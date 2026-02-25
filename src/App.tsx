@@ -70,6 +70,7 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         setTempRName(data.name);
+        setTempRId(data.id); // Use the canonical ID from the server
         setLandingStep('LOGIN');
       } else {
         alert("Restaurant ID is wrong. Please check and try again.");
@@ -88,7 +89,12 @@ export default function App() {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ loginId, password, restaurantId: tempRId, role: loginRole })
+        body: JSON.stringify({ 
+          loginId: loginId.trim(), 
+          password: password.trim(), 
+          restaurantId: tempRId, 
+          role: loginRole 
+        })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -525,7 +531,7 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
   const [selectedRestaurantId, setSelectedRestaurantId] = useState('');
   const [restaurants, setRestaurants] = useState<{id: string, name: string}[]>([]);
   const [loading, setLoading] = useState(false);
-  const [registrationResult, setRegistrationResult] = useState<{ loginId: string, password: string } | null>(null);
+  const [registrationResult, setRegistrationResult] = useState<{ loginId: string, password: string, restaurantId: string } | null>(null);
 
   useEffect(() => {
     if (mode === 'LOGIN') {
@@ -548,7 +554,7 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
     try {
       const endpoint = mode === 'LOGIN' ? '/api/auth/login' : '/api/auth/register';
       const body = mode === 'LOGIN' 
-        ? { loginId, password, restaurantId: selectedRestaurantId, role: selectedRole } 
+        ? { loginId: loginId.trim(), password: password.trim(), restaurantId: selectedRestaurantId, role: selectedRole } 
         : { email, restaurantName, name, password, phone, state, city };
         
       const res = await fetch(endpoint, {
@@ -560,7 +566,7 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
       if (!res.ok) throw new Error(data.error);
       
       if (mode === 'REGISTER') {
-        setRegistrationResult({ loginId: data.loginId, password: password });
+        setRegistrationResult({ loginId: data.loginId, password: password, restaurantId: data.restaurantId });
       } else {
         onSuccess(data.token, data.restaurantId, data.role, data.name);
       }
@@ -586,6 +592,12 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
           <p className="text-[#5A5A40]/60 mb-8">Your business has been registered and is pending activation by the Admin. Please save your login credentials.</p>
           
           <div className="bg-[#f5f5f0] p-6 rounded-3xl space-y-4 mb-8 text-left">
+            <div>
+              <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Restaurant ID (Required for Login)</label>
+              <div className="bg-white px-4 py-3 rounded-xl font-mono font-bold text-lg border border-emerald-500/30 text-emerald-700 select-all">
+                {registrationResult.restaurantId}
+              </div>
+            </div>
             <div>
               <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Login ID</label>
               <div className="bg-white px-4 py-3 rounded-xl font-mono font-bold text-lg border border-[#5A5A40]/10 select-all">

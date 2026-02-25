@@ -253,11 +253,11 @@ async function startServer() {
   app.post("/api/auth/login", async (req, res) => {
     const { loginId, password, restaurantId, role } = req.body;
     
-    let query = "SELECT * FROM users WHERE login_id = ?";
+    let query = "SELECT * FROM users WHERE LOWER(login_id) = LOWER(?)";
     let params = [loginId];
 
     if (role && role !== 'SUPER_ADMIN') {
-      query += " AND role = ? AND restaurant_id = ?";
+      query += " AND role = ? AND LOWER(restaurant_id) = LOWER(?)";
       params.push(role, restaurantId);
     } else if (role === 'SUPER_ADMIN') {
       query += " AND role = 'SUPER_ADMIN'";
@@ -396,7 +396,18 @@ async function startServer() {
 
   // API Routes
   app.get("/api/restaurant/:id", (req, res) => {
-    const restaurant = centralDb.prepare("SELECT * FROM restaurants WHERE LOWER(id) = LOWER(?)").get(req.params.id) as any;
+    const id = req.params.id;
+    // Try finding by restaurant ID first
+    let restaurant = centralDb.prepare("SELECT * FROM restaurants WHERE LOWER(id) = LOWER(?)").get(id) as any;
+    
+    // If not found, try finding by owner's login ID
+    if (!restaurant) {
+      const user = centralDb.prepare("SELECT restaurant_id FROM users WHERE LOWER(login_id) = LOWER(?) AND role = 'OWNER'").get(id) as any;
+      if (user && user.restaurant_id) {
+        restaurant = centralDb.prepare("SELECT * FROM restaurants WHERE id = ?").get(user.restaurant_id) as any;
+      }
+    }
+
     if (!restaurant) {
       return res.status(404).json({ error: "Restaurant not found" });
     }
