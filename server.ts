@@ -66,6 +66,11 @@ try {
   centralDb.exec("ALTER TABLE restaurants ADD COLUMN watermark_image TEXT;");
 } catch (e) {}
 
+// Ensure demo restaurant is active
+try {
+  centralDb.prepare("UPDATE restaurants SET is_active = 1 WHERE id = 'resto-1'").run();
+} catch (e) {}
+
 const dbCache = new Map<string, Database.Database>();
 
 // Configure multer
@@ -170,7 +175,7 @@ if (rowCount.count === 0) {
   const password = "password123";
   const hashedPassword = bcrypt.hashSync(password, 10);
 
-  centralDb.prepare("INSERT INTO restaurants (id, name, admin_id) VALUES (?, ?, ?)").run(restaurantId, "The Gourmet Kitchen", userId);
+  centralDb.prepare("INSERT INTO restaurants (id, name, admin_id, is_active) VALUES (?, ?, ?, 1)").run(restaurantId, "The Gourmet Kitchen", userId, 1);
   centralDb.prepare("INSERT INTO users (id, login_id, name, password, restaurant_id, role) VALUES (?, ?, ?, ?, ?, ?)").run(userId, loginId, "Restaurant Owner", hashedPassword, restaurantId, 'OWNER');
   
   // Seed a Chef user
@@ -391,7 +396,7 @@ async function startServer() {
 
   // API Routes
   app.get("/api/restaurant/:id", (req, res) => {
-    const restaurant = centralDb.prepare("SELECT * FROM restaurants WHERE id = ?").get(req.params.id) as any;
+    const restaurant = centralDb.prepare("SELECT * FROM restaurants WHERE LOWER(id) = LOWER(?)").get(req.params.id) as any;
     if (!restaurant) {
       return res.status(404).json({ error: "Restaurant not found" });
     }

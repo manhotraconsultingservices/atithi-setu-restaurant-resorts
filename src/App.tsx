@@ -62,19 +62,20 @@ export default function App() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   const handleVerifyId = async () => {
-    if (!tempRId) return;
+    const id = tempRId.trim();
+    if (!id) return;
     setIsVerifying(true);
     try {
-      const res = await fetch(`/api/restaurant/${tempRId}`);
+      const res = await fetch(`/api/restaurant/${id}`);
       const data = await res.json();
       if (res.ok) {
         setTempRName(data.name);
         setLandingStep('LOGIN');
       } else {
-        alert("Restaurant ID is wrong");
+        alert("Restaurant ID is wrong. Please check and try again.");
       }
     } catch (err) {
-      alert("Error validating Restaurant ID");
+      alert("Error validating Restaurant ID. Please try again later.");
     } finally {
       setIsVerifying(false);
     }
