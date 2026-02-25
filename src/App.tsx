@@ -22,10 +22,12 @@ import {
   User,
   Lock,
   Mail,
-  Download
+  Download,
+  Leaf,
+  Search
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
-import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table } from './types';
+import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize } from './types';
 import { cn } from './lib/utils';
 import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
 import { 
@@ -674,12 +676,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [isAddingItem, setIsAddingItem] = useState(false);
   const [isAddingStaff, setIsAddingStaff] = useState(false);
   const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'CHEF' as UserRole });
-  const [newItem, setNewItem] = useState<{ name: string, description: string, price: string, category: string, imageFile: File | null }>({ 
+  const [newItem, setNewItem] = useState<{ 
+    name: string, 
+    description: string, 
+    price: string, 
+    price_half: string, 
+    price_full: string, 
+    category: string, 
+    imageFile: File | null,
+    dietary_type: DietaryType,
+    is_daily_special: boolean
+  }>({ 
     name: '', 
     description: '', 
     price: '', 
-    category: 'Mains',
-    imageFile: null
+    price_half: '', 
+    price_full: '', 
+    category: 'Mains', 
+    imageFile: null,
+    dietary_type: 'VEG',
+    is_daily_special: false
   });
 
   useEffect(() => {
@@ -930,8 +946,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const formData = new FormData();
     formData.append('name', newItem.name);
     formData.append('description', newItem.description);
-    formData.append('price', newItem.price);
+    formData.append('price', newItem.price_full || newItem.price);
+    formData.append('price_half', newItem.price_half);
+    formData.append('price_full', newItem.price_full || newItem.price);
     formData.append('category', newItem.category);
+    formData.append('dietary_type', newItem.dietary_type);
+    formData.append('is_daily_special', String(newItem.is_daily_special));
     if (newItem.imageFile) {
       formData.append('image', newItem.imageFile);
     }
@@ -942,7 +962,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       body: formData
     });
     setIsAddingItem(false);
-    setNewItem({ name: '', description: '', price: '', category: 'Mains', imageFile: null });
+    setNewItem({ 
+      name: '', 
+      description: '', 
+      price: '', 
+      price_half: '', 
+      price_full: '', 
+      category: 'Mains', 
+      imageFile: null,
+      dietary_type: 'VEG',
+      is_daily_special: false
+    });
     fetchMenu();
   };
 
@@ -1505,6 +1535,36 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             </div>
 
+            <div className="space-y-4">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">Menu Watermark</label>
+              <div className="flex items-center gap-4">
+                {restaurant?.watermark_image && (
+                  <img src={restaurant.watermark_image} alt="Watermark" className="w-12 h-12 object-contain border rounded-lg" referrerPolicy="no-referrer" />
+                )}
+                <input 
+                  type="file"
+                  accept="image/*"
+                  className="w-full text-sm text-[#5A5A40]/50 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-bold file:bg-[#5A5A40]/10 file:text-[#5A5A40] hover:file:bg-[#5A5A40]/20"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      const formData = new FormData();
+                      formData.append('watermark', file);
+                      const res = await fetch(`/api/restaurant/${restaurantId}/watermark`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${token}` },
+                        body: formData
+                      });
+                      const data = await res.json();
+                      if (data.watermark_image) {
+                        setRestaurant(prev => prev ? { ...prev, watermark_image: data.watermark_image } : null);
+                      }
+                    }
+                  }}
+                />
+              </div>
+            </div>
+
             <button 
               type="submit"
               className="w-full bg-[#5A5A40] text-white py-4 rounded-2xl font-bold hover:bg-[#4A4A30] transition-all"
@@ -1552,15 +1612,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">Price (₹)</label>
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">Half Price (₹)</label>
+                    <input 
+                      type="number"
+                      step="0.01"
+                      className="w-full bg-[#f5f5f0] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#5A5A40]/20 outline-none"
+                      value={newItem.price_half}
+                      onChange={e => setNewItem({ ...newItem, price_half: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">Full Price (₹)</label>
                     <input 
                       required
                       type="number"
                       step="0.01"
                       className="w-full bg-[#f5f5f0] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#5A5A40]/20 outline-none"
-                      value={newItem.price}
-                      onChange={e => setNewItem({ ...newItem, price: e.target.value })}
+                      value={newItem.price_full}
+                      onChange={e => setNewItem({ ...newItem, price_full: e.target.value })}
                     />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">Dietary Type</label>
+                    <select 
+                      className="w-full bg-[#f5f5f0] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#5A5A40]/20 outline-none"
+                      value={newItem.dietary_type}
+                      onChange={e => setNewItem({ ...newItem, dietary_type: e.target.value as DietaryType })}
+                    >
+                      <option value="VEG">Veg</option>
+                      <option value="VEGAN">Vegan</option>
+                      <option value="NON_VEG">Non-Veg</option>
+                    </select>
                   </div>
                   <div>
                     <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">Category</label>
@@ -1576,6 +1660,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <option>Desserts</option>
                     </select>
                   </div>
+                </div>
+                <div className="flex items-center gap-2 p-2">
+                  <input 
+                    type="checkbox"
+                    id="is_daily_special"
+                    checked={newItem.is_daily_special}
+                    onChange={e => setNewItem({ ...newItem, is_daily_special: e.target.checked })}
+                    className="w-4 h-4 rounded border-[#5A5A40]/20 text-[#5A5A40] focus:ring-[#5A5A40]/20"
+                  />
+                  <label htmlFor="is_daily_special" className="text-xs font-bold text-[#5A5A40]">Daily Special Item</label>
                 </div>
                 <div>
                   <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">Item Image</label>
@@ -1748,6 +1842,10 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [customerInfo, setCustomerInfo] = useState({ name: '', phone: '' });
   const [tableNumber, setTableNumber] = useState("Online");
   const [tableName, setTableName] = useState("Online Order");
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterCategory, setFilterCategory] = useState('All');
+  const [filterDietary, setFilterDietary] = useState('All');
+  const [filterSize, setFilterSize] = useState('All');
   const { lastMessage } = useSocket('CUSTOMER', restaurantId);
 
   useEffect(() => {
@@ -1821,13 +1919,21 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     }
   };
 
-  const addToCart = (item: MenuItem) => {
+  const addToCart = (item: MenuItem, size: ItemSize = 'FULL') => {
+    const price = size === 'HALF' && item.price_half ? item.price_half : (item.price_full || item.price);
     setCart(prev => {
-      const existing = prev.find(i => i.menuItemId === item.id);
+      const existing = prev.find(i => i.menuItemId === item.id && i.size === size);
       if (existing) {
-        return prev.map(i => i.menuItemId === item.id ? { ...i, quantity: i.quantity + 1 } : i);
+        return prev.map(i => (i.menuItemId === item.id && i.size === size) ? { ...i, quantity: i.quantity + 1 } : i);
       }
-      return [...prev, { id: Math.random().toString(), menuItemId: item.id, name: item.name, price: item.price, quantity: 1 }];
+      return [...prev, { 
+        id: Math.random().toString(), 
+        menuItemId: item.id, 
+        name: `${item.name} (${size})`, 
+        price: price, 
+        quantity: 1,
+        size: size
+      }];
     });
   };
 
@@ -1855,7 +1961,13 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
           tableNumber: tableName,
           customerName: customerInfo.name,
           customerPhone: customerInfo.phone,
-          items: cart.map(i => ({ id: i.menuItemId, name: i.name, price: i.price, quantity: i.quantity })),
+          items: cart.map(i => ({ 
+            id: i.menuItemId, 
+            name: i.name, 
+            price: i.price, 
+            quantity: i.quantity,
+            size: i.size
+          })),
           totalAmount: cartTotal,
           gstAmount: gstAmount,
           paymentMethod
@@ -2022,23 +2134,67 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const TemplateRenderer = () => {
     const template = restaurant?.template_id || 'CLASSIC';
     
+    const filteredMenu = menu.filter(item => {
+      const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                           item.description.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesCategory = filterCategory === 'All' || item.category === filterCategory;
+      const matchesDietary = filterDietary === 'All' || item.dietary_type === filterDietary;
+      const matchesSize = filterSize === 'All' || (filterSize === 'HALF' ? !!item.price_half : !item.price_half);
+      
+      return matchesSearch && matchesCategory && matchesDietary && matchesSize;
+    });
+
+    const sortedMenu = [...filteredMenu].sort((a, b) => (b.is_daily_special ? 1 : 0) - (a.is_daily_special ? 1 : 0));
+
+    const DietaryIcon = ({ type }: { type: DietaryType }) => {
+      if (type === 'VEG') return (
+        <div className="w-3 h-3 bg-green-600 rounded-full shadow-sm" title="Vegetarian" />
+      );
+      if (type === 'VEGAN') return (
+        <div className="text-green-600 flex items-center gap-1" title="Vegan">
+          <Leaf size={14} className="text-green-600" />
+          <span className="text-[8px] font-bold uppercase tracking-tighter">Vegan</span>
+        </div>
+      );
+      return (
+        <div className="w-3 h-3 bg-red-600 rounded-full shadow-sm" title="Non-Vegetarian" />
+      );
+    };
+
     if (template === 'MODERN') {
       return (
         <div className="space-y-12">
-          {menu.map(item => (
-            <div key={item.id} className="flex flex-col md:flex-row gap-8 items-center bg-white p-8 rounded-[40px] shadow-sm">
+          {sortedMenu.map(item => (
+            <div key={item.id} className={cn(
+              "flex flex-col md:flex-row gap-8 items-center bg-white p-8 rounded-[40px] shadow-sm relative",
+              item.is_daily_special && "border-2 border-yellow-400"
+            )}>
+              {item.is_daily_special && <div className="absolute -top-3 left-8 bg-yellow-400 text-yellow-950 px-4 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest shadow-md">Daily Special</div>}
               <div className="w-full md:w-1/3 aspect-square rounded-3xl overflow-hidden">
                 <img src={item.image || `https://picsum.photos/seed/${item.id}/600/600`} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
               </div>
               <div className="flex-1 space-y-4">
                 <div className="flex justify-between items-start">
-                  <h4 className="text-3xl font-bold">{item.name}</h4>
-                  <span className="text-2xl font-mono font-bold">₹{item.price}</span>
+                  <div className="flex items-center gap-3">
+                    <DietaryIcon type={item.dietary_type} />
+                    <h4 className="text-3xl font-bold">{item.name}</h4>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-2xl font-mono font-bold">₹{item.price_full || item.price}</span>
+                    {item.price_half && <p className="text-sm text-[#5A5A40]/50 font-mono">Half: ₹{item.price_half}</p>}
+                  </div>
                 </div>
                 <p className="text-lg text-[#5A5A40]/60">{item.description}</p>
-                <button onClick={() => addToCart(item)} className="bg-[#1a1a1a] text-white px-8 py-4 rounded-2xl font-bold hover:scale-105 transition-transform">
-                  Add to Cart
-                </button>
+                <div className="flex gap-4">
+                  <button onClick={() => addToCart(item, 'FULL')} className="flex-1 bg-[#1a1a1a] text-white px-8 py-4 rounded-2xl font-bold hover:scale-105 transition-transform">
+                    Add Full
+                  </button>
+                  {item.price_half && (
+                    <button onClick={() => addToCart(item, 'HALF')} className="flex-1 border-2 border-[#1a1a1a] text-[#1a1a1a] px-8 py-4 rounded-2xl font-bold hover:scale-105 transition-transform">
+                      Add Half
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ))}
@@ -2050,20 +2206,33 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       return (
         <div className="max-w-3xl mx-auto space-y-16 py-12">
           {['Starters', 'Mains', 'Desserts', 'Drinks'].map(cat => {
-            const items = menu.filter(i => i.category === cat);
+            const items = sortedMenu.filter(i => i.category === cat);
             if (items.length === 0) return null;
             return (
               <div key={cat} className="space-y-8">
                 <h3 className="text-5xl font-serif italic border-b border-[#1a1a1a] pb-4">{cat}</h3>
                 <div className="space-y-10">
                   {items.map(item => (
-                    <div key={item.id} className="group cursor-pointer" onClick={() => addToCart(item)}>
+                    <div key={item.id} className={cn(
+                      "group cursor-pointer p-4 rounded-2xl transition-all",
+                      item.is_daily_special && "bg-yellow-50 border border-yellow-200"
+                    )}>
                       <div className="flex justify-between items-baseline mb-2">
-                        <h4 className="text-2xl font-bold uppercase tracking-tighter group-hover:text-[#5A5A40] transition-colors">{item.name}</h4>
+                        <div className="flex items-center gap-2">
+                          <DietaryIcon type={item.dietary_type} />
+                          <h4 className="text-2xl font-bold uppercase tracking-tighter group-hover:text-[#5A5A40] transition-colors">{item.name}</h4>
+                        </div>
                         <div className="flex-1 border-b border-dotted border-[#1a1a1a]/20 mx-4" />
-                        <span className="text-xl font-mono">₹{item.price}</span>
+                        <div className="text-right">
+                          <span className="text-xl font-mono">₹{item.price_full || item.price}</span>
+                          {item.price_half && <p className="text-[10px] font-mono opacity-50">H: ₹{item.price_half}</p>}
+                        </div>
                       </div>
-                      <p className="text-[#5A5A40]/60 italic font-serif">{item.description}</p>
+                      <p className="text-[#5A5A40]/60 italic font-serif mb-4">{item.description}</p>
+                      <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onClick={(e) => { e.stopPropagation(); addToCart(item, 'FULL'); }} className="text-[10px] font-bold uppercase tracking-widest bg-[#1a1a1a] text-white px-4 py-1 rounded-full">Add Full</button>
+                        {item.price_half && <button onClick={(e) => { e.stopPropagation(); addToCart(item, 'HALF'); }} className="text-[10px] font-bold uppercase tracking-widest border border-[#1a1a1a] px-4 py-1 rounded-full">Add Half</button>}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -2077,7 +2246,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     // Default CLASSIC
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {menu.sort((a, b) => (b.is_daily_special ? 1 : 0) - (a.is_daily_special ? 1 : 0)).map(item => (
+        {sortedMenu.map(item => (
           <motion.div 
             key={item.id} 
             className={cn(
@@ -2097,20 +2266,34 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                 referrerPolicy="no-referrer"
               />
-              <div className="absolute top-4 right-4 bg-white/90 backdrop-blur px-3 py-1 rounded-full text-xs font-bold font-mono">
-                ₹{item.price.toFixed(2)}
+              <div className="absolute top-4 right-4 bg-white/90 backdrop-blur px-3 py-1 rounded-full text-xs font-bold font-mono flex flex-col items-end">
+                <span>₹{(item.price_full || item.price).toFixed(2)}</span>
+                {item.price_half && <span className="text-[8px] opacity-50">H: ₹{item.price_half.toFixed(2)}</span>}
               </div>
             </div>
             <div className="p-6">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">{item.category}</span>
+              <div className="flex justify-between items-start mb-1">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">{item.category}</span>
+                <DietaryIcon type={item.dietary_type} />
+              </div>
               <h4 className="text-xl font-bold font-serif mb-2">{item.name}</h4>
               <p className="text-sm text-[#5A5A40]/60 mb-6 line-clamp-2">{item.description}</p>
-              <button 
-                onClick={() => addToCart(item)}
-                className="w-full bg-[#f5f5f0] text-[#5A5A40] py-3 rounded-2xl font-bold hover:bg-[#5A5A40] hover:text-white transition-all flex items-center justify-center gap-2"
-              >
-                <Plus size={18} /> Add to Cart
-              </button>
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => addToCart(item, 'FULL')}
+                  className="flex-1 bg-[#f5f5f0] text-[#5A5A40] py-3 rounded-2xl font-bold hover:bg-[#5A5A40] hover:text-white transition-all flex items-center justify-center gap-2 text-xs"
+                >
+                  <Plus size={14} /> Full
+                </button>
+                {item.price_half && (
+                  <button 
+                    onClick={() => addToCart(item, 'HALF')}
+                    className="flex-1 border border-[#5A5A40]/20 text-[#5A5A40] py-3 rounded-2xl font-bold hover:bg-[#5A5A40] hover:text-white transition-all flex items-center justify-center gap-2 text-xs"
+                  >
+                    <Plus size={14} /> Half
+                  </button>
+                )}
+              </div>
             </div>
           </motion.div>
         ))}
@@ -2130,7 +2313,69 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         </div>
       </div>
 
-      <TemplateRenderer />
+      <div className="space-y-4">
+        <div className="relative">
+          <input 
+            type="text"
+            placeholder="Search for dishes..."
+            className="w-full bg-white border border-[#5A5A40]/10 rounded-2xl pl-12 pr-4 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none shadow-sm"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+          />
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-[#5A5A40]/40" size={20} />
+        </div>
+        
+        <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
+          {['All', 'Starters', 'Mains', 'Sides', 'Drinks', 'Desserts'].map(cat => (
+            <button
+              key={cat}
+              onClick={() => setFilterCategory(cat)}
+              className={cn(
+                "px-6 py-2 rounded-full text-xs font-bold whitespace-nowrap transition-all",
+                filterCategory === cat ? "bg-[#5A5A40] text-white shadow-md" : "bg-white text-[#5A5A40] border border-[#5A5A40]/10"
+              )}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex gap-4">
+          <select 
+            className="bg-white border border-[#5A5A40]/10 rounded-xl px-4 py-2 text-xs font-bold text-[#5A5A40] outline-none"
+            value={filterDietary}
+            onChange={e => setFilterDietary(e.target.value)}
+          >
+            <option value="All">All Dietary</option>
+            <option value="VEG">Veg</option>
+            <option value="VEGAN">Vegan</option>
+            <option value="NON_VEG">Non-Veg</option>
+          </select>
+          <select 
+            className="bg-white border border-[#5A5A40]/10 rounded-xl px-4 py-2 text-xs font-bold text-[#5A5A40] outline-none"
+            value={filterSize}
+            onChange={e => setFilterSize(e.target.value)}
+          >
+            <option value="All">All Sizes</option>
+            <option value="HALF">Half Available</option>
+            <option value="FULL">Full Only</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="relative">
+        {restaurant?.watermark_image && (
+          <div 
+            className="fixed inset-0 pointer-events-none opacity-[0.03] z-0"
+            style={{ 
+              backgroundImage: `url(${restaurant.watermark_image})`,
+              backgroundSize: '400px',
+              backgroundRepeat: 'repeat'
+            }}
+          />
+        )}
+        <TemplateRenderer />
+      </div>
 
       {/* Floating Cart Button */}
       {cart.length > 0 && (

@@ -38,7 +38,8 @@ centralDb.exec(`
     gst_percentage REAL DEFAULT 0,
     is_gst_enabled INTEGER DEFAULT 0,
     template_id TEXT DEFAULT 'CLASSIC',
-    table_count INTEGER DEFAULT 0
+    table_count INTEGER DEFAULT 0,
+    watermark_image TEXT
   );
 `);
 
@@ -60,6 +61,9 @@ try {
 } catch (e) {}
 try {
   centralDb.exec("ALTER TABLE restaurants ADD COLUMN city TEXT;");
+} catch (e) {}
+try {
+  centralDb.exec("ALTER TABLE restaurants ADD COLUMN watermark_image TEXT;");
 } catch (e) {}
 
 const dbCache = new Map<string, Database.Database>();
@@ -89,10 +93,13 @@ function getTenantDb(restaurantId: string) {
       name TEXT NOT NULL,
       description TEXT,
       price REAL NOT NULL,
+      price_half REAL,
+      price_full REAL,
       category TEXT,
       image TEXT,
       available INTEGER DEFAULT 1,
-      is_daily_special INTEGER DEFAULT 0
+      is_daily_special INTEGER DEFAULT 0,
+      dietary_type TEXT DEFAULT 'VEG'
     );
 
     CREATE TABLE IF NOT EXISTS orders (
@@ -116,6 +123,7 @@ function getTenantDb(restaurantId: string) {
       name TEXT NOT NULL,
       price REAL NOT NULL,
       quantity INTEGER NOT NULL,
+      size TEXT DEFAULT 'FULL',
       FOREIGN KEY(order_id) REFERENCES orders(id)
     );
 
@@ -129,6 +137,18 @@ function getTenantDb(restaurantId: string) {
   // Migrations for Tenant Database
   try {
     db.exec("ALTER TABLE tables ADD COLUMN assigned_waiter_id TEXT;");
+  } catch (e) {}
+  try {
+    db.exec("ALTER TABLE menu_items ADD COLUMN price_half REAL;");
+  } catch (e) {}
+  try {
+    db.exec("ALTER TABLE menu_items ADD COLUMN price_full REAL;");
+  } catch (e) {}
+  try {
+    db.exec("ALTER TABLE menu_items ADD COLUMN dietary_type TEXT DEFAULT 'VEG';");
+  } catch (e) {}
+  try {
+    db.exec("ALTER TABLE order_items ADD COLUMN size TEXT DEFAULT 'FULL';");
   } catch (e) {}
 
   dbCache.set(restaurantId, db);
@@ -379,6 +399,15 @@ async function startServer() {
     res.json(restaurant);
   });
 
+  app.post("/api/restaurant/:id/watermark", authenticate, upload.single("watermark"), (req: any, res) => {
+    if (req.user.restaurantId !== req.params.id) return res.status(403).json({ error: "Forbidden" });
+    const watermark_image = req.file ? `/uploads/${req.file.filename}` : null;
+    if (watermark_image) {
+      centralDb.prepare("UPDATE restaurants SET watermark_image = ? WHERE id = ?").run(watermark_image, req.params.id);
+    }
+    res.json({ watermark_image });
+  });
+
   app.patch("/api/restaurant/:id", authenticate, (req: any, res) => {
     if (req.user.restaurantId !== req.params.id) return res.status(403).json({ error: "Forbidden" });
     try {
@@ -448,13 +477,19 @@ async function startServer() {
 
   app.post("/api/restaurant/:id/menu", authenticate, upload.single("image"), (req: any, res) => {
     if (req.user.restaurantId !== req.params.id) return res.status(403).json({ error: "Forbidden" });
-    const { name, description, price, category } = req.body;
+    const { name, description, price, price_half, price_full, category, dietary_type, is_daily_special } = req.body;
     const image = req.file ? `/uploads/${req.file.filename}` : null;
     const id = Math.random().toString(36).substr(2, 9);
     const db = getTenantDb(req.params.id);
-    db.prepare("INSERT INTO menu_items (id, name, description, price, category, image) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(id, name, description, price, category, image);
-    res.json({ id, name, description, price, category, image });
+    
+    // If this is a daily special, unset others
+    if (is_daily_special === 'true' || is_daily_special === true) {
+      db.prepare("UPDATE menu_items SET is_daily_special = 0").run();
+    }
+
+    db.prepare("INSERT INTO menu_items (id, name, description, price, price_half, price_full, category, image, dietary_type, is_daily_special) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, name, description, price || price_full, price_half || null, price_full || price, category, image, dietary_type || 'VEG', (is_daily_special === 'true' || is_daily_special === true) ? 1 : 0);
+    res.json({ id, name, description, price, price_half, price_full, category, image, dietary_type, is_daily_special });
   });
 
   app.delete("/api/menu/:id", authenticate, (req: any, res) => {
@@ -465,9 +500,18 @@ async function startServer() {
 
   app.patch("/api/menu/:id", authenticate, (req: any, res) => {
     const db = getTenantDb(req.user.restaurantId);
-    const { price, available, is_daily_special } = req.body;
+    const { price, price_half, price_full, available, is_daily_special, dietary_type } = req.body;
     if (price !== undefined) {
       db.prepare("UPDATE menu_items SET price = ? WHERE id = ?").run(price, req.params.id);
+    }
+    if (price_half !== undefined) {
+      db.prepare("UPDATE menu_items SET price_half = ? WHERE id = ?").run(price_half, req.params.id);
+    }
+    if (price_full !== undefined) {
+      db.prepare("UPDATE menu_items SET price_full = ? WHERE id = ?").run(price_full, req.params.id);
+    }
+    if (dietary_type !== undefined) {
+      db.prepare("UPDATE menu_items SET dietary_type = ? WHERE id = ?").run(dietary_type, req.params.id);
     }
     if (available !== undefined) {
       db.prepare("UPDATE menu_items SET available = ? WHERE id = ?").run(available ? 1 : 0, req.params.id);
@@ -490,9 +534,9 @@ async function startServer() {
       const insertOrder = db.prepare("INSERT INTO orders (id, table_number, customer_name, customer_phone, total_amount, gst_amount, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)");
       insertOrder.run(orderId, tableNumber, customerName, customerPhone, totalAmount, gstAmount || 0, paymentMethod);
 
-      const insertItem = db.prepare("INSERT INTO order_items (id, order_id, menu_item_id, name, price, quantity) VALUES (?, ?, ?, ?, ?, ?)");
+      const insertItem = db.prepare("INSERT INTO order_items (id, order_id, menu_item_id, name, price, quantity, size) VALUES (?, ?, ?, ?, ?, ?, ?)");
       items.forEach((item: any) => {
-        insertItem.run(Math.random().toString(36).substr(2, 9), orderId, item.id, item.name, item.price, item.quantity);
+        insertItem.run(Math.random().toString(36).substr(2, 9), orderId, item.id, item.name, item.price, item.quantity, item.size || 'FULL');
       });
 
       // Notify Chef

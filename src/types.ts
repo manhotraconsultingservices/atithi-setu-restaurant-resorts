@@ -1,15 +1,20 @@
 export type UserRole = 'SUPER_ADMIN' | 'OWNER' | 'CHEF' | 'WAITER' | 'CUSTOMER';
+export type DietaryType = 'VEG' | 'VEGAN' | 'NON_VEG';
+export type ItemSize = 'HALF' | 'FULL';
 
 export interface MenuItem {
   id: string;
   restaurantId: string;
   name: string;
   description: string;
-  price: number;
+  price: number; // Default price (Full)
+  price_half?: number;
+  price_full: number;
   category: string;
   image: string;
   available: boolean;
   is_daily_special?: boolean;
+  dietary_type: DietaryType;
 }
 
 export interface OrderItem {
@@ -18,6 +23,7 @@ export interface OrderItem {
   name: string;
   price: number;
   quantity: number;
+  size: ItemSize;
 }
 
 export type OrderStatus = 'PENDING' | 'CONFIRMED' | 'PREPARING' | 'READY' | 'DELIVERED' | 'CANCELLED';
@@ -47,6 +53,7 @@ export interface Restaurant {
   is_gst_enabled?: boolean;
   template_id?: 'CLASSIC' | 'MODERN' | 'EDITORIAL';
   table_count?: number;
+  watermark_image?: string;
 }
 
 export interface Table {
