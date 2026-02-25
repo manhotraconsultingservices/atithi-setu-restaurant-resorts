@@ -699,6 +699,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   });
 
   useEffect(() => {
+    if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     fetchMenu();
     fetchReports();
     fetchRestaurant();
@@ -1701,6 +1702,7 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
   const { lastMessage } = useSocket('CHEF', restaurantId);
 
   useEffect(() => {
+    if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     fetchOrders();
   }, [restaurantId]);
 
@@ -1849,6 +1851,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const { lastMessage } = useSocket('CUSTOMER', restaurantId);
 
   useEffect(() => {
+    if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     fetchMenu();
     fetchRestaurant();
     fetchTableInfo();
@@ -2710,6 +2713,7 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
   const [tables, setTables] = useState<Table[]>([]);
 
   useEffect(() => {
+    if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     fetchData();
   }, [restaurantId]);
 

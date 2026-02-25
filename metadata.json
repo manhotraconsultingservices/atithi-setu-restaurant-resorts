@@ -1,5 +1,5 @@
 {
-  "name": "",
-  "description": "",
+  "name": "RestoFlow ERP",
+  "description": "A comprehensive multi-tenant restaurant management system with QR-based ordering, kitchen management, and sales analytics.",
   "requestFramePermissions": []
 }
