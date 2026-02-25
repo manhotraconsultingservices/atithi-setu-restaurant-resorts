@@ -52,6 +52,61 @@ export default function App() {
   const [authMode, setAuthMode] = useState<'LOGIN' | 'REGISTER'>('LOGIN');
   const [initialAuthRole, setInitialAuthRole] = useState<UserRole | undefined>(undefined);
   const [restaurantName, setRestaurantName] = useState<string>('RestoFlow');
+  const [landingStep, setLandingStep] = useState<'ID' | 'LOGIN'>('ID');
+  const [tempRId, setTempRId] = useState('');
+  const [tempRName, setTempRName] = useState('');
+  const [loginId, setLoginId] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginRole, setLoginRole] = useState<UserRole>('OWNER');
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  const handleVerifyId = async () => {
+    if (!tempRId) return;
+    setIsVerifying(true);
+    try {
+      const res = await fetch(`/api/restaurant/${tempRId}`);
+      const data = await res.json();
+      if (res.ok) {
+        setTempRName(data.name);
+        setLandingStep('LOGIN');
+      } else {
+        alert("Restaurant ID is wrong");
+      }
+    } catch (err) {
+      alert("Error validating Restaurant ID");
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleUnifiedLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoggingIn(true);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ loginId, password, restaurantId: tempRId, role: loginRole })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      
+      setToken(data.token);
+      setRestaurantId(data.restaurantId);
+      setRole(data.role);
+      setUserName(data.name);
+      localStorage.setItem('token', data.token);
+      localStorage.setItem('restaurantId', data.restaurantId);
+      localStorage.setItem('role', data.role);
+      localStorage.setItem('userName', data.name);
+      setView('DASHBOARD');
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
 
   useEffect(() => {
     const savedRole = localStorage.getItem('role');
@@ -67,20 +122,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (restaurantId && restaurantId !== 'null' && restaurantId !== 'undefined') {
+    if (restaurantId && restaurantId !== 'null' && restaurantId !== 'undefined' && restaurantId !== '') {
       fetch(`/api/restaurant/${restaurantId}`)
         .then(res => {
-          if (!res.ok) throw new Error('Restaurant not found');
+          if (res.status === 404) {
+            throw new Error('Restaurant not found');
+          }
+          if (!res.ok) throw new Error('Failed to fetch restaurant info');
           return res.json();
         })
         .then(data => {
           if (data && data.name) setRestaurantName(data.name);
         })
         .catch(err => {
-          console.error("Failed to fetch restaurant info", err);
-          // If restaurant not found, maybe clear it
+          console.error(err.message, err);
           if (err.message === 'Restaurant not found') {
-            // setRestaurantId(null);
+            setRestaurantId(null);
+            localStorage.removeItem('restaurantId');
+            setView('LANDING');
           }
         });
     }
@@ -116,105 +175,209 @@ export default function App() {
     setRestaurantId(null);
     setRole(null);
     setUserName(null);
+    setLandingStep('ID');
     setView('LANDING');
   };
 
   if (view === 'LANDING') {
     return (
-      <div className="min-h-screen bg-[#f5f5f0] flex flex-col items-center justify-center p-6 font-serif">
+      <div className="min-h-screen bg-[#f5f5f0] flex flex-col items-center justify-center p-6 font-serif overflow-hidden relative">
+        {/* Background decorative elements */}
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-[#5A5A40]/5 rounded-full blur-3xl" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-[#5A5A40]/5 rounded-full blur-3xl" />
+
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="text-center max-w-5xl"
+          className="w-full max-w-xl z-10"
         >
-          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-[#5A5A40]/10 text-[#5A5A40] text-xs font-bold uppercase tracking-widest mb-8">
-            <Star size={14} /> The Future of Restaurant Management
-          </div>
-          <h1 className="text-7xl md:text-8xl font-bold text-[#1a1a1a] mb-6 tracking-tight">RestoFlow ERP</h1>
-          <p className="text-xl md:text-2xl text-[#5A5A40]/70 mb-16 max-w-2xl mx-auto leading-relaxed">
-            Empowering restaurant owners with seamless multi-tenant operations, real-time analytics, and effortless customer experiences.
-          </p>
-          
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            <RoleCard 
-              icon={<ShieldCheck />} 
-              title="Business Owner" 
-              description="Register your business, manage staff, and scale your operations."
-              onClick={() => { 
-                setInitialAuthRole('OWNER');
-                if (token) {
-                  setRole('OWNER');
-                  setView('DASHBOARD');
-                } else {
-                  setAuthMode('REGISTER');
-                  setView('AUTH');
-                }
-              }}
-            />
-            <RoleCard 
-              icon={<ChefHat />} 
-              title="Staff Login" 
-              description="Access the kitchen or waiter dashboard to manage orders."
-              onClick={() => { 
-                setInitialAuthRole('CHEF');
-                setAuthMode('LOGIN');
-                setView('AUTH');
-              }}
-            />
-            <RoleCard 
-              icon={<ShoppingCart />} 
-              title="Customer" 
-              description="Scan a QR code or enter a restaurant ID to start ordering."
-              onClick={() => { 
-                const id = prompt("Enter Restaurant ID (e.g. resto-1):");
-                if (id) {
-                  setRestaurantId(id);
-                  localStorage.setItem('restaurantId', id);
-                  setRole('CUSTOMER');
-                  localStorage.setItem('role', 'CUSTOMER');
-                  setView('DASHBOARD');
-                }
-              }}
-            />
+          <div className="text-center mb-12">
+            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-[#5A5A40]/10 text-[#5A5A40] text-xs font-bold uppercase tracking-widest mb-6">
+              <Star size={14} /> The Future of Restaurant Management
+            </div>
+            <h1 className="text-6xl font-bold text-[#1a1a1a] mb-4 tracking-tight">RestoFlow ERP</h1>
+            <p className="text-lg text-[#5A5A40]/70 leading-relaxed">
+              Seamless multi-tenant operations, real-time analytics, and effortless customer experiences.
+            </p>
           </div>
 
-          <div className="mt-20 p-8 bg-white rounded-[40px] border border-[#5A5A40]/10 shadow-sm text-left max-w-3xl mx-auto">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-10 h-10 rounded-full bg-[#5A5A40]/10 flex items-center justify-center text-[#5A5A40]">
-                <Lock size={20} />
-              </div>
-              <h4 className="text-lg font-bold font-serif">Demo Access</h4>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 text-sm">
-              <div>
-                <p className="font-bold text-[#1a1a1a] mb-1">Super Admin</p>
-                <p className="text-[#5A5A40]/60 font-mono text-xs">ID: SUPERADMIN</p>
-                <p className="text-[#5A5A40]/60 font-mono text-xs">Pass: admin123</p>
-              </div>
-              <div>
-                <p className="font-bold text-[#1a1a1a] mb-1">Owner</p>
-                <p className="text-[#5A5A40]/60 font-mono text-xs">ID: OWNER-DEMO</p>
-                <p className="text-[#5A5A40]/60 font-mono text-xs">Pass: password123</p>
-              </div>
-              <div>
-                <p className="font-bold text-[#1a1a1a] mb-1">Chef</p>
-                <p className="text-[#5A5A40]/60 font-mono text-xs">ID: CHEF-DEMO</p>
-                <p className="text-[#5A5A40]/60 font-mono text-xs">Pass: password123</p>
-              </div>
-            </div>
-            <div className="mt-6 pt-6 border-t border-[#5A5A40]/5 flex items-center justify-between">
-              <p className="text-xs text-[#5A5A40]/50 italic">* Use "resto-1" for Customer access.</p>
-              <button 
-                onClick={() => {
-                  setAuthMode('LOGIN');
-                  setInitialAuthRole('SUPER_ADMIN');
-                  setView('AUTH');
-                }}
-                className="text-xs font-bold uppercase tracking-widest text-[#5A5A40] hover:underline"
-              >
-                Admin Portal
-              </button>
-            </div>
+          <div className="bg-white p-10 rounded-[40px] shadow-2xl border border-[#5A5A40]/5 relative overflow-hidden">
+            <AnimatePresence mode="wait">
+              {landingStep === 'ID' ? (
+                <motion.div
+                  key="id-step"
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  className="space-y-8"
+                >
+                  <div className="text-center">
+                    <h2 className="text-3xl font-bold mb-2">Enter Restaurant ID</h2>
+                    <p className="text-[#5A5A40]/60 text-sm">Please provide your unique business identifier to continue.</p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="relative">
+                      <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-[#5A5A40]/40" size={20} />
+                      <input 
+                        type="text"
+                        placeholder="e.g. resto-1"
+                        className="w-full bg-[#f5f5f0] border-none rounded-2xl pl-14 pr-6 py-5 text-xl font-mono focus:ring-2 ring-[#5A5A40]/20 outline-none transition-all"
+                        value={tempRId}
+                        onChange={e => setTempRId(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && !isVerifying && handleVerifyId()}
+                      />
+                    </div>
+                    <button 
+                      onClick={handleVerifyId}
+                      disabled={!tempRId || isVerifying}
+                      className="w-full bg-[#5A5A40] text-white py-5 rounded-2xl font-bold text-lg hover:bg-[#4A4A30] transition-all shadow-lg shadow-[#5A5A40]/20 disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {isVerifying ? (
+                        <>
+                          <Clock className="animate-spin" size={20} /> Verifying...
+                        </>
+                      ) : (
+                        <>Verify ID <ChevronRight size={20} /></>
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="pt-6 border-t border-[#5A5A40]/5 flex flex-col gap-4">
+                    <div className="flex items-center justify-between text-sm">
+                      <button 
+                        onClick={() => {
+                          setAuthMode('REGISTER');
+                          setView('AUTH');
+                        }}
+                        className="text-[#5A5A40] font-bold hover:underline"
+                      >
+                        Register New Business
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setAuthMode('LOGIN');
+                          setInitialAuthRole('SUPER_ADMIN');
+                          setView('AUTH');
+                        }}
+                        className="text-[#5A5A40]/50 hover:text-[#5A5A40] transition-colors"
+                      >
+                        Admin Portal
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-[#5A5A40]/40 text-center uppercase tracking-widest">
+                      Use "resto-1" for demo access
+                    </p>
+                  </div>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="login-step"
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  className="space-y-8"
+                >
+                  <div className="flex items-center justify-between">
+                    <button 
+                      onClick={() => setLandingStep('ID')}
+                      className="text-[#5A5A40]/50 hover:text-[#5A5A40] flex items-center gap-1 text-sm transition-colors"
+                    >
+                      <ChevronRight className="rotate-180" size={16} /> Change ID
+                    </button>
+                    <div className="text-right">
+                      <h2 className="text-2xl font-bold">{tempRName}</h2>
+                      <p className="text-[#5A5A40]/60 text-xs font-mono uppercase tracking-widest">{tempRId}</p>
+                    </div>
+                  </div>
+
+                  <form onSubmit={handleUnifiedLogin} className="space-y-6">
+                    <div className="space-y-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Your Role</label>
+                        <select 
+                          className="w-full bg-[#f5f5f0] border-none rounded-2xl px-5 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none appearance-none font-sans"
+                          value={loginRole}
+                          onChange={e => setLoginRole(e.target.value as UserRole)}
+                        >
+                          <option value="OWNER">Business Owner</option>
+                          <option value="CHEF">Chef / Kitchen Staff</option>
+                          <option value="WAITER">Waiter / Attender</option>
+                        </select>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Login ID</label>
+                        <div className="relative">
+                          <User className="absolute left-5 top-1/2 -translate-y-1/2 text-[#5A5A40]/40" size={18} />
+                          <input 
+                            required
+                            className="w-full bg-[#f5f5f0] border-none rounded-2xl pl-14 pr-6 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none font-sans"
+                            placeholder="e.g. OWNER-XXXX"
+                            value={loginId}
+                            onChange={e => setLoginId(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Password</label>
+                        <div className="relative">
+                          <Lock className="absolute left-5 top-1/2 -translate-y-1/2 text-[#5A5A40]/40" size={18} />
+                          <input 
+                            required
+                            type="password"
+                            className="w-full bg-[#f5f5f0] border-none rounded-2xl pl-14 pr-6 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none font-sans"
+                            placeholder="••••••••"
+                            value={password}
+                            onChange={e => setPassword(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-4">
+                      <button 
+                        type="submit"
+                        disabled={isLoggingIn}
+                        className="w-full bg-[#5A5A40] text-white py-5 rounded-2xl font-bold text-lg hover:bg-[#4A4A30] transition-all shadow-lg shadow-[#5A5A40]/20 disabled:opacity-50 flex items-center justify-center gap-2"
+                      >
+                        {isLoggingIn ? (
+                          <>
+                            <Clock className="animate-spin" size={20} /> Signing In...
+                          </>
+                        ) : (
+                          <>Sign In to Dashboard</>
+                        )}
+                      </button>
+                      
+                      <div className="relative py-2">
+                        <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-[#5A5A40]/10"></div></div>
+                        <div className="relative flex justify-center text-[10px] uppercase tracking-widest"><span className="bg-white px-2 text-[#5A5A40]/40">or</span></div>
+                      </div>
+
+                      <button 
+                        type="button"
+                        onClick={() => {
+                          setRestaurantId(tempRId);
+                          localStorage.setItem('restaurantId', tempRId);
+                          setRole('CUSTOMER');
+                          localStorage.setItem('role', 'CUSTOMER');
+                          setView('DASHBOARD');
+                        }}
+                        className="w-full bg-white border-2 border-[#5A5A40]/10 text-[#5A5A40] py-4 rounded-2xl font-bold hover:bg-[#f5f5f0] transition-all flex items-center justify-center gap-2"
+                      >
+                        <ShoppingCart size={18} /> Enter as Customer
+                      </button>
+                    </div>
+                  </form>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          <div className="mt-12 text-center text-[#5A5A40]/40 text-xs">
+            &copy; {new Date().getFullYear()} RestoFlow ERP. All rights reserved.
           </div>
         </motion.div>
       </div>
@@ -799,6 +962,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   const fetchRestaurant = async () => {
+    if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}`);
       if (res.ok) {
@@ -1884,6 +2048,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   };
 
   const fetchRestaurant = async () => {
+    if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}`);
       if (res.ok) {
