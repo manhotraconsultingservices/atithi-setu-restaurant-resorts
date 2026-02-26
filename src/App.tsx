@@ -12,6 +12,7 @@ import {
   Clock, 
   BarChart3,
   ChevronRight,
+  Edit3,
   X,
   CreditCard,
   Receipt,
@@ -129,25 +130,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (restaurantId && restaurantId !== 'null' && restaurantId !== 'undefined' && restaurantId !== '') {
+    if (restaurantId && typeof restaurantId === 'string' && restaurantId !== 'null' && restaurantId !== 'undefined' && restaurantId !== '' && restaurantId !== '[object Object]') {
       fetch(`/api/restaurant/${restaurantId}`)
         .then(res => {
           if (res.status === 404) {
-            throw new Error('Restaurant not found');
+            return null; // Silently handle not found
           }
           if (!res.ok) throw new Error('Failed to fetch restaurant info');
           return res.json();
         })
         .then(data => {
-          if (data && data.name) setRestaurantName(data.name);
-        })
-        .catch(err => {
-          console.error(err.message, err);
-          if (err.message === 'Restaurant not found') {
+          if (data && data.name) {
+            setRestaurantName(data.name);
+          } else if (data === null) {
+            // If restaurant not found, clear it
             setRestaurantId(null);
             localStorage.removeItem('restaurantId');
             setView('LANDING');
           }
+        })
+        .catch(err => {
+          console.error("Restaurant fetch error:", err.message);
         });
     }
   }, [restaurantId]);
@@ -843,14 +846,16 @@ function RoleCard({ icon, title, description, onClick }: { icon: React.ReactNode
 
 // --- ADMIN DASHBOARD ---
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
-  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS'>('MENU');
+  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS' | 'PAYMENTS'>('MENU');
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [reports, setReports] = useState<any>(null);
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [tables, setTables] = useState<Table[]>([]);
   const [staff, setStaff] = useState<any[]>([]);
+  const [orders, setOrders] = useState<Order[]>([]);
   const [isAddingItem, setIsAddingItem] = useState(false);
   const [isAddingStaff, setIsAddingStaff] = useState(false);
+  const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
   const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'CHEF' as UserRole });
   const [newItem, setNewItem] = useState<{ 
     name: string, 
@@ -881,7 +886,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     fetchRestaurant();
     fetchTables();
     fetchStaff();
+    fetchOrders();
   }, [restaurantId]);
+
+  const fetchOrders = async () => {
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/orders`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setOrders(await res.json());
+    } catch (err) {
+      console.error("Failed to fetch orders", err);
+    }
+  };
 
   const fetchStaff = async () => {
     try {
@@ -975,14 +992,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   const fetchRestaurant = async () => {
-    if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
+    if (!restaurantId || typeof restaurantId !== 'string' || restaurantId === 'null' || restaurantId === 'undefined' || restaurantId === '[object Object]') return;
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}`);
       if (res.ok) {
         setRestaurant(await res.json());
       }
     } catch (err) {
-      console.error("Error fetching restaurant:", err);
+      // Silent error
     }
   };
 
@@ -1002,7 +1019,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           gst_percentage: restaurant.gst_percentage,
           is_gst_enabled: restaurant.is_gst_enabled,
           template_id: restaurant.template_id,
-          table_count: restaurant.table_count
+          table_count: restaurant.table_count,
+          upi_id: restaurant.upi_id
         })
       });
       if (!res.ok) throw new Error("Failed to update settings");
@@ -1174,6 +1192,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     fetchMenu();
   };
 
+  const handleUpdateItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingItem) return;
+
+    await fetch(`/api/menu/${editingItem.id}`, {
+      method: 'PATCH',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        name: editingItem.name,
+        price_half: editingItem.price_half,
+        price_full: editingItem.price_full,
+        price: editingItem.price_full,
+        dietary_type: editingItem.dietary_type,
+        description: editingItem.description,
+        category: editingItem.category
+      })
+    });
+    setEditingItem(null);
+    fetchMenu();
+  };
+
   const handleToggleDailySpecial = async (id: string, is_daily_special: boolean) => {
     await fetch(`/api/menu/${id}`, {
       method: 'PATCH',
@@ -1226,6 +1268,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           Staff Management
         </button>
         <button 
+          onClick={() => setActiveTab('PAYMENTS')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'PAYMENTS' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Payments
+        </button>
+        <button 
           onClick={() => setActiveTab('SETTINGS')}
           className={cn(
             "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
@@ -1266,6 +1317,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <span className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 block">
                           {item.category}
                         </span>
+                        <span className={cn(
+                          "text-[8px] font-bold uppercase px-1.5 py-0.5 rounded flex items-center gap-0.5",
+                          item.dietary_type === 'VEG' ? "bg-green-100 text-green-700" : 
+                          item.dietary_type === 'NON_VEG' ? "bg-red-100 text-red-700" : 
+                          "bg-blue-100 text-blue-700"
+                        )}>
+                          <div className={cn(
+                            "w-1.5 h-1.5 rounded-full",
+                            item.dietary_type === 'VEG' ? "bg-green-600" : 
+                            item.dietary_type === 'NON_VEG' ? "bg-red-600" : 
+                            "bg-blue-600"
+                          )} />
+                          {item.dietary_type.replace('_', ' ')}
+                        </span>
                         {item.is_daily_special ? (
                           <span className="bg-yellow-100 text-yellow-700 text-[8px] font-bold uppercase px-1.5 py-0.5 rounded flex items-center gap-0.5">
                             <Star size={8} fill="currentColor" /> Daily Special
@@ -1294,28 +1359,152 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                   </div>
                   <p className="text-sm text-[#5A5A40]/70 mb-6 line-clamp-2">{item.description}</p>
-                  <div className="mt-auto flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="text-lg font-bold font-mono">₹{item.price.toFixed(2)}</span>
-                      <button 
-                        onClick={() => {
-                          const newPrice = prompt("Enter new price:", item.price.toString());
-                          if (newPrice) handleUpdatePrice(item.id, parseFloat(newPrice));
-                        }}
-                        className="text-xs text-[#5A5A40] underline"
-                      >
-                        Edit
-                      </button>
+                  <div className="mt-auto flex flex-col gap-4">
+                    <div className="flex flex-wrap gap-3">
+                      {item.price_half ? (
+                        <div className="bg-[#f5f5f0] px-3 py-1.5 rounded-xl border border-[#5A5A40]/5">
+                          <span className="text-[10px] text-[#5A5A40]/50 uppercase font-bold block">Half</span>
+                          <span className="text-sm font-bold font-mono">₹{item.price_half.toFixed(2)}</span>
+                        </div>
+                      ) : null}
+                      <div className="bg-[#f5f5f0] px-3 py-1.5 rounded-xl border border-[#5A5A40]/5">
+                        <span className="text-[10px] text-[#5A5A40]/50 uppercase font-bold block">Full</span>
+                        <span className="text-sm font-bold font-mono">₹{item.price_full.toFixed(2)}</span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <div className={cn("w-2 h-2 rounded-full", item.available ? "bg-green-500" : "bg-red-500")} />
-                      <span className="text-xs font-medium">{item.available ? 'Available' : 'Out of Stock'}</span>
+                    
+                    <div className="flex items-center justify-between pt-4 border-t border-[#5A5A40]/5">
+                      <button 
+                        onClick={() => setEditingItem(item)}
+                        className="text-sm font-bold text-[#5A5A40] hover:underline flex items-center gap-1"
+                      >
+                        <Edit3 size={14} /> Edit Item
+                      </button>
+                      <div className="flex items-center gap-2">
+                        <div className={cn("w-2 h-2 rounded-full", item.available ? "bg-green-500" : "bg-red-500")} />
+                        <span className="text-xs font-medium">{item.available ? 'Available' : 'Out of Stock'}</span>
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
             ))}
           </div>
+
+          {/* Edit Item Modal */}
+          {editingItem && (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                className="bg-white rounded-[40px] shadow-2xl w-full max-w-2xl overflow-hidden"
+              >
+                <div className="p-8 border-b border-[#5A5A40]/10 flex justify-between items-center bg-[#f5f5f0]/50">
+                  <div>
+                    <h3 className="text-2xl font-bold font-serif">Edit Menu Item</h3>
+                    <p className="text-sm text-[#5A5A40]/60">Update details for {editingItem.name}</p>
+                  </div>
+                  <button onClick={() => setEditingItem(null)} className="p-2 hover:bg-white rounded-full transition-colors">
+                    <X size={24} />
+                  </button>
+                </div>
+                
+                <form onSubmit={handleUpdateItem} className="p-8 space-y-6 max-h-[70vh] overflow-y-auto">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold uppercase tracking-widest text-[#5A5A40]/60 ml-2">Item Name</label>
+                      <input 
+                        type="text" 
+                        required
+                        value={editingItem.name}
+                        onChange={e => setEditingItem({...editingItem, name: e.target.value})}
+                        className="w-full px-6 py-4 rounded-2xl border border-[#5A5A40]/10 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 font-medium"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold uppercase tracking-widest text-[#5A5A40]/60 ml-2">Category</label>
+                      <select 
+                        value={editingItem.category}
+                        onChange={e => setEditingItem({...editingItem, category: e.target.value})}
+                        className="w-full px-6 py-4 rounded-2xl border border-[#5A5A40]/10 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 font-medium bg-white"
+                      >
+                        {['Starters', 'Mains', 'Sides', 'Desserts', 'Drinks', 'Breads'].map(cat => (
+                          <option key={cat} value={cat}>{cat}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase tracking-widest text-[#5A5A40]/60 ml-2">Description</label>
+                    <textarea 
+                      value={editingItem.description}
+                      onChange={e => setEditingItem({...editingItem, description: e.target.value})}
+                      className="w-full px-6 py-4 rounded-2xl border border-[#5A5A40]/10 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 font-medium h-24 resize-none"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold uppercase tracking-widest text-[#5A5A40]/60 ml-2">Price (Full)</label>
+                      <div className="relative">
+                        <span className="absolute left-6 top-1/2 -translate-y-1/2 text-[#5A5A40]/40 font-bold">₹</span>
+                        <input 
+                          type="number" 
+                          step="0.01"
+                          required
+                          value={editingItem.price_full}
+                          onChange={e => setEditingItem({...editingItem, price_full: parseFloat(e.target.value)})}
+                          className="w-full pl-12 pr-6 py-4 rounded-2xl border border-[#5A5A40]/10 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 font-mono font-bold"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold uppercase tracking-widest text-[#5A5A40]/60 ml-2">Price (Half) - Optional</label>
+                      <div className="relative">
+                        <span className="absolute left-6 top-1/2 -translate-y-1/2 text-[#5A5A40]/40 font-bold">₹</span>
+                        <input 
+                          type="number" 
+                          step="0.01"
+                          value={editingItem.price_half || ''}
+                          onChange={e => setEditingItem({...editingItem, price_half: e.target.value ? parseFloat(e.target.value) : undefined})}
+                          className="w-full pl-12 pr-6 py-4 rounded-2xl border border-[#5A5A40]/10 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 font-mono font-bold"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold uppercase tracking-widest text-[#5A5A40]/60 ml-2">Dietary Type</label>
+                      <select 
+                        value={editingItem.dietary_type}
+                        onChange={e => setEditingItem({...editingItem, dietary_type: e.target.value as DietaryType})}
+                        className="w-full px-6 py-4 rounded-2xl border border-[#5A5A40]/10 focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 font-medium bg-white"
+                      >
+                        <option value="VEG">Veg</option>
+                        <option value="NON_VEG">Non-Veg</option>
+                        <option value="VEGAN">Vegan</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="pt-4 flex gap-4">
+                    <button 
+                      type="button"
+                      onClick={() => setEditingItem(null)}
+                      className="flex-1 px-8 py-4 rounded-2xl font-bold border border-[#5A5A40]/10 hover:bg-[#f5f5f0] transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      type="submit"
+                      className="flex-1 bg-[#5A5A40] text-white px-8 py-4 rounded-2xl font-bold hover:bg-[#4A4A30] transition-all shadow-lg shadow-[#5A5A40]/20"
+                    >
+                      Save Changes
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          )}
         </div>
       ) : activeTab === 'REPORTS' ? (
         <div className="space-y-8">
@@ -1549,6 +1738,87 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
         </div>
+      ) : activeTab === 'PAYMENTS' ? (
+        <div className="space-y-8">
+          <div className="flex justify-between items-center">
+            <h2 className="text-3xl font-bold font-serif">Payment Management</h2>
+            <button 
+              onClick={fetchOrders}
+              className="p-3 bg-white border border-[#5A5A40]/10 rounded-2xl text-[#5A5A40] hover:bg-[#f5f5f0] transition-all"
+            >
+              <Clock size={20} />
+            </button>
+          </div>
+
+          <div className="bg-white rounded-[32px] border border-[#5A5A40]/5 shadow-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-[#f5f5f0] border-b border-[#5A5A40]/5">
+                    <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Order ID</th>
+                    <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Customer</th>
+                    <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Table</th>
+                    <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Amount</th>
+                    <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Method</th>
+                    <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Status</th>
+                    <th className="px-6 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#5A5A40]/5">
+                  {orders.map(order => (
+                    <tr key={order.id} className="hover:bg-[#f5f5f0]/30 transition-colors">
+                      <td className="px-6 py-4 font-mono text-xs font-bold">{order.id}</td>
+                      <td className="px-6 py-4">
+                        <p className="font-bold text-sm">{order.customerName}</p>
+                        <p className="text-[10px] text-[#5A5A40]/50">{order.customerPhone}</p>
+                      </td>
+                      <td className="px-6 py-4 text-sm">{order.tableNumber}</td>
+                      <td className="px-6 py-4 font-mono font-bold text-sm">₹{order.totalAmount.toFixed(2)}</td>
+                      <td className="px-6 py-4">
+                        <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 bg-[#5A5A40]/5 rounded-full">
+                          {order.paymentMethod}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4">
+                        <span className={cn(
+                          "text-[10px] font-bold uppercase tracking-widest px-3 py-1 rounded-full",
+                          order.paymentStatus === 'PAID' ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"
+                        )}>
+                          {order.paymentStatus || 'PENDING'}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        {order.paymentStatus !== 'PAID' && (
+                          <button 
+                            onClick={async () => {
+                              const res = await fetch(`/api/orders/${order.id}/payment`, {
+                                method: 'PATCH',
+                                headers: { 
+                                  'Content-Type': 'application/json',
+                                  'Authorization': `Bearer ${token}`
+                                },
+                                body: JSON.stringify({ status: 'PAID', restaurantId })
+                              });
+                              if (res.ok) fetchOrders();
+                            }}
+                            className="bg-green-600 text-white px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-green-700 transition-all"
+                          >
+                            Mark Paid
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {orders.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-6 py-12 text-center text-[#5A5A40]/40 italic">No orders found.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       ) : activeTab === 'QR' ? (
         <div className="max-w-4xl space-y-8">
           <div className="flex justify-between items-center">
@@ -1740,6 +2010,48 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     }
                   }}
                 />
+              </div>
+            </div>
+
+            <div className="space-y-4 pt-4 border-t border-[#5A5A40]/10">
+              <h4 className="text-sm font-bold uppercase tracking-widest text-[#5A5A40]">UPI Payment Settings</h4>
+              <div>
+                <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">UPI ID (VPA)</label>
+                <input 
+                  className="w-full bg-[#f5f5f0] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#5A5A40]/20 outline-none"
+                  placeholder="e.g. merchant@upi"
+                  value={restaurant?.upi_id || ''}
+                  onChange={e => setRestaurant(prev => prev ? { ...prev, upi_id: e.target.value } : null)}
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">Static UPI QR Code</label>
+                <div className="flex items-center gap-4">
+                  {restaurant?.upi_qr_image && (
+                    <img src={restaurant.upi_qr_image} alt="UPI QR" className="w-12 h-12 object-contain border rounded-lg" referrerPolicy="no-referrer" />
+                  )}
+                  <input 
+                    type="file"
+                    accept="image/*"
+                    className="w-full text-sm text-[#5A5A40]/50 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-bold file:bg-[#5A5A40]/10 file:text-[#5A5A40] hover:file:bg-[#5A5A40]/20"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const formData = new FormData();
+                        formData.append('upi_qr', file);
+                        const res = await fetch(`/api/restaurant/${restaurantId}/upi-qr`, {
+                          method: 'POST',
+                          headers: { 'Authorization': `Bearer ${token}` },
+                          body: formData
+                        });
+                        const data = await res.json();
+                        if (data.upi_qr_image) {
+                          setRestaurant(prev => prev ? { ...prev, upi_qr_image: data.upi_qr_image } : null);
+                        }
+                      }
+                    }}
+                  />
+                </div>
               </div>
             </div>
 
@@ -1952,7 +2264,10 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
               <div className="space-y-2">
                 {order.items.map((item, idx) => (
                   <div key={idx} className="flex justify-between text-sm">
-                    <span><span className="font-bold text-[#5A5A40]">{item.quantity}x</span> {item.name}</span>
+                    <span>
+                      <span className="font-bold text-[#5A5A40]">{item.quantity}x</span> {item.name}
+                      {item.size && <span className="ml-2 text-[10px] font-bold uppercase text-[#5A5A40]/40">({item.size})</span>}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -2017,6 +2332,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [order, setOrder] = useState<Order | null>(null);
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
+  const [showUPIModal, setShowUPIModal] = useState(false);
   const [showInvoice, setShowInvoice] = useState(false);
   const [customerInfo, setCustomerInfo] = useState({ name: '', phone: '' });
   const [tableNumber, setTableNumber] = useState("Online");
@@ -2061,14 +2377,14 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   };
 
   const fetchRestaurant = async () => {
-    if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
+    if (!restaurantId || typeof restaurantId !== 'string' || restaurantId === 'null' || restaurantId === 'undefined' || restaurantId === '[object Object]') return;
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}`);
       if (res.ok) {
         setRestaurant(await res.json());
       }
     } catch (err) {
-      console.error("Error fetching restaurant:", err);
+      // Silent error
     }
   };
 
@@ -2118,8 +2434,8 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     });
   };
 
-  const removeFromCart = (menuItemId: string) => {
-    setCart(prev => prev.filter(i => i.menuItemId !== menuItemId));
+  const removeFromCart = (id: string) => {
+    setCart(prev => prev.filter(i => i.id !== id));
   };
 
   const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
@@ -2182,6 +2498,9 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       setOrder(newOrder);
       setCart([]);
       setIsCheckingOut(false);
+      if (paymentMethod === 'ONLINE') {
+        setShowUPIModal(true);
+      }
       localStorage.setItem('last_restaurant_id', restaurantId);
 
       // Simulate WhatsApp Message
@@ -2300,6 +2619,72 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                 >
                   Print Invoice
                 </button>
+              </motion.div>
+            </div>
+          )}
+
+          {showUPIModal && order && restaurant && (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[110] p-4">
+              <motion.div 
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="bg-white rounded-[40px] p-8 w-full max-w-md shadow-2xl text-center space-y-6"
+              >
+                <div className="flex justify-between items-center">
+                  <h3 className="text-2xl font-bold font-serif">UPI Payment</h3>
+                  <button onClick={() => setShowUPIModal(false)} className="text-[#5A5A40]/50 hover:text-[#5A5A40]">
+                    <X />
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-sm text-[#5A5A40]/60 uppercase tracking-widest font-bold">Order Total</p>
+                  <p className="text-4xl font-bold font-mono text-[#1a1a1a]">₹{(order.totalAmount + (order.gstAmount || 0)).toFixed(2)}</p>
+                </div>
+
+                {restaurant.upi_id ? (
+                  <div className="space-y-6">
+                    <div className="bg-[#f5f5f0] p-6 rounded-[32px] inline-block shadow-inner border border-[#5A5A40]/5">
+                      <QRCodeCanvas 
+                        value={`upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}&am=${(order.totalAmount + (order.gstAmount || 0)).toFixed(2)}&cu=INR&tn=${order.id}`} 
+                        size={200}
+                        level="H"
+                        includeMargin={true}
+                      />
+                    </div>
+                    <div className="space-y-3">
+                      <p className="text-xs text-[#5A5A40]/60">Scan this QR with any UPI app to pay</p>
+                      <a 
+                        href={`upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}&am=${(order.totalAmount + (order.gstAmount || 0)).toFixed(2)}&cu=INR&tn=${order.id}`}
+                        className="block w-full bg-[#5A5A40] text-white py-4 rounded-2xl font-bold hover:bg-[#4A4A30] transition-all"
+                      >
+                        Open UPI App
+                      </a>
+                    </div>
+                  </div>
+                ) : restaurant.upi_qr_image ? (
+                  <div className="space-y-4">
+                    <img src={restaurant.upi_qr_image} alt="UPI QR" className="w-full max-w-[200px] mx-auto rounded-2xl shadow-md" referrerPolicy="no-referrer" />
+                    <p className="text-xs text-[#5A5A40]/60">Scan this QR to make payment</p>
+                  </div>
+                ) : (
+                  <div className="p-8 bg-yellow-50 text-yellow-700 rounded-2xl text-sm italic">
+                    UPI payment details are not set by the restaurant. Please pay at the counter.
+                  </div>
+                )}
+
+                <div className="pt-4 border-t border-[#5A5A40]/10">
+                  <button 
+                    onClick={() => {
+                      setShowUPIModal(false);
+                      alert("Payment confirmation sent to restaurant. Please wait for verification.");
+                    }}
+                    className="w-full border-2 border-[#5A5A40] text-[#5A5A40] py-4 rounded-2xl font-bold hover:bg-[#5A5A40] hover:text-white transition-all"
+                  >
+                    I have paid
+                  </button>
+                </div>
               </motion.div>
             </div>
           )}
@@ -2643,7 +3028,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                     </div>
                     <div className="flex items-center gap-4">
                       <p className="font-mono font-bold">₹{(item.price * item.quantity).toFixed(2)}</p>
-                      <button onClick={() => removeFromCart(item.menuItemId)} className="text-red-400">
+                      <button onClick={() => removeFromCart(item.id)} className="text-red-400">
                         <Trash2 size={16} />
                       </button>
                     </div>
@@ -2933,6 +3318,13 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
                 <div>
                   <p className="text-2xl font-bold text-[#1a1a1a]">{order.tableNumber}</p>
                   <p className="text-sm text-[#5A5A40]/60">{order.customerName}</p>
+                  <div className="mt-2 space-y-1">
+                    {order.items.map((item, idx) => (
+                      <p key={idx} className="text-xs text-[#5A5A40]/70">
+                        <span className="font-bold">{item.quantity}x</span> {item.name}
+                      </p>
+                    ))}
+                  </div>
                 </div>
                 <button 
                   onClick={async () => {

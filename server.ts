@@ -66,6 +66,13 @@ try {
   centralDb.exec("ALTER TABLE restaurants ADD COLUMN watermark_image TEXT;");
 } catch (e) {}
 
+try {
+  centralDb.exec("ALTER TABLE restaurants ADD COLUMN upi_id TEXT;");
+} catch (e) {}
+try {
+  centralDb.exec("ALTER TABLE restaurants ADD COLUMN upi_qr_image TEXT;");
+} catch (e) {}
+
 // Ensure demo restaurant is active
 try {
   centralDb.prepare("UPDATE restaurants SET is_active = 1 WHERE id = 'resto-1'").run();
@@ -397,6 +404,9 @@ async function startServer() {
   // API Routes
   app.get("/api/restaurant/:id", (req, res) => {
     const id = req.params.id;
+    if (!id || id === 'null' || id === 'undefined' || id === '[object Object]') {
+      return res.status(400).json({ error: "Invalid restaurant ID" });
+    }
     // Try finding by restaurant ID first
     let restaurant = centralDb.prepare("SELECT * FROM restaurants WHERE LOWER(id) = LOWER(?)").get(id) as any;
     
@@ -427,17 +437,27 @@ async function startServer() {
   app.patch("/api/restaurant/:id", authenticate, (req: any, res) => {
     if (req.user.restaurantId !== req.params.id) return res.status(403).json({ error: "Forbidden" });
     try {
-      const { name, gst_number, gst_percentage, is_gst_enabled, template_id, table_count } = req.body;
+      const { name, gst_number, gst_percentage, is_gst_enabled, template_id, table_count, upi_id } = req.body;
       if (name) centralDb.prepare("UPDATE restaurants SET name = ? WHERE id = ?").run(name, req.params.id);
       if (gst_number !== undefined) centralDb.prepare("UPDATE restaurants SET gst_number = ? WHERE id = ?").run(gst_number, req.params.id);
       if (gst_percentage !== undefined) centralDb.prepare("UPDATE restaurants SET gst_percentage = ? WHERE id = ?").run(gst_percentage, req.params.id);
       if (is_gst_enabled !== undefined) centralDb.prepare("UPDATE restaurants SET is_gst_enabled = ? WHERE id = ?").run(is_gst_enabled ? 1 : 0, req.params.id);
       if (template_id) centralDb.prepare("UPDATE restaurants SET template_id = ? WHERE id = ?").run(template_id, req.params.id);
       if (table_count !== undefined) centralDb.prepare("UPDATE restaurants SET table_count = ? WHERE id = ?").run(table_count, req.params.id);
+      if (upi_id !== undefined) centralDb.prepare("UPDATE restaurants SET upi_id = ? WHERE id = ?").run(upi_id, req.params.id);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message || "Failed to update settings" });
     }
+  });
+
+  app.post("/api/restaurant/:id/upi-qr", authenticate, upload.single("upi_qr"), (req: any, res) => {
+    if (req.user.restaurantId !== req.params.id) return res.status(403).json({ error: "Forbidden" });
+    const upi_qr_image = req.file ? `/uploads/${req.file.filename}` : null;
+    if (upi_qr_image) {
+      centralDb.prepare("UPDATE restaurants SET upi_qr_image = ? WHERE id = ?").run(upi_qr_image, req.params.id);
+    }
+    res.json({ upi_qr_image });
   });
 
   app.get("/api/restaurant/:id/menu", (req, res) => {
@@ -516,7 +536,10 @@ async function startServer() {
 
   app.patch("/api/menu/:id", authenticate, (req: any, res) => {
     const db = getTenantDb(req.user.restaurantId);
-    const { price, price_half, price_full, available, is_daily_special, dietary_type } = req.body;
+    const { name, price, price_half, price_full, available, is_daily_special, dietary_type } = req.body;
+    if (name !== undefined) {
+      db.prepare("UPDATE menu_items SET name = ? WHERE id = ?").run(name, req.params.id);
+    }
     if (price !== undefined) {
       db.prepare("UPDATE menu_items SET price = ? WHERE id = ?").run(price, req.params.id);
     }
@@ -565,13 +588,42 @@ async function startServer() {
     }
   });
 
+  app.patch("/api/orders/:id/payment", authenticate, (req: any, res) => {
+    const { status, restaurantId } = req.body;
+    if (req.user.restaurantId !== restaurantId) return res.status(403).json({ error: "Forbidden" });
+    
+    try {
+      const db = getTenantDb(restaurantId);
+      db.prepare("UPDATE orders SET payment_status = ? WHERE id = ?").run(status, req.params.id);
+      
+      // Notify Customer
+      broadcastToRole(restaurantId, "CUSTOMER", { type: "PAYMENT_UPDATE", orderId: req.params.id, status });
+      
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get("/api/restaurant/:id/orders", authenticate, (req: any, res) => {
     if (req.user.restaurantId !== req.params.id) return res.status(403).json({ error: "Forbidden" });
     const db = getTenantDb(req.params.id);
     const orders = db.prepare("SELECT * FROM orders ORDER BY created_at DESC").all();
     const ordersWithItems = orders.map((order: any) => {
       const items = db.prepare("SELECT * FROM order_items WHERE order_id = ?").all(order.id);
-      return { ...order, items, restaurantId: req.params.id };
+      return { 
+        ...order, 
+        items, 
+        restaurantId: req.params.id,
+        tableNumber: order.table_number,
+        customerName: order.customer_name,
+        customerPhone: order.customer_phone,
+        totalAmount: order.total_amount,
+        gstAmount: order.gst_amount,
+        paymentStatus: order.payment_status,
+        paymentMethod: order.payment_method,
+        createdAt: order.created_at
+      };
     });
     res.json(ordersWithItems);
   });

@@ -54,6 +54,8 @@ export interface Restaurant {
   template_id?: 'CLASSIC' | 'MODERN' | 'EDITORIAL';
   table_count?: number;
   watermark_image?: string;
+  upi_id?: string;
+  upi_qr_image?: string;
 }
 
 export interface Table {
