@@ -25,7 +25,16 @@ import {
   Mail,
   Download,
   Leaf,
-  Search
+  Search,
+  Smartphone,
+  Hash,
+  Copy,
+  Check,
+  Info,
+  Calendar,
+  UserCheck,
+  History,
+  RefreshCw
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize } from './types';
@@ -618,11 +627,11 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
           <button 
             onClick={() => {
               setRegistrationResult(null);
-              onSwitch(); // Switch to login mode
+              onBack(); // Redirect to landing page
             }}
             className="w-full bg-[#5A5A40] text-white py-5 rounded-2xl font-bold hover:bg-[#4A4A30] transition-all"
           >
-            Go to Login
+            Close
           </button>
         </motion.div>
       </div>
@@ -844,15 +853,571 @@ function RoleCard({ icon, title, description, onClick }: { icon: React.ReactNode
   );
 }
 
+const getDaysInMonth = (monthStr: string) => {
+  const [year, month] = monthStr.split('-').map(Number);
+  const date = new Date(year, month - 1, 1);
+  const days = [];
+  while (date.getMonth() === month - 1) {
+    days.push(new Date(date).toISOString().slice(0, 10));
+    date.setDate(date.getDate() + 1);
+  }
+  return days;
+};
+
+function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, token: string, restaurantId: string }) {
+  const [logs, setLogs] = useState<any[]>([]);
+  const [stats, setStats] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [hours, setHours] = useState('8');
+  const [type, setType] = useState('WORK');
+  const [note, setNote] = useState('');
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().slice(0, 10));
+  const [selectedDays, setSelectedDays] = useState<string[]>([]);
+  const [staffList, setStaffList] = useState<any[]>([]);
+  const [user, setUser] = useState<any>(null);
+
+  useEffect(() => {
+    fetchLogs();
+    fetchUser();
+    if (role === 'OWNER') {
+      fetchStats();
+      fetchStaff();
+    }
+  }, [month, role]);
+
+  const fetchUser = async () => {
+    try {
+      const res = await fetch('/api/me', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      setUser(data);
+      if (data.default_hours) setHours(data.default_hours.toString());
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchLogs = async () => {
+    try {
+      const res = await fetch(`/api/attendance?month=${month}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      setLogs(data);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchStats = async () => {
+    try {
+      const res = await fetch(`/api/owner/attendance/stats?month=${month}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      setStats(data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchStaff = async () => {
+    try {
+      const res = await fetch('/api/owner/staff', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      setStaffList(data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      const res = await fetch('/api/attendance', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          date: selectedDate,
+          hours: parseFloat(hours),
+          type,
+          note
+        })
+      });
+      if (res.ok) {
+        fetchLogs();
+        alert('Attendance logged successfully!');
+      }
+    } catch (err) {
+      alert('Failed to log attendance');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleBulkSubmit = async () => {
+    if (selectedDays.length === 0) return;
+    setSubmitting(true);
+    try {
+      const promises = selectedDays.map(day => fetch('/api/attendance', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          date: day,
+          hours: parseFloat(hours),
+          type,
+          note
+        })
+      }));
+      await Promise.all(promises);
+      fetchLogs();
+      setSelectedDays([]);
+      alert(`Attendance logged for ${selectedDays.length} days!`);
+    } catch (err) {
+      alert('Failed to log attendance for some days');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleStatusUpdate = async (id: string, status: string) => {
+    try {
+      const res = await fetch(`/api/attendance/${id}`, {
+        method: 'PATCH',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ status })
+      });
+      if (res.ok) {
+        fetchLogs();
+        fetchStats();
+      }
+    } catch (err) {
+      alert('Failed to update status');
+    }
+  };
+
+  const updateDefaultHours = async (staffId: string, hours: number) => {
+    try {
+      const res = await fetch(`/api/owner/staff/${staffId}/settings`, {
+        method: 'PATCH',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ default_hours: hours })
+      });
+      if (res.ok) {
+        fetchStaff();
+        fetchStats();
+      }
+    } catch (err) {
+      alert('Failed to update default hours');
+    }
+  };
+
+  return (
+    <div className="space-y-8">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-3xl font-bold font-serif">Staff Attendance</h2>
+          <p className="text-[#5A5A40]/60">Manage daily logs and monthly reports</p>
+        </div>
+        <div className="flex items-center gap-3 bg-white p-2 rounded-2xl shadow-sm border border-[#5A5A40]/5">
+          <Calendar size={18} className="text-[#5A5A40]/40 ml-2" />
+          <input 
+            type="month" 
+            value={month}
+            onChange={e => setMonth(e.target.value)}
+            className="bg-transparent border-none focus:ring-0 text-sm font-bold text-[#5A5A40] outline-none"
+          />
+        </div>
+      </div>
+
+      {role !== 'OWNER' && (
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white p-8 rounded-[40px] shadow-sm border border-[#5A5A40]/5"
+        >
+          <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+            <UserCheck size={20} className="text-emerald-600" />
+            Log Attendance
+          </h3>
+          <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-5 gap-6 items-end">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Date</label>
+              <input 
+                type="date" 
+                required
+                max={new Date().toISOString().slice(0, 10)}
+                value={selectedDate}
+                onChange={e => setSelectedDate(e.target.value)}
+                className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none font-bold"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">
+                Hours Worked {user?.default_hours && <span className="text-emerald-600">(Default: {user.default_hours}h)</span>}
+              </label>
+              <input 
+                type="number" 
+                step="0.5"
+                required
+                value={hours}
+                onChange={e => setHours(e.target.value)}
+                className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none font-bold"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Type</label>
+              <select 
+                value={type}
+                onChange={e => setType(e.target.value)}
+                className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none font-bold appearance-none"
+              >
+                <option value="WORK">Work Day</option>
+                <option value="LEAVE">Leave</option>
+                <option value="SICK">Sick Leave</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Note (Optional)</label>
+              <input 
+                type="text" 
+                value={note}
+                onChange={e => setNote(e.target.value)}
+                placeholder="e.g. Overtime"
+                className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none"
+              />
+            </div>
+            <button 
+              disabled={submitting}
+              type="submit"
+              className="bg-[#5A5A40] text-white py-4 rounded-2xl font-bold hover:bg-[#4A4A30] transition-all disabled:opacity-50"
+            >
+              {submitting ? 'Logging...' : 'Submit Log'}
+            </button>
+          </form>
+          {selectedDays.length > 0 && (
+            <motion.div 
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              className="mt-6 p-4 bg-emerald-50 rounded-2xl border border-emerald-100 flex items-center justify-between"
+            >
+              <div className="flex items-center gap-3">
+                <div className="bg-emerald-600 text-white w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm">
+                  {selectedDays.length}
+                </div>
+                <div>
+                  <p className="font-bold text-emerald-900 text-sm">Days Selected</p>
+                  <p className="text-emerald-700 text-xs">Submit timesheet for all selected dates with the values above.</p>
+                </div>
+              </div>
+              <button 
+                onClick={handleBulkSubmit}
+                disabled={submitting}
+                className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold text-sm hover:bg-emerald-700 transition-all disabled:opacity-50"
+              >
+                {submitting ? 'Submitting...' : 'Bulk Submit'}
+              </button>
+            </motion.div>
+          )}
+        </motion.div>
+      )}
+
+      {role !== 'OWNER' && (
+        <div className="bg-white rounded-[40px] shadow-sm border border-[#5A5A40]/5 overflow-hidden">
+          <div className="p-8 border-b border-[#5A5A40]/10 flex justify-between items-center">
+            <h3 className="text-xl font-bold font-serif">Monthly Timesheet</h3>
+            <div className="text-xs font-bold uppercase tracking-widest text-[#5A5A40]/40">
+              {new Date(month + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-[#f5f5f0]/50">
+                  <th className="px-8 py-4 w-12">
+                    <input 
+                      type="checkbox" 
+                      className="rounded border-[#5A5A40]/20 text-[#5A5A40] focus:ring-[#5A5A40]/20"
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          const pastDaysWithoutLogs = getDaysInMonth(month).filter(day => {
+                            const log = logs.find(l => l.date === day);
+                            const isFuture = day > new Date().toISOString().slice(0, 10);
+                            return !log && !isFuture;
+                          });
+                          setSelectedDays(pastDaysWithoutLogs);
+                        } else {
+                          setSelectedDays([]);
+                        }
+                      }}
+                    />
+                  </th>
+                  <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Date</th>
+                  <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Status</th>
+                  <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Hours</th>
+                  <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#5A5A40]/5">
+                {getDaysInMonth(month).map(day => {
+                  const log = logs.find(l => l.date === day);
+                  const isFuture = day > new Date().toISOString().slice(0, 10);
+                  const isSelected = selectedDays.includes(day);
+                  return (
+                    <tr key={day} className={cn("hover:bg-[#f5f5f0]/30 transition-colors", isFuture && "opacity-40")}>
+                      <td className="px-8 py-4">
+                        {!log && !isFuture && (
+                          <input 
+                            type="checkbox" 
+                            checked={isSelected}
+                            className="rounded border-[#5A5A40]/20 text-[#5A5A40] focus:ring-[#5A5A40]/20"
+                            onChange={(e) => {
+                              if (e.target.checked) setSelectedDays([...selectedDays, day]);
+                              else setSelectedDays(selectedDays.filter(d => d !== day));
+                            }}
+                          />
+                        )}
+                      </td>
+                      <td className="px-8 py-4 font-mono text-sm">{day}</td>
+                      <td className="px-8 py-4">
+                        {log ? (
+                          <span className={cn(
+                            "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest",
+                            log.status === 'APPROVED' ? "bg-green-50 text-green-700" : 
+                            log.status === 'REJECTED' ? "bg-red-50 text-red-700" : "bg-yellow-50 text-yellow-700"
+                          )}>
+                            {log.status}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/30 italic">
+                            {isFuture ? 'Future' : 'No Log'}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-8 py-4 font-bold">
+                        {log ? `${log.hours} hrs` : '-'}
+                      </td>
+                      <td className="px-8 py-4 text-right">
+                        {!log && !isFuture && (
+                          <button 
+                            onClick={() => {
+                              setSelectedDate(day);
+                              window.scrollTo({ top: 0, behavior: 'smooth' });
+                            }}
+                            className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40] hover:underline"
+                          >
+                            Log Hours
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {role === 'OWNER' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          <div className="lg:col-span-2 space-y-8">
+            <div className="bg-white rounded-[40px] shadow-sm border border-[#5A5A40]/5 overflow-hidden">
+              <div className="p-8 border-b border-[#5A5A40]/10 flex justify-between items-center">
+                <h3 className="text-xl font-bold font-serif">Monthly Summary</h3>
+                <div className="text-xs font-bold uppercase tracking-widest text-[#5A5A40]/40">
+                  {new Date(month + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-[#f5f5f0]/50">
+                      <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Staff Member</th>
+                      <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Total Hours</th>
+                      <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Days Worked</th>
+                      <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Default Hours</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#5A5A40]/5">
+                    {stats.map(stat => (
+                      <tr key={stat.user_id} className="hover:bg-[#f5f5f0]/30 transition-colors">
+                        <td className="px-8 py-5 font-bold text-[#5A5A40]">{stat.name}</td>
+                        <td className="px-8 py-5">
+                          <span className="font-mono font-bold text-lg">{stat.total_hours}</span>
+                          <span className="text-xs text-[#5A5A40]/40 ml-1">hrs</span>
+                        </td>
+                        <td className="px-8 py-5">
+                          <span className="bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold">
+                            {stat.days_worked} days
+                          </span>
+                        </td>
+                        <td className="px-8 py-5">
+                          <input 
+                            type="number" 
+                            defaultValue={stat.default_hours}
+                            onBlur={(e) => updateDefaultHours(stat.user_id, parseFloat(e.target.value))}
+                            className="w-16 bg-[#f5f5f0] border-none rounded-lg px-2 py-1 text-sm font-bold outline-none focus:ring-1 ring-[#5A5A40]/20"
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                    {stats.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="px-8 py-12 text-center text-[#5A5A40]/40 italic">
+                          No approved logs for this month
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-white p-8 rounded-[40px] shadow-sm border border-[#5A5A40]/5">
+              <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
+                <Settings size={18} className="text-[#5A5A40]/40" />
+                Staff Settings
+              </h3>
+              <div className="space-y-4">
+                {staffList.map(staff => (
+                  <div key={staff.id} className="flex items-center justify-between p-4 bg-[#f5f5f0] rounded-2xl">
+                    <div>
+                      <p className="font-bold text-sm">{staff.name}</p>
+                      <p className="text-[10px] text-[#5A5A40]/50 uppercase tracking-widest">{staff.role}</p>
+                    </div>
+                    <div className="text-right">
+                      <label className="block text-[8px] font-bold uppercase text-[#5A5A40]/40 mb-1">Default Hrs</label>
+                      <input 
+                        type="number" 
+                        defaultValue={staff.default_hours || 8}
+                        onBlur={(e) => updateDefaultHours(staff.id, parseFloat(e.target.value))}
+                        className="w-12 bg-white border-none rounded-lg px-2 py-1 text-xs font-bold outline-none"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white rounded-[40px] shadow-sm border border-[#5A5A40]/5 overflow-hidden">
+        <div className="p-8 border-b border-[#5A5A40]/10 flex justify-between items-center">
+          <h3 className="text-xl font-bold font-serif flex items-center gap-2">
+            <History size={20} className="text-[#5A5A40]/40" />
+            {role === 'OWNER' ? 'All Attendance Logs' : 'My Attendance History'}
+          </h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-[#f5f5f0]/50">
+                <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Date</th>
+                {role === 'OWNER' && <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Staff</th>}
+                <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Hours</th>
+                <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Type</th>
+                <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Status</th>
+                {role === 'OWNER' && <th className="px-8 py-4 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 text-right">Actions</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#5A5A40]/5">
+              {logs.map(log => (
+                <tr key={log.id} className="hover:bg-[#f5f5f0]/30 transition-colors">
+                  <td className="px-8 py-5 font-mono text-sm">{log.date}</td>
+                  {role === 'OWNER' && (
+                    <td className="px-8 py-5 font-bold text-[#5A5A40]">
+                      {staffList.find(s => s.id === log.user_id)?.name || 'Staff Member'}
+                    </td>
+                  )}
+                  <td className="px-8 py-5 font-bold">{log.hours} hrs</td>
+                  <td className="px-8 py-5">
+                    <span className={cn(
+                      "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest",
+                      log.type === 'WORK' ? "bg-blue-50 text-blue-700" : "bg-orange-50 text-orange-700"
+                    )}>
+                      {log.type}
+                    </span>
+                  </td>
+                  <td className="px-8 py-5">
+                    <span className={cn(
+                      "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest",
+                      log.status === 'APPROVED' ? "bg-green-50 text-green-700" : 
+                      log.status === 'REJECTED' ? "bg-red-50 text-red-700" : "bg-yellow-50 text-yellow-700"
+                    )}>
+                      {log.status}
+                    </span>
+                  </td>
+                  {role === 'OWNER' && (
+                    <td className="px-8 py-5 text-right">
+                      {log.status === 'PENDING' && (
+                        <div className="flex justify-end gap-2">
+                          <button 
+                            onClick={() => handleStatusUpdate(log.id, 'APPROVED')}
+                            className="p-2 bg-green-50 text-green-600 rounded-xl hover:bg-green-600 hover:text-white transition-all"
+                          >
+                            <Check size={16} />
+                          </button>
+                          <button 
+                            onClick={() => handleStatusUpdate(log.id, 'REJECTED')}
+                            className="p-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-600 hover:text-white transition-all"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
+              {logs.length === 0 && (
+                <tr>
+                  <td colSpan={role === 'OWNER' ? 6 : 4} className="px-8 py-12 text-center text-[#5A5A40]/40 italic">
+                    No logs found for this month
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // --- ADMIN DASHBOARD ---
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
-  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS' | 'PAYMENTS'>('MENU');
+  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS' | 'PAYMENTS' | 'ATTENDANCE'>('MENU');
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [reports, setReports] = useState<any>(null);
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [tables, setTables] = useState<Table[]>([]);
   const [staff, setStaff] = useState<any[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(false);
   const [isAddingItem, setIsAddingItem] = useState(false);
   const [isAddingStaff, setIsAddingStaff] = useState(false);
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
@@ -887,9 +1452,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     fetchTables();
     fetchStaff();
     fetchOrders();
-  }, [restaurantId]);
+
+    const interval = setInterval(() => {
+      fetchOrders();
+      if (activeTab === 'REPORTS') fetchReports();
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [restaurantId, activeTab]);
 
   const fetchOrders = async () => {
+    setLoadingOrders(true);
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/orders`, {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -897,6 +1469,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (res.ok) setOrders(await res.json());
     } catch (err) {
       console.error("Failed to fetch orders", err);
+    } finally {
+      setLoadingOrders(false);
     }
   };
 
@@ -1275,6 +1849,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
         >
           Payments
+        </button>
+        <button 
+          onClick={() => setActiveTab('ATTENDANCE')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'ATTENDANCE' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Attendance
         </button>
         <button 
           onClick={() => setActiveTab('SETTINGS')}
@@ -1744,9 +2327,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <h2 className="text-3xl font-bold font-serif">Payment Management</h2>
             <button 
               onClick={fetchOrders}
-              className="p-3 bg-white border border-[#5A5A40]/10 rounded-2xl text-[#5A5A40] hover:bg-[#f5f5f0] transition-all"
+              className="px-4 py-2 bg-white border border-[#5A5A40]/10 rounded-2xl text-[#5A5A40] hover:bg-[#f5f5f0] transition-all flex items-center gap-2 text-xs font-bold uppercase tracking-widest"
             >
-              <Clock size={20} />
+              <RefreshCw size={16} className={cn(loadingOrders && "animate-spin")} />
+              Refresh On demand database queries
             </button>
           </div>
 
@@ -1910,7 +2494,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
         </div>
-      ) : (
+      ) : activeTab === 'SETTINGS' ? (
         <div className="max-w-xl bg-white p-8 rounded-[32px] border border-[#5A5A40]/5 shadow-sm">
           <h3 className="text-2xl font-bold font-serif mb-6">Brand & Restaurant Settings</h3>
           <form onSubmit={updateRestaurant} className="space-y-6">
@@ -2063,6 +2647,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </button>
           </form>
         </div>
+      ) : (
+        <AttendanceManagement role="OWNER" token={token} restaurantId={restaurantId} />
       )}
 
       {/* Add Item Modal */}
@@ -2187,12 +2773,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
 // --- CHEF DASHBOARD ---
 function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: string }) {
+  const [activeTab, setActiveTab] = useState<'QUEUE' | 'ATTENDANCE'>('QUEUE');
   const [orders, setOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(false);
   const { lastMessage } = useSocket('CHEF', restaurantId);
 
   useEffect(() => {
     if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
     fetchOrders();
+    const interval = setInterval(fetchOrders, 60000);
+    return () => clearInterval(interval);
   }, [restaurantId]);
 
   useEffect(() => {
@@ -2203,6 +2793,7 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
   }, [lastMessage]);
 
   const fetchOrders = async () => {
+    setLoading(true);
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/orders`, {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -2214,6 +2805,8 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
       }
     } catch (err) {
       console.error("Error fetching orders:", err);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -2233,94 +2826,138 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
 
   return (
     <div className="space-y-8">
-      <div className="flex justify-between items-center">
-        <h2 className="text-3xl font-bold font-serif">Kitchen Queue</h2>
-        <div className="flex items-center gap-2 bg-[#5A5A40]/10 px-4 py-2 rounded-full">
-          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-xs font-bold text-[#5A5A40] uppercase tracking-widest">Live Updates</span>
-        </div>
+      <div className="flex border-b border-[#5A5A40]/10 mb-8 gap-8">
+        <button 
+          onClick={() => setActiveTab('QUEUE')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'QUEUE' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Kitchen Queue
+        </button>
+        <button 
+          onClick={() => setActiveTab('ATTENDANCE')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'ATTENDANCE' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Attendance
+        </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {activeOrders.map(order => (
-          <motion.div 
-            layout
-            key={order.id} 
-            className="bg-white rounded-[32px] border border-[#5A5A40]/5 shadow-sm overflow-hidden"
-          >
-            <div className="p-6 border-b border-[#5A5A40]/5 flex justify-between items-center bg-[#fcfcfc]">
-              <div>
-                <span className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 block">Table {order.tableNumber}</span>
-                <h4 className="text-lg font-bold font-mono">{order.id}</h4>
-              </div>
-              <span className={cn(
-                "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest",
-                order.status === 'PENDING' ? "bg-orange-100 text-orange-600" : "bg-blue-100 text-blue-600"
-              )}>
-                {order.status}
-              </span>
+      {activeTab === 'QUEUE' ? (
+        <div className="space-y-8">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-4">
+              <h2 className="text-3xl font-bold font-serif">Kitchen Queue</h2>
+              <button 
+                onClick={fetchOrders}
+                className="px-4 py-2 bg-white border border-[#5A5A40]/10 rounded-2xl text-[#5A5A40] hover:bg-[#f5f5f0] transition-all flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest"
+              >
+                <RefreshCw size={14} className={cn(loading && "animate-spin")} />
+                Refresh On demand database queries
+              </button>
             </div>
-            <div className="p-6 space-y-4">
-              <div className="space-y-2">
-                {order.items.map((item, idx) => (
-                  <div key={idx} className="flex justify-between text-sm">
-                    <span>
-                      <span className="font-bold text-[#5A5A40]">{item.quantity}x</span> {item.name}
-                      {item.size && <span className="ml-2 text-[10px] font-bold uppercase text-[#5A5A40]/40">({item.size})</span>}
-                    </span>
-                  </div>
-                ))}
-              </div>
+            <div className="flex items-center gap-2 bg-[#5A5A40]/10 px-4 py-2 rounded-full">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              <span className="text-xs font-bold text-[#5A5A40] uppercase tracking-widest">Live Updates</span>
+            </div>
+          </div>
 
-              {order.status === 'PENDING' && (
-                <div className="pt-4 space-y-3">
-                  <div className="flex gap-2">
-                    {['15m', '30m', '45m'].map(time => (
-                      <button 
-                        key={time}
-                        onClick={() => updateOrderStatus(order.id, 'PREPARING', time)}
-                        className="flex-1 py-2 rounded-xl border border-[#5A5A40]/20 text-xs font-bold hover:bg-[#5A5A40] hover:text-white transition-all"
-                      >
-                        {time}
-                      </button>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {activeOrders.map(order => (
+              <motion.div 
+                layout
+                key={order.id} 
+                className="bg-white rounded-[32px] border border-[#5A5A40]/5 shadow-sm overflow-hidden"
+              >
+                <div className="p-6 border-b border-[#5A5A40]/5 flex justify-between items-center bg-[#fcfcfc]">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 block">Table {order.tableNumber}</span>
+                    <h4 className="text-lg font-bold font-mono">{order.id}</h4>
+                    <div className="flex gap-2 mt-1">
+                      <span className={cn(
+                        "text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded-full",
+                        order.paymentStatus === 'PAID' ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"
+                      )}>
+                        {order.paymentStatus === 'PAID' ? 'Paid' : 'Unpaid'}
+                      </span>
+                    </div>
+                  </div>
+                  <span className={cn(
+                    "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest",
+                    order.status === 'PENDING' ? "bg-orange-100 text-orange-600" : "bg-blue-100 text-blue-600"
+                  )}>
+                    {order.status}
+                  </span>
+                </div>
+                <div className="p-6 space-y-4">
+                  <div className="space-y-2">
+                    {order.items.map((item, idx) => (
+                      <div key={idx} className="flex justify-between text-sm">
+                        <span>
+                          <span className="font-bold text-[#5A5A40]">{item.quantity}x</span> {item.name}
+                          {item.size && <span className="ml-2 text-[10px] font-bold uppercase text-[#5A5A40]/40">({item.size})</span>}
+                        </span>
+                      </div>
                     ))}
                   </div>
-                  <button 
-                    onClick={() => updateOrderStatus(order.id, 'PREPARING', '10m')}
-                    className="w-full bg-[#5A5A40] text-white py-3 rounded-xl font-bold text-sm"
-                  >
-                    Confirm & Start
-                  </button>
+
+                  {order.status === 'PENDING' && (
+                    <div className="pt-4 space-y-3">
+                      <div className="flex gap-2">
+                        {['15m', '30m', '45m'].map(time => (
+                          <button 
+                            key={time}
+                            onClick={() => updateOrderStatus(order.id, 'PREPARING', time)}
+                            className="flex-1 py-2 rounded-xl border border-[#5A5A40]/20 text-xs font-bold hover:bg-[#5A5A40] hover:text-white transition-all"
+                          >
+                            {time}
+                          </button>
+                        ))}
+                      </div>
+                      <button 
+                        onClick={() => updateOrderStatus(order.id, 'PREPARING', '10m')}
+                        className="w-full bg-[#5A5A40] text-white py-3 rounded-xl font-bold text-sm"
+                      >
+                        Confirm & Start
+                      </button>
+                    </div>
+                  )}
+
+                  {order.status === 'PREPARING' && (
+                    <button 
+                      onClick={() => updateOrderStatus(order.id, 'READY')}
+                      className="w-full bg-green-600 text-white py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle2 size={18} /> Mark as Ready
+                    </button>
+                  )}
+
+                  {order.status === 'READY' && (
+                    <button 
+                      onClick={() => updateOrderStatus(order.id, 'DELIVERED')}
+                      className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold text-sm"
+                    >
+                      Delivered
+                    </button>
+                  )}
                 </div>
-              )}
-
-              {order.status === 'PREPARING' && (
-                <button 
-                  onClick={() => updateOrderStatus(order.id, 'READY')}
-                  className="w-full bg-green-600 text-white py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2"
-                >
-                  <CheckCircle2 size={18} /> Mark as Ready
-                </button>
-              )}
-
-              {order.status === 'READY' && (
-                <button 
-                  onClick={() => updateOrderStatus(order.id, 'DELIVERED')}
-                  className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold text-sm"
-                >
-                  Delivered
-                </button>
-              )}
-            </div>
-          </motion.div>
-        ))}
-        {activeOrders.length === 0 && (
-          <div className="col-span-full py-20 text-center text-[#5A5A40]/40">
-            <ChefHat size={48} className="mx-auto mb-4 opacity-20" />
-            <p className="font-serif italic text-xl">No active orders in the kitchen.</p>
+              </motion.div>
+            ))}
+            {activeOrders.length === 0 && (
+              <div className="col-span-full py-20 text-center text-[#5A5A40]/40">
+                <ChefHat size={48} className="mx-auto mb-4 opacity-20" />
+                <p className="font-serif italic text-xl">No active orders in the kitchen.</p>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <AttendanceManagement role="CHEF" token={token} restaurantId={restaurantId} />
+      )}
     </div>
   );
 }
@@ -2333,6 +2970,8 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [showUPIModal, setShowUPIModal] = useState(false);
+  const [upiCopied, setUpiCopied] = useState(false);
+  const [upiQrType, setUpiQrType] = useState<'DYNAMIC' | 'BASIC'>('DYNAMIC');
   const [showInvoice, setShowInvoice] = useState(false);
   const [customerInfo, setCustomerInfo] = useState({ name: '', phone: '' });
   const [tableNumber, setTableNumber] = useState("Online");
@@ -2400,8 +3039,16 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   };
 
   useEffect(() => {
-    if (lastMessage?.type === 'ORDER_UPDATE' && order && lastMessage.orderId === order.id) {
-      setOrder(prev => prev ? { ...prev, status: lastMessage.status, eta: lastMessage.eta } : null);
+    if (order && lastMessage) {
+      if (lastMessage.type === 'ORDER_UPDATE' && lastMessage.orderId === order.id) {
+        setOrder(prev => prev ? { ...prev, status: lastMessage.status, eta: lastMessage.eta } : null);
+      }
+      if (lastMessage.type === 'PAYMENT_UPDATE' && lastMessage.orderId === order.id) {
+        setOrder(prev => prev ? { ...prev, paymentStatus: lastMessage.status } : null);
+        if (lastMessage.status === 'PAID') {
+          setShowUPIModal(false);
+        }
+      }
     }
   }, [lastMessage, order]);
 
@@ -2545,6 +3192,26 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                 {order.eta || 'Waiting for Chef...'}
               </span>
             </div>
+            {order.paymentMethod === 'ONLINE' && (
+              <div className="flex justify-between items-center pt-2 border-t border-[#5A5A40]/5">
+                <span className="text-sm text-[#5A5A40]/60 uppercase tracking-widest font-bold">Payment</span>
+                <span className={cn(
+                  "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5",
+                  order.paymentStatus === 'PAID' ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-600"
+                )}>
+                  {order.paymentStatus === 'PAID' ? (
+                    <>
+                      <CheckCircle2 size={10} /> Payment Successful
+                    </>
+                  ) : (
+                    <>
+                      <div className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
+                      Pending Payment
+                    </>
+                  )}
+                </span>
+              </div>
+            )}
           </div>
 
           <button 
@@ -2623,71 +3290,128 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
             </div>
           )}
 
-          {showUPIModal && order && restaurant && (
-            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[110] p-4">
-              <motion.div 
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.9, opacity: 0 }}
-                className="bg-white rounded-[40px] p-8 w-full max-w-md shadow-2xl text-center space-y-6"
-              >
-                <div className="flex justify-between items-center">
-                  <h3 className="text-2xl font-bold font-serif">UPI Payment</h3>
-                  <button onClick={() => setShowUPIModal(false)} className="text-[#5A5A40]/50 hover:text-[#5A5A40]">
-                    <X />
-                  </button>
-                </div>
+        {showUPIModal && order && restaurant && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[110] p-4">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white rounded-[40px] p-8 w-full max-w-md shadow-2xl text-center space-y-6 max-h-[90vh] overflow-y-auto"
+            >
+              <div className="flex justify-between items-center">
+                <h3 className="text-2xl font-bold font-serif">UPI Payment</h3>
+                <button onClick={() => setShowUPIModal(false)} className="text-[#5A5A40]/50 hover:text-[#5A5A40]">
+                  <X />
+                </button>
+              </div>
 
-                <div className="space-y-2">
-                  <p className="text-sm text-[#5A5A40]/60 uppercase tracking-widest font-bold">Order Total</p>
-                  <p className="text-4xl font-bold font-mono text-[#1a1a1a]">₹{(order.totalAmount + (order.gstAmount || 0)).toFixed(2)}</p>
-                </div>
+              <div className="space-y-2">
+                <p className="text-sm text-[#5A5A40]/60 uppercase tracking-widest font-bold">Order Total</p>
+                <p className="text-4xl font-bold font-mono text-[#1a1a1a]">₹{(order.totalAmount + (order.gstAmount || 0)).toFixed(2)}</p>
+              </div>
 
-                {restaurant.upi_id ? (
-                  <div className="space-y-6">
-                    <div className="bg-[#f5f5f0] p-6 rounded-[32px] inline-block shadow-inner border border-[#5A5A40]/5">
-                      <QRCodeCanvas 
-                        value={`upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}&am=${(order.totalAmount + (order.gstAmount || 0)).toFixed(2)}&cu=INR&tn=${order.id}`} 
-                        size={200}
-                        level="H"
-                        includeMargin={true}
-                      />
-                    </div>
-                    <div className="space-y-3">
-                      <p className="text-xs text-[#5A5A40]/60">Scan this QR with any UPI app to pay</p>
-                      <a 
-                        href={`upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}&am=${(order.totalAmount + (order.gstAmount || 0)).toFixed(2)}&cu=INR&tn=${order.id}`}
-                        className="block w-full bg-[#5A5A40] text-white py-4 rounded-2xl font-bold hover:bg-[#4A4A30] transition-all"
-                      >
-                        Open UPI App
-                      </a>
-                    </div>
+              {restaurant.upi_id ? (
+                <div className="space-y-6">
+                  {/* QR Type Toggle */}
+                  <div className="flex p-1 bg-[#f5f5f0] rounded-2xl">
+                    <button 
+                      onClick={() => setUpiQrType('DYNAMIC')}
+                      className={cn(
+                        "flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-xl transition-all",
+                        upiQrType === 'DYNAMIC' ? "bg-white text-[#5A5A40] shadow-sm" : "text-[#5A5A40]/40"
+                      )}
+                    >
+                      Auto Amount
+                    </button>
+                    <button 
+                      onClick={() => setUpiQrType('BASIC')}
+                      className={cn(
+                        "flex-1 py-2 text-[10px] font-bold uppercase tracking-widest rounded-xl transition-all",
+                        upiQrType === 'BASIC' ? "bg-white text-[#5A5A40] shadow-sm" : "text-[#5A5A40]/40"
+                      )}
+                    >
+                      Basic QR
+                    </button>
                   </div>
-                ) : restaurant.upi_qr_image ? (
+
+                  <div className="bg-[#f5f5f0] p-6 rounded-[32px] inline-block shadow-inner border border-[#5A5A40]/5">
+                    <QRCodeCanvas 
+                      value={upiQrType === 'DYNAMIC' 
+                        ? `upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}&am=${(order.totalAmount + (order.gstAmount || 0)).toFixed(2)}&cu=INR&tn=${order.id}&tr=${order.id}`
+                        : `upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}`
+                      } 
+                      size={200}
+                      level="H"
+                      includeMargin={true}
+                    />
+                  </div>
+
                   <div className="space-y-4">
-                    <img src={restaurant.upi_qr_image} alt="UPI QR" className="w-full max-w-[200px] mx-auto rounded-2xl shadow-md" referrerPolicy="no-referrer" />
-                    <p className="text-xs text-[#5A5A40]/60">Scan this QR to make payment</p>
-                  </div>
-                ) : (
-                  <div className="p-8 bg-yellow-50 text-yellow-700 rounded-2xl text-sm italic">
-                    UPI payment details are not set by the restaurant. Please pay at the counter.
-                  </div>
-                )}
+                    <p className="text-xs text-[#5A5A40]/60">
+                      {upiQrType === 'DYNAMIC' 
+                        ? "Scan to pay exact amount automatically" 
+                        : "Scan to pay. You must enter the amount manually."}
+                    </p>
 
-                <div className="pt-4 border-t border-[#5A5A40]/10">
-                  <button 
-                    onClick={() => {
-                      setShowUPIModal(false);
-                      alert("Payment confirmation sent to restaurant. Please wait for verification.");
-                    }}
-                    className="w-full border-2 border-[#5A5A40] text-[#5A5A40] py-4 rounded-2xl font-bold hover:bg-[#5A5A40] hover:text-white transition-all"
-                  >
-                    I have paid
-                  </button>
+                    <div className="grid grid-cols-1 gap-3">
+                      <a 
+                        href={`upi://pay?pa=${restaurant.upi_id}&pn=${encodeURIComponent(restaurant.name)}&am=${(order.totalAmount + (order.gstAmount || 0)).toFixed(2)}&cu=INR&tn=${order.id}&tr=${order.id}`}
+                        className="flex items-center justify-center gap-2 w-full bg-[#5A5A40] text-white py-4 rounded-2xl font-bold hover:bg-[#4A4A30] transition-all"
+                      >
+                        <Smartphone size={18} /> Open UPI App
+                      </a>
+
+                      <button 
+                        onClick={() => {
+                          navigator.clipboard.writeText(restaurant.upi_id || '');
+                          setUpiCopied(true);
+                          setTimeout(() => setUpiCopied(false), 2000);
+                        }}
+                        className="flex items-center justify-center gap-2 w-full border-2 border-[#5A5A40]/10 text-[#5A5A40] py-4 rounded-2xl font-bold hover:bg-[#f5f5f0] transition-all"
+                      >
+                        {upiCopied ? <Check size={18} className="text-green-600" /> : <Copy size={18} />}
+                        {upiCopied ? "UPI ID Copied!" : "Copy UPI ID"}
+                      </button>
+                      
+                      <div className="p-5 bg-blue-50 rounded-3xl text-left border border-blue-100">
+                        <div className="flex items-center gap-2 text-blue-600 mb-2">
+                          <Info size={16} />
+                          <p className="text-[10px] font-bold uppercase tracking-widest">Payment Help</p>
+                        </div>
+                        <p className="text-[11px] text-blue-800 leading-relaxed">
+                          If you see <strong>"Bank Limit Exceeded"</strong>, your bank is blocking the automatic amount. 
+                          <br/><br/>
+                          <strong>To Fix:</strong> Switch to <span className="font-bold">"Basic QR"</span> above or <span className="font-bold">Copy UPI ID</span> and pay manually in your app.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </motion.div>
-            </div>
-          )}
+              ) : restaurant.upi_qr_image ? (
+                <div className="space-y-4">
+                  <img src={restaurant.upi_qr_image} alt="UPI QR" className="w-full max-w-[200px] mx-auto rounded-2xl shadow-md" referrerPolicy="no-referrer" />
+                  <p className="text-xs text-[#5A5A40]/60">Scan this QR to make payment</p>
+                </div>
+              ) : (
+                <div className="p-8 bg-yellow-50 text-yellow-700 rounded-2xl text-sm italic">
+                  UPI payment details are not set by the restaurant. Please pay at the counter.
+                </div>
+              )}
+
+              <div className="pt-4 border-t border-[#5A5A40]/10">
+                <button 
+                  onClick={() => {
+                    setShowUPIModal(false);
+                    alert("Payment confirmation sent to restaurant. Please wait for verification.");
+                  }}
+                  className="w-full border-2 border-[#5A5A40] text-[#5A5A40] py-4 rounded-2xl font-bold hover:bg-[#5A5A40] hover:text-white transition-all"
+                >
+                  I have paid
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
         </AnimatePresence>
 
         <div className="text-center">
@@ -3210,6 +3934,10 @@ function SuperAdminDashboard({ token }: { token: string }) {
             
             <div className="space-y-3 flex-1">
               <div className="flex items-center gap-3 text-sm">
+                <Hash size={16} className="text-[#5A5A40]/40" />
+                <span className="font-mono text-xs bg-emerald-50 text-emerald-700 px-2 py-1 rounded font-bold">{r.id}</span>
+              </div>
+              <div className="flex items-center gap-3 text-sm">
                 <User size={16} className="text-[#5A5A40]/40" />
                 <span className="font-medium">{r.owner_name}</span>
               </div>
@@ -3272,6 +4000,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
 }
 
 function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token: string }) {
+  const [activeTab, setActiveTab] = useState<'DASHBOARD' | 'ATTENDANCE'>('DASHBOARD');
   const [orders, setOrders] = useState<Order[]>([]);
   const [tables, setTables] = useState<Table[]>([]);
 
@@ -3298,72 +4027,110 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
 
   return (
     <div className="space-y-8">
-      <div className="flex justify-between items-center">
-        <h2 className="text-3xl font-bold font-serif">Waiter Dashboard</h2>
-        <div className="bg-green-100 text-green-700 px-4 py-2 rounded-full text-xs font-bold uppercase tracking-widest">
-          {readyOrders.length} Orders Ready for Pickup
-        </div>
+      <div className="flex border-b border-[#5A5A40]/10 mb-8 gap-8">
+        <button 
+          onClick={() => setActiveTab('DASHBOARD')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'DASHBOARD' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Waiter Dashboard
+        </button>
+        <button 
+          onClick={() => setActiveTab('ATTENDANCE')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'ATTENDANCE' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Attendance
+        </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 space-y-6">
-          <h3 className="text-xl font-bold font-serif">Ready to Serve</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {readyOrders.map(order => (
-              <div key={order.id} className="bg-white p-6 rounded-[32px] border-2 border-green-200 shadow-sm space-y-4">
-                <div className="flex justify-between items-center">
-                  <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-[10px] font-bold uppercase">Ready</span>
-                  <span className="font-mono font-bold">{order.id}</span>
-                </div>
-                <div>
-                  <p className="text-2xl font-bold text-[#1a1a1a]">{order.tableNumber}</p>
-                  <p className="text-sm text-[#5A5A40]/60">{order.customerName}</p>
-                  <div className="mt-2 space-y-1">
-                    {order.items.map((item, idx) => (
-                      <p key={idx} className="text-xs text-[#5A5A40]/70">
-                        <span className="font-bold">{item.quantity}x</span> {item.name}
-                      </p>
-                    ))}
+      {activeTab === 'DASHBOARD' ? (
+        <div className="space-y-8">
+          <div className="flex justify-between items-center">
+            <h2 className="text-3xl font-bold font-serif">Waiter Dashboard</h2>
+            <div className="bg-green-100 text-green-700 px-4 py-2 rounded-full text-xs font-bold uppercase tracking-widest">
+              {readyOrders.length} Orders Ready for Pickup
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div className="lg:col-span-2 space-y-6">
+              <h3 className="text-xl font-bold font-serif">Ready to Serve</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {readyOrders.map(order => (
+                  <div key={order.id} className="bg-white p-6 rounded-[32px] border-2 border-green-200 shadow-sm space-y-4">
+                    <div className="flex justify-between items-center">
+                      <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-[10px] font-bold uppercase">Ready</span>
+                      <span className="font-mono font-bold">{order.id}</span>
+                    </div>
+                    <div>
+                      <p className="text-2xl font-bold text-[#1a1a1a]">{order.tableNumber}</p>
+                      <p className="text-sm text-[#5A5A40]/60">{order.customerName}</p>
+                      <div className="mt-2 flex items-center gap-2">
+                        <span className={cn(
+                          "text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full",
+                          order.paymentStatus === 'PAID' ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-700"
+                        )}>
+                          {order.paymentStatus === 'PAID' ? 'Paid' : 'Unpaid'}
+                        </span>
+                        <span className="text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 bg-[#f5f5f0] text-[#5A5A40]/50 rounded-full">
+                          {order.paymentMethod}
+                        </span>
+                      </div>
+                      <div className="mt-3 space-y-1">
+                        {order.items.map((item, idx) => (
+                          <p key={idx} className="text-xs text-[#5A5A40]/70">
+                            <span className="font-bold">{item.quantity}x</span> {item.name}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                    <button 
+                      onClick={async () => {
+                        await fetch(`/api/orders/${order.id}`, {
+                          method: 'PATCH',
+                          headers: { 
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                          },
+                          body: JSON.stringify({ status: 'DELIVERED' })
+                        });
+                        fetchData();
+                      }}
+                      className="w-full bg-green-600 text-white py-4 rounded-2xl font-bold hover:bg-green-700 transition-all"
+                    >
+                      Mark as Delivered
+                    </button>
                   </div>
-                </div>
-                <button 
-                  onClick={async () => {
-                    await fetch(`/api/orders/${order.id}`, {
-                      method: 'PATCH',
-                      headers: { 
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
-                      },
-                      body: JSON.stringify({ status: 'DELIVERED' })
-                    });
-                    fetchData();
-                  }}
-                  className="w-full bg-green-600 text-white py-4 rounded-2xl font-bold hover:bg-green-700 transition-all"
-                >
-                  Mark as Delivered
-                </button>
+                ))}
+                {readyOrders.length === 0 && (
+                  <div className="col-span-full p-12 text-center bg-white rounded-[32px] border border-dashed border-[#5A5A40]/20">
+                    <p className="text-[#5A5A40]/40 italic">No orders ready for pickup right now.</p>
+                  </div>
+                )}
               </div>
-            ))}
-            {readyOrders.length === 0 && (
-              <div className="col-span-full p-12 text-center bg-white rounded-[32px] border border-dashed border-[#5A5A40]/20">
-                <p className="text-[#5A5A40]/40 italic">No orders ready for pickup right now.</p>
-              </div>
-            )}
-          </div>
-        </div>
+            </div>
 
-        <div className="space-y-6">
-          <h3 className="text-xl font-bold font-serif">My Tables</h3>
-          <div className="space-y-3">
-            {myTables.map(table => (
-              <div key={table.id} className="bg-white p-4 rounded-2xl border border-[#5A5A40]/5 flex justify-between items-center">
-                <span className="font-bold">{table.name}</span>
-                <span className="text-[10px] uppercase tracking-widest text-[#5A5A40]/50">Active</span>
+            <div className="space-y-6">
+              <h3 className="text-xl font-bold font-serif">My Tables</h3>
+              <div className="space-y-3">
+                {myTables.map(table => (
+                  <div key={table.id} className="bg-white p-4 rounded-2xl border border-[#5A5A40]/5 flex justify-between items-center">
+                    <span className="font-bold">{table.name}</span>
+                    <span className="text-[10px] uppercase tracking-widest text-[#5A5A40]/50">Active</span>
+                  </div>
+                ))}
               </div>
-            ))}
+            </div>
           </div>
         </div>
-      </div>
+      ) : (
+        <AttendanceManagement role="WAITER" token={token} restaurantId={restaurantId} />
+      )}
     </div>
   );
 }

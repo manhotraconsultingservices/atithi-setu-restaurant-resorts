@@ -10,6 +10,8 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 
 const centralDb = new Database("central.db");
+centralDb.pragma('journal_mode = WAL');
+centralDb.pragma('busy_timeout = 5000');
 const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key";
 
 // Ensure directories exist
@@ -72,6 +74,9 @@ try {
 try {
   centralDb.exec("ALTER TABLE restaurants ADD COLUMN upi_qr_image TEXT;");
 } catch (e) {}
+try {
+  centralDb.exec("ALTER TABLE users ADD COLUMN default_hours REAL DEFAULT 8;");
+} catch (e) {}
 
 // Ensure demo restaurant is active
 try {
@@ -97,6 +102,8 @@ function getTenantDb(restaurantId: string) {
 
   const dbPath = path.join(dbsDir, `${restaurantId}.db`);
   const db = new Database(dbPath);
+  db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
   
   // Initialize Tenant Schema
   db.exec(`
@@ -143,6 +150,17 @@ function getTenantDb(restaurantId: string) {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       is_active INTEGER DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS attendance (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      date TEXT NOT NULL,
+      hours REAL NOT NULL,
+      status TEXT DEFAULT 'PENDING',
+      type TEXT DEFAULT 'WORK',
+      note TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
@@ -291,6 +309,12 @@ async function startServer() {
     res.json({ token, restaurantId: user.restaurant_id, userId: user.id, role: user.role, name: user.name });
   });
 
+  app.get("/api/me", authenticate, (req: any, res) => {
+    const user = centralDb.prepare("SELECT id, name, login_id, email, phone, role, restaurant_id, default_hours FROM users WHERE id = ?").get(req.user.userId) as any;
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json(user);
+  });
+
   // --- SUPER ADMIN ROUTES ---
   const isSuperAdmin = (req: any, res: any, next: any) => {
     if (req.user.role !== 'SUPER_ADMIN') return res.status(403).json({ error: "Forbidden" });
@@ -372,6 +396,93 @@ async function startServer() {
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     centralDb.prepare("UPDATE users SET password = ? WHERE id = ? AND restaurant_id = ?").run(hashedPassword, staffId, req.user.restaurantId);
     res.json({ success: true });
+  });
+
+  app.patch("/api/owner/staff/:id/settings", authenticate, isOwner, (req: any, res) => {
+    const { default_hours } = req.body;
+    centralDb.prepare("UPDATE users SET default_hours = ? WHERE id = ? AND restaurant_id = ?").run(default_hours, req.params.id, req.user.restaurantId);
+    res.json({ success: true });
+  });
+
+  // --- ATTENDANCE ROUTES ---
+  app.post("/api/attendance", authenticate, (req: any, res) => {
+    const { date, hours, type, note } = req.body;
+    const db = getTenantDb(req.user.restaurantId);
+    const id = Math.random().toString(36).substr(2, 9);
+    
+    const today = new Date().toISOString().slice(0, 10);
+    if (date > today) {
+      return res.status(400).json({ error: "Cannot log attendance for future dates" });
+    }
+
+    // Check if already exists for this date
+    const existing = db.prepare("SELECT id FROM attendance WHERE user_id = ? AND date = ?").get(req.user.userId, date);
+    if (existing) {
+      db.prepare("UPDATE attendance SET hours = ?, type = ?, note = ?, status = 'PENDING' WHERE id = ?").run(hours, type, note, (existing as any).id);
+      return res.json({ success: true, id: (existing as any).id });
+    }
+
+    db.prepare("INSERT INTO attendance (id, user_id, date, hours, type, note) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(id, req.user.userId, date, hours, type || 'WORK', note || '');
+    res.json({ success: true, id });
+  });
+
+  app.get("/api/attendance", authenticate, (req: any, res) => {
+    const { month, userId } = req.query;
+    const db = getTenantDb(req.user.restaurantId);
+    
+    let query = "SELECT * FROM attendance WHERE 1=1";
+    const params: any[] = [];
+
+    if (req.user.role === 'OWNER') {
+      if (userId) {
+        query += " AND user_id = ?";
+        params.push(userId);
+      }
+    } else {
+      query += " AND user_id = ?";
+      params.push(req.user.userId);
+    }
+
+    if (month) {
+      query += " AND date LIKE ?";
+      params.push(`${month}%`);
+    }
+
+    query += " ORDER BY date DESC";
+    const logs = db.prepare(query).all(...params);
+    res.json(logs);
+  });
+
+  app.patch("/api/attendance/:id", authenticate, isOwner, (req: any, res) => {
+    const { status } = req.body;
+    const db = getTenantDb(req.user.restaurantId);
+    db.prepare("UPDATE attendance SET status = ? WHERE id = ?").run(status, req.params.id);
+    res.json({ success: true });
+  });
+
+  app.get("/api/owner/attendance/stats", authenticate, isOwner, (req: any, res) => {
+    const { month } = req.query;
+    const db = getTenantDb(req.user.restaurantId);
+    
+    const stats = db.prepare(`
+      SELECT user_id, SUM(hours) as total_hours, COUNT(*) as days_worked
+      FROM attendance
+      WHERE date LIKE ? AND status = 'APPROVED' AND type = 'WORK'
+      GROUP BY user_id
+    `).all(`${month}%`);
+
+    // Join with user names from central DB
+    const statsWithNames = stats.map((stat: any) => {
+      const user = centralDb.prepare("SELECT name, default_hours FROM users WHERE id = ?").get(stat.user_id) as any;
+      return {
+        ...stat,
+        name: user?.name || 'Unknown',
+        default_hours: user?.default_hours || 8
+      };
+    });
+
+    res.json(statsWithNames);
   });
 
   // WebSocket connection handling
