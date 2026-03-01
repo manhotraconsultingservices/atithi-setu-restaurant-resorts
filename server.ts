@@ -8,11 +8,139 @@ import multer from "multer";
 import fs from "fs";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import twilio from 'twilio';
+import nodemailer from 'nodemailer';
+import axios from 'axios';
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const centralDb = new Database("central.db");
 centralDb.pragma('journal_mode = WAL');
 centralDb.pragma('busy_timeout = 5000');
 const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key";
+
+const twilioClient = process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN 
+  ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN) 
+  : null;
+
+// Notification Engine
+const emailTransporter = process.env.SMTP_HOST ? nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_PORT === '465',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+}) : null;
+
+async function sendEmail(to: string, subject: string, text: string) {
+  if (!emailTransporter) {
+    console.log("Email not configured. Message would have been:", text);
+    return;
+  }
+  try {
+    await emailTransporter.sendMail({
+      from: process.env.SMTP_FROM,
+      to,
+      subject,
+      text,
+    });
+    console.log(`Email sent to ${to}`);
+  } catch (err) {
+    console.error("Failed to send email:", err);
+  }
+}
+
+async function sendSMS(to: string, message: string) {
+  if (!twilioClient) {
+    console.log("Twilio not configured for SMS. Message would have been:", message);
+    return;
+  }
+  try {
+    await twilioClient.messages.create({
+      from: process.env.TWILIO_PHONE_NUMBER, // Need to add this to .env
+      to,
+      body: message
+    });
+    console.log(`SMS sent to ${to}`);
+  } catch (err) {
+    console.error("Failed to send SMS:", err);
+  }
+}
+
+async function sendWhatsAppMeta(to: string, message: string) {
+  const accessToken = process.env.META_WA_ACCESS_TOKEN;
+  const phoneNumberId = process.env.META_WA_PHONE_NUMBER_ID;
+  
+  if (!accessToken || !phoneNumberId) {
+    console.log("Meta WhatsApp not configured. Falling back to Twilio if available.");
+    return false;
+  }
+
+  try {
+    const cleanNumber = to.replace(/\D/g, '');
+    await axios.post(
+      `https://graph.facebook.com/v17.0/${phoneNumberId}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: cleanNumber,
+        type: "text",
+        text: { body: message }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    console.log(`Meta WhatsApp sent to ${to}`);
+    return true;
+  } catch (err: any) {
+    console.error("Failed to send Meta WhatsApp:", err.response?.data || err.message);
+    return false;
+  }
+}
+
+async function sendWhatsApp(to: string, message: string) {
+  // Try Meta first, then fallback to Twilio
+  const metaSuccess = await sendWhatsAppMeta(to, message);
+  if (metaSuccess) return;
+
+  if (!twilioClient || !process.env.TWILIO_WHATSAPP_FROM) {
+    console.log("Twilio WhatsApp not configured. Message would have been:", message);
+    return;
+  }
+  try {
+    const formattedTo = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+    await twilioClient.messages.create({
+      from: process.env.TWILIO_WHATSAPP_FROM,
+      to: formattedTo,
+      body: message
+    });
+    console.log(`Twilio WhatsApp sent to ${formattedTo}`);
+  } catch (err) {
+    console.error("Failed to send Twilio WhatsApp:", err);
+  }
+}
+
+async function notify(restaurantId: string, eventName: string, recipient: { phone?: string, email?: string }, data: { subject?: string, message: string }) {
+  const settings = centralDb.prepare("SELECT * FROM notification_settings WHERE restaurant_id = ? AND event_name = ?").get(restaurantId) as any;
+  if (!settings) return;
+
+  if (settings.whatsapp_enabled && recipient.phone) {
+    await sendWhatsApp(recipient.phone, data.message);
+  }
+  if (settings.sms_enabled && recipient.phone) {
+    await sendSMS(recipient.phone, data.message);
+  }
+  if (settings.email_enabled && recipient.email) {
+    await sendEmail(recipient.email, data.subject || "Notification", data.message);
+  }
+}
 
 // Ensure directories exist
 const uploadsDir = path.join(process.cwd(), "uploads");
@@ -25,11 +153,12 @@ if (!fs.existsSync(dbsDir)) fs.mkdirSync(dbsDir);
 centralDb.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
-    login_id TEXT UNIQUE NOT NULL,
+    login_id TEXT NOT NULL,
     email TEXT,
     password TEXT NOT NULL,
     restaurant_id TEXT,
-    role TEXT DEFAULT 'OWNER'
+    role TEXT DEFAULT 'OWNER',
+    UNIQUE(login_id, restaurant_id)
   );
 
   CREATE TABLE IF NOT EXISTS restaurants (
@@ -42,6 +171,15 @@ centralDb.exec(`
     template_id TEXT DEFAULT 'CLASSIC',
     table_count INTEGER DEFAULT 0,
     watermark_image TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS notification_settings (
+    restaurant_id TEXT,
+    event_name TEXT,
+    whatsapp_enabled INTEGER DEFAULT 0,
+    sms_enabled INTEGER DEFAULT 0,
+    email_enabled INTEGER DEFAULT 0,
+    PRIMARY KEY (restaurant_id, event_name)
   );
 `);
 
@@ -77,6 +215,51 @@ try {
 try {
   centralDb.exec("ALTER TABLE users ADD COLUMN default_hours REAL DEFAULT 8;");
 } catch (e) {}
+
+// Migration to fix unique constraint on login_id (make it unique per restaurant)
+try {
+  const indexList = centralDb.prepare("PRAGMA index_list(users)").all() as any[];
+  // Check if there's a unique index that is NOT the composite one we want
+  // In SQLite, an implicit unique constraint often doesn't show up as a named index we can easily distinguish without looking at columns
+  // But we can check if a composite unique index exists
+  const hasCompositeUnique = indexList.some(idx => {
+    const info = centralDb.prepare(`PRAGMA index_info('${idx.name}')`).all() as any[];
+    return info.length === 2 && info.some(c => c.name === 'login_id') && info.some(c => c.name === 'restaurant_id');
+  });
+
+  if (!hasCompositeUnique) {
+    console.log("Migrating users table to composite unique constraint...");
+    centralDb.transaction(() => {
+      // 1. Create new table with correct constraints
+      centralDb.exec(`
+        CREATE TABLE users_new (
+          id TEXT PRIMARY KEY,
+          login_id TEXT NOT NULL,
+          email TEXT,
+          password TEXT NOT NULL,
+          restaurant_id TEXT,
+          role TEXT DEFAULT 'OWNER',
+          name TEXT,
+          phone TEXT,
+          default_hours REAL DEFAULT 8,
+          UNIQUE(login_id, restaurant_id)
+        )
+      `);
+      // 2. Copy data (using INSERT OR IGNORE in case there are already duplicates that would violate the new constraint, 
+      // though unlikely if the old one was more restrictive)
+      centralDb.exec(`
+        INSERT INTO users_new (id, login_id, email, password, restaurant_id, role, name, phone, default_hours)
+        SELECT id, login_id, email, password, restaurant_id, role, name, phone, default_hours FROM users
+      `);
+      // 3. Swap tables
+      centralDb.exec("DROP TABLE users");
+      centralDb.exec("ALTER TABLE users_new RENAME TO users");
+    })();
+    console.log("Users table migration completed.");
+  }
+} catch (e) {
+  console.error("Migration error (users unique constraint):", e);
+}
 
 // Ensure demo restaurant is active
 try {
@@ -126,12 +309,14 @@ function getTenantDb(restaurantId: string) {
       table_number TEXT,
       customer_name TEXT,
       customer_phone TEXT,
+      customer_email TEXT,
       total_amount REAL NOT NULL,
       gst_amount REAL DEFAULT 0,
       status TEXT DEFAULT 'PENDING',
       payment_status TEXT DEFAULT 'PENDING',
       payment_method TEXT,
       eta TEXT,
+      feedback_requested INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -162,9 +347,25 @@ function getTenantDb(restaurantId: string) {
       note TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS feedback (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      rating INTEGER NOT NULL,
+      comment TEXT,
+      customer_name TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(order_id) REFERENCES orders(id)
+    );
   `);
 
   // Migrations for Tenant Database
+  try {
+    db.exec("ALTER TABLE orders ADD COLUMN feedback_requested INTEGER DEFAULT 0;");
+  } catch (e) {}
+  try {
+    db.exec("ALTER TABLE orders ADD COLUMN customer_email TEXT;");
+  } catch (e) {}
   try {
     db.exec("ALTER TABLE tables ADD COLUMN assigned_waiter_id TEXT;");
   } catch (e) {}
@@ -231,6 +432,10 @@ async function startServer() {
 
   app.use(express.json());
   app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
 
   // Auth Middleware
   const authenticate = (req: any, res: any, next: any) => {
@@ -370,16 +575,34 @@ async function startServer() {
   };
 
   app.get("/api/owner/staff", authenticate, isOwner, (req: any, res) => {
-    const staff = centralDb.prepare("SELECT id, login_id, name, role FROM users WHERE restaurant_id = ? AND role IN ('CHEF', 'WAITER')").all(req.user.restaurantId);
+    const staff = centralDb.prepare("SELECT id, login_id, name, role, phone FROM users WHERE restaurant_id = ? AND role IN ('CHEF', 'WAITER')").all(req.user.restaurantId);
     res.json(staff);
   });
 
+  app.get("/api/owner/notification-settings", authenticate, isOwner, (req: any, res) => {
+    const settings = centralDb.prepare("SELECT * FROM notification_settings WHERE restaurant_id = ?").all(req.user.restaurantId);
+    res.json(settings);
+  });
+
+  app.post("/api/owner/notification-settings", authenticate, isOwner, (req: any, res) => {
+    const { event_name, whatsapp_enabled, sms_enabled, email_enabled } = req.body;
+    centralDb.prepare(`
+      INSERT INTO notification_settings (restaurant_id, event_name, whatsapp_enabled, sms_enabled, email_enabled)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(restaurant_id, event_name) DO UPDATE SET
+        whatsapp_enabled = excluded.whatsapp_enabled,
+        sms_enabled = excluded.sms_enabled,
+        email_enabled = excluded.email_enabled
+    `).run(req.user.restaurantId, event_name, whatsapp_enabled ? 1 : 0, sms_enabled ? 1 : 0, email_enabled ? 1 : 0);
+    res.json({ success: true });
+  });
+
   app.post("/api/owner/staff", authenticate, isOwner, async (req: any, res) => {
-    const { loginId, name, password, role } = req.body;
+    const { loginId, name, password, role, phone, email } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10);
     const id = "staff-" + Math.random().toString(36).substr(2, 6);
     try {
-      centralDb.prepare("INSERT INTO users (id, login_id, name, password, restaurant_id, role) VALUES (?, ?, ?, ?, ?, ?)").run(id, loginId, name, hashedPassword, req.user.restaurantId, role);
+      centralDb.prepare("INSERT INTO users (id, login_id, name, password, restaurant_id, role, phone, email) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(id, loginId, name, hashedPassword, req.user.restaurantId, role, phone, email);
       res.json({ success: true });
     } catch (err) {
       res.status(400).json({ error: "Login ID already exists" });
@@ -677,12 +900,12 @@ async function startServer() {
 
   app.post("/api/orders", (req, res) => {
     try {
-      const { restaurantId, tableNumber, customerName, customerPhone, items, totalAmount, gstAmount, paymentMethod } = req.body;
+      const { restaurantId, tableNumber, customerName, customerPhone, customerEmail, items, totalAmount, gstAmount, paymentMethod } = req.body;
       const orderId = "ORD-" + Math.random().toString(36).substr(2, 6).toUpperCase();
       
       const db = getTenantDb(restaurantId);
-      const insertOrder = db.prepare("INSERT INTO orders (id, table_number, customer_name, customer_phone, total_amount, gst_amount, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)");
-      insertOrder.run(orderId, tableNumber, customerName, customerPhone, totalAmount, gstAmount || 0, paymentMethod);
+      const insertOrder = db.prepare("INSERT INTO orders (id, table_number, customer_name, customer_phone, customer_email, total_amount, gst_amount, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+      insertOrder.run(orderId, tableNumber, customerName, customerPhone, customerEmail, totalAmount, gstAmount || 0, paymentMethod);
 
       const insertItem = db.prepare("INSERT INTO order_items (id, order_id, menu_item_id, name, price, quantity, size) VALUES (?, ?, ?, ?, ?, ?, ?)");
       items.forEach((item: any) => {
@@ -691,6 +914,29 @@ async function startServer() {
 
       // Notify Chef
       broadcastToRole(restaurantId, "CHEF", { type: "NEW_ORDER", orderId });
+      
+      // WhatsApp Notification for Owner and Chefs
+      try {
+        const staffToNotify = centralDb.prepare("SELECT phone, email FROM users WHERE restaurant_id = ? AND (role = 'OWNER' OR role = 'CHEF')").all(restaurantId) as any[];
+        staffToNotify.forEach((staff: any) => {
+          notify(restaurantId, 'ORDER_PLACED', { phone: staff.phone, email: staff.email }, {
+            subject: `New Order Received - ${orderId}`,
+            message: `🔔 *New Order Received!*\n\nOrder ID: ${orderId}\nTable: ${tableNumber}\nCustomer: ${customerName}\nTotal: ₹${totalAmount}\n\nPlease check the dashboard.`
+          });
+        });
+      } catch (err) {
+        console.error("Notification error:", err);
+      }
+
+      // Notify Customer
+      try {
+        notify(restaurantId, 'CUSTOMER_ORDER_CONFIRMATION', { phone: customerPhone, email: customerEmail }, {
+          subject: `Order Confirmed - ${orderId}`,
+          message: `✅ *Order Confirmed!*\n\nHi ${customerName},\n\nYour order ${orderId} has been successfully placed at Table ${tableNumber}.\nTotal Amount: ₹${totalAmount}\n\nThank you for dining with us!`
+        });
+      } catch (err) {
+        console.error("Customer notification error:", err);
+      }
       
       res.json({ orderId });
     } catch (error: any) {
@@ -707,10 +953,78 @@ async function startServer() {
       const db = getTenantDb(restaurantId);
       db.prepare("UPDATE orders SET payment_status = ? WHERE id = ?").run(status, req.params.id);
       
+      const order = db.prepare("SELECT * FROM orders WHERE id = ?").get(req.params.id) as any;
+      
       // Notify Customer
       broadcastToRole(restaurantId, "CUSTOMER", { type: "PAYMENT_UPDATE", orderId: req.params.id, status });
       
+      if (status === 'PAID' && order) {
+        // Notify Customer with Invoice
+        try {
+          notify(restaurantId, 'CUSTOMER_INVOICE', { phone: order.customer_phone, email: order.customer_email }, {
+            subject: `Invoice for Order ${order.id}`,
+            message: `🧾 *Invoice - Order ${order.id}*\n\nHi ${order.customer_name},\n\nThank you for your payment! Your order has been settled.\n\nTotal: ₹${order.total_amount}\nGST: ₹${order.gst_amount}\nGrand Total: ₹${(order.total_amount + order.gst_amount).toFixed(2)}\n\nWe hope you enjoyed your meal!`
+          });
+        } catch (err) {
+          console.error("Customer invoice notification error:", err);
+        }
+
+        // Notify Owner
+        try {
+          const owner = centralDb.prepare("SELECT phone, email FROM users WHERE restaurant_id = ? AND role = 'OWNER'").get(restaurantId) as any;
+          if (owner) {
+            notify(restaurantId, 'PAYMENT_RECEIVED', { phone: owner.phone, email: owner.email }, {
+              subject: `Payment Received - Order ${req.params.id}`,
+              message: `💰 *Payment Confirmed!*\n\nOrder ID: ${req.params.id}\nStatus: PAID\n\nThe customer payment has been verified.`
+            });
+          }
+        } catch (err) {
+          console.error("Owner notification error:", err);
+        }
+      }
+      
       res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/orders/:id/request-feedback", authenticate, isOwner, (req: any, res) => {
+    try {
+      const db = getTenantDb(req.user.restaurantId);
+      db.prepare("UPDATE orders SET feedback_requested = 1 WHERE id = ?").run(req.params.id);
+      
+      // Notify Customer via WebSocket
+      broadcastToRole(req.user.restaurantId, "CUSTOMER", { 
+        type: "FEEDBACK_REQUESTED", 
+        orderId: req.params.id 
+      });
+
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/orders/:id/feedback", (req, res) => {
+    const { rating, comment, restaurantId, customerName } = req.body;
+    const orderId = req.params.id;
+    const id = Math.random().toString(36).substr(2, 9);
+    
+    try {
+      const db = getTenantDb(restaurantId);
+      db.prepare("INSERT INTO feedback (id, order_id, rating, comment, customer_name) VALUES (?, ?, ?, ?, ?)").run(id, orderId, rating, comment, customerName);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/owner/feedback", authenticate, isOwner, (req: any, res) => {
+    try {
+      const db = getTenantDb(req.user.restaurantId);
+      const feedback = db.prepare("SELECT * FROM feedback ORDER BY created_at DESC").all();
+      res.json(feedback);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -733,6 +1047,7 @@ async function startServer() {
         gstAmount: order.gst_amount,
         paymentStatus: order.payment_status,
         paymentMethod: order.payment_method,
+        feedbackRequested: !!order.feedback_requested,
         createdAt: order.created_at
       };
     });
@@ -746,6 +1061,22 @@ async function startServer() {
     if (eta) db.prepare("UPDATE orders SET eta = ? WHERE id = ?").run(eta, req.params.id);
     if (paymentStatus) db.prepare("UPDATE orders SET payment_status = ? WHERE id = ?").run(paymentStatus, req.params.id);
     
+    // WhatsApp Notification for Waiters when order is READY
+    if (status === 'READY') {
+      try {
+        const order = db.prepare("SELECT table_number FROM orders WHERE id = ?").get(req.params.id) as any;
+        const waiters = centralDb.prepare("SELECT phone, email FROM users WHERE restaurant_id = ? AND role = 'WAITER'").all(req.user.restaurantId) as any[];
+        waiters.forEach((waiter: any) => {
+          notify(req.user.restaurantId, 'ORDER_READY', { phone: waiter.phone, email: waiter.email }, {
+            subject: `Order Ready for Table ${order?.table_number || 'N/A'}`,
+            message: `👨‍🍳 *Order Ready!*\n\nOrder ID: ${req.params.id}\nTable: ${order?.table_number || 'N/A'}\n\nPlease serve it to the customer.`
+          });
+        });
+      } catch (err) {
+        console.error("Notification error:", err);
+      }
+    }
+
     broadcastToRole(req.user.restaurantId, "CUSTOMER", { type: "ORDER_UPDATE", orderId: req.params.id, status, eta });
     res.json({ success: true });
   });
@@ -761,7 +1092,19 @@ async function startServer() {
     const order = db.prepare("SELECT * FROM orders WHERE id = ?").get(req.params.id) as any;
     if (!order) return res.status(404).json({ error: "Order not found" });
     const items = db.prepare("SELECT * FROM order_items WHERE order_id = ?").all(order.id);
-    res.json({ ...order, items });
+    res.json({ 
+      ...order, 
+      items,
+      feedbackRequested: !!order.feedback_requested,
+      tableNumber: order.table_number,
+      customerName: order.customer_name,
+      customerPhone: order.customer_phone,
+      totalAmount: order.total_amount,
+      gstAmount: order.gst_amount,
+      paymentStatus: order.payment_status,
+      paymentMethod: order.payment_method,
+      createdAt: order.created_at
+    });
   });
 
   app.get("/api/restaurant/:id/reports", authenticate, (req: any, res) => {

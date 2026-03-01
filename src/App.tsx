@@ -34,7 +34,10 @@ import {
   Calendar,
   UserCheck,
   History,
-  RefreshCw
+  RefreshCw,
+  Bell,
+  MessageCircle,
+  Users
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize } from './types';
@@ -146,7 +149,12 @@ export default function App() {
             return null; // Silently handle not found
           }
           if (!res.ok) throw new Error('Failed to fetch restaurant info');
-          return res.json();
+          const contentType = res.headers.get("content-type");
+          if (contentType && contentType.indexOf("application/json") !== -1) {
+            return res.json();
+          } else {
+            throw new Error('Received non-JSON response from server');
+          }
         })
         .then(data => {
           if (data && data.name) {
@@ -1410,18 +1418,22 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
 
 // --- ADMIN DASHBOARD ---
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
-  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS' | 'PAYMENTS' | 'ATTENDANCE'>('MENU');
+  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS' | 'PAYMENTS' | 'ATTENDANCE' | 'NOTIFICATIONS' | 'FEEDBACK'>('MENU');
+  const [notificationSettings, setNotificationSettings] = useState<any[]>([]);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [reports, setReports] = useState<any>(null);
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [tables, setTables] = useState<Table[]>([]);
   const [staff, setStaff] = useState<any[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [feedback, setFeedback] = useState<any[]>([]);
+  const [loadingFeedback, setLoadingFeedback] = useState(false);
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [isAddingItem, setIsAddingItem] = useState(false);
   const [isAddingStaff, setIsAddingStaff] = useState(false);
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
-  const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'CHEF' as UserRole });
+  const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'CHEF' as UserRole, phone: '', email: '' });
   const [newItem, setNewItem] = useState<{ 
     name: string, 
     description: string, 
@@ -1452,6 +1464,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     fetchTables();
     fetchStaff();
     fetchOrders();
+    if (activeTab === 'FEEDBACK') fetchFeedback();
+    if (activeTab === 'NOTIFICATIONS') fetchNotificationSettings();
 
     const interval = setInterval(() => {
       fetchOrders();
@@ -1466,11 +1480,49 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const res = await fetch(`/api/restaurant/${restaurantId}/orders`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (res.ok) setOrders(await res.json());
+      if (res.ok) {
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setOrders(await res.json());
+        }
+      }
     } catch (err) {
       console.error("Failed to fetch orders", err);
     } finally {
       setLoadingOrders(false);
+    }
+  };
+
+  const fetchFeedback = async () => {
+    setLoadingFeedback(true);
+    try {
+      const res = await fetch(`/api/owner/feedback`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setFeedback(await res.json());
+    } catch (err) {
+      console.error("Failed to fetch feedback", err);
+    } finally {
+      setLoadingFeedback(false);
+    }
+  };
+
+  const requestFeedback = async (orderId: string) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}/request-feedback`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ restaurantId })
+      });
+      if (res.ok) {
+        alert("Feedback request sent to customer!");
+        fetchOrders();
+      }
+    } catch (err) {
+      console.error("Failed to request feedback", err);
     }
   };
 
@@ -1482,6 +1534,51 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (res.ok) setStaff(await res.json());
     } catch (err) {
       console.error("Failed to fetch staff", err);
+    }
+  };
+
+  const fetchNotificationSettings = async () => {
+    try {
+      const res = await fetch('/api/owner/notification-settings', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setNotificationSettings(await res.json());
+    } catch (err) {
+      console.error("Failed to fetch notification settings", err);
+    }
+  };
+
+  const updateNotificationSetting = async (eventName: string, field: string, value: boolean) => {
+    setIsSavingSettings(true);
+    try {
+      const current = notificationSettings.find(s => s.event_name === eventName) || {
+        event_name: eventName,
+        whatsapp_enabled: 0,
+        sms_enabled: 0,
+        email_enabled: 0
+      };
+      
+      const payload = {
+        ...current,
+        [field]: value ? 1 : 0
+      };
+
+      const res = await fetch('/api/owner/notification-settings', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(payload)
+      });
+      
+      if (res.ok) {
+        fetchNotificationSettings();
+      }
+    } catch (err) {
+      console.error("Failed to update notification setting", err);
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
@@ -1498,7 +1595,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       if (res.ok) {
         setIsAddingStaff(false);
-        setNewStaff({ loginId: '', name: '', password: '', role: 'CHEF' });
+        setNewStaff({ loginId: '', name: '', password: '', role: 'CHEF', phone: '', email: '' });
         fetchStaff();
       } else {
         const data = await res.json();
@@ -1860,6 +1957,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           Attendance
         </button>
         <button 
+          onClick={() => setActiveTab('FEEDBACK')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'FEEDBACK' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Feedback
+        </button>
+        <button 
+          onClick={() => setActiveTab('NOTIFICATIONS')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'NOTIFICATIONS' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Notifications
+        </button>
+        <button 
           onClick={() => setActiveTab('SETTINGS')}
           className={cn(
             "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
@@ -2101,7 +2216,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
             <div className="bg-white p-8 rounded-[32px] border border-[#5A5A40]/5 shadow-sm">
               <h3 className="text-xl font-bold font-serif mb-6 flex items-center gap-2">
                 <BarChart3 className="text-[#5A5A40]" /> Sales by Category
@@ -2143,6 +2258,42 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <Bar dataKey="total" fill="#5A5A40" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="bg-white p-8 rounded-[32px] border border-[#5A5A40]/5 shadow-sm">
+              <h3 className="text-xl font-bold font-serif mb-6 flex items-center gap-2">
+                <Star className="text-[#5A5A40]" /> Customer Satisfaction
+              </h3>
+              <div className="flex flex-col items-center justify-center h-[300px] space-y-6">
+                <div className="text-6xl font-bold font-serif text-[#5A5A40]">
+                  {feedback.length > 0 
+                    ? (feedback.reduce((acc, f) => acc + f.rating, 0) / feedback.length).toFixed(1)
+                    : '0.0'}
+                </div>
+                <div className="flex gap-2">
+                  {[1, 2, 3, 4, 5].map((star) => {
+                    const avg = feedback.length > 0 ? feedback.reduce((acc, f) => acc + f.rating, 0) / feedback.length : 0;
+                    return (
+                      <Star 
+                        key={star} 
+                        size={24} 
+                        className={cn(
+                          star <= Math.round(avg) ? "text-yellow-400 fill-yellow-400" : "text-gray-200"
+                        )} 
+                      />
+                    );
+                  })}
+                </div>
+                <p className="text-sm text-[#5A5A40]/50 font-bold uppercase tracking-widest">
+                  Based on {feedback.length} reviews
+                </p>
+                <button 
+                  onClick={() => setActiveTab('FEEDBACK')}
+                  className="text-[#5A5A40] underline text-xs font-bold uppercase tracking-widest"
+                >
+                  View All Feedback
+                </button>
               </div>
             </div>
           </div>
@@ -2229,9 +2380,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <Trash2 size={18} />
                   </button>
                 </div>
-                <div className="bg-[#f5f5f0] p-4 rounded-2xl">
-                  <p className="text-[10px] uppercase tracking-widest text-[#5A5A40]/50 mb-1">Login ID</p>
-                  <p className="font-mono font-bold">{s.login_id}</p>
+                <div className="bg-[#f5f5f0] p-4 rounded-2xl space-y-3">
+                  <div>
+                    <p className="text-[10px] uppercase tracking-widest text-[#5A5A40]/50 mb-1">Login ID</p>
+                    <p className="font-mono font-bold">{s.login_id}</p>
+                  </div>
+                  {s.phone && (
+                    <div>
+                      <p className="text-[10px] uppercase tracking-widest text-[#5A5A40]/50 mb-1">Mobile Number</p>
+                      <p className="font-bold">{s.phone}</p>
+                    </div>
+                  )}
+                  {s.email && (
+                    <div>
+                      <p className="text-[10px] uppercase tracking-widest text-[#5A5A40]/50 mb-1">Email Address</p>
+                      <p className="text-sm font-medium truncate">{s.email}</p>
+                    </div>
+                  )}
                 </div>
                 <button 
                   onClick={() => {
@@ -2300,6 +2465,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     />
                   </div>
                   <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">WhatsApp Phone (with country code)</label>
+                    <input 
+                      required
+                      placeholder="+919876543210"
+                      className="w-full bg-[#f5f5f0] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#5A5A40]/20 outline-none"
+                      value={newStaff.phone}
+                      onChange={e => setNewStaff({...newStaff, phone: e.target.value})}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Email Address</label>
+                    <input 
+                      type="email"
+                      className="w-full bg-[#f5f5f0] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#5A5A40]/20 outline-none"
+                      value={newStaff.email}
+                      onChange={e => setNewStaff({...newStaff, email: e.target.value})}
+                    />
+                  </div>
+                  <div className="space-y-1">
                     <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Role</label>
                     <select 
                       className="w-full bg-[#f5f5f0] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#5A5A40]/20 outline-none"
@@ -2320,6 +2504,139 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </motion.div>
             </div>
           )}
+        </div>
+      ) : activeTab === 'NOTIFICATIONS' ? (
+        <div className="space-y-8">
+          <div className="flex justify-between items-center">
+            <div>
+              <h2 className="text-3xl font-bold font-serif">Notification Engine</h2>
+              <p className="text-[#5A5A40]/60 mt-1">Manage how and when your staff receives alerts.</p>
+            </div>
+            {isSavingSettings && (
+              <div className="flex items-center gap-2 text-[#5A5A40]/60 text-xs font-bold uppercase tracking-widest">
+                <RefreshCw size={14} className="animate-spin" /> Saving...
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 gap-6">
+            {[
+              { id: 'ORDER_PLACED', name: 'New Order Received', desc: 'Notify Owner and Chefs when a customer places a new order.' },
+              { id: 'CUSTOMER_ORDER_CONFIRMATION', name: 'Customer Order Confirmation', desc: 'Send a confirmation message to the customer once they place an order.' },
+              { id: 'CUSTOMER_INVOICE', name: 'Customer Invoice', desc: 'Send the final invoice to the customer once payment is confirmed.' },
+              { id: 'ORDER_READY', name: 'Order Ready for Pickup', desc: 'Notify Waiters when a Chef marks an order as ready.' },
+              { id: 'PAYMENT_RECEIVED', name: 'Payment Received', desc: 'Notify Owner when a customer confirms payment.' }
+            ].map(event => {
+              const setting = notificationSettings.find(s => s.event_name === event.id) || {
+                whatsapp_enabled: 0,
+                sms_enabled: 0,
+                email_enabled: 0
+              };
+
+              return (
+                <div key={event.id} className="bg-white p-8 rounded-[32px] border border-[#5A5A40]/5 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-8">
+                  <div className="max-w-md">
+                    <h3 className="text-xl font-bold font-serif mb-2">{event.name}</h3>
+                    <p className="text-sm text-[#5A5A40]/60">{event.desc}</p>
+                  </div>
+
+                  <div className="flex flex-wrap gap-4">
+                    <button 
+                      onClick={() => updateNotificationSetting(event.id, 'whatsapp_enabled', !setting.whatsapp_enabled)}
+                      className={cn(
+                        "flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all border",
+                        setting.whatsapp_enabled 
+                          ? "bg-green-50 border-green-200 text-green-700" 
+                          : "bg-white border-[#5A5A40]/10 text-[#5A5A40]/40 hover:border-[#5A5A40]/20"
+                      )}
+                    >
+                      <MessageCircle size={16} /> WhatsApp
+                    </button>
+                    <button 
+                      onClick={() => updateNotificationSetting(event.id, 'sms_enabled', !setting.sms_enabled)}
+                      className={cn(
+                        "flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all border",
+                        setting.sms_enabled 
+                          ? "bg-blue-50 border-blue-200 text-blue-700" 
+                          : "bg-white border-[#5A5A40]/10 text-[#5A5A40]/40 hover:border-[#5A5A40]/20"
+                      )}
+                    >
+                      <Smartphone size={16} /> SMS
+                    </button>
+                    <button 
+                      onClick={() => updateNotificationSetting(event.id, 'email_enabled', !setting.email_enabled)}
+                      className={cn(
+                        "flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all border",
+                        setting.email_enabled 
+                          ? "bg-purple-50 border-purple-200 text-purple-700" 
+                          : "bg-white border-[#5A5A40]/10 text-[#5A5A40]/40 hover:border-[#5A5A40]/20"
+                      )}
+                    >
+                      <Mail size={16} /> Email
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="bg-[#f5f5f0] p-8 rounded-[32px] border border-[#5A5A40]/5">
+            <h4 className="text-sm font-bold uppercase tracking-widest text-[#5A5A40] mb-4">Configuration Note</h4>
+            <ul className="space-y-2 text-sm text-[#5A5A40]/70 list-disc pl-5">
+              <li><strong>WhatsApp:</strong> Uses Meta (Facebook) Graph API for reliable delivery. Requires Meta Business configuration.</li>
+              <li><strong>SMS:</strong> Uses Twilio for global SMS delivery.</li>
+              <li><strong>Email:</strong> Uses SMTP for professional email notifications.</li>
+              <li>Ensure staff members have their <strong>WhatsApp Phone Number</strong> and <strong>Email</strong> configured in the Staff tab.</li>
+            </ul>
+          </div>
+        </div>
+      ) : activeTab === 'FEEDBACK' ? (
+        <div className="space-y-8">
+          <div className="flex justify-between items-center">
+            <h2 className="text-3xl font-bold font-serif">Customer Feedback</h2>
+            <button 
+              onClick={fetchFeedback}
+              className="px-4 py-2 bg-white border border-[#5A5A40]/10 rounded-2xl text-[#5A5A40] hover:bg-[#f5f5f0] transition-all flex items-center gap-2 text-xs font-bold uppercase tracking-widest"
+            >
+              <RefreshCw size={16} className={cn(loadingFeedback && "animate-spin")} />
+              Refresh
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {feedback.length === 0 ? (
+              <div className="col-span-full py-20 text-center bg-white rounded-[32px] border border-[#5A5A40]/5">
+                <Star className="mx-auto mb-4 text-[#5A5A40]/20" size={48} />
+                <p className="text-[#5A5A40]/50 font-bold uppercase tracking-widest text-sm">No feedback received yet</p>
+              </div>
+            ) : (
+              feedback.map((f) => (
+                <div key={f.id} className="bg-white p-6 rounded-[32px] border border-[#5A5A40]/5 shadow-sm space-y-4">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="font-bold text-[#5A5A40]">{f.customer_name || 'Anonymous'}</p>
+                      <p className="text-[10px] text-[#5A5A40]/50 uppercase tracking-widest">Order: {f.order_id}</p>
+                    </div>
+                    <div className="flex gap-1">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <Star 
+                          key={star} 
+                          size={14} 
+                          className={cn(
+                            star <= f.rating ? "text-yellow-400 fill-yellow-400" : "text-gray-200"
+                          )} 
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  <p className="text-sm text-[#5A5A40]/80 italic">"{f.comment || 'No comment provided'}"</p>
+                  <div className="pt-4 border-t border-[#5A5A40]/5 text-[10px] text-[#5A5A40]/40 uppercase tracking-widest font-bold">
+                    {new Date(f.created_at).toLocaleString()}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </div>
       ) : activeTab === 'PAYMENTS' ? (
         <div className="space-y-8">
@@ -2371,7 +2688,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           {order.paymentStatus || 'PENDING'}
                         </span>
                       </td>
-                      <td className="px-6 py-4 text-right">
+                      <td className="px-6 py-4 text-right flex justify-end gap-2">
+                        {order.paymentStatus === 'PAID' && !order.feedbackRequested && (
+                          <button 
+                            onClick={() => requestFeedback(order.id)}
+                            className="bg-[#5A5A40] text-white px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-[#4A4A30] transition-all flex items-center gap-2"
+                          >
+                            <Star size={12} /> Request Feedback
+                          </button>
+                        )}
+                        {order.feedbackRequested && (
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-green-600 flex items-center gap-1">
+                            <CheckCircle2 size={12} /> Feedback Requested
+                          </span>
+                        )}
                         {order.paymentStatus !== 'PAID' && (
                           <button 
                             onClick={async () => {
@@ -2973,7 +3303,8 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [upiCopied, setUpiCopied] = useState(false);
   const [upiQrType, setUpiQrType] = useState<'DYNAMIC' | 'BASIC'>('DYNAMIC');
   const [showInvoice, setShowInvoice] = useState(false);
-  const [customerInfo, setCustomerInfo] = useState({ name: '', phone: '' });
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [customerInfo, setCustomerInfo] = useState({ name: '', phone: '', email: '' });
   const [tableNumber, setTableNumber] = useState("Online");
   const [tableName, setTableName] = useState("Online Order");
   const [searchQuery, setSearchQuery] = useState('');
@@ -3049,6 +3380,9 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
           setShowUPIModal(false);
         }
       }
+      if (lastMessage.type === 'FEEDBACK_REQUESTED' && lastMessage.orderId === order.id) {
+        setOrder(prev => prev ? { ...prev, feedbackRequested: true } : null);
+      }
     }
   }, [lastMessage, order]);
 
@@ -3105,6 +3439,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
           tableNumber: tableName,
           customerName: customerInfo.name,
           customerPhone: customerInfo.phone,
+          customerEmail: customerInfo.email,
           items: cart.map(i => ({ 
             id: i.menuItemId, 
             name: i.name, 
@@ -3221,6 +3556,60 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
             <Receipt size={20} /> View Invoice
           </button>
         </motion.div>
+
+        {!feedbackSubmitted && order.feedbackRequested && (
+          <motion.div 
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white p-8 rounded-[40px] shadow-xl border border-[#5A5A40]/5"
+          >
+            <h3 className="text-xl font-bold font-serif mb-4 text-center">Rate Your Experience</h3>
+            <div className="flex justify-center gap-4 mb-6">
+              {[
+                { val: 1, label: 'Very Bad 😞' },
+                { val: 2, label: 'Needs Improvement' },
+                { val: 3, label: 'Okay 🙂' },
+                { val: 4, label: 'Good 👍' },
+                { val: 5, label: 'Awesome 🤩' }
+              ].map((item) => (
+                <button 
+                  key={item.val}
+                  onClick={() => {
+                    const comment = prompt(`Any comments for "${item.label}"? (Optional)`);
+                    fetch(`/api/orders/${order.id}/feedback`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        rating: item.val,
+                        comment: comment || '',
+                        restaurantId: restaurantId,
+                        customerName: order.customerName
+                      })
+                    }).then(() => {
+                      setFeedbackSubmitted(true);
+                      alert("Thank you for your feedback!");
+                    });
+                  }}
+                  className="flex flex-col items-center gap-1 group flex-1"
+                >
+                  <Star 
+                    size={24} 
+                    className="text-gray-200 group-hover:text-yellow-400 transition-colors" 
+                  />
+                  <span className="text-[7px] font-bold uppercase tracking-tighter text-[#5A5A40]/40 text-center leading-tight h-4 flex items-center">
+                    {item.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </motion.div>
+        )}
+
+        {feedbackSubmitted && (
+          <div className="bg-green-50 p-6 rounded-[40px] border border-green-100 text-center">
+            <p className="text-green-700 font-bold text-sm uppercase tracking-widest">Feedback Submitted! Thank you.</p>
+          </div>
+        )}
 
         <AnimatePresence>
           {showInvoice && (
@@ -3415,7 +3804,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         </AnimatePresence>
 
         <div className="text-center">
-          <button onClick={() => setOrder(null)} className="text-[#5A5A40] underline text-sm">Place another order</button>
+          <button onClick={() => { setOrder(null); setFeedbackSubmitted(false); }} className="text-[#5A5A40] underline text-sm">Place another order</button>
         </div>
       </div>
     );
@@ -3733,6 +4122,16 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                       placeholder="+1 234 567 890"
                       value={customerInfo.phone}
                       onChange={e => setCustomerInfo({ ...customerInfo, phone: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 mb-1 block">Email Address (Optional)</label>
+                    <input 
+                      type="email"
+                      className="w-full bg-[#f5f5f0] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#5A5A40]/20 outline-none"
+                      placeholder="john@example.com"
+                      value={customerInfo.email}
+                      onChange={e => setCustomerInfo({ ...customerInfo, email: e.target.value })}
                     />
                   </div>
                 </div>
