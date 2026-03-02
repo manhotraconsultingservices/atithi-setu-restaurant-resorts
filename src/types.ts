@@ -1,4 +1,4 @@
-export type UserRole = 'SUPER_ADMIN' | 'OWNER' | 'CHEF' | 'WAITER' | 'CUSTOMER';
+export type UserRole = 'SUPER_ADMIN' | 'OWNER' | 'CHEF' | 'WAITER' | 'CUSTOMER' | 'SALES_REP' | 'CTO';
 export type DietaryType = 'VEG' | 'VEGAN' | 'NON_VEG';
 export type ItemSize = 'HALF' | 'FULL';
 

@@ -213,6 +213,9 @@ try {
   centralDb.exec("ALTER TABLE restaurants ADD COLUMN upi_qr_image TEXT;");
 } catch (e) {}
 try {
+  centralDb.exec("ALTER TABLE restaurants ADD COLUMN sales_rep_id TEXT;");
+} catch (e) {}
+try {
   centralDb.exec("ALTER TABLE users ADD COLUMN default_hours REAL DEFAULT 8;");
 } catch (e) {}
 
@@ -476,14 +479,14 @@ async function startServer() {
 
   // Auth Routes
   app.post("/api/auth/register", async (req, res) => {
-    const { email, restaurantName, name, password, phone, state, city } = req.body;
+    const { email, restaurantName, name, password, phone, state, city, sales_rep_id } = req.body;
     try {
       const loginId = "OWNER-" + Math.random().toString(36).substr(2, 4).toUpperCase();
       const hashedPassword = await bcrypt.hash(password || Math.random().toString(36).substr(2, 8), 10);
       const restaurantId = "resto-" + Math.random().toString(36).substr(2, 6);
       const userId = "user-" + Math.random().toString(36).substr(2, 6);
 
-      centralDb.prepare("INSERT INTO restaurants (id, name, admin_id, state, city, is_active) VALUES (?, ?, ?, ?, ?, 0)").run(restaurantId, restaurantName, userId, state, city);
+      centralDb.prepare("INSERT INTO restaurants (id, name, admin_id, state, city, is_active, sales_rep_id) VALUES (?, ?, ?, ?, ?, 0, ?)").run(restaurantId, restaurantName, userId, state, city, sales_rep_id || null);
       centralDb.prepare("INSERT INTO users (id, login_id, name, email, phone, password, restaurant_id, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(userId, loginId, name, email, phone, hashedPassword, restaurantId, 'OWNER');
 
       getTenantDb(restaurantId);
@@ -550,7 +553,12 @@ async function startServer() {
     next();
   };
 
-  app.get("/api/admin/restaurants", authenticate, isSuperAdmin, (req, res) => {
+  const isSuperAdminOrSalesRep = (req: any, res: any, next: any) => {
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.role !== 'SALES_REP') return res.status(403).json({ error: "Forbidden" });
+    next();
+  };
+
+  app.get("/api/admin/restaurants", authenticate, isSuperAdminOrSalesRep, (req, res) => {
     const restaurants = centralDb.prepare(`
       SELECT r.*, u.login_id as owner_login_id, u.name as owner_name, u.email as owner_email, u.phone as owner_phone
       FROM restaurants r 
@@ -590,6 +598,56 @@ async function startServer() {
     centralDb.prepare("DELETE FROM restaurants WHERE id = ?").run(req.params.id);
     centralDb.prepare("DELETE FROM users WHERE restaurant_id = ?").run(req.params.id);
     res.json({ success: true });
+  });
+
+  app.get("/api/admin/users", authenticate, isSuperAdmin, (req, res) => {
+    const users = centralDb.prepare("SELECT id, login_id, name, email, phone, role FROM users WHERE role IN ('SUPER_ADMIN', 'SALES_REP', 'CTO')").all();
+    res.json(users);
+  });
+
+  app.post("/api/admin/users", authenticate, isSuperAdmin, async (req, res) => {
+    const { loginId, name, email, phone, password, role } = req.body;
+    try {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const id = "admin-" + Math.random().toString(36).substr(2, 6);
+      centralDb.prepare("INSERT INTO users (id, login_id, name, email, phone, password, role) VALUES (?, ?, ?, ?, ?, ?, ?)").run(id, loginId, name, email, phone, hashedPassword, role);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(400).json({ error: "Login ID already exists" });
+    }
+  });
+
+  app.patch("/api/admin/restaurants/:id/sales-rep", authenticate, isSuperAdmin, (req, res) => {
+    const { sales_rep_id } = req.body;
+    centralDb.prepare("UPDATE restaurants SET sales_rep_id = ? WHERE id = ?").run(sales_rep_id, req.params.id);
+    res.json({ success: true });
+  });
+
+  // --- CTO ROUTES ---
+  const isCTO = (req: any, res: any, next: any) => {
+    if (req.user.role !== 'CTO' && req.user.role !== 'SUPER_ADMIN') return res.status(403).json({ error: "Forbidden" });
+    next();
+  };
+
+  app.get("/api/cto/onboarding-report", authenticate, isCTO, (req, res) => {
+    const report = centralDb.prepare(`
+      SELECT u.id as sales_rep_id, u.name as sales_rep_name, COUNT(r.id) as restaurant_count
+      FROM users u
+      LEFT JOIN restaurants r ON u.id = r.sales_rep_id
+      WHERE u.role = 'SALES_REP'
+      GROUP BY u.id
+    `).all();
+    res.json(report);
+  });
+
+  app.get("/api/cto/sales-rep-restaurants/:id", authenticate, isCTO, (req, res) => {
+    const restaurants = centralDb.prepare(`
+      SELECT r.*, u.name as owner_name
+      FROM restaurants r
+      JOIN users u ON r.id = u.restaurant_id
+      WHERE r.sales_rep_id = ? AND u.role = 'OWNER'
+    `).all(req.params.id);
+    res.json(restaurants);
   });
 
   // --- OWNER ROUTES ---

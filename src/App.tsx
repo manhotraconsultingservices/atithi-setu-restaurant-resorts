@@ -499,6 +499,8 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto p-6">
         {role === 'SUPER_ADMIN' && <SuperAdminDashboard token={token!} />}
+        {role === 'CTO' && <CTODashboard token={token!} />}
+        {role === 'SALES_REP' && <SalesRepresentativeDashboard token={token!} />}
         {role === 'OWNER' && (
           <OwnerDashboard 
             restaurantId={restaurantId!} 
@@ -555,6 +557,7 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [restaurantName, setRestaurantName] = useState('');
+  const [salesRepId, setSalesRepId] = useState('');
   const [selectedRole, setSelectedRole] = useState<UserRole>(initialRole || 'OWNER');
 
   useEffect(() => {
@@ -587,7 +590,7 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
       const endpoint = mode === 'LOGIN' ? '/api/auth/login' : '/api/auth/register';
       const body = mode === 'LOGIN' 
         ? { loginId: loginId.trim(), password: password.trim(), restaurantId: selectedRestaurantId, role: selectedRole } 
-        : { email, restaurantName, name, password, phone, state, city };
+        : { email, restaurantName, name, password, phone, state, city, sales_rep_id: salesRepId };
         
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -780,6 +783,18 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
                   />
                 </div>
               </div>
+              <div className="space-y-1 md:col-span-2">
+                <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Sales Representative ID (Optional)</label>
+                <div className="relative">
+                  <UserCheck className="absolute left-4 top-1/2 -translate-y-1/2 text-[#5A5A40]/40" size={18} />
+                  <input 
+                    className="w-full bg-[#f5f5f0] border-none rounded-2xl pl-12 pr-4 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none"
+                    placeholder="admin-xxxx"
+                    value={salesRepId}
+                    onChange={e => setSalesRepId(e.target.value)}
+                  />
+                </div>
+              </div>
             </div>
           ) : (
             <div className="max-w-md mx-auto space-y-4">
@@ -794,6 +809,8 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
                   <option value="CHEF">Chef</option>
                   <option value="WAITER">Waiter / Attender</option>
                   <option value="SUPER_ADMIN">ERP Admin</option>
+                  <option value="CTO">CTO</option>
+                  <option value="SALES_REP">Sales Representative</option>
                 </select>
               </div>
 
@@ -4306,11 +4323,16 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 
 function SuperAdminDashboard({ token }: { token: string }) {
   const [restaurants, setRestaurants] = useState<any[]>([]);
+  const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
+  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS'>('RESTAURANTS');
+  const [isAddingUser, setIsAddingUser] = useState(false);
+  const [newUser, setNewUser] = useState({ loginId: '', name: '', email: '', phone: '', password: '', role: 'SALES_REP' as UserRole });
 
   useEffect(() => {
     fetchRestaurants();
+    fetchInternalUsers();
   }, []);
 
   const fetchRestaurants = async () => {
@@ -4328,6 +4350,57 @@ function SuperAdminDashboard({ token }: { token: string }) {
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchInternalUsers = async () => {
+    try {
+      const res = await fetch('/api/admin/users', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setInternalUsers(await res.json());
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleAddUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(newUser)
+      });
+      if (res.ok) {
+        setIsAddingUser(false);
+        setNewUser({ loginId: '', name: '', email: '', phone: '', password: '', role: 'SALES_REP' });
+        fetchInternalUsers();
+      } else {
+        const data = await res.json();
+        alert(data.error);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const assignSalesRep = async (restaurantId: string, salesRepId: string) => {
+    try {
+      const res = await fetch(`/api/admin/restaurants/${restaurantId}/sales-rep`, {
+        method: 'PATCH',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ sales_rep_id: salesRepId })
+      });
+      if (res.ok) fetchRestaurants();
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -4397,119 +4470,456 @@ function SuperAdminDashboard({ token }: { token: string }) {
       <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
         <div>
           <h2 className="text-3xl font-bold font-serif">ERP Super Admin</h2>
-          <p className="text-sm text-[#5A5A40]/60">Manage business partners, approvals, and activations.</p>
+          <p className="text-sm text-[#5A5A40]/60">Manage business partners, internal users, and activations.</p>
         </div>
-        <div className="flex bg-white p-1 rounded-2xl border border-[#5A5A40]/10 overflow-x-auto max-w-full">
+        <div className="flex bg-white p-1 rounded-2xl border border-[#5A5A40]/10">
           <button 
-            onClick={() => setActiveTab('PENDING')}
+            onClick={() => setViewMode('RESTAURANTS')}
             className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all whitespace-nowrap",
-              activeTab === 'PENDING' ? "bg-orange-500 text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'RESTAURANTS' ? "bg-[#5A5A40] text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
             )}
           >
-            Pending Approval ({restaurants.filter(r => r.is_active === 0).length})
+            <Layout size={16} /> Businesses
           </button>
           <button 
-            onClick={() => setActiveTab('ACTIVE')}
+            onClick={() => setViewMode('USERS')}
             className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all whitespace-nowrap",
-              activeTab === 'ACTIVE' ? "bg-green-600 text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'USERS' ? "bg-[#5A5A40] text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
             )}
           >
-            Active Business ({restaurants.filter(r => r.is_active === 1).length})
-          </button>
-          <button 
-            onClick={() => setActiveTab('INACTIVE')}
-            className={cn(
-              "px-6 py-2 rounded-xl text-sm font-bold transition-all whitespace-nowrap",
-              activeTab === 'INACTIVE' ? "bg-[#5A5A40] text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
-            )}
-          >
-            Inactive Business ({restaurants.filter(r => r.is_active === 2).length})
+            <Users size={16} /> Internal Users
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {filteredRestaurants.map(r => (
-          <div key={r.id} className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm space-y-6 flex flex-col">
-            <div className="flex justify-between items-start">
-              <div className="flex-1">
-                <h3 className="text-xl font-bold font-serif">{r.name}</h3>
-                <p className="text-xs text-[#5A5A40]/50 font-mono">{r.city}, {r.state}</p>
-              </div>
-              <div className={cn(
-                "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest",
-                r.is_active === 1 ? "bg-green-100 text-green-700" : 
-                r.is_active === 0 ? "bg-orange-100 text-orange-700" : 
-                "bg-red-100 text-red-700"
-              )}>
-                {r.is_active === 1 ? 'Active' : r.is_active === 0 ? 'Pending' : 'Inactive'}
-              </div>
-            </div>
-            
-            <div className="space-y-3 flex-1">
-              <div className="flex items-center gap-3 text-sm">
-                <Hash size={16} className="text-[#5A5A40]/40" />
-                <span className="font-mono text-xs bg-emerald-50 text-emerald-700 px-2 py-1 rounded font-bold">{r.id}</span>
-              </div>
-              <div className="flex items-center gap-3 text-sm">
-                <User size={16} className="text-[#5A5A40]/40" />
-                <span className="font-medium">{r.owner_name}</span>
-              </div>
-              <div className="flex items-center gap-3 text-sm">
-                <Star size={16} className="text-[#5A5A40]/40" />
-                <span>{r.owner_phone || 'No Phone'}</span>
-              </div>
-              <div className="flex items-center gap-3 text-sm">
-                <Mail size={16} className="text-[#5A5A40]/40" />
-                <span className="truncate">{r.owner_email}</span>
-              </div>
-              <div className="flex items-center gap-3 text-sm">
-                <Lock size={16} className="text-[#5A5A40]/40" />
-                <span className="font-mono text-xs bg-[#f5f5f0] px-2 py-1 rounded">{r.owner_login_id}</span>
-              </div>
-            </div>
+      {viewMode === 'RESTAURANTS' ? (
+        <>
+          <div className="flex bg-white p-1 rounded-2xl border border-[#5A5A40]/10 overflow-x-auto max-w-full">
+            <button 
+              onClick={() => setActiveTab('PENDING')}
+              className={cn(
+                "px-6 py-2 rounded-xl text-sm font-bold transition-all whitespace-nowrap",
+                activeTab === 'PENDING' ? "bg-orange-500 text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
+              )}
+            >
+              Pending Approval ({restaurants.filter(r => r.is_active === 0).length})
+            </button>
+            <button 
+              onClick={() => setActiveTab('ACTIVE')}
+              className={cn(
+                "px-6 py-2 rounded-xl text-sm font-bold transition-all whitespace-nowrap",
+                activeTab === 'ACTIVE' ? "bg-green-600 text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
+              )}
+            >
+              Active Business ({restaurants.filter(r => r.is_active === 1).length})
+            </button>
+            <button 
+              onClick={() => setActiveTab('INACTIVE')}
+              className={cn(
+                "px-6 py-2 rounded-xl text-sm font-bold transition-all whitespace-nowrap",
+                activeTab === 'INACTIVE' ? "bg-[#5A5A40] text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
+              )}
+            >
+              Inactive Business ({restaurants.filter(r => r.is_active === 2).length})
+            </button>
+          </div>
 
-            <div className="pt-6 border-t border-[#5A5A40]/10 flex flex-col gap-3">
-              {r.is_active === 0 && (
-                <button 
-                  onClick={() => setStatus(r.id, 1)}
-                  className="w-full py-4 rounded-xl font-bold text-xs uppercase tracking-widest bg-green-600 text-white hover:bg-green-700 shadow-lg shadow-green-600/20 transition-all"
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {filteredRestaurants.map(r => (
+              <div key={r.id} className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm space-y-6 flex flex-col">
+                <div className="flex justify-between items-start">
+                  <div className="flex-1">
+                    <h3 className="text-xl font-bold font-serif">{r.name}</h3>
+                    <p className="text-xs text-[#5A5A40]/50 font-mono">{r.city}, {r.state}</p>
+                  </div>
+                  <div className={cn(
+                    "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest",
+                    r.is_active === 1 ? "bg-green-100 text-green-700" : 
+                    r.is_active === 0 ? "bg-orange-100 text-orange-700" : 
+                    "bg-red-100 text-red-700"
+                  )}>
+                    {r.is_active === 1 ? 'Active' : r.is_active === 0 ? 'Pending' : 'Inactive'}
+                  </div>
+                </div>
+                
+                <div className="space-y-3 flex-1">
+                  <div className="flex items-center gap-3 text-sm">
+                    <Hash size={16} className="text-[#5A5A40]/40" />
+                    <span className="font-mono text-xs bg-emerald-50 text-emerald-700 px-2 py-1 rounded font-bold">{r.id}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-sm">
+                    <User size={16} className="text-[#5A5A40]/40" />
+                    <span className="font-medium">{r.owner_name}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-sm">
+                    <Mail size={16} className="text-[#5A5A40]/40" />
+                    <span className="truncate">{r.owner_email}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-sm">
+                    <Lock size={16} className="text-[#5A5A40]/40" />
+                    <span className="font-mono text-xs bg-[#f5f5f0] px-2 py-1 rounded">{r.owner_login_id}</span>
+                  </div>
+                  <div className="pt-2">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/40 mb-1">Sales Representative</p>
+                    <select 
+                      value={r.sales_rep_id || ''}
+                      onChange={(e) => assignSalesRep(r.id, e.target.value)}
+                      className="w-full bg-[#f5f5f0] border border-[#5A5A40]/10 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#5A5A40]/20"
+                    >
+                      <option value="">Unassigned</option>
+                      {internalUsers.filter(u => u.role === 'SALES_REP').map(u => (
+                        <option key={u.id} value={u.id}>{u.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="pt-6 border-t border-[#5A5A40]/10 flex flex-col gap-3">
+                  {r.is_active === 0 && (
+                    <button 
+                      onClick={() => setStatus(r.id, 1)}
+                      className="w-full py-4 rounded-xl font-bold text-xs uppercase tracking-widest bg-green-600 text-white hover:bg-green-700 shadow-lg shadow-green-600/20 transition-all"
+                    >
+                      Approve & Activate
+                    </button>
+                  )}
+                  {r.is_active === 1 && (
+                    <button 
+                      onClick={() => setStatus(r.id, 2)}
+                      className="w-full py-4 rounded-xl font-bold text-xs uppercase tracking-widest bg-red-50 text-red-600 hover:bg-red-100 transition-all"
+                    >
+                      Deactivate Business
+                    </button>
+                  )}
+                  {r.is_active === 2 && (
+                    <button 
+                      onClick={() => setStatus(r.id, 1)}
+                      className="w-full py-4 rounded-xl font-bold text-xs uppercase tracking-widest bg-green-600 text-white hover:bg-green-700 shadow-lg shadow-green-600/20 transition-all"
+                    >
+                      Re-activate Business
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => resetPassword(r.id)}
+                    className="w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest text-[#5A5A40] border border-[#5A5A40]/10 hover:bg-[#5A5A40]/5 transition-all"
+                  >
+                    Reset Owner Password
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="space-y-6">
+          <div className="flex justify-between items-center">
+            <h3 className="text-xl font-bold font-serif">Internal User Management</h3>
+            <button 
+              onClick={() => setIsAddingUser(true)}
+              className="bg-[#5A5A40] text-white px-6 py-2 rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-[#4A4A30] transition-all"
+            >
+              <Plus size={16} /> Add Internal User
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {internalUsers.map(u => (
+              <div key={u.id} className="bg-white p-6 rounded-[32px] border border-[#5A5A40]/5 shadow-sm space-y-4">
+                <div className="flex justify-between items-start">
+                  <div className="w-12 h-12 rounded-2xl bg-[#5A5A40]/10 flex items-center justify-center text-[#5A5A40]">
+                    <User size={24} />
+                  </div>
+                  <div className="px-3 py-1 rounded-full bg-[#5A5A40]/10 text-[#5A5A40] text-[10px] font-bold uppercase tracking-widest">
+                    {u.role.replace('_', ' ')}
+                  </div>
+                </div>
+                <div>
+                  <h4 className="font-bold text-lg">{u.name}</h4>
+                  <p className="text-xs text-[#5A5A40]/50 font-mono">{u.login_id}</p>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-xs text-[#5A5A40]/70 flex items-center gap-2"><Mail size={12} /> {u.email || 'No email'}</p>
+                  <p className="text-xs text-[#5A5A40]/70 flex items-center gap-2"><Smartphone size={12} /> {u.phone || 'No phone'}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <AnimatePresence>
+            {isAddingUser && (
+              <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+                <motion.div 
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  className="bg-white w-full max-w-md rounded-[40px] p-10 shadow-2xl relative"
                 >
-                  Approve & Activate
-                </button>
-              )}
-              {r.is_active === 1 && (
-                <button 
-                  onClick={() => setStatus(r.id, 2)}
-                  className="w-full py-4 rounded-xl font-bold text-xs uppercase tracking-widest bg-red-50 text-red-600 hover:bg-red-100 transition-all"
-                >
-                  Deactivate Business
-                </button>
-              )}
-              {r.is_active === 2 && (
-                <button 
-                  onClick={() => setStatus(r.id, 1)}
-                  className="w-full py-4 rounded-xl font-bold text-xs uppercase tracking-widest bg-green-600 text-white hover:bg-green-700 shadow-lg shadow-green-600/20 transition-all"
-                >
-                  Re-activate Business
-                </button>
-              )}
-              <button 
-                onClick={() => resetPassword(r.id)}
-                className="w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest text-[#5A5A40] border border-[#5A5A40]/10 hover:bg-[#5A5A40]/5 transition-all"
-              >
-                Reset Owner Password
-              </button>
+                  <button onClick={() => setIsAddingUser(false)} className="absolute top-6 right-6 text-[#5A5A40]/40 hover:text-[#5A5A40]"><X size={24} /></button>
+                  <h3 className="text-2xl font-bold mb-6">Add Internal User</h3>
+                  <form onSubmit={handleAddUser} className="space-y-4">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Full Name</label>
+                      <input 
+                        required
+                        className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-3 outline-none"
+                        value={newUser.name}
+                        onChange={e => setNewUser({...newUser, name: e.target.value})}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Login ID</label>
+                        <input 
+                          required
+                          className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-3 outline-none"
+                          value={newUser.loginId}
+                          onChange={e => setNewUser({...newUser, loginId: e.target.value})}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Role</label>
+                        <select 
+                          className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-3 outline-none"
+                          value={newUser.role}
+                          onChange={e => setNewUser({...newUser, role: e.target.value as UserRole})}
+                        >
+                          <option value="SUPER_ADMIN">Super Admin</option>
+                          <option value="SALES_REP">Sales Rep</option>
+                          <option value="CTO">CTO</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Email</label>
+                      <input 
+                        type="email"
+                        className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-3 outline-none"
+                        value={newUser.email}
+                        onChange={e => setNewUser({...newUser, email: e.target.value})}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Password</label>
+                      <input 
+                        required
+                        type="password"
+                        className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-3 outline-none"
+                        value={newUser.password}
+                        onChange={e => setNewUser({...newUser, password: e.target.value})}
+                      />
+                    </div>
+                    <button type="submit" className="w-full bg-[#5A5A40] text-white py-4 rounded-2xl font-bold mt-4">Create User</button>
+                  </form>
+                </motion.div>
+              </div>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SalesRepresentativeDashboard({ token }: { token: string }) {
+  const [restaurants, setRestaurants] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchMyRestaurants();
+  }, []);
+
+  const fetchMyRestaurants = async () => {
+    try {
+      const res = await fetch('/api/cto/onboarding-report', { // Reuse report to find own count or similar
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      // Actually, let's add a specific endpoint for sales rep or reuse the CTO one if they have permissions
+      // For now, let's fetch all restaurants and filter client-side or add a new endpoint.
+      // Better to add a new endpoint /api/sales-rep/my-restaurants
+      const res2 = await fetch('/api/admin/restaurants', { // SuperAdmin endpoint, might need permission update
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res2.ok) {
+        const all = await res2.json();
+        // We need the user's ID. Let's decode the token or pass it.
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        setRestaurants(all.filter((r: any) => r.sales_rep_id === payload.id));
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) return <div className="flex justify-center p-12"><Clock className="animate-spin" /></div>;
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h2 className="text-3xl font-bold font-serif">Sales Representative Dashboard</h2>
+        <p className="text-sm text-[#5A5A40]/60">Your onboarded businesses and performance tracking.</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm text-center">
+          <p className="text-4xl font-bold text-[#5A5A40] mb-2">{restaurants.length}</p>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/40">Total Onboarded</p>
+        </div>
+        <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm text-center">
+          <p className="text-4xl font-bold text-green-600 mb-2">{restaurants.filter(r => r.is_active === 1).length}</p>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/40">Active Businesses</p>
+        </div>
+        <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm text-center">
+          <p className="text-4xl font-bold text-orange-500 mb-2">{restaurants.filter(r => r.is_active === 0).length}</p>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/40">Pending Approval</p>
+        </div>
+      </div>
+
+      <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm">
+        <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+          <Layout size={20} /> My Onboarded Businesses
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {restaurants.map(r => (
+            <div key={r.id} className="p-6 rounded-3xl bg-[#f5f5f0] flex justify-between items-center">
+              <div>
+                <h4 className="font-bold">{r.name}</h4>
+                <p className="text-xs text-[#5A5A40]/50">{r.city}, {r.state}</p>
+                <div className="mt-2 flex items-center gap-2">
+                  <span className={cn(
+                    "px-2 py-0.5 rounded-full text-[8px] font-bold uppercase tracking-widest",
+                    r.is_active === 1 ? "bg-green-100 text-green-700" : 
+                    r.is_active === 0 ? "bg-orange-100 text-orange-700" : 
+                    "bg-red-100 text-red-700"
+                  )}>
+                    {r.is_active === 1 ? 'Active' : r.is_active === 0 ? 'Pending' : 'Inactive'}
+                  </span>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="text-xs font-bold">{r.owner_name}</p>
+                <p className="text-[10px] text-[#5A5A40]/40 font-mono">{r.id}</p>
+              </div>
             </div>
+          ))}
+          {restaurants.length === 0 && (
+            <div className="col-span-full py-12 text-center text-[#5A5A40]/30 italic">
+              You haven't onboarded any businesses yet.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CTODashboard({ token }: { token: string }) {
+  const [report, setReport] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedSalesRep, setSelectedSalesRep] = useState<string | null>(null);
+  const [salesRepRestaurants, setSalesRepRestaurants] = useState<any[]>([]);
+
+  useEffect(() => {
+    fetchReport();
+  }, []);
+
+  const fetchReport = async () => {
+    try {
+      const res = await fetch('/api/cto/onboarding-report', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setReport(await res.json());
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchSalesRepRestaurants = async (id: string) => {
+    try {
+      const res = await fetch(`/api/cto/sales-rep-restaurants/${id}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setSalesRepRestaurants(await res.json());
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  if (loading) return <div className="flex justify-center p-12"><Clock className="animate-spin" /></div>;
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h2 className="text-3xl font-bold font-serif">CTO Dashboard</h2>
+        <p className="text-sm text-[#5A5A40]/60">Onboarding performance and sales representative reports.</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm">
+          <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+            <Users size={20} /> Sales Representative Performance
+          </h3>
+          <div className="space-y-4">
+            {report.map(item => (
+              <div 
+                key={item.sales_rep_id}
+                onClick={() => {
+                  setSelectedSalesRep(item.sales_rep_id);
+                  fetchSalesRepRestaurants(item.sales_rep_id);
+                }}
+                className={cn(
+                  "p-4 rounded-2xl border transition-all cursor-pointer flex justify-between items-center",
+                  selectedSalesRep === item.sales_rep_id ? "border-[#5A5A40] bg-[#5A5A40]/5" : "border-[#5A5A40]/10 hover:bg-[#5A5A40]/5"
+                )}
+              >
+                <div>
+                  <p className="font-bold">{item.sales_rep_name}</p>
+                  <p className="text-xs text-[#5A5A40]/50">Sales Representative</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-2xl font-bold text-[#5A5A40]">{item.restaurant_count}</p>
+                  <p className="text-[10px] uppercase tracking-widest text-[#5A5A40]/40">Onboarded</p>
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
-        {filteredRestaurants.length === 0 && (
-          <div className="col-span-full py-20 text-center bg-white rounded-[40px] border border-dashed border-[#5A5A40]/20">
-            <p className="text-[#5A5A40]/40 italic">No {activeTab.toLowerCase().replace('_', ' ')} businesses found.</p>
-          </div>
-        )}
+        </div>
+
+        <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm">
+          <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+            <Layout size={20} /> Onboarded Businesses
+          </h3>
+          {selectedSalesRep ? (
+            <div className="space-y-4">
+              {salesRepRestaurants.length > 0 ? (
+                salesRepRestaurants.map(r => (
+                  <div key={r.id} className="p-4 rounded-2xl bg-[#f5f5f0] flex justify-between items-center">
+                    <div>
+                      <p className="font-bold">{r.name}</p>
+                      <p className="text-xs text-[#5A5A40]/50">{r.city}, {r.state}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs font-bold">{r.owner_name}</p>
+                      <p className="text-[10px] text-[#5A5A40]/40">Business Owner</p>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="text-center py-12 text-[#5A5A40]/40">No businesses onboarded yet.</p>
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-20 text-[#5A5A40]/30">
+              <Info size={48} className="mb-4 opacity-20" />
+              <p>Select a sales representative to view details</p>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
