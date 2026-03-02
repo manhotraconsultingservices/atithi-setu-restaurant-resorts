@@ -425,6 +425,7 @@ if (rowCount.count === 0) {
 }
 
 async function startServer() {
+  console.log("Starting server...");
   const app = express();
   const httpServer = createServer(app);
   const wss = new WebSocketServer({ server: httpServer });
@@ -434,6 +435,7 @@ async function startServer() {
   app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
   app.get("/api/health", (req, res) => {
+    console.log("Health check requested");
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
@@ -1134,11 +1136,16 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
+    try {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+      console.log("Vite middleware initialized");
+    } catch (err) {
+      console.error("Failed to initialize Vite middleware:", err);
+    }
   } else {
     app.use(express.static(path.join(__dirname, "dist")));
     app.get("*", (req, res) => {
@@ -1151,4 +1158,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch(err => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
+});
