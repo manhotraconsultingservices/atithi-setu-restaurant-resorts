@@ -80,16 +80,22 @@ export default function App() {
     setIsVerifying(true);
     try {
       const res = await fetch(`/api/restaurant/${id}`);
-      const data = await res.json();
-      if (res.ok) {
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || "Restaurant ID is wrong. Please check and try again.");
+      }
+      
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        const data = await res.json();
         setTempRName(data.name);
         setTempRId(data.id); // Use the canonical ID from the server
         setLandingStep('LOGIN');
       } else {
-        alert("Restaurant ID is wrong. Please check and try again.");
+        throw new Error("Received non-JSON response from server");
       }
-    } catch (err) {
-      alert("Error validating Restaurant ID. Please try again later.");
+    } catch (err: any) {
+      alert(err.message || "Error validating Restaurant ID. Please try again later.");
     } finally {
       setIsVerifying(false);
     }
@@ -109,18 +115,24 @@ export default function App() {
           role: loginRole 
         })
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
       
-      setToken(data.token);
-      setRestaurantId(data.restaurantId);
-      setRole(data.role);
-      setUserName(data.name);
-      localStorage.setItem('token', data.token);
-      localStorage.setItem('restaurantId', data.restaurantId);
-      localStorage.setItem('role', data.role);
-      localStorage.setItem('userName', data.name);
-      setView('DASHBOARD');
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Login failed");
+        
+        setToken(data.token);
+        setRestaurantId(data.restaurantId);
+        setRole(data.role);
+        setUserName(data.name);
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('restaurantId', data.restaurantId);
+        localStorage.setItem('role', data.role);
+        localStorage.setItem('userName', data.name);
+        setView('DASHBOARD');
+      } else {
+        throw new Error("Received non-JSON response from server");
+      }
     } catch (err: any) {
       alert(err.message);
     } finally {
@@ -582,13 +594,19 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
       
-      if (mode === 'REGISTER') {
-        setRegistrationResult({ loginId: data.loginId, password: password, restaurantId: data.restaurantId });
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Action failed");
+        
+        if (mode === 'REGISTER') {
+          setRegistrationResult({ loginId: data.loginId, password: password, restaurantId: data.restaurantId });
+        } else {
+          onSuccess(data.token, data.restaurantId, data.role, data.name);
+        }
       } else {
-        onSuccess(data.token, data.restaurantId, data.role, data.name);
+        throw new Error("Received non-JSON response from server");
       }
     } catch (err: any) {
       alert(err.message);
@@ -900,9 +918,13 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
       const res = await fetch('/api/me', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      const data = await res.json();
-      setUser(data);
-      if (data.default_hours) setHours(data.default_hours.toString());
+      if (!res.ok) return;
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        const data = await res.json();
+        setUser(data);
+        if (data.default_hours) setHours(data.default_hours.toString());
+      }
     } catch (err) {
       console.error(err);
     }
@@ -913,8 +935,12 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
       const res = await fetch(`/api/attendance?month=${month}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      const data = await res.json();
-      setLogs(data);
+      if (!res.ok) return;
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        const data = await res.json();
+        setLogs(data);
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -927,8 +953,12 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
       const res = await fetch(`/api/owner/attendance/stats?month=${month}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      const data = await res.json();
-      setStats(data);
+      if (!res.ok) return;
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        const data = await res.json();
+        setStats(data);
+      }
     } catch (err) {
       console.error(err);
     }
@@ -939,8 +969,12 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
       const res = await fetch('/api/owner/staff', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      const data = await res.json();
-      setStaffList(data);
+      if (!res.ok) return;
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        const data = await res.json();
+        setStaffList(data);
+      }
     } catch (err) {
       console.error(err);
     }
@@ -1499,7 +1533,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const res = await fetch(`/api/owner/feedback`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (res.ok) setFeedback(await res.json());
+      if (res.ok) {
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setFeedback(await res.json());
+        }
+      }
     } catch (err) {
       console.error("Failed to fetch feedback", err);
     } finally {
@@ -1531,7 +1570,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const res = await fetch('/api/owner/staff', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (res.ok) setStaff(await res.json());
+      if (res.ok) {
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setStaff(await res.json());
+        }
+      }
     } catch (err) {
       console.error("Failed to fetch staff", err);
     }
@@ -1542,7 +1586,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const res = await fetch('/api/owner/notification-settings', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (res.ok) setNotificationSettings(await res.json());
+      if (res.ok) {
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setNotificationSettings(await res.json());
+        }
+      }
     } catch (err) {
       console.error("Failed to fetch notification settings", err);
     }
@@ -1598,8 +1647,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         setNewStaff({ loginId: '', name: '', password: '', role: 'CHEF', phone: '', email: '' });
         fetchStaff();
       } else {
-        const data = await res.json();
-        alert(data.error);
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          const data = await res.json();
+          alert(data.error || "Failed to add staff");
+        } else {
+          alert("Failed to add staff: " + (await res.text()));
+        }
       }
     } catch (err) {
       console.error("Failed to add staff", err);
@@ -1624,7 +1678,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const res = await fetch(`/api/restaurant/${restaurantId}/tables`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (res.ok) setTables(await res.json());
+      if (res.ok) {
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setTables(await res.json());
+        }
+      }
     } catch (err) {
       console.error("Failed to fetch tables", err);
     }
@@ -1667,7 +1726,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}`);
       if (res.ok) {
-        setRestaurant(await res.json());
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setRestaurant(await res.json());
+        }
       }
     } catch (err) {
       // Silent error
@@ -1708,7 +1770,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/menu`);
       if (res.ok) {
-        setMenu(await res.json());
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setMenu(await res.json());
+        }
       }
     } catch (err) {
       console.error("Error fetching menu:", err);
@@ -1721,7 +1786,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
-        setReports(await res.json());
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setReports(await res.json());
+        }
       }
     } catch (err) {
       console.error("Error fetching reports:", err);
@@ -2917,9 +2985,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         headers: { 'Authorization': `Bearer ${token}` },
                         body: formData
                       });
-                      const data = await res.json();
-                      if (data.watermark_image) {
-                        setRestaurant(prev => prev ? { ...prev, watermark_image: data.watermark_image } : null);
+                      if (res.ok) {
+                        const contentType = res.headers.get("content-type");
+                        if (contentType && contentType.indexOf("application/json") !== -1) {
+                          const data = await res.json();
+                          if (data.watermark_image) {
+                            setRestaurant(prev => prev ? { ...prev, watermark_image: data.watermark_image } : null);
+                          }
+                        }
                       }
                     }
                   }}
@@ -2958,9 +3031,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           headers: { 'Authorization': `Bearer ${token}` },
                           body: formData
                         });
-                        const data = await res.json();
-                        if (data.upi_qr_image) {
-                          setRestaurant(prev => prev ? { ...prev, upi_qr_image: data.upi_qr_image } : null);
+                        if (res.ok) {
+                          const contentType = res.headers.get("content-type");
+                          if (contentType && contentType.indexOf("application/json") !== -1) {
+                            const data = await res.json();
+                            if (data.upi_qr_image) {
+                              setRestaurant(prev => prev ? { ...prev, upi_qr_image: data.upi_qr_image } : null);
+                            }
+                          }
                         }
                       }
                     }}
@@ -3129,7 +3207,10 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
-        setOrders(await res.json());
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setOrders(await res.json());
+        }
       } else {
         console.error("Failed to fetch orders", await res.text());
       }
@@ -3337,9 +3418,12 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/tables/public`);
       if (res.ok) {
-        const tables: any[] = await res.json();
-        const table = tables.find(t => t.id === tableId);
-        if (table) setTableName(table.name);
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          const tables: any[] = await res.json();
+          const table = tables.find(t => t.id === tableId);
+          if (table) setTableName(table.name);
+        }
       }
     } catch (err) {
       console.error("Failed to fetch table info", err);
@@ -3351,7 +3435,10 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}`);
       if (res.ok) {
-        setRestaurant(await res.json());
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setRestaurant(await res.json());
+        }
       }
     } catch (err) {
       // Silent error
@@ -3362,7 +3449,10 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     try {
       const res = await fetch(`/api/orders/${id}?restaurantId=${restaurantId}`);
       if (res.ok) {
-        setOrder(await res.json());
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setOrder(await res.json());
+        }
       }
     } catch (err) {
       console.error("Failed to fetch order", err);
@@ -3390,7 +3480,10 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/menu`);
       if (res.ok) {
-        setMenu(await res.json());
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setMenu(await res.json());
+        }
       }
     } catch (err) {
       console.error("Error fetching menu:", err);
@@ -3454,15 +3547,21 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       });
 
       if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to place order');
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          const errorData = await res.json();
+          throw new Error(errorData.error || 'Failed to place order');
+        } else {
+          throw new Error(await res.text() || 'Failed to place order');
+        }
       }
 
-      const data = await res.json();
-      
-      if (!data.orderId) {
-        throw new Error('Server did not return an order ID');
-      }
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        const data = await res.json();
+        if (!data.orderId) {
+          throw new Error('Server did not return an order ID');
+        }
 
       const newOrder: Order = {
         id: data.orderId,
@@ -3494,6 +3593,9 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       setTimeout(() => {
         alert(`[WhatsApp Simulation]\nTo: ${customerInfo.phone}\nMessage: ${message}`);
       }, 1000);
+      } else {
+        throw new Error('Invalid response from server');
+      }
     } catch (error: any) {
       console.error('Order placement error:', error);
       alert(`Error: ${error.message || 'Something went wrong while placing your order. Please try again.'}`);
@@ -4216,7 +4318,12 @@ function SuperAdminDashboard({ token }: { token: string }) {
       const res = await fetch('/api/admin/restaurants', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      if (res.ok) setRestaurants(await res.json());
+      if (res.ok) {
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          setRestaurants(await res.json());
+        }
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -4248,11 +4355,21 @@ function SuperAdminDashboard({ token }: { token: string }) {
           },
           body: JSON.stringify({ restaurantId, newPassword: newPass })
         });
-        const data = await res.json();
-        if (res.ok) {
-          alert("Password reset successfully");
+        
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          const data = await res.json();
+          if (res.ok) {
+            alert("Password reset successfully");
+          } else {
+            alert("Error: " + (data.error || "Failed to reset password"));
+          }
         } else {
-          alert("Error: " + (data.error || "Failed to reset password"));
+          if (res.ok) {
+            alert("Password reset successfully");
+          } else {
+            alert("Error: Failed to reset password");
+          }
         }
       } catch (err) {
         alert("Network error. Please try again.");
