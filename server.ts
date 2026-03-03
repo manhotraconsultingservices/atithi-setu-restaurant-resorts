@@ -543,7 +543,31 @@ async function startServer() {
       centralDb.prepare("INSERT INTO restaurants (id, name, admin_id, state, city, is_active, sales_rep_id, registered_at, subscription_expires_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)").run(restaurantId, restaurantName, userId, state, city, sales_rep_id || null, now.toISOString(), expiresAt.toISOString());
       centralDb.prepare("INSERT INTO users (id, login_id, name, email, phone, password, restaurant_id, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(userId, loginId, name, email, phone, hashedPassword, restaurantId, 'OWNER');
 
+      // Initialize default notification settings
+      const events = ['ORDER_PLACED', 'ORDER_READY', 'PAYMENT_RECEIVED', 'CUSTOMER_ORDER_CONFIRMATION', 'CUSTOMER_INVOICE', 'REGISTRATION_SUCCESS'];
+      const stmt = centralDb.prepare("INSERT INTO notification_settings (restaurant_id, event_name, whatsapp_enabled, sms_enabled, email_enabled) VALUES (?, ?, 1, 1, 1)");
+      for (const event of events) {
+        stmt.run(restaurantId, event);
+      }
+
       getTenantDb(restaurantId);
+
+      // Send Welcome Email
+      if (email) {
+        await sendEmail(email, "Welcome to AtithiSetu!", `
+          Hello ${name},
+
+          Welcome to AtithiSetu! Your restaurant "${restaurantName}" has been successfully registered.
+
+          Your Login ID: ${loginId}
+          Restaurant ID: ${restaurantId}
+
+          You can now log in and start managing your restaurant.
+
+          Best regards,
+          The AtithiSetu Team
+        `);
+      }
 
       res.json({ 
         success: true, 
