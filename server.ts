@@ -149,6 +149,12 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 const dbsDir = path.join(process.cwd(), "dbs");
 if (!fs.existsSync(dbsDir)) fs.mkdirSync(dbsDir);
 
+try {
+  centralDb.exec(`
+    ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1;
+  `);
+} catch (e) {}
+
 // Initialize Central Database
 centralDb.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -507,23 +513,35 @@ async function startServer() {
     res.json(restaurants);
   });
 
+  app.get("/api/public/sales-reps", (req, res) => {
+    const salesReps = centralDb.prepare("SELECT id, name FROM users WHERE role = 'SALES_REP' AND is_active = 1").all();
+    res.json(salesReps);
+  });
+
   app.post("/api/auth/login", async (req, res) => {
     const { loginId, password, restaurantId, role } = req.body;
     
     let query = "SELECT * FROM users WHERE LOWER(login_id) = LOWER(?)";
     let params = [loginId];
 
-    if (role && role !== 'SUPER_ADMIN') {
+    const internalRoles = ['SUPER_ADMIN', 'CTO', 'SALES_REP'];
+    if (role && !internalRoles.includes(role)) {
       query += " AND role = ? AND LOWER(restaurant_id) = LOWER(?)";
       params.push(role, restaurantId);
-    } else if (role === 'SUPER_ADMIN') {
-      query += " AND role = 'SUPER_ADMIN'";
+    } else if (role && internalRoles.includes(role)) {
+      query += " AND role = ?";
+      params.push(role);
     }
 
     const user = centralDb.prepare(query).get(...params) as any;
     
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Check if internal user is active
+    if (internalRoles.includes(user.role) && user.is_active === 0) {
+      return res.status(403).json({ error: "Your account is inactive. Please contact support." });
     }
 
     // Check if restaurant is active for non-super-admins
@@ -558,20 +576,43 @@ async function startServer() {
     next();
   };
 
-  app.get("/api/admin/restaurants", authenticate, isSuperAdminOrSalesRep, (req, res) => {
-    const restaurants = centralDb.prepare(`
+  app.get("/api/admin/restaurants", authenticate, isSuperAdminOrSalesRep, (req: any, res) => {
+    let query = `
       SELECT r.*, u.login_id as owner_login_id, u.name as owner_name, u.email as owner_email, u.phone as owner_phone
       FROM restaurants r 
       JOIN users u ON r.id = u.restaurant_id 
       WHERE u.role = 'OWNER'
-    `).all();
+    `;
+    let params = [];
+    
+    if (req.user.role === 'SALES_REP') {
+      query += " AND r.sales_rep_id = ?";
+      params.push(req.user.userId);
+    }
+
+    const restaurants = centralDb.prepare(query).all(...params);
     res.json(restaurants);
   });
 
-  app.post("/api/admin/restaurants/:id/toggle-status", authenticate, isSuperAdmin, (req, res) => {
+  app.post("/api/admin/restaurants/:id/toggle-status", authenticate, (req: any, res) => {
     const { is_active } = req.body;
-    centralDb.prepare("UPDATE restaurants SET is_active = ? WHERE id = ?").run(is_active, req.params.id);
-    res.json({ success: true });
+    const restaurantId = req.params.id;
+    
+    // Check permissions
+    if (req.user.role === 'SUPER_ADMIN' || req.user.role === 'CTO') {
+      centralDb.prepare("UPDATE restaurants SET is_active = ? WHERE id = ?").run(is_active, restaurantId);
+      return res.json({ success: true });
+    }
+    
+    if (req.user.role === 'SALES_REP') {
+      const restaurant = centralDb.prepare("SELECT sales_rep_id FROM restaurants WHERE id = ?").get(restaurantId) as any;
+      if (restaurant && restaurant.sales_rep_id === req.user.userId) {
+        centralDb.prepare("UPDATE restaurants SET is_active = ? WHERE id = ?").run(is_active, restaurantId);
+        return res.json({ success: true });
+      }
+    }
+
+    res.status(403).json({ error: "Forbidden" });
   });
 
   app.post("/api/admin/reset-owner-password", authenticate, isSuperAdmin, async (req: any, res) => {
@@ -594,15 +635,47 @@ async function startServer() {
     }
   });
 
+  app.post("/api/admin/reset-internal-user-password", authenticate, isSuperAdmin, async (req: any, res) => {
+    try {
+      const { userId, newPassword } = req.body;
+      if (!userId || !newPassword) {
+        return res.status(400).json({ error: "Missing userId or newPassword" });
+      }
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      const result = centralDb.prepare("UPDATE users SET password = ? WHERE id = ? AND role IN ('SUPER_ADMIN', 'CTO', 'SALES_REP')").run(hashedPassword, userId);
+      
+      if (result.changes === 0) {
+        return res.status(404).json({ error: "Internal user not found" });
+      }
+      
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error("Reset internal password error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // --- CTO ROUTES ---
+  const isCTO = (req: any, res: any, next: any) => {
+    if (req.user.role !== 'CTO' && req.user.role !== 'SUPER_ADMIN') return res.status(403).json({ error: "Forbidden" });
+    next();
+  };
+
   app.delete("/api/admin/restaurants/:id", authenticate, isSuperAdmin, (req, res) => {
     centralDb.prepare("DELETE FROM restaurants WHERE id = ?").run(req.params.id);
     centralDb.prepare("DELETE FROM users WHERE restaurant_id = ?").run(req.params.id);
     res.json({ success: true });
   });
 
-  app.get("/api/admin/users", authenticate, isSuperAdmin, (req, res) => {
-    const users = centralDb.prepare("SELECT id, login_id, name, email, phone, role FROM users WHERE role IN ('SUPER_ADMIN', 'SALES_REP', 'CTO')").all();
+  app.get("/api/admin/users", authenticate, isCTO, (req, res) => {
+    const users = centralDb.prepare("SELECT id, login_id, name, email, phone, role, is_active FROM users WHERE role IN ('SUPER_ADMIN', 'SALES_REP', 'CTO')").all();
     res.json(users);
+  });
+
+  app.post("/api/admin/users/:id/toggle-status", authenticate, isCTO, (req, res) => {
+    const { is_active } = req.body;
+    centralDb.prepare("UPDATE users SET is_active = ? WHERE id = ?").run(is_active, req.params.id);
+    res.json({ success: true });
   });
 
   app.post("/api/admin/users", authenticate, isSuperAdmin, async (req, res) => {
@@ -622,12 +695,6 @@ async function startServer() {
     centralDb.prepare("UPDATE restaurants SET sales_rep_id = ? WHERE id = ?").run(sales_rep_id, req.params.id);
     res.json({ success: true });
   });
-
-  // --- CTO ROUTES ---
-  const isCTO = (req: any, res: any, next: any) => {
-    if (req.user.role !== 'CTO' && req.user.role !== 'SUPER_ADMIN') return res.status(403).json({ error: "Forbidden" });
-    next();
-  };
 
   app.get("/api/cto/onboarding-report", authenticate, isCTO, (req, res) => {
     const report = centralDb.prepare(`

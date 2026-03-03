@@ -142,7 +142,7 @@ export default function App() {
 
   useEffect(() => {
     const savedRole = localStorage.getItem('role');
-    const validRoles: UserRole[] = ['SUPER_ADMIN', 'OWNER', 'CHEF', 'WAITER', 'CUSTOMER'];
+    const validRoles: UserRole[] = ['SUPER_ADMIN', 'OWNER', 'CHEF', 'WAITER', 'CUSTOMER', 'SALES_REP', 'CTO'];
     if (savedRole && !validRoles.includes(savedRole as UserRole)) {
       if (savedRole === 'ADMIN') {
         setRole('SUPER_ADMIN');
@@ -301,7 +301,7 @@ export default function App() {
                         }}
                         className="text-[#5A5A40]/50 hover:text-[#5A5A40] transition-colors"
                       >
-                        Admin Portal
+                        Internal Portal
                       </button>
                     </div>
                     <p className="text-[10px] text-[#5A5A40]/40 text-center uppercase tracking-widest">
@@ -446,7 +446,7 @@ export default function App() {
     );
   }
 
-  if (!restaurantId && role !== 'SUPER_ADMIN' && role !== null) {
+  if (!restaurantId && !['SUPER_ADMIN', 'CTO', 'SALES_REP'].includes(role as string) && role !== null) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#f5f5f0]">
         <div className="bg-white p-12 rounded-[40px] shadow-xl border border-[#5A5A40]/10 max-w-xl text-center">
@@ -567,6 +567,7 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
   const [restaurants, setRestaurants] = useState<{id: string, name: string}[]>([]);
   const [loading, setLoading] = useState(false);
   const [registrationResult, setRegistrationResult] = useState<{ loginId: string, password: string, restaurantId: string } | null>(null);
+  const [salesReps, setSalesReps] = useState<{id: string, name: string}[]>([]);
 
   useEffect(() => {
     if (mode === 'LOGIN') {
@@ -580,6 +581,11 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
           if (data && data.length > 0) setSelectedRestaurantId(data[0].id);
         })
         .catch(err => console.error("Error fetching public restaurants:", err));
+    } else {
+      fetch('/api/public/sales-reps')
+        .then(res => res.json())
+        .then(data => setSalesReps(data))
+        .catch(err => console.error("Error fetching sales reps:", err));
     }
   }, [mode]);
 
@@ -784,15 +790,19 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
                 </div>
               </div>
               <div className="space-y-1 md:col-span-2">
-                <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Sales Representative ID (Optional)</label>
+                <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Sales Representative (Optional)</label>
                 <div className="relative">
                   <UserCheck className="absolute left-4 top-1/2 -translate-y-1/2 text-[#5A5A40]/40" size={18} />
-                  <input 
-                    className="w-full bg-[#f5f5f0] border-none rounded-2xl pl-12 pr-4 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none"
-                    placeholder="admin-xxxx"
+                  <select 
+                    className="w-full bg-[#f5f5f0] border-none rounded-2xl pl-12 pr-4 py-4 focus:ring-2 ring-[#5A5A40]/20 outline-none appearance-none"
                     value={salesRepId}
                     onChange={e => setSalesRepId(e.target.value)}
-                  />
+                  >
+                    <option value="">Select Sales Representative</option>
+                    {salesReps.map(sr => (
+                      <option key={sr.id} value={sr.id}>{sr.name} ({sr.id})</option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </div>
@@ -814,7 +824,7 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
                 </select>
               </div>
 
-              {selectedRole !== 'SUPER_ADMIN' && (
+              {!['SUPER_ADMIN', 'CTO', 'SALES_REP'].includes(selectedRole) && (
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Business / Restaurant</label>
                   <select 
@@ -4450,6 +4460,46 @@ function SuperAdminDashboard({ token }: { token: string }) {
     }
   };
 
+  const resetInternalUserPassword = async (userId: string) => {
+    const newPass = prompt("Enter new password for Internal User:");
+    if (newPass) {
+      try {
+        const res = await fetch('/api/admin/reset-internal-user-password', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ userId, newPassword: newPass })
+        });
+        if (res.ok) {
+          alert("Password reset successfully");
+        } else {
+          const data = await res.json();
+          alert("Error: " + (data.error || "Failed to reset password"));
+        }
+      } catch (err) {
+        alert("Network error. Please try again.");
+      }
+    }
+  };
+
+  const toggleInternalUserStatus = async (userId: string, currentStatus: number) => {
+    try {
+      const res = await fetch(`/api/admin/users/${userId}/toggle-status`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ is_active: currentStatus === 1 ? 0 : 1 })
+      });
+      if (res.ok) fetchInternalUsers();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const filteredRestaurants = restaurants.filter(r => {
     if (activeTab === 'ACTIVE') return r.is_active === 1;
     if (activeTab === 'INACTIVE') return r.is_active === 2;
@@ -4643,6 +4693,23 @@ function SuperAdminDashboard({ token }: { token: string }) {
                   <p className="text-xs text-[#5A5A40]/70 flex items-center gap-2"><Mail size={12} /> {u.email || 'No email'}</p>
                   <p className="text-xs text-[#5A5A40]/70 flex items-center gap-2"><Smartphone size={12} /> {u.phone || 'No phone'}</p>
                 </div>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => resetInternalUserPassword(u.id)}
+                    className="flex-1 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest text-[#5A5A40] border border-[#5A5A40]/10 hover:bg-[#5A5A40]/5 transition-all"
+                  >
+                    Reset Password
+                  </button>
+                  <button 
+                    onClick={() => toggleInternalUserStatus(u.id, u.is_active)}
+                    className={cn(
+                      "flex-1 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all",
+                      u.is_active === 1 ? "bg-red-50 text-red-600 hover:bg-red-100" : "bg-green-50 text-green-600 hover:bg-green-100"
+                    )}
+                  >
+                    {u.is_active === 1 ? 'Deactivate' : 'Activate'}
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -4732,25 +4799,32 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
 
   const fetchMyRestaurants = async () => {
     try {
-      const res = await fetch('/api/cto/onboarding-report', { // Reuse report to find own count or similar
+      const res = await fetch('/api/admin/restaurants', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      // Actually, let's add a specific endpoint for sales rep or reuse the CTO one if they have permissions
-      // For now, let's fetch all restaurants and filter client-side or add a new endpoint.
-      // Better to add a new endpoint /api/sales-rep/my-restaurants
-      const res2 = await fetch('/api/admin/restaurants', { // SuperAdmin endpoint, might need permission update
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res2.ok) {
-        const all = await res2.json();
-        // We need the user's ID. Let's decode the token or pass it.
-        const payload = JSON.parse(atob(token.split('.')[1]));
-        setRestaurants(all.filter((r: any) => r.sales_rep_id === payload.id));
+      if (res.ok) {
+        setRestaurants(await res.json());
       }
     } catch (err) {
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const approveRestaurant = async (id: string) => {
+    try {
+      const res = await fetch(`/api/admin/restaurants/${id}/toggle-status`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ is_active: 1 })
+      });
+      if (res.ok) fetchMyRestaurants();
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -4799,9 +4873,19 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
                   </span>
                 </div>
               </div>
-              <div className="text-right">
-                <p className="text-xs font-bold">{r.owner_name}</p>
-                <p className="text-[10px] text-[#5A5A40]/40 font-mono">{r.id}</p>
+              <div className="text-right flex flex-col items-end gap-2">
+                <div>
+                  <p className="text-xs font-bold">{r.owner_name}</p>
+                  <p className="text-[10px] text-[#5A5A40]/40 font-mono">{r.id}</p>
+                </div>
+                {r.is_active === 0 && (
+                  <button 
+                    onClick={() => approveRestaurant(r.id)}
+                    className="bg-green-600 text-white px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-green-700 transition-all shadow-lg shadow-green-600/20"
+                  >
+                    Approve
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -4818,12 +4902,15 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
 
 function CTODashboard({ token }: { token: string }) {
   const [report, setReport] = useState<any[]>([]);
+  const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedSalesRep, setSelectedSalesRep] = useState<string | null>(null);
   const [salesRepRestaurants, setSalesRepRestaurants] = useState<any[]>([]);
+  const [viewMode, setViewMode] = useState<'REPORTS' | 'USERS'>('REPORTS');
 
   useEffect(() => {
     fetchReport();
+    fetchInternalUsers();
   }, []);
 
   const fetchReport = async () => {
@@ -4836,6 +4923,33 @@ function CTODashboard({ token }: { token: string }) {
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchInternalUsers = async () => {
+    try {
+      const res = await fetch('/api/admin/users', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setInternalUsers(await res.json());
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const toggleInternalUserStatus = async (userId: string, currentStatus: number) => {
+    try {
+      const res = await fetch(`/api/admin/users/${userId}/toggle-status`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ is_active: currentStatus === 1 ? 0 : 1 })
+      });
+      if (res.ok) fetchInternalUsers();
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -4854,73 +4968,129 @@ function CTODashboard({ token }: { token: string }) {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-3xl font-bold font-serif">CTO Dashboard</h2>
-        <p className="text-sm text-[#5A5A40]/60">Onboarding performance and sales representative reports.</p>
+      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+        <div>
+          <h2 className="text-3xl font-bold font-serif">CTO Dashboard</h2>
+          <p className="text-sm text-[#5A5A40]/60">Onboarding performance and internal user management.</p>
+        </div>
+        <div className="flex bg-white p-1 rounded-2xl border border-[#5A5A40]/10">
+          <button 
+            onClick={() => setViewMode('REPORTS')}
+            className={cn(
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'REPORTS' ? "bg-[#5A5A40] text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
+            )}
+          >
+            <BarChart size={16} /> Reports
+          </button>
+          <button 
+            onClick={() => setViewMode('USERS')}
+            className={cn(
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'USERS' ? "bg-[#5A5A40] text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
+            )}
+          >
+            <Users size={16} /> Internal Users
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm">
-          <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
-            <Users size={20} /> Sales Representative Performance
-          </h3>
-          <div className="space-y-4">
-            {report.map(item => (
-              <div 
-                key={item.sales_rep_id}
-                onClick={() => {
-                  setSelectedSalesRep(item.sales_rep_id);
-                  fetchSalesRepRestaurants(item.sales_rep_id);
-                }}
-                className={cn(
-                  "p-4 rounded-2xl border transition-all cursor-pointer flex justify-between items-center",
-                  selectedSalesRep === item.sales_rep_id ? "border-[#5A5A40] bg-[#5A5A40]/5" : "border-[#5A5A40]/10 hover:bg-[#5A5A40]/5"
+      {viewMode === 'REPORTS' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm">
+            <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+              <Users size={20} /> Sales Representative Performance
+            </h3>
+            <div className="space-y-4">
+              {report.map(item => (
+                <div 
+                  key={item.sales_rep_id}
+                  onClick={() => {
+                    setSelectedSalesRep(item.sales_rep_id);
+                    fetchSalesRepRestaurants(item.sales_rep_id);
+                  }}
+                  className={cn(
+                    "p-4 rounded-2xl border transition-all cursor-pointer flex justify-between items-center",
+                    selectedSalesRep === item.sales_rep_id ? "border-[#5A5A40] bg-[#5A5A40]/5" : "border-[#5A5A40]/10 hover:bg-[#5A5A40]/5"
+                  )}
+                >
+                  <div>
+                    <p className="font-bold">{item.sales_rep_name}</p>
+                    <p className="text-xs text-[#5A5A40]/50">Sales Representative</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-2xl font-bold text-[#5A5A40]">{item.restaurant_count}</p>
+                    <p className="text-[10px] uppercase tracking-widest text-[#5A5A40]/40">Onboarded</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm">
+            <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+              <Layout size={20} /> Onboarded Businesses
+            </h3>
+            {selectedSalesRep ? (
+              <div className="space-y-4">
+                {salesRepRestaurants.length > 0 ? (
+                  salesRepRestaurants.map(r => (
+                    <div key={r.id} className="p-4 rounded-2xl bg-[#f5f5f0] flex justify-between items-center">
+                      <div>
+                        <p className="font-bold">{r.name}</p>
+                        <p className="text-xs text-[#5A5A40]/50">{r.city}, {r.state}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs font-bold">{r.owner_name}</p>
+                        <p className="text-[10px] text-[#5A5A40]/40">Business Owner</p>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-center py-12 text-[#5A5A40]/40">No businesses onboarded yet.</p>
                 )}
-              >
-                <div>
-                  <p className="font-bold">{item.sales_rep_name}</p>
-                  <p className="text-xs text-[#5A5A40]/50">Sales Representative</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-2xl font-bold text-[#5A5A40]">{item.restaurant_count}</p>
-                  <p className="text-[10px] uppercase tracking-widest text-[#5A5A40]/40">Onboarded</p>
-                </div>
               </div>
-            ))}
+            ) : (
+              <div className="flex flex-col items-center justify-center py-20 text-[#5A5A40]/30">
+                <Info size={48} className="mb-4 opacity-20" />
+                <p>Select a sales representative to view details</p>
+              </div>
+            )}
           </div>
         </div>
-
-        <div className="bg-white p-8 rounded-[40px] border border-[#5A5A40]/5 shadow-sm">
-          <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
-            <Layout size={20} /> Onboarded Businesses
-          </h3>
-          {selectedSalesRep ? (
-            <div className="space-y-4">
-              {salesRepRestaurants.length > 0 ? (
-                salesRepRestaurants.map(r => (
-                  <div key={r.id} className="p-4 rounded-2xl bg-[#f5f5f0] flex justify-between items-center">
-                    <div>
-                      <p className="font-bold">{r.name}</p>
-                      <p className="text-xs text-[#5A5A40]/50">{r.city}, {r.state}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-xs font-bold">{r.owner_name}</p>
-                      <p className="text-[10px] text-[#5A5A40]/40">Business Owner</p>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <p className="text-center py-12 text-[#5A5A40]/40">No businesses onboarded yet.</p>
-              )}
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {internalUsers.map(u => (
+            <div key={u.id} className="bg-white p-6 rounded-[32px] border border-[#5A5A40]/5 shadow-sm space-y-4">
+              <div className="flex justify-between items-start">
+                <div className="w-12 h-12 rounded-2xl bg-[#5A5A40]/10 flex items-center justify-center text-[#5A5A40]">
+                  <User size={24} />
+                </div>
+                <div className="px-3 py-1 rounded-full bg-[#5A5A40]/10 text-[#5A5A40] text-[10px] font-bold uppercase tracking-widest">
+                  {u.role.replace('_', ' ')}
+                </div>
+              </div>
+              <div>
+                <h4 className="font-bold text-lg">{u.name}</h4>
+                <p className="text-xs text-[#5A5A40]/50 font-mono">{u.login_id}</p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs text-[#5A5A40]/70 flex items-center gap-2"><Mail size={12} /> {u.email || 'No email'}</p>
+                <p className="text-xs text-[#5A5A40]/70 flex items-center gap-2"><Smartphone size={12} /> {u.phone || 'No phone'}</p>
+              </div>
+              <button 
+                onClick={() => toggleInternalUserStatus(u.id, u.is_active)}
+                className={cn(
+                  "w-full py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all",
+                  u.is_active === 1 ? "bg-red-50 text-red-600 hover:bg-red-100" : "bg-green-50 text-green-600 hover:bg-green-100"
+                )}
+              >
+                {u.is_active === 1 ? 'Deactivate' : 'Activate'}
+              </button>
             </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center py-20 text-[#5A5A40]/30">
-              <Info size={48} className="mb-4 opacity-20" />
-              <p>Select a sales representative to view details</p>
-            </div>
-          )}
+          ))}
         </div>
-      </div>
+      )}
     </div>
   );
 }
