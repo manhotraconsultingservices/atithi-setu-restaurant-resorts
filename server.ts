@@ -16,7 +16,7 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const centralDb = new Database("central.db");
+const centralDb = new Database(path.join(__dirname, "central.db"));
 centralDb.pragma('journal_mode = WAL');
 centralDb.pragma('busy_timeout = 5000');
 const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key";
@@ -149,31 +149,19 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 const dbsDir = path.join(process.cwd(), "dbs");
 if (!fs.existsSync(dbsDir)) fs.mkdirSync(dbsDir);
 
-try {
-  centralDb.exec(`
-    ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1;
-  `);
-} catch (e) {}
-
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN registered_at DATETIME DEFAULT CURRENT_TIMESTAMP;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN subscription_type TEXT DEFAULT 'MONTHLY';");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN subscription_expires_at DATETIME;");
-} catch (e) {}
-
 // Initialize Central Database
 centralDb.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     login_id TEXT NOT NULL,
+    name TEXT,
     email TEXT,
+    phone TEXT,
     password TEXT NOT NULL,
     restaurant_id TEXT,
     role TEXT DEFAULT 'OWNER',
+    is_active INTEGER DEFAULT 1,
+    default_hours REAL DEFAULT 8,
     UNIQUE(login_id, restaurant_id)
   );
 
@@ -181,6 +169,8 @@ centralDb.exec(`
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     admin_id TEXT NOT NULL,
+    state TEXT,
+    city TEXT,
     gst_number TEXT,
     gst_percentage REAL DEFAULT 0,
     is_gst_enabled INTEGER DEFAULT 0,
@@ -191,7 +181,9 @@ centralDb.exec(`
     is_active INTEGER DEFAULT 0,
     registered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     subscription_type TEXT DEFAULT 'MONTHLY',
-    subscription_expires_at DATETIME
+    subscription_expires_at DATETIME,
+    upi_id TEXT,
+    upi_qr_image TEXT
   );
 
   CREATE TABLE IF NOT EXISTS system_settings (
@@ -201,7 +193,72 @@ centralDb.exec(`
 
   INSERT OR IGNORE INTO system_settings (key, value) VALUES ('monthly_price', '999');
   INSERT OR IGNORE INTO system_settings (key, value) VALUES ('annual_price', '9999');
+`);
 
+// Robust Migrations
+const migrateTable = (tableName: string, migrations: { column: string, sql: string }[]) => {
+  try {
+    // Use pragma() method which is more direct in better-sqlite3
+    const tableInfo = centralDb.pragma(`table_info(${tableName})`) as any[];
+    const existingColumns = tableInfo.map((c: any) => c.name);
+    
+    console.log(`Checking migrations for ${tableName}. Existing columns: ${existingColumns.join(', ')}`);
+    
+    for (const m of migrations) {
+      if (!existingColumns.includes(m.column)) {
+        console.log(`Migrating ${tableName}: adding column ${m.column}`);
+        try {
+          centralDb.exec(m.sql);
+          console.log(`Successfully added column ${m.column} to ${tableName}`);
+        } catch (err: any) {
+          if (err.message.includes('duplicate column name')) {
+            console.log(`Column ${m.column} already exists in ${tableName} (detected during ALTER)`);
+          } else {
+            console.error(`Failed to add column ${m.column} to ${tableName}:`, err.message);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`Error during migration check for ${tableName}:`, err);
+    
+    // Fallback: try each migration anyway in a try-catch
+    console.log(`Running fallback migrations for ${tableName}...`);
+    for (const m of migrations) {
+      try {
+        centralDb.exec(m.sql);
+      } catch (e) {}
+    }
+  }
+};
+
+migrateTable('users', [
+  { column: 'is_active', sql: "ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1;" },
+  { column: 'name', sql: "ALTER TABLE users ADD COLUMN name TEXT;" },
+  { column: 'email', sql: "ALTER TABLE users ADD COLUMN email TEXT;" },
+  { column: 'phone', sql: "ALTER TABLE users ADD COLUMN phone TEXT;" },
+  { column: 'default_hours', sql: "ALTER TABLE users ADD COLUMN default_hours REAL DEFAULT 8;" }
+]);
+
+migrateTable('restaurants', [
+  { column: 'registered_at', sql: "ALTER TABLE restaurants ADD COLUMN registered_at DATETIME;" },
+  { column: 'subscription_type', sql: "ALTER TABLE restaurants ADD COLUMN subscription_type TEXT DEFAULT 'MONTHLY';" },
+  { column: 'subscription_expires_at', sql: "ALTER TABLE restaurants ADD COLUMN subscription_expires_at DATETIME;" },
+  { column: 'is_active', sql: "ALTER TABLE restaurants ADD COLUMN is_active INTEGER DEFAULT 0;" },
+  { column: 'state', sql: "ALTER TABLE restaurants ADD COLUMN state TEXT;" },
+  { column: 'city', sql: "ALTER TABLE restaurants ADD COLUMN city TEXT;" },
+  { column: 'sales_rep_id', sql: "ALTER TABLE restaurants ADD COLUMN sales_rep_id TEXT;" },
+  { column: 'watermark_image', sql: "ALTER TABLE restaurants ADD COLUMN watermark_image TEXT;" },
+  { column: 'upi_id', sql: "ALTER TABLE restaurants ADD COLUMN upi_id TEXT;" },
+  { column: 'upi_qr_image', sql: "ALTER TABLE restaurants ADD COLUMN upi_qr_image TEXT;" }
+]);
+
+// Set default for existing rows if needed
+try {
+  centralDb.exec("UPDATE restaurants SET registered_at = CURRENT_TIMESTAMP WHERE registered_at IS NULL;");
+} catch (e) {}
+
+centralDb.exec(`
   CREATE TABLE IF NOT EXISTS notification_settings (
     restaurant_id TEXT,
     event_name TEXT,
@@ -211,42 +268,6 @@ centralDb.exec(`
     PRIMARY KEY (restaurant_id, event_name)
   );
 `);
-
-// Migrations for Central Database
-try {
-  centralDb.exec("ALTER TABLE users ADD COLUMN name TEXT;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE users ADD COLUMN email TEXT;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE users ADD COLUMN phone TEXT;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN is_active INTEGER DEFAULT 0;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN state TEXT;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN city TEXT;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN watermark_image TEXT;");
-} catch (e) {}
-
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN upi_id TEXT;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN upi_qr_image TEXT;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE restaurants ADD COLUMN sales_rep_id TEXT;");
-} catch (e) {}
-try {
-  centralDb.exec("ALTER TABLE users ADD COLUMN default_hours REAL DEFAULT 8;");
-} catch (e) {}
 
 // Migration to fix unique constraint on login_id (make it unique per restaurant)
 try {
