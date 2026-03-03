@@ -234,7 +234,7 @@ export default function App() {
             <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-[#5A5A40]/10 text-[#5A5A40] text-xs font-bold uppercase tracking-widest mb-6">
               <Star size={14} /> The Future of Restaurant Management
             </div>
-            <h1 className="text-6xl font-bold text-[#1a1a1a] mb-4 tracking-tight">RestoFlow ERP</h1>
+            <h1 className="text-6xl font-bold text-[#1a1a1a] mb-4 tracking-tight">AtithiSetu</h1>
             <p className="text-lg text-[#5A5A40]/70 leading-relaxed">
               Seamless multi-tenant operations, real-time analytics, and effortless customer experiences.
             </p>
