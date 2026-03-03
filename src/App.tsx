@@ -1479,7 +1479,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
 
 // --- ADMIN DASHBOARD ---
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
-  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS' | 'PAYMENTS' | 'ATTENDANCE' | 'NOTIFICATIONS' | 'FEEDBACK'>('MENU');
+  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS' | 'PAYMENTS' | 'ATTENDANCE' | 'NOTIFICATIONS' | 'FEEDBACK' | 'SUBSCRIPTION'>('MENU');
   const [notificationSettings, setNotificationSettings] = useState<any[]>([]);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [menu, setMenu] = useState<MenuItem[]>([]);
@@ -2059,6 +2059,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
         >
           Feedback
+        </button>
+        <button 
+          onClick={() => setActiveTab('SUBSCRIPTION')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'SUBSCRIPTION' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Subscription
         </button>
         <button 
           onClick={() => setActiveTab('NOTIFICATIONS')}
@@ -3081,6 +3090,55 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               Save Settings
             </button>
           </form>
+        </div>
+      ) : activeTab === 'SUBSCRIPTION' ? (
+        <div className="bg-white p-10 rounded-[40px] border border-[#5A5A40]/5 shadow-sm max-w-2xl mx-auto">
+          <div className="flex items-center gap-4 mb-8">
+            <div className="w-16 h-16 rounded-3xl bg-[#5A5A40]/10 flex items-center justify-center text-[#5A5A40]">
+              <CreditCard size={32} />
+            </div>
+            <div>
+              <h3 className="text-2xl font-bold font-serif">Subscription Plan</h3>
+              <p className="text-sm text-[#5A5A40]/60">Manage your SaaS subscription and billing.</p>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="p-6 rounded-3xl bg-[#f5f5f0] flex justify-between items-center">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/40 mb-1">Current Plan</p>
+                <p className="text-xl font-bold text-[#5A5A40]">
+                  {(restaurant as any)?.subscription_type === 'ANNUALLY' ? 'Annual Professional' : 'Monthly Professional'}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/40 mb-1">Status</p>
+                <span className="px-3 py-1 rounded-full bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-widest">Active</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="p-6 rounded-3xl border border-[#5A5A40]/10">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/40 mb-1">Registered On</p>
+                <p className="font-bold">
+                  {(restaurant as any)?.registered_at ? new Date((restaurant as any).registered_at).toLocaleDateString() : 'N/A'}
+                </p>
+              </div>
+              <div className="p-6 rounded-3xl border border-[#5A5A40]/10">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/40 mb-1">Renewal Due</p>
+                <p className="font-bold text-orange-600">
+                  {(restaurant as any)?.subscription_expires_at ? new Date((restaurant as any).subscription_expires_at).toLocaleDateString() : 'N/A'}
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-blue-50 p-6 rounded-3xl border border-blue-100 flex gap-4">
+              <Info className="text-blue-500 shrink-0" size={20} />
+              <p className="text-xs text-blue-700 leading-relaxed">
+                Your subscription is managed by your assigned Sales Representative. For renewals or plan changes, please contact support or your representative.
+              </p>
+            </div>
+          </div>
         </div>
       ) : (
         <AttendanceManagement role="OWNER" token={token} restaurantId={restaurantId} />
@@ -4871,6 +4929,14 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
                   )}>
                     {r.is_active === 1 ? 'Active' : r.is_active === 0 ? 'Pending' : 'Inactive'}
                   </span>
+                  {r.subscription_expires_at && (
+                    <span className={cn(
+                      "px-2 py-0.5 rounded-full text-[8px] font-bold uppercase tracking-widest flex items-center gap-1",
+                      new Date(r.subscription_expires_at) < new Date() ? "bg-red-50 text-red-600" : "bg-blue-50 text-blue-600"
+                    )}>
+                      <Clock size={8} /> Due: {new Date(r.subscription_expires_at).toLocaleDateString()}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="text-right flex flex-col items-end gap-2">
@@ -4906,12 +4972,64 @@ function CTODashboard({ token }: { token: string }) {
   const [loading, setLoading] = useState(true);
   const [selectedSalesRep, setSelectedSalesRep] = useState<string | null>(null);
   const [salesRepRestaurants, setSalesRepRestaurants] = useState<any[]>([]);
-  const [viewMode, setViewMode] = useState<'REPORTS' | 'USERS'>('REPORTS');
+  const [viewMode, setViewMode] = useState<'REPORTS' | 'USERS' | 'SUBSCRIPTIONS'>('REPORTS');
+  const [prices, setPrices] = useState({ monthly_price: '999', annual_price: '9999' });
+  const [isSavingPrices, setIsSavingPrices] = useState(false);
 
   useEffect(() => {
     fetchReport();
     fetchInternalUsers();
+    fetchPrices();
   }, []);
+
+  const fetchPrices = async () => {
+    try {
+      const res = await fetch('/api/admin/subscription-prices', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setPrices(await res.json());
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const savePrices = async () => {
+    setIsSavingPrices(true);
+    try {
+      const res = await fetch('/api/admin/subscription-prices', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(prices)
+      });
+      if (res.ok) alert("Prices updated successfully");
+    } catch (err) {
+      alert("Failed to update prices");
+    } finally {
+      setIsSavingPrices(false);
+    }
+  };
+
+  const renewSubscription = async (restaurantId: string, type: 'MONTHLY' | 'ANNUALLY') => {
+    try {
+      const res = await fetch(`/api/admin/restaurants/${restaurantId}/renew-subscription`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ type })
+      });
+      if (res.ok) {
+        alert("Subscription renewed successfully");
+        if (selectedSalesRep) fetchSalesRepRestaurants(selectedSalesRep);
+      }
+    } catch (err) {
+      alert("Failed to renew subscription");
+    }
+  };
 
   const fetchReport = async () => {
     try {
@@ -4992,6 +5110,15 @@ function CTODashboard({ token }: { token: string }) {
           >
             <Users size={16} /> Internal Users
           </button>
+          <button 
+            onClick={() => setViewMode('SUBSCRIPTIONS')}
+            className={cn(
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'SUBSCRIPTIONS' ? "bg-[#5A5A40] text-white shadow-md" : "text-[#5A5A40] hover:bg-[#5A5A40]/5"
+            )}
+          >
+            <CreditCard size={16} /> Subscriptions
+          </button>
         </div>
       </div>
 
@@ -5039,10 +5166,34 @@ function CTODashboard({ token }: { token: string }) {
                       <div>
                         <p className="font-bold">{r.name}</p>
                         <p className="text-xs text-[#5A5A40]/50">{r.city}, {r.state}</p>
+                        {r.subscription_expires_at && (
+                          <p className={cn(
+                            "text-[10px] font-bold mt-1",
+                            new Date(r.subscription_expires_at) < new Date() ? "text-red-500" : "text-blue-500"
+                          )}>
+                            Due: {new Date(r.subscription_expires_at).toLocaleDateString()}
+                          </p>
+                        )}
                       </div>
-                      <div className="text-right">
-                        <p className="text-xs font-bold">{r.owner_name}</p>
-                        <p className="text-[10px] text-[#5A5A40]/40">Business Owner</p>
+                      <div className="text-right flex flex-col items-end gap-2">
+                        <div>
+                          <p className="text-xs font-bold">{r.owner_name}</p>
+                          <p className="text-[10px] text-[#5A5A40]/40">Business Owner</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => renewSubscription(r.id, 'MONTHLY')}
+                            className="bg-[#5A5A40] text-white px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest hover:bg-[#4A4A30]"
+                          >
+                            +1 Month
+                          </button>
+                          <button 
+                            onClick={() => renewSubscription(r.id, 'ANNUALLY')}
+                            className="bg-green-600 text-white px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest hover:bg-green-700"
+                          >
+                            +1 Year
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))
@@ -5058,7 +5209,7 @@ function CTODashboard({ token }: { token: string }) {
             )}
           </div>
         </div>
-      ) : (
+      ) : viewMode === 'USERS' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {internalUsers.map(u => (
             <div key={u.id} className="bg-white p-6 rounded-[32px] border border-[#5A5A40]/5 shadow-sm space-y-4">
@@ -5089,6 +5240,47 @@ function CTODashboard({ token }: { token: string }) {
               </button>
             </div>
           ))}
+        </div>
+      ) : (
+        <div className="bg-white p-10 rounded-[40px] border border-[#5A5A40]/5 shadow-sm max-w-2xl mx-auto">
+          <h3 className="text-2xl font-bold font-serif mb-8 flex items-center gap-2">
+            <CreditCard size={28} /> Subscription Pricing
+          </h3>
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Monthly Price (₹)</label>
+                <input 
+                  type="number"
+                  className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-4 outline-none font-bold"
+                  value={prices.monthly_price}
+                  onChange={e => setPrices({...prices, monthly_price: e.target.value})}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50 ml-2">Annual Price (₹)</label>
+                <input 
+                  type="number"
+                  className="w-full bg-[#f5f5f0] border-none rounded-2xl px-6 py-4 outline-none font-bold"
+                  value={prices.annual_price}
+                  onChange={e => setPrices({...prices, annual_price: e.target.value})}
+                />
+              </div>
+            </div>
+            <button 
+              onClick={savePrices}
+              disabled={isSavingPrices}
+              className="w-full bg-[#5A5A40] text-white py-4 rounded-2xl font-bold hover:bg-[#4A4A30] transition-all disabled:opacity-50"
+            >
+              {isSavingPrices ? 'Saving...' : 'Update Subscription Prices'}
+            </button>
+            <div className="bg-orange-50 p-6 rounded-3xl border border-orange-100 flex gap-4">
+              <Info className="text-orange-500 shrink-0" size={20} />
+              <p className="text-xs text-orange-700 leading-relaxed">
+                Only the CTO can modify global subscription pricing. These prices will be visible to all sales representatives and business owners.
+              </p>
+            </div>
+          </div>
         </div>
       )}
     </div>

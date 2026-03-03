@@ -155,6 +155,16 @@ try {
   `);
 } catch (e) {}
 
+try {
+  centralDb.exec("ALTER TABLE restaurants ADD COLUMN registered_at DATETIME DEFAULT CURRENT_TIMESTAMP;");
+} catch (e) {}
+try {
+  centralDb.exec("ALTER TABLE restaurants ADD COLUMN subscription_type TEXT DEFAULT 'MONTHLY';");
+} catch (e) {}
+try {
+  centralDb.exec("ALTER TABLE restaurants ADD COLUMN subscription_expires_at DATETIME;");
+} catch (e) {}
+
 // Initialize Central Database
 centralDb.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -176,8 +186,21 @@ centralDb.exec(`
     is_gst_enabled INTEGER DEFAULT 0,
     template_id TEXT DEFAULT 'CLASSIC',
     table_count INTEGER DEFAULT 0,
-    watermark_image TEXT
+    watermark_image TEXT,
+    sales_rep_id TEXT,
+    is_active INTEGER DEFAULT 0,
+    registered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    subscription_type TEXT DEFAULT 'MONTHLY',
+    subscription_expires_at DATETIME
   );
+
+  CREATE TABLE IF NOT EXISTS system_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+
+  INSERT OR IGNORE INTO system_settings (key, value) VALUES ('monthly_price', '999');
+  INSERT OR IGNORE INTO system_settings (key, value) VALUES ('annual_price', '9999');
 
   CREATE TABLE IF NOT EXISTS notification_settings (
     restaurant_id TEXT,
@@ -492,7 +515,11 @@ async function startServer() {
       const restaurantId = "resto-" + Math.random().toString(36).substr(2, 6);
       const userId = "user-" + Math.random().toString(36).substr(2, 6);
 
-      centralDb.prepare("INSERT INTO restaurants (id, name, admin_id, state, city, is_active, sales_rep_id) VALUES (?, ?, ?, ?, ?, 0, ?)").run(restaurantId, restaurantName, userId, state, city, sales_rep_id || null);
+      const now = new Date();
+      const expiresAt = new Date();
+      expiresAt.setMonth(now.getMonth() + 1); // Initial 1 month trial or similar
+
+      centralDb.prepare("INSERT INTO restaurants (id, name, admin_id, state, city, is_active, sales_rep_id, registered_at, subscription_expires_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)").run(restaurantId, restaurantName, userId, state, city, sales_rep_id || null, now.toISOString(), expiresAt.toISOString());
       centralDb.prepare("INSERT INTO users (id, login_id, name, email, phone, password, restaurant_id, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(userId, loginId, name, email, phone, hashedPassword, restaurantId, 'OWNER');
 
       getTenantDb(restaurantId);
@@ -660,6 +687,42 @@ async function startServer() {
     if (req.user.role !== 'CTO' && req.user.role !== 'SUPER_ADMIN') return res.status(403).json({ error: "Forbidden" });
     next();
   };
+
+  app.get("/api/admin/subscription-prices", authenticate, isCTO, (req, res) => {
+    const settings = centralDb.prepare("SELECT * FROM system_settings").all();
+    const prices = settings.reduce((acc: any, s: any) => {
+      acc[s.key] = s.value;
+      return acc;
+    }, {});
+    res.json(prices);
+  });
+
+  app.post("/api/admin/subscription-prices", authenticate, isCTO, (req, res) => {
+    const { monthly_price, annual_price } = req.body;
+    if (monthly_price !== undefined) {
+      centralDb.prepare("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('monthly_price', ?)").run(String(monthly_price));
+    }
+    if (annual_price !== undefined) {
+      centralDb.prepare("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('annual_price', ?)").run(String(annual_price));
+    }
+    res.json({ success: true });
+  });
+
+  app.post("/api/admin/restaurants/:id/renew-subscription", authenticate, isCTO, (req, res) => {
+    const { type } = req.body; // 'MONTHLY' or 'ANNUALLY'
+    const restaurantId = req.params.id;
+    
+    const now = new Date();
+    let expiresAt = new Date();
+    if (type === 'ANNUALLY') {
+      expiresAt.setFullYear(now.getFullYear() + 1);
+    } else {
+      expiresAt.setMonth(now.getMonth() + 1);
+    }
+
+    centralDb.prepare("UPDATE restaurants SET subscription_type = ?, subscription_expires_at = ? WHERE id = ?").run(type, expiresAt.toISOString(), restaurantId);
+    res.json({ success: true, expiresAt: expiresAt.toISOString() });
+  });
 
   app.delete("/api/admin/restaurants/:id", authenticate, isSuperAdmin, (req, res) => {
     centralDb.prepare("DELETE FROM restaurants WHERE id = ?").run(req.params.id);
