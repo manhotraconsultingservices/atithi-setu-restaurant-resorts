@@ -7,6 +7,7 @@ import {
   ShoppingCart, 
   QrCode, 
   Plus, 
+  Minus,
   Trash2, 
   CheckCircle2, 
   Clock, 
@@ -37,7 +38,10 @@ import {
   RefreshCw,
   Bell,
   MessageCircle,
-  Users
+  MessageSquare,
+  Save,
+  Users,
+  CalendarCheck
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize } from './types';
@@ -1479,7 +1483,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
 
 // --- ADMIN DASHBOARD ---
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
-  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS' | 'PAYMENTS' | 'ATTENDANCE' | 'NOTIFICATIONS' | 'FEEDBACK' | 'SUBSCRIPTION'>('MENU');
+  const [activeTab, setActiveTab] = useState<'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS' | 'PAYMENTS' | 'ATTENDANCE' | 'NOTIFICATIONS' | 'FEEDBACK' | 'SUBSCRIPTION' | 'BOOKINGS'>('MENU');
   const [notificationSettings, setNotificationSettings] = useState<any[]>([]);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [menu, setMenu] = useState<MenuItem[]>([]);
@@ -2025,6 +2029,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           QR Management
         </button>
         <button 
+          onClick={() => setActiveTab('BOOKINGS')}
+          className={cn(
+            "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
+            activeTab === 'BOOKINGS' ? "text-[#5A5A40] border-b-2 border-[#5A5A40]" : "text-[#5A5A40]/40"
+          )}
+        >
+          Bookings
+        </button>
+        <button 
           onClick={() => setActiveTab('STAFF')}
           className={cn(
             "pb-4 text-sm font-bold uppercase tracking-widest transition-all",
@@ -2308,6 +2321,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
         </div>
+      ) : activeTab === 'BOOKINGS' ? (
+        <BookingsManagement restaurantId={restaurantId} token={token} />
       ) : activeTab === 'REPORTS' ? (
         <div className="space-y-8">
           <div className="flex justify-between items-center">
@@ -2610,90 +2625,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
         </div>
       ) : activeTab === 'NOTIFICATIONS' ? (
-        <div className="space-y-8">
-          <div className="flex justify-between items-center">
-            <div>
-              <h2 className="text-3xl font-bold font-serif">Notification Engine</h2>
-              <p className="text-[#5A5A40]/60 mt-1">Manage how and when your staff receives alerts.</p>
-            </div>
-            {isSavingSettings && (
-              <div className="flex items-center gap-2 text-[#5A5A40]/60 text-xs font-bold uppercase tracking-widest">
-                <RefreshCw size={14} className="animate-spin" /> Saving...
-              </div>
-            )}
-          </div>
-
-          <div className="grid grid-cols-1 gap-6">
-            {[
-              { id: 'ORDER_PLACED', name: 'New Order Received', desc: 'Notify Owner and Chefs when a customer places a new order.' },
-              { id: 'CUSTOMER_ORDER_CONFIRMATION', name: 'Customer Order Confirmation', desc: 'Send a confirmation message to the customer once they place an order.' },
-              { id: 'CUSTOMER_INVOICE', name: 'Customer Invoice', desc: 'Send the final invoice to the customer once payment is confirmed.' },
-              { id: 'ORDER_READY', name: 'Order Ready for Pickup', desc: 'Notify Waiters when a Chef marks an order as ready.' },
-              { id: 'PAYMENT_RECEIVED', name: 'Payment Received', desc: 'Notify Owner when a customer confirms payment.' }
-            ].map(event => {
-              const setting = notificationSettings.find(s => s.event_name === event.id) || {
-                whatsapp_enabled: 0,
-                sms_enabled: 0,
-                email_enabled: 0
-              };
-
-              return (
-                <div key={event.id} className="bg-white p-8 rounded-[32px] border border-[#5A5A40]/5 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-8">
-                  <div className="max-w-md">
-                    <h3 className="text-xl font-bold font-serif mb-2">{event.name}</h3>
-                    <p className="text-sm text-[#5A5A40]/60">{event.desc}</p>
-                  </div>
-
-                  <div className="flex flex-wrap gap-4">
-                    <button 
-                      onClick={() => updateNotificationSetting(event.id, 'whatsapp_enabled', !setting.whatsapp_enabled)}
-                      className={cn(
-                        "flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all border",
-                        setting.whatsapp_enabled 
-                          ? "bg-green-50 border-green-200 text-green-700" 
-                          : "bg-white border-[#5A5A40]/10 text-[#5A5A40]/40 hover:border-[#5A5A40]/20"
-                      )}
-                    >
-                      <MessageCircle size={16} /> WhatsApp
-                    </button>
-                    <button 
-                      onClick={() => updateNotificationSetting(event.id, 'sms_enabled', !setting.sms_enabled)}
-                      className={cn(
-                        "flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all border",
-                        setting.sms_enabled 
-                          ? "bg-blue-50 border-blue-200 text-blue-700" 
-                          : "bg-white border-[#5A5A40]/10 text-[#5A5A40]/40 hover:border-[#5A5A40]/20"
-                      )}
-                    >
-                      <Smartphone size={16} /> SMS
-                    </button>
-                    <button 
-                      onClick={() => updateNotificationSetting(event.id, 'email_enabled', !setting.email_enabled)}
-                      className={cn(
-                        "flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all border",
-                        setting.email_enabled 
-                          ? "bg-purple-50 border-purple-200 text-purple-700" 
-                          : "bg-white border-[#5A5A40]/10 text-[#5A5A40]/40 hover:border-[#5A5A40]/20"
-                      )}
-                    >
-                      <Mail size={16} /> Email
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="bg-[#f5f5f0] p-8 rounded-[32px] border border-[#5A5A40]/5">
-            <h4 className="text-sm font-bold uppercase tracking-widest text-[#5A5A40] mb-4">Configuration Note</h4>
-            <ul className="space-y-2 text-sm text-[#5A5A40]/70 list-disc pl-5">
-              <li><strong>WhatsApp:</strong> Uses Meta (Facebook) Graph API for reliable delivery. Requires Meta Business configuration.</li>
-              <li><strong>SMS:</strong> Uses Twilio for global SMS delivery.</li>
-              <li><strong>Email:</strong> Uses SMTP for professional email notifications.</li>
-              <li>Ensure staff members have their <strong>WhatsApp Phone Number</strong> and <strong>Email</strong> configured in the Staff tab.</li>
-            </ul>
-          </div>
-        </div>
+        <NotificationSettings restaurantId={restaurantId} token={token} />
       ) : activeTab === 'FEEDBACK' ? (
         <div className="space-y-8">
           <div className="flex justify-between items-center">
@@ -3477,6 +3409,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [filterCategory, setFilterCategory] = useState('All');
   const [filterDietary, setFilterDietary] = useState('All');
   const [filterSize, setFilterSize] = useState('All');
+  const [showBooking, setShowBooking] = useState(false);
   const { lastMessage } = useSocket('CUSTOMER', restaurantId);
 
   useEffect(() => {
@@ -3597,6 +3530,16 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     setCart(prev => prev.filter(i => i.id !== id));
   };
 
+  const updateCartQuantity = (id: string, delta: number) => {
+    setCart(prev => prev.map(item => {
+      if (item.id === id) {
+        const newQuantity = Math.max(1, item.quantity + delta);
+        return { ...item, quantity: newQuantity };
+      }
+      return item;
+    }));
+  };
+
   const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
   const placeOrder = async (paymentMethod: 'ONLINE' | 'TABLE') => {
@@ -3687,119 +3630,180 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     }
   };
 
-  if (order) {
-    return (
-      <div className="max-w-md mx-auto space-y-8">
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="bg-white p-8 rounded-[40px] shadow-xl border border-[#5A5A40]/5 text-center"
-        >
-          <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6">
-            <CheckCircle2 size={40} />
-          </div>
-          <h2 className="text-3xl font-bold font-serif mb-2">Order Confirmed!</h2>
-          <p className="text-[#5A5A40]/60 mb-8">Your order <span className="font-mono font-bold text-[#1a1a1a]">{order.id}</span> is being prepared.</p>
-          
-          <div className="bg-[#f5f5f0] p-6 rounded-3xl space-y-4 mb-8">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-[#5A5A40]/60 uppercase tracking-widest font-bold">Status</span>
-              <span className="px-3 py-1 bg-[#5A5A40] text-white rounded-full text-[10px] font-bold uppercase tracking-widest">
-                {order.status}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-[#5A5A40]/60 uppercase tracking-widest font-bold">Estimated Time</span>
-              <span className="text-xl font-bold font-serif text-[#5A5A40]">
-                {order.eta || 'Waiting for Chef...'}
-              </span>
-            </div>
-            {order.paymentMethod === 'ONLINE' && (
-              <div className="flex justify-between items-center pt-2 border-t border-[#5A5A40]/5">
-                <span className="text-sm text-[#5A5A40]/60 uppercase tracking-widest font-bold">Payment</span>
-                <span className={cn(
-                  "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5",
-                  order.paymentStatus === 'PAID' ? "bg-green-100 text-green-700" : "bg-orange-100 text-orange-600"
-                )}>
-                  {order.paymentStatus === 'PAID' ? (
-                    <>
-                      <CheckCircle2 size={10} /> Payment Successful
-                    </>
-                  ) : (
-                    <>
-                      <div className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
-                      Pending Payment
-                    </>
+  const TemplateRenderer = () => {
+    const template = restaurant?.template_id || 'CLASSIC';
+    
+    const filteredMenu = menu.filter(item => {
+      const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                           item.description.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesCategory = filterCategory === 'All' || item.category === filterCategory;
+      const matchesDietary = filterDietary === 'All' || item.dietary_type === filterDietary;
+      const matchesSize = filterSize === 'All' || (filterSize === 'HALF' ? !!item.price_half : !item.price_half);
+      
+      return matchesSearch && matchesCategory && matchesDietary && matchesSize;
+    });
+
+    const sortedMenu = [...filteredMenu].sort((a, b) => (b.is_daily_special ? 1 : 0) - (a.is_daily_special ? 1 : 0));
+
+    const DietaryIcon = ({ type }: { type: DietaryType }) => {
+      if (type === 'VEG') return (
+        <div className="w-3 h-3 bg-green-600 rounded-full shadow-sm" title="Vegetarian" />
+      );
+      if (type === 'VEGAN') return (
+        <div className="text-green-600 flex items-center gap-1" title="Vegan">
+          <Leaf size={14} className="text-green-600" />
+          <span className="text-[8px] font-bold uppercase tracking-tighter">Vegan</span>
+        </div>
+      );
+      return (
+        <div className="w-3 h-3 bg-red-600 rounded-full shadow-sm" title="Non-Vegetarian" />
+      );
+    };
+
+    if (template === 'MODERN') {
+      return (
+        <div className="space-y-12">
+          {sortedMenu.map(item => (
+            <div key={item.id} className={cn(
+              "flex flex-col md:flex-row gap-8 items-center bg-white p-8 rounded-[40px] shadow-sm relative",
+              item.is_daily_special && "border-2 border-yellow-400"
+            )}>
+              {item.is_daily_special && <div className="absolute -top-3 left-8 bg-yellow-400 text-yellow-950 px-4 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest shadow-md">Daily Special</div>}
+              <div className="w-full md:w-1/3 aspect-square rounded-3xl overflow-hidden">
+                <img src={item.image || `https://picsum.photos/seed/${item.id}/600/600`} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+              </div>
+              <div className="flex-1 space-y-4">
+                <div className="flex justify-between items-start">
+                  <div className="flex items-center gap-3">
+                    <DietaryIcon type={item.dietary_type} />
+                    <h4 className="text-3xl font-bold">{item.name}</h4>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-2xl font-mono font-bold">₹{item.price_full || item.price}</span>
+                    {item.price_half && <p className="text-sm text-[#5A5A40]/50 font-mono">Half: ₹{item.price_half}</p>}
+                  </div>
+                </div>
+                <p className="text-lg text-[#5A5A40]/60">{item.description}</p>
+                <div className="flex gap-4">
+                  <button onClick={() => addToCart(item, 'FULL')} className="flex-1 bg-[#1a1a1a] text-white px-8 py-4 rounded-2xl font-bold hover:scale-105 transition-transform">
+                    Add Full
+                  </button>
+                  {item.price_half && (
+                    <button onClick={() => addToCart(item, 'HALF')} className="flex-1 border-2 border-[#1a1a1a] text-[#1a1a1a] px-8 py-4 rounded-2xl font-bold hover:scale-105 transition-transform">
+                      Add Half
+                    </button>
                   )}
-                </span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    if (template === 'EDITORIAL') {
+      return (
+        <div className="max-w-3xl mx-auto space-y-16 py-12">
+          {['Starters', 'Mains', 'Desserts', 'Drinks'].map(cat => {
+            const items = sortedMenu.filter(i => i.category === cat);
+            if (items.length === 0) return null;
+            return (
+              <div key={cat} className="space-y-8">
+                <h3 className="text-5xl font-serif italic border-b border-[#1a1a1a] pb-4">{cat}</h3>
+                <div className="space-y-10">
+                  {items.map(item => (
+                    <div key={item.id} className={cn(
+                      "group cursor-pointer p-4 rounded-2xl transition-all",
+                      item.is_daily_special && "bg-yellow-50 border border-yellow-200"
+                    )}>
+                      <div className="flex justify-between items-baseline mb-2">
+                        <div className="flex items-center gap-2">
+                          <DietaryIcon type={item.dietary_type} />
+                          <h4 className="text-2xl font-bold uppercase tracking-tighter group-hover:text-[#5A5A40] transition-colors">{item.name}</h4>
+                        </div>
+                        <div className="flex-1 border-b border-dotted border-[#1a1a1a]/20 mx-4" />
+                        <div className="text-right">
+                          <span className="text-xl font-mono">₹{item.price_full || item.price}</span>
+                          {item.price_half && <p className="text-[10px] font-mono opacity-50">H: ₹{item.price_half}</p>}
+                        </div>
+                      </div>
+                      <p className="text-[#5A5A40]/60 italic font-serif mb-4">{item.description}</p>
+                      <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onClick={(e) => { e.stopPropagation(); addToCart(item, 'FULL'); }} className="text-[10px] font-bold uppercase tracking-widest bg-[#1a1a1a] text-white px-4 py-1 rounded-full">Add Full</button>
+                        {item.price_half && <button onClick={(e) => { e.stopPropagation(); addToCart(item, 'HALF'); }} className="text-[10px] font-bold uppercase tracking-widest border border-[#1a1a1a] px-4 py-1 rounded-full">Add Half</button>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // Default CLASSIC
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {sortedMenu.map(item => (
+          <motion.div 
+            key={item.id} 
+            className={cn(
+              "bg-white rounded-[32px] overflow-hidden border shadow-sm group relative",
+              item.is_daily_special ? "border-yellow-400 ring-2 ring-yellow-400/20" : "border-[#5A5A40]/5"
+            )}
+          >
+            {item.is_daily_special && (
+              <div className="absolute top-4 left-4 z-10 bg-yellow-400 text-yellow-950 text-[10px] font-bold uppercase tracking-widest px-3 py-1 rounded-full flex items-center gap-1 shadow-lg">
+                <Star size={12} fill="currentColor" /> Daily Special
               </div>
             )}
-          </div>
-
-          <button 
-            onClick={() => setShowInvoice(true)}
-            className="w-full border-2 border-[#5A5A40] text-[#5A5A40] py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-[#5A5A40] hover:text-white transition-all"
-          >
-            <Receipt size={20} /> View Invoice
-          </button>
-        </motion.div>
-
-        {!feedbackSubmitted && order.feedbackRequested && (
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="bg-white p-8 rounded-[40px] shadow-xl border border-[#5A5A40]/5"
-          >
-            <h3 className="text-xl font-bold font-serif mb-4 text-center">Rate Your Experience</h3>
-            <div className="flex justify-center gap-4 mb-6">
-              {[
-                { val: 1, label: 'Very Bad 😞' },
-                { val: 2, label: 'Needs Improvement' },
-                { val: 3, label: 'Okay 🙂' },
-                { val: 4, label: 'Good 👍' },
-                { val: 5, label: 'Awesome 🤩' }
-              ].map((item) => (
+            <div className="aspect-[4/3] bg-[#f5f5f0] relative overflow-hidden">
+              <img 
+                src={item.image || `https://picsum.photos/seed/${item.id}/600/450`} 
+                alt={item.name} 
+                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                referrerPolicy="no-referrer"
+              />
+              <div className="absolute top-4 right-4 bg-white/90 backdrop-blur px-3 py-1 rounded-full text-xs font-bold font-mono flex flex-col items-end">
+                <span>₹{(item.price_full || item.price).toFixed(2)}</span>
+                {item.price_half && <span className="text-[8px] opacity-50">H: ₹{item.price_half.toFixed(2)}</span>}
+              </div>
+            </div>
+            <div className="p-6">
+              <div className="flex justify-between items-start mb-1">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">{item.category}</span>
+                <DietaryIcon type={item.dietary_type} />
+              </div>
+              <h4 className="text-xl font-bold font-serif mb-2">{item.name}</h4>
+              <p className="text-sm text-[#5A5A40]/60 mb-6 line-clamp-2">{item.description}</p>
+              <div className="flex gap-2">
                 <button 
-                  key={item.val}
-                  onClick={() => {
-                    const comment = prompt(`Any comments for "${item.label}"? (Optional)`);
-                    fetch(`/api/orders/${order.id}/feedback`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        rating: item.val,
-                        comment: comment || '',
-                        restaurantId: restaurantId,
-                        customerName: order.customerName
-                      })
-                    }).then(() => {
-                      setFeedbackSubmitted(true);
-                      alert("Thank you for your feedback!");
-                    });
-                  }}
-                  className="flex flex-col items-center gap-1 group flex-1"
+                  onClick={() => addToCart(item, 'FULL')}
+                  className="flex-1 bg-[#f5f5f0] text-[#5A5A40] py-3 rounded-2xl font-bold hover:bg-[#5A5A40] hover:text-white transition-all flex items-center justify-center gap-2 text-xs"
                 >
-                  <Star 
-                    size={24} 
-                    className="text-gray-200 group-hover:text-yellow-400 transition-colors" 
-                  />
-                  <span className="text-[7px] font-bold uppercase tracking-tighter text-[#5A5A40]/40 text-center leading-tight h-4 flex items-center">
-                    {item.label}
-                  </span>
+                  <Plus size={14} /> Full
                 </button>
-              ))}
+                {item.price_half && (
+                  <button 
+                    onClick={() => addToCart(item, 'HALF')}
+                    className="flex-1 border border-[#5A5A40]/20 text-[#5A5A40] py-3 rounded-2xl font-bold hover:bg-[#5A5A40] hover:text-white transition-all flex items-center justify-center gap-2 text-xs"
+                  >
+                    <Plus size={14} /> Half
+                  </button>
+                )}
+              </div>
             </div>
           </motion.div>
-        )}
+        ))}
+      </div>
+    );
+  };
 
-        {feedbackSubmitted && (
-          <div className="bg-green-50 p-6 rounded-[40px] border border-green-100 text-center">
-            <p className="text-green-700 font-bold text-sm uppercase tracking-widest">Feedback Submitted! Thank you.</p>
-          </div>
-        )}
+  return (
 
-        <AnimatePresence>
-          {showInvoice && (
+      <AnimatePresence>
+        {showInvoice && order && (
             <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[110] p-4">
               <motion.div 
                 initial={{ scale: 0.9, opacity: 0 }}
@@ -4173,6 +4177,12 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         <div>
           <h2 className="text-4xl font-bold font-serif mb-2">{restaurant?.name || 'Our Menu'}</h2>
           <p className="text-[#5A5A40]/60 italic">{tableName} • Fresh & Seasonal</p>
+          <button 
+            onClick={() => setShowBooking(true)}
+            className="mt-4 bg-[#5A5A40] text-white px-6 py-2 rounded-full text-xs font-bold flex items-center gap-2 hover:scale-105 transition-transform"
+          >
+            <CalendarCheck size={16} /> Book a Table
+          </button>
         </div>
         <div className="bg-white p-2 rounded-2xl shadow-sm border border-[#5A5A40]/5">
           <QRCodeSVG value={`${window.location.origin}?r=${restaurantId}`} size={60} />
@@ -4326,19 +4336,36 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 
               <div className="space-y-4 mb-8">
                 {cart.map(item => (
-                  <div key={item.id} className="flex justify-between items-center">
+                  <div key={item.id} className="flex justify-between items-center bg-[#f5f5f0]/50 p-3 rounded-2xl">
                     <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 bg-[#f5f5f0] rounded-xl flex items-center justify-center font-bold text-[#5A5A40]">
-                        {item.quantity}x
+                      <div className="flex flex-col items-center gap-1 bg-white p-1 rounded-xl shadow-sm">
+                        <button 
+                          onClick={() => updateCartQuantity(item.id, 1)}
+                          className="p-1 hover:bg-[#f5f5f0] rounded-lg transition-colors text-[#5A5A40]"
+                        >
+                          <Plus size={14} />
+                        </button>
+                        <span className="font-bold text-sm min-w-[20px] text-center">{item.quantity}</span>
+                        <button 
+                          onClick={() => updateCartQuantity(item.id, -1)}
+                          disabled={item.quantity <= 1}
+                          className="p-1 hover:bg-[#f5f5f0] rounded-lg transition-colors text-[#5A5A40] disabled:opacity-30"
+                        >
+                          <Minus size={14} />
+                        </button>
                       </div>
                       <div>
-                        <p className="font-bold">{item.name}</p>
-                        <p className="text-xs text-[#5A5A40]/50">₹{item.price.toFixed(2)} each</p>
+                        <p className="font-bold text-sm">{item.name}</p>
+                        <p className="text-[10px] text-[#5A5A40]/50 font-mono">₹{item.price.toFixed(2)} each</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-4">
-                      <p className="font-mono font-bold">₹{(item.price * item.quantity).toFixed(2)}</p>
-                      <button onClick={() => removeFromCart(item.id)} className="text-red-400">
+                      <p className="font-mono font-bold text-sm">₹{(item.price * item.quantity).toFixed(2)}</p>
+                      <button 
+                        onClick={() => removeFromCart(item.id)} 
+                        className="p-2 hover:bg-red-50 text-red-400 rounded-xl transition-colors"
+                        title="Remove item"
+                      >
                         <Trash2 size={16} />
                       </button>
                     </div>
@@ -4385,6 +4412,13 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
           </div>
         )}
       </AnimatePresence>
+
+      {showBooking && (
+        <TableBooking 
+          restaurantId={restaurantId} 
+          onClose={() => setShowBooking(false)} 
+        />
+      )}
     </div>
   );
 }
@@ -5419,6 +5453,492 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
       ) : (
         <AttendanceManagement role="WAITER" token={token} restaurantId={restaurantId} />
       )}
+    </div>
+  );
+}
+
+function TableBooking({ restaurantId, onClose }: { restaurantId: string, onClose: () => void }) {
+  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [time, setTime] = useState('19:00');
+  const [guests, setGuests] = useState(2);
+  const [availableTables, setAvailableTables] = useState<Table[]>([]);
+  const [selectedTable, setSelectedTable] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [bookingInfo, setBookingInfo] = useState({ name: '', phone: '', email: '' });
+  const [step, setStep] = useState<'AVAILABILITY' | 'DETAILS' | 'SUCCESS'>('AVAILABILITY');
+
+  const checkAvailability = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/public/restaurants/${restaurantId}/tables/availability?date=${date}&time=${time}`);
+      if (res.ok) {
+        setAvailableTables(await res.json());
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBook = async () => {
+    if (!selectedTable) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/public/restaurants/${restaurantId}/bookings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tableId: selectedTable,
+          customerName: bookingInfo.name,
+          customerPhone: bookingInfo.phone,
+          customerEmail: bookingInfo.email,
+          bookingDate: date,
+          bookingTime: time,
+          guests
+        })
+      });
+      if (res.ok) {
+        setStep('SUCCESS');
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+      <motion.div 
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="bg-[#f5f5f0] w-full max-w-md rounded-[40px] overflow-hidden shadow-2xl"
+      >
+        <div className="p-8">
+          <div className="flex justify-between items-center mb-8">
+            <h2 className="text-2xl font-serif font-bold">Book a Table</h2>
+            <button onClick={onClose} className="p-2 hover:bg-black/5 rounded-full"><X size={20} /></button>
+          </div>
+
+          {step === 'AVAILABILITY' && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Date</label>
+                  <input 
+                    type="date" 
+                    value={date}
+                    onChange={e => setDate(e.target.value)}
+                    className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#5A5A40]/20"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Time</label>
+                  <input 
+                    type="time" 
+                    value={time}
+                    onChange={e => setTime(e.target.value)}
+                    className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#5A5A40]/20"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Guests</label>
+                <div className="flex items-center gap-4 bg-white p-2 rounded-2xl">
+                  <button onClick={() => setGuests(Math.max(1, guests - 1))} className="p-2 hover:bg-[#f5f5f0] rounded-xl"><Minus size={16}/></button>
+                  <span className="flex-1 text-center font-bold">{guests} Guests</span>
+                  <button onClick={() => setGuests(guests + 1)} className="p-2 hover:bg-[#f5f5f0] rounded-xl"><Plus size={16}/></button>
+                </div>
+              </div>
+
+              <button 
+                onClick={checkAvailability}
+                disabled={loading}
+                className="w-full bg-[#1a1a1a] text-white py-4 rounded-2xl font-bold hover:scale-[1.02] transition-transform disabled:opacity-50"
+              >
+                {loading ? 'Checking...' : 'Check Availability'}
+              </button>
+
+              {availableTables.length > 0 && (
+                <div className="space-y-4 pt-4">
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Select a Table</label>
+                  <div className="grid grid-cols-3 gap-3">
+                    {availableTables.map(table => (
+                      <button
+                        key={table.id}
+                        onClick={() => setSelectedTable(table.id)}
+                        className={cn(
+                          "p-4 rounded-2xl border-2 transition-all text-center",
+                          selectedTable === table.id 
+                            ? "border-[#5A5A40] bg-[#5A5A40] text-white" 
+                            : "border-white bg-white text-[#5A5A40] hover:border-[#5A5A40]/20"
+                        )}
+                      >
+                        <p className="text-xs font-bold">{table.name}</p>
+                      </button>
+                    ))}
+                  </div>
+                  <button 
+                    onClick={() => setStep('DETAILS')}
+                    disabled={!selectedTable}
+                    className="w-full bg-[#5A5A40] text-white py-4 rounded-2xl font-bold hover:scale-[1.02] transition-transform disabled:opacity-50"
+                  >
+                    Continue
+                  </button>
+                </div>
+              )}
+              {availableTables.length === 0 && !loading && date && (
+                <p className="text-center text-sm text-[#5A5A40]/50 py-4">No tables available for this time.</p>
+              )}
+            </div>
+          )}
+
+          {step === 'DETAILS' && (
+            <div className="space-y-6">
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Full Name</label>
+                  <input 
+                    type="text" 
+                    placeholder="John Doe"
+                    value={bookingInfo.name}
+                    onChange={e => setBookingInfo({...bookingInfo, name: e.target.value})}
+                    className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#5A5A40]/20"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Phone Number</label>
+                  <input 
+                    type="tel" 
+                    placeholder="+91 98765 43210"
+                    value={bookingInfo.phone}
+                    onChange={e => setBookingInfo({...bookingInfo, phone: e.target.value})}
+                    className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#5A5A40]/20"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Email Address</label>
+                  <input 
+                    type="email" 
+                    placeholder="john@example.com"
+                    value={bookingInfo.email}
+                    onChange={e => setBookingInfo({...bookingInfo, email: e.target.value})}
+                    className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#5A5A40]/20"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setStep('AVAILABILITY')}
+                  className="flex-1 border-2 border-[#5A5A40] text-[#5A5A40] py-4 rounded-2xl font-bold"
+                >
+                  Back
+                </button>
+                <button 
+                  onClick={handleBook}
+                  disabled={loading || !bookingInfo.name || !bookingInfo.phone}
+                  className="flex-2 bg-[#1a1a1a] text-white py-4 rounded-2xl font-bold disabled:opacity-50"
+                >
+                  {loading ? 'Booking...' : 'Confirm Booking'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 'SUCCESS' && (
+            <div className="text-center py-8">
+              <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                <CheckCircle2 size={40} />
+              </div>
+              <h3 className="text-2xl font-serif font-bold mb-2">Booking Confirmed!</h3>
+              <p className="text-[#5A5A40]/70 mb-8">
+                We've sent a confirmation email to {bookingInfo.email}. See you on {date} at {time}!
+              </p>
+              <button 
+                onClick={onClose}
+                className="w-full bg-[#1a1a1a] text-white py-4 rounded-2xl font-bold"
+              >
+                Done
+              </button>
+            </div>
+          )}
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+function BookingsManagement({ restaurantId, token }: { restaurantId: string, token: string }) {
+  const [bookings, setBookings] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchBookings();
+  }, []);
+
+  const fetchBookings = async () => {
+    try {
+      const res = await fetch('/api/owner/bookings', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setBookings(await res.json());
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateStatus = async (id: string, status: string) => {
+    try {
+      const res = await fetch(`/api/owner/bookings/${id}/status`, {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ status })
+      });
+      if (res.ok) fetchBookings();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-serif font-bold">Table Bookings</h2>
+        <button onClick={fetchBookings} className="p-2 hover:bg-black/5 rounded-full"><RefreshCw size={20} /></button>
+      </div>
+
+      <div className="bg-white rounded-[32px] overflow-hidden shadow-sm border border-black/5">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="bg-[#f5f5f0] text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">
+                <th className="px-6 py-4">Customer</th>
+                <th className="px-6 py-4">Table</th>
+                <th className="px-6 py-4">Date & Time</th>
+                <th className="px-6 py-4">Guests</th>
+                <th className="px-6 py-4">Status</th>
+                <th className="px-6 py-4">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-black/5">
+              {bookings.map(booking => (
+                <tr key={booking.id} className="hover:bg-[#f5f5f0]/30 transition-colors">
+                  <td className="px-6 py-4">
+                    <p className="font-bold text-sm">{booking.customer_name}</p>
+                    <p className="text-xs text-[#5A5A40]/50">{booking.customer_phone}</p>
+                  </td>
+                  <td className="px-6 py-4">
+                    <span className="px-3 py-1 bg-[#5A5A40]/10 text-[#5A5A40] rounded-full text-[10px] font-bold uppercase">
+                      {booking.table_name}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4">
+                    <p className="text-sm font-bold">{booking.booking_date}</p>
+                    <p className="text-xs text-[#5A5A40]/50">{booking.booking_time}</p>
+                  </td>
+                  <td className="px-6 py-4 font-bold text-sm">{booking.guests}</td>
+                  <td className="px-6 py-4">
+                    <span className={cn(
+                      "px-3 py-1 rounded-full text-[10px] font-bold uppercase",
+                      booking.status === 'CONFIRMED' ? "bg-green-100 text-green-600" : "bg-red-100 text-red-600"
+                    )}>
+                      {booking.status}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4">
+                    <div className="flex gap-2">
+                      {booking.status === 'CONFIRMED' && (
+                        <button 
+                          onClick={() => updateStatus(booking.id, 'CANCELLED')}
+                          className="p-2 hover:bg-red-50 text-red-400 rounded-xl transition-colors"
+                        >
+                          <X size={16} />
+                        </button>
+                      )}
+                      {booking.status === 'CANCELLED' && (
+                        <button 
+                          onClick={() => updateStatus(booking.id, 'CONFIRMED')}
+                          className="p-2 hover:bg-green-50 text-green-400 rounded-xl transition-colors"
+                        >
+                          <Check size={16} />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {bookings.length === 0 && !loading && (
+            <div className="py-20 text-center">
+              <Calendar size={48} className="mx-auto text-[#5A5A40]/20 mb-4" />
+              <p className="text-[#5A5A40]/50">No bookings found.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const NOTIFICATION_EVENTS = [
+  { id: 'ORDER_PLACED', label: 'New Order Received', roles: ['OWNER', 'CHEF'] },
+  { id: 'ORDER_READY', label: 'Order Ready for Pickup', roles: ['WAITER'] },
+  { id: 'CUSTOMER_ORDER_CONFIRMATION', label: 'Order Confirmation to Customer', roles: ['CUSTOMER'] },
+  { id: 'CUSTOMER_INVOICE', label: 'Invoice to Customer', roles: ['CUSTOMER'] },
+  { id: 'TABLE_BOOKING', label: 'New Table Booking', roles: ['OWNER', 'CUSTOMER'] },
+  { id: 'PAYMENT_RECEIVED', label: 'Payment Received Notification', roles: ['OWNER'] },
+];
+
+const NOTIFICATION_CHANNELS = [
+  { id: 'whatsapp_enabled', label: 'WhatsApp', icon: MessageSquare },
+  { id: 'sms_enabled', label: 'SMS', icon: Smartphone },
+  { id: 'email_enabled', label: 'Email', icon: Mail },
+];
+
+function NotificationSettings({ restaurantId, token }: { restaurantId: string, token: string }) {
+  const [settings, setSettings] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetchSettings();
+  }, []);
+
+  const fetchSettings = async () => {
+    try {
+      const res = await fetch('/api/owner/notification-settings', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) setSettings(await res.json());
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleToggle = (eventName: string, role: string, channel: string) => {
+    setSettings(prev => {
+      const existing = prev.find(s => s.event_name === eventName && s.role === role);
+      if (existing) {
+        return prev.map(s => 
+          (s.event_name === eventName && s.role === role) 
+            ? { ...s, [channel]: s[channel] ? 0 : 1 } 
+            : s
+        );
+      } else {
+        return [...prev, { 
+          event_name: eventName, 
+          role, 
+          whatsapp_enabled: channel === 'whatsapp_enabled' ? 1 : 0,
+          sms_enabled: channel === 'sms_enabled' ? 1 : 0,
+          email_enabled: channel === 'email_enabled' ? 1 : 0
+        }];
+      }
+    });
+  };
+
+  const saveSettings = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch('/api/owner/notification-settings', {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ settings })
+      });
+      if (res.ok) alert("Notification settings saved!");
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return <div className="p-12 text-center">Loading settings...</div>;
+
+  return (
+    <div className="space-y-8">
+      <div className="flex justify-between items-center">
+        <div>
+          <h2 className="text-3xl font-bold font-serif">Notification Settings</h2>
+          <p className="text-[#5A5A40]/60">Configure how and when your team and customers receive updates.</p>
+        </div>
+        <button 
+          onClick={saveSettings}
+          disabled={saving}
+          className="bg-[#5A5A40] text-white px-8 py-3 rounded-2xl font-bold hover:bg-[#4A4A30] transition-all disabled:opacity-50 flex items-center gap-2"
+        >
+          {saving ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
+          Save Changes
+        </button>
+      </div>
+
+      <div className="bg-white rounded-[40px] border border-[#5A5A40]/5 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="bg-[#f5f5f0] border-b border-[#5A5A40]/10">
+                <th className="px-8 py-6 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Event & Role</th>
+                {NOTIFICATION_CHANNELS.map(channel => (
+                  <th key={channel.id} className="px-8 py-6 text-center">
+                    <div className="flex flex-col items-center gap-1">
+                      <channel.icon size={18} className="text-[#5A5A40]" />
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">{channel.label}</span>
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#5A5A40]/5">
+              {NOTIFICATION_EVENTS.map(event => (
+                <React.Fragment key={event.id}>
+                  {event.roles.map((role, idx) => {
+                    const setting = settings.find(s => s.event_name === event.id && s.role === role);
+                    return (
+                      <tr key={`${event.id}-${role}`} className="hover:bg-[#fcfcfc] transition-colors">
+                        <td className="px-8 py-6">
+                          {idx === 0 && <p className="font-bold text-[#1a1a1a] mb-1">{event.label}</p>}
+                          <span className="inline-block px-2 py-0.5 bg-[#5A5A40]/10 text-[#5A5A40] rounded text-[9px] font-bold uppercase tracking-widest">
+                            Notify {role}
+                          </span>
+                        </td>
+                        {NOTIFICATION_CHANNELS.map(channel => (
+                          <td key={channel.id} className="px-8 py-6 text-center">
+                            <button
+                              onClick={() => handleToggle(event.id, role, channel.id)}
+                              className={cn(
+                                "w-12 h-6 rounded-full transition-all relative",
+                                setting?.[channel.id] ? "bg-[#5A5A40]" : "bg-gray-200"
+                              )}
+                            >
+                              <div className={cn(
+                                "absolute top-1 w-4 h-4 bg-white rounded-full transition-all",
+                                setting?.[channel.id] ? "left-7" : "left-1"
+                              )} />
+                            </button>
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }

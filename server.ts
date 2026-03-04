@@ -127,8 +127,8 @@ async function sendWhatsApp(to: string, message: string) {
   }
 }
 
-async function notify(restaurantId: string, eventName: string, recipient: { phone?: string, email?: string }, data: { subject?: string, message: string }) {
-  const settings = centralDb.prepare("SELECT * FROM notification_settings WHERE restaurant_id = ? AND event_name = ?").get(restaurantId) as any;
+async function notify(restaurantId: string, eventName: string, role: string, recipient: { phone?: string, email?: string }, data: { subject?: string, message: string }) {
+  const settings = centralDb.prepare("SELECT * FROM notification_settings WHERE restaurant_id = ? AND event_name = ? AND role = ?").get(restaurantId, eventName, role) as any;
   if (!settings) return;
 
   if (settings.whatsapp_enabled && recipient.phone) {
@@ -262,12 +262,37 @@ centralDb.exec(`
   CREATE TABLE IF NOT EXISTS notification_settings (
     restaurant_id TEXT,
     event_name TEXT,
+    role TEXT DEFAULT 'OWNER',
     whatsapp_enabled INTEGER DEFAULT 0,
     sms_enabled INTEGER DEFAULT 0,
     email_enabled INTEGER DEFAULT 0,
-    PRIMARY KEY (restaurant_id, event_name)
+    PRIMARY KEY (restaurant_id, event_name, role)
   );
 `);
+
+// Migration for notification_settings
+try {
+  const info = centralDb.pragma("table_info(notification_settings)") as any[];
+  if (info.length > 0 && !info.some(c => c.name === 'role')) {
+    centralDb.transaction(() => {
+      centralDb.exec(`
+        CREATE TABLE notification_settings_new (
+          restaurant_id TEXT,
+          event_name TEXT,
+          role TEXT DEFAULT 'OWNER',
+          whatsapp_enabled INTEGER DEFAULT 0,
+          sms_enabled INTEGER DEFAULT 0,
+          email_enabled INTEGER DEFAULT 0,
+          PRIMARY KEY (restaurant_id, event_name, role)
+        );
+        INSERT INTO notification_settings_new (restaurant_id, event_name, whatsapp_enabled, sms_enabled, email_enabled)
+        SELECT restaurant_id, event_name, whatsapp_enabled, sms_enabled, email_enabled FROM notification_settings;
+        DROP TABLE notification_settings;
+        ALTER TABLE notification_settings_new RENAME TO notification_settings;
+      `);
+    })();
+  }
+} catch (e) {}
 
 // Migration to fix unique constraint on login_id (make it unique per restaurant)
 try {
@@ -388,6 +413,20 @@ function getTenantDb(restaurantId: string) {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       is_active INTEGER DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS bookings (
+      id TEXT PRIMARY KEY,
+      table_id TEXT NOT NULL,
+      customer_name TEXT NOT NULL,
+      customer_phone TEXT NOT NULL,
+      customer_email TEXT,
+      booking_date TEXT NOT NULL,
+      booking_time TEXT NOT NULL,
+      guests INTEGER NOT NULL,
+      status TEXT DEFAULT 'CONFIRMED',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(table_id) REFERENCES tables(id)
     );
 
     CREATE TABLE IF NOT EXISTS attendance (
@@ -544,7 +583,7 @@ async function startServer() {
       centralDb.prepare("INSERT INTO users (id, login_id, name, email, phone, password, restaurant_id, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(userId, loginId, name, email, phone, hashedPassword, restaurantId, 'OWNER');
 
       // Initialize default notification settings
-      const events = ['ORDER_PLACED', 'ORDER_READY', 'PAYMENT_RECEIVED', 'CUSTOMER_ORDER_CONFIRMATION', 'CUSTOMER_INVOICE', 'REGISTRATION_SUCCESS'];
+      const events = ['ORDER_PLACED', 'ORDER_READY', 'PAYMENT_RECEIVED', 'CUSTOMER_ORDER_CONFIRMATION', 'CUSTOMER_INVOICE', 'REGISTRATION_SUCCESS', 'TABLE_BOOKING'];
       const stmt = centralDb.prepare("INSERT INTO notification_settings (restaurant_id, event_name, whatsapp_enabled, sms_enabled, email_enabled) VALUES (?, ?, 1, 1, 1)");
       for (const event of events) {
         stmt.run(restaurantId, event);
@@ -831,6 +870,87 @@ async function startServer() {
     next();
   };
 
+  app.get("/api/public/restaurants/:id/tables/availability", (req, res) => {
+    const { date, time } = req.query;
+    if (!date || !time) return res.status(400).json({ error: "Date and time are required" });
+    
+    const tenantDb = getTenantDb(req.params.id);
+    const tables = tenantDb.prepare("SELECT * FROM tables WHERE is_active = 1").all() as any[];
+    
+    // Check which tables are booked at this date and time
+    // For simplicity, we assume a booking lasts 2 hours
+    const bookedTables = tenantDb.prepare(`
+      SELECT table_id FROM bookings 
+      WHERE booking_date = ? 
+      AND status = 'CONFIRMED'
+      AND (
+        (booking_time <= ? AND time(booking_time, '+2 hours') > ?)
+        OR
+        (booking_time >= ? AND booking_time < time(?, '+2 hours'))
+      )
+    `).all(date, time, time, time, time) as any[];
+    
+    const bookedTableIds = bookedTables.map(b => b.table_id);
+    const availableTables = tables.filter(t => !bookedTableIds.includes(t.id));
+    
+    res.json(availableTables);
+  });
+
+  app.post("/api/public/restaurants/:id/bookings", async (req, res) => {
+    const { tableId, customerName, customerPhone, customerEmail, bookingDate, bookingTime, guests } = req.body;
+    const restaurantId = req.params.id;
+    const tenantDb = getTenantDb(restaurantId);
+    
+    const bookingId = "book-" + Math.random().toString(36).substr(2, 6);
+    
+    try {
+      tenantDb.prepare(`
+        INSERT INTO bookings (id, table_id, customer_name, customer_phone, customer_email, booking_date, booking_time, guests)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(bookingId, tableId, customerName, customerPhone, customerEmail, bookingDate, bookingTime, guests);
+      
+      const restaurant = centralDb.prepare("SELECT name, admin_id FROM restaurants WHERE id = ?").get(restaurantId) as any;
+      const owner = centralDb.prepare("SELECT email, phone FROM users WHERE id = ?").get(restaurant.admin_id) as any;
+      
+      // Notify Owner
+      notify(restaurantId, 'TABLE_BOOKING', 'OWNER', { phone: owner.phone, email: owner.email }, {
+        subject: "New Table Booking Received",
+        message: `New booking for ${customerName} on ${bookingDate} at ${bookingTime} for ${guests} guests.\n\nCustomer Details:\nPhone: ${customerPhone}\nEmail: ${customerEmail || 'N/A'}`
+      });
+      
+      // Notify Customer
+      if (customerEmail) {
+        notify(restaurantId, 'TABLE_BOOKING', 'CUSTOMER', { email: customerEmail }, {
+          subject: `Table Booking Confirmed - ${restaurant.name}`,
+          message: `Your table booking at ${restaurant.name} is confirmed for ${bookingDate} at ${bookingTime}.`
+        });
+      }
+      
+      res.json({ success: true, bookingId });
+    } catch (err) {
+      console.error("Booking error:", err);
+      res.status(500).json({ error: "Failed to book table" });
+    }
+  });
+
+  app.get("/api/owner/bookings", authenticate, isOwner, (req: any, res) => {
+    const tenantDb = getTenantDb(req.user.restaurantId);
+    const bookings = tenantDb.prepare(`
+      SELECT b.*, t.name as table_name 
+      FROM bookings b 
+      JOIN tables t ON b.table_id = t.id 
+      ORDER BY b.booking_date DESC, b.booking_time DESC
+    `).all();
+    res.json(bookings);
+  });
+
+  app.post("/api/owner/bookings/:id/status", authenticate, isOwner, (req: any, res) => {
+    const { status } = req.body;
+    const tenantDb = getTenantDb(req.user.restaurantId);
+    tenantDb.prepare("UPDATE bookings SET status = ? WHERE id = ?").run(status, req.params.id);
+    res.json({ success: true });
+  });
+
   app.get("/api/owner/staff", authenticate, isOwner, (req: any, res) => {
     const staff = centralDb.prepare("SELECT id, login_id, name, role, phone FROM users WHERE restaurant_id = ? AND role IN ('CHEF', 'WAITER')").all(req.user.restaurantId);
     res.json(staff);
@@ -993,6 +1113,40 @@ async function startServer() {
   };
 
   // API Routes
+  app.get("/api/owner/notification-settings", authenticate, isOwner, (req: any, res) => {
+    const settings = centralDb.prepare("SELECT * FROM notification_settings WHERE restaurant_id = ?").all(req.user.restaurantId);
+    res.json(settings);
+  });
+
+  app.post("/api/owner/notification-settings", authenticate, isOwner, (req: any, res) => {
+    const { settings } = req.body;
+    
+    const upsert = centralDb.prepare(`
+      INSERT INTO notification_settings (restaurant_id, event_name, role, whatsapp_enabled, sms_enabled, email_enabled)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(restaurant_id, event_name, role) DO UPDATE SET
+        whatsapp_enabled = excluded.whatsapp_enabled,
+        sms_enabled = excluded.sms_enabled,
+        email_enabled = excluded.email_enabled
+    `);
+
+    const transaction = centralDb.transaction((items) => {
+      for (const item of items) {
+        upsert.run(
+          req.user.restaurantId,
+          item.event_name,
+          item.role,
+          item.whatsapp_enabled ? 1 : 0,
+          item.sms_enabled ? 1 : 0,
+          item.email_enabled ? 1 : 0
+        );
+      }
+    });
+
+    transaction(settings);
+    res.json({ success: true });
+  });
+
   app.get("/api/restaurant/:id", (req, res) => {
     const id = req.params.id;
     if (!id || id === 'null' || id === 'undefined' || id === '[object Object]') {
@@ -1174,9 +1328,9 @@ async function startServer() {
       
       // WhatsApp Notification for Owner and Chefs
       try {
-        const staffToNotify = centralDb.prepare("SELECT phone, email FROM users WHERE restaurant_id = ? AND (role = 'OWNER' OR role = 'CHEF')").all(restaurantId) as any[];
+        const staffToNotify = centralDb.prepare("SELECT phone, email, role FROM users WHERE restaurant_id = ? AND (role = 'OWNER' OR role = 'CHEF')").all(restaurantId) as any[];
         staffToNotify.forEach((staff: any) => {
-          notify(restaurantId, 'ORDER_PLACED', { phone: staff.phone, email: staff.email }, {
+          notify(restaurantId, 'ORDER_PLACED', staff.role, { phone: staff.phone, email: staff.email }, {
             subject: `New Order Received - ${orderId}`,
             message: `🔔 *New Order Received!*\n\nOrder ID: ${orderId}\nTable: ${tableNumber}\nCustomer: ${customerName}\nTotal: ₹${totalAmount}\n\nPlease check the dashboard.`
           });
@@ -1187,7 +1341,7 @@ async function startServer() {
 
       // Notify Customer
       try {
-        notify(restaurantId, 'CUSTOMER_ORDER_CONFIRMATION', { phone: customerPhone, email: customerEmail }, {
+        notify(restaurantId, 'CUSTOMER_ORDER_CONFIRMATION', 'CUSTOMER', { phone: customerPhone, email: customerEmail }, {
           subject: `Order Confirmed - ${orderId}`,
           message: `✅ *Order Confirmed!*\n\nHi ${customerName},\n\nYour order ${orderId} has been successfully placed at Table ${tableNumber}.\nTotal Amount: ₹${totalAmount}\n\nThank you for dining with us!`
         });
@@ -1218,7 +1372,7 @@ async function startServer() {
       if (status === 'PAID' && order) {
         // Notify Customer with Invoice
         try {
-          notify(restaurantId, 'CUSTOMER_INVOICE', { phone: order.customer_phone, email: order.customer_email }, {
+          notify(restaurantId, 'CUSTOMER_INVOICE', 'CUSTOMER', { phone: order.customer_phone, email: order.customer_email }, {
             subject: `Invoice for Order ${order.id}`,
             message: `🧾 *Invoice - Order ${order.id}*\n\nHi ${order.customer_name},\n\nThank you for your payment! Your order has been settled.\n\nTotal: ₹${order.total_amount}\nGST: ₹${order.gst_amount}\nGrand Total: ₹${(order.total_amount + order.gst_amount).toFixed(2)}\n\nWe hope you enjoyed your meal!`
           });
@@ -1230,7 +1384,7 @@ async function startServer() {
         try {
           const owner = centralDb.prepare("SELECT phone, email FROM users WHERE restaurant_id = ? AND role = 'OWNER'").get(restaurantId) as any;
           if (owner) {
-            notify(restaurantId, 'PAYMENT_RECEIVED', { phone: owner.phone, email: owner.email }, {
+            notify(restaurantId, 'PAYMENT_RECEIVED', 'OWNER', { phone: owner.phone, email: owner.email }, {
               subject: `Payment Received - Order ${req.params.id}`,
               message: `💰 *Payment Confirmed!*\n\nOrder ID: ${req.params.id}\nStatus: PAID\n\nThe customer payment has been verified.`
             });
@@ -1324,7 +1478,7 @@ async function startServer() {
         const order = db.prepare("SELECT table_number FROM orders WHERE id = ?").get(req.params.id) as any;
         const waiters = centralDb.prepare("SELECT phone, email FROM users WHERE restaurant_id = ? AND role = 'WAITER'").all(req.user.restaurantId) as any[];
         waiters.forEach((waiter: any) => {
-          notify(req.user.restaurantId, 'ORDER_READY', { phone: waiter.phone, email: waiter.email }, {
+          notify(req.user.restaurantId, 'ORDER_READY', 'WAITER', { phone: waiter.phone, email: waiter.email }, {
             subject: `Order Ready for Table ${order?.table_number || 'N/A'}`,
             message: `👨‍🍳 *Order Ready!*\n\nOrder ID: ${req.params.id}\nTable: ${order?.table_number || 'N/A'}\n\nPlease serve it to the customer.`
           });
