@@ -101,15 +101,28 @@ async function triggerNotification(restaurantId: string, eventName: string, data
 async function startServer() {
   await initDb();
 
-  // Create default super admin if none exists
+  // Ensure SYSTEM restaurant exists
+  const systemResto = await centralDb.get("SELECT * FROM restaurants WHERE id = 'SYSTEM'");
+  if (!systemResto) {
+    await centralDb.run(`
+      INSERT INTO restaurants (id, name, admin_id, state, city, is_active, registered_at) 
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, ["SYSTEM", "RestoFlow System", "SYSTEM-ADMIN", "N/A", "N/A", 1, new Date().toISOString()]);
+  }
+
+  // Create or Update default super admin
   const adminExists = await centralDb.get("SELECT * FROM users WHERE role = 'SUPER_ADMIN'");
+  const hashedPassword = await bcrypt.hash("admin123", 12);
   if (!adminExists) {
-    const hashedPassword = await bcrypt.hash("admin123", 12);
     await centralDb.run(`
       INSERT INTO users (id, login_id, name, email, phone, password, restaurant_id, role, is_active) 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [randomUUID(), "ADMIN-ANKUSH", "Ankush Admin", "ankushmanhotra@gmail.com", "0000000000", hashedPassword, "SYSTEM", "SUPER_ADMIN", 1]);
     console.log("Default SUPER_ADMIN created: ADMIN-ANKUSH / admin123");
+  } else {
+    // Optionally update password to ensure it matches what we tell the user
+    await centralDb.run("UPDATE users SET password = ?, login_id = ? WHERE role = 'SUPER_ADMIN'", [hashedPassword, "ADMIN-ANKUSH"]);
+    console.log("Default SUPER_ADMIN credentials verified: ADMIN-ANKUSH / admin123");
   }
 
   const app = express();
@@ -232,6 +245,16 @@ async function startServer() {
     }
   });
 
+  // Public: Get Restaurants
+  app.get("/api/public/restaurants", async (req: Request, res: Response) => {
+    try {
+      const restaurants = await centralDb.query("SELECT id, name FROM restaurants WHERE is_active = 1");
+      res.json(restaurants);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch public restaurants" });
+    }
+  });
+
   // Auth: Get Me
   app.get("/api/me", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -326,6 +349,12 @@ async function startServer() {
     const { email, restaurantName, name, password, phone, state, city, sales_rep_id } = req.body;
     
     try {
+      // Check if email already exists
+      const existingUser = await centralDb.get("SELECT id FROM users WHERE email = ?", [email]);
+      if (existingUser) {
+        return res.status(400).json({ error: "This email address is already registered. Please use a different email or login." });
+      }
+
       const seq = await getNextSequence('restaurant');
       const restaurantId = `RESTO-${1000 + seq}`;
       const loginId = `OWNER-${1000 + seq}`;
@@ -348,9 +377,15 @@ async function startServer() {
       `, [userId, loginId, name, email, phone, hashedPassword, restaurantId, 'OWNER']);
 
       res.json({ success: true, loginId, restaurantId });
-    } catch (err) {
+    } catch (err: any) {
       console.error("Registration error:", err);
-      res.status(500).json({ error: "Registration failed. Email or Login ID might already exist." });
+      if (err.message && err.message.includes("UNIQUE constraint failed: users.email")) {
+        return res.status(400).json({ error: "This email address is already registered." });
+      }
+      if (err.message && err.message.includes("UNIQUE constraint failed: users.login_id")) {
+        return res.status(400).json({ error: "A user with this Login ID already exists." });
+      }
+      res.status(500).json({ error: "Registration failed. Please try again later." });
     }
   });
 

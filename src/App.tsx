@@ -346,6 +346,9 @@ export default function App() {
                           <option value="OWNER">Business Owner</option>
                           <option value="CHEF">Chef / Kitchen Staff</option>
                           <option value="WAITER">Waiter / Attender</option>
+                          <option value="SUPER_ADMIN">ERP Admin</option>
+                          <option value="SALES_REP">Sales Representative</option>
+                          <option value="CTO">CTO</option>
                         </select>
                       </div>
 
@@ -563,15 +566,22 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
   const [restaurantName, setRestaurantName] = useState('');
   const [salesRepId, setSalesRepId] = useState('');
   const [selectedRole, setSelectedRole] = useState<UserRole>(initialRole || 'OWNER');
-
-  useEffect(() => {
-    if (initialRole) setSelectedRole(initialRole);
-  }, [initialRole]);
   const [selectedRestaurantId, setSelectedRestaurantId] = useState('');
   const [restaurants, setRestaurants] = useState<{id: string, name: string}[]>([]);
   const [loading, setLoading] = useState(false);
   const [registrationResult, setRegistrationResult] = useState<{ loginId: string, password: string, restaurantId: string } | null>(null);
   const [salesReps, setSalesReps] = useState<{id: string, name: string}[]>([]);
+
+  useEffect(() => {
+    if (initialRole) setSelectedRole(initialRole);
+    if (initialRole === 'SUPER_ADMIN') setSelectedRestaurantId('SYSTEM');
+  }, [initialRole]);
+
+  useEffect(() => {
+    if (selectedRole === 'SUPER_ADMIN' || selectedRole === 'CTO' || selectedRole === 'SALES_REP') {
+      setSelectedRestaurantId('SYSTEM');
+    }
+  }, [selectedRole]);
 
   useEffect(() => {
     if (mode === 'LOGIN') {
