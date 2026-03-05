@@ -5697,6 +5697,23 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
     }
   };
 
+  const testNotification = async (eventName: string) => {
+    try {
+      const res = await fetch('/api/owner/test-notification', {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ eventName })
+      });
+      if (res.ok) alert("Test notification triggered!");
+      else alert("Failed to trigger test notification. Check console.");
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   if (loading) return <div className="p-12 text-center">Loading settings...</div>;
 
   return (
@@ -5730,6 +5747,7 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
                     </div>
                   </th>
                 ))}
+                <th className="px-8 py-6 text-[10px] font-bold uppercase tracking-widest text-[#5A5A40]/50">Additional Recipients</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#5A5A40]/5">
@@ -5740,7 +5758,19 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
                     return (
                       <tr key={`${event.id}-${role}`} className="hover:bg-[#fcfcfc] transition-colors">
                         <td className="px-8 py-6">
-                          {idx === 0 && <p className="font-bold text-[#1a1a1a] mb-1">{event.label}</p>}
+                          {idx === 0 && (
+                            <div className="flex items-center justify-between group">
+                              <div>
+                                <p className="font-bold text-[#1a1a1a] mb-1">{event.label}</p>
+                              </div>
+                              <button 
+                                onClick={() => testNotification(event.id)}
+                                className="opacity-0 group-hover:opacity-100 p-2 text-[9px] font-bold uppercase tracking-widest text-[#5A5A40] bg-[#5A5A40]/5 rounded-lg hover:bg-[#5A5A40]/10 transition-all"
+                              >
+                                Test
+                              </button>
+                            </div>
+                          )}
                           <span className="inline-block px-2 py-0.5 bg-[#5A5A40]/10 text-[#5A5A40] rounded text-[9px] font-bold uppercase tracking-widest">
                             Notify {role}
                           </span>
@@ -5761,6 +5791,24 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
                             </button>
                           </td>
                         ))}
+                        <td className="px-8 py-6">
+                          <input 
+                            placeholder="Emails/Phones (comma separated)"
+                            className="w-full bg-[#f5f5f0] border-none rounded-xl px-4 py-2 text-xs outline-none"
+                            value={setting?.recipients || ''}
+                            onChange={e => {
+                              const val = e.target.value;
+                              setSettings(prev => {
+                                const existing = prev.find(s => s.event_name === event.id && s.role === role);
+                                if (existing) {
+                                  return prev.map(s => (s.event_name === event.id && s.role === role) ? { ...s, recipients: val } : s);
+                                } else {
+                                  return [...prev, { event_name: event.id, role, recipients: val }];
+                                }
+                              });
+                            }}
+                          />
+                        </td>
                       </tr>
                     );
                   })}

@@ -142,7 +142,17 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
       total_amount REAL,
       status TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
+    );
+
+    CREATE TABLE IF NOT EXISTS notification_settings (
+      event_name TEXT,
+      role TEXT,
+      email_enabled INTEGER DEFAULT 0,
+      sms_enabled INTEGER DEFAULT 0,
+      whatsapp_enabled INTEGER DEFAULT 0,
+      recipients TEXT,
+      PRIMARY KEY (event_name, role)
+    );
   `);
 
   tenantDbCache.set(restaurantId, db);

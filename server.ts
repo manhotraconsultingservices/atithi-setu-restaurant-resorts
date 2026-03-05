@@ -7,6 +7,7 @@ import { randomUUID } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { centralDb, getTenantDb, initDb, getNextSequence } from "./db.ts";
+import { sendEmail, sendSMS, sendWhatsApp } from "./notificationService.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,6 +52,51 @@ const isAdmin = (req: AuthRequest, res: Response, next: NextFunction) => {
 };
 
 const MAX_TENANTS_IN_MEMORY = 100;
+
+async function triggerNotification(restaurantId: string, eventName: string, data: any) {
+  try {
+    const db = await getTenantDb(restaurantId);
+    const settings = await db.query("SELECT * FROM notification_settings WHERE event_name = ?", [eventName]);
+    if (!settings || settings.length === 0) return;
+
+    for (const setting of settings) {
+      // Determine recipients based on role
+      let recipients: string[] = [];
+      if (setting.role === 'CUSTOMER' && data.customerEmail) {
+        recipients.push(data.customerEmail);
+        if (data.customerPhone) recipients.push(data.customerPhone);
+      } else {
+        // Fetch users with this role for this restaurant
+        const users = await centralDb.query("SELECT email, phone FROM users WHERE restaurant_id = ? AND role = ? AND is_active = 1", [restaurantId, setting.role]);
+        users.forEach(u => {
+          if (u.email) recipients.push(u.email);
+          if (u.phone) recipients.push(u.phone);
+        });
+      }
+
+      // Add manual recipients if any
+      if (setting.recipients) {
+        setting.recipients.split(',').forEach((r: string) => recipients.push(r.trim()));
+      }
+
+      const message = `Notification: ${eventName}\nData: ${JSON.stringify(data, null, 2)}`;
+
+      for (const recipient of recipients) {
+        if (setting.email_enabled && recipient.includes('@')) {
+          await sendEmail(recipient, `RestoFlow: ${eventName}`, message);
+        }
+        if (setting.sms_enabled && !recipient.includes('@')) {
+          await sendSMS(recipient, message);
+        }
+        if (setting.whatsapp_enabled && !recipient.includes('@')) {
+          await sendWhatsApp(recipient, message);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`Failed to trigger notification for ${eventName}:`, err);
+  }
+}
 
 async function startServer() {
   await initDb();
@@ -194,6 +240,49 @@ async function startServer() {
       res.json(user);
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch user info" });
+    }
+  });
+
+  // Owner: Notification Settings
+  app.get("/api/owner/notification-settings", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const settings = await db.query("SELECT * FROM notification_settings");
+      res.json(settings);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch notification settings" });
+    }
+  });
+
+  app.post("/api/owner/notification-settings", authenticate, async (req: AuthRequest, res: Response) => {
+    const { settings } = req.body;
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      for (const s of settings) {
+        await db.run(`
+          INSERT INTO notification_settings (event_name, role, email_enabled, sms_enabled, whatsapp_enabled, recipients)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(event_name, role) DO UPDATE SET
+            email_enabled = excluded.email_enabled,
+            sms_enabled = excluded.sms_enabled,
+            whatsapp_enabled = excluded.whatsapp_enabled,
+            recipients = excluded.recipients
+        `, [s.event_name, s.role, s.email_enabled ? 1 : 0, s.sms_enabled ? 1 : 0, s.whatsapp_enabled ? 1 : 0, s.recipients || '']);
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Update notification settings error:", err);
+      res.status(500).json({ error: "Failed to update notification settings" });
+    }
+  });
+
+  app.post("/api/owner/test-notification", authenticate, async (req: AuthRequest, res: Response) => {
+    const { eventName, data } = req.body;
+    try {
+      await triggerNotification(req.user!.restaurantId, eventName, data || { test: "This is a test notification" });
+      res.json({ success: true, message: "Notification triggered" });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to trigger test notification" });
     }
   });
 
