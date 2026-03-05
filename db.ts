@@ -112,6 +112,11 @@ export async function initDb() {
       role TEXT,
       is_active INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS sequences (
+      name TEXT PRIMARY KEY,
+      current_value INTEGER DEFAULT 0
+    );
   `);
 }
 
@@ -142,4 +147,15 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
 
   tenantDbCache.set(restaurantId, db);
   return db;
+}
+
+export async function getNextSequence(name: string): Promise<number> {
+  const row = await centralDb.get("SELECT current_value FROM sequences WHERE name = ?", [name]);
+  if (!row) {
+    await centralDb.run("INSERT INTO sequences (name, current_value) VALUES (?, 1)", [name]);
+    return 1;
+  }
+  const nextValue = row.current_value + 1;
+  await centralDb.run("UPDATE sequences SET current_value = ? WHERE name = ?", [nextValue, name]);
+  return nextValue;
 }

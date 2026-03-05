@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
-import { centralDb, getTenantDb, initDb } from "./db.js";
+import { centralDb, getTenantDb, initDb, getNextSequence } from "./db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -237,9 +237,11 @@ async function startServer() {
     const { email, restaurantName, name, password, phone, state, city, sales_rep_id } = req.body;
     
     try {
-      const loginId = "OWNER-" + randomUUID().split('-')[0].toUpperCase();
+      const seq = await getNextSequence('restaurant');
+      const restaurantId = `RESTO-${1000 + seq}`;
+      const loginId = `OWNER-${1000 + seq}`;
+      
       const hashedPassword = await bcrypt.hash(password, 12);
-      const restaurantId = "resto-" + randomUUID();
       const userId = "user-" + randomUUID();
 
       const now = new Date().toISOString();
