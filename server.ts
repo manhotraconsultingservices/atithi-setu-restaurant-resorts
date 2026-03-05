@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
-import { centralDb, getTenantDb, initDb, getNextSequence } from "./db.js";
+import { centralDb, getTenantDb, initDb, getNextSequence } from "./db.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
