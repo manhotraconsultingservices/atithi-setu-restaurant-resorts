@@ -2070,7 +2070,7 @@ async function startServer() {
       `, [
         name,
         gst_number || null,
-        gst_percentage || 5,
+        gst_percentage != null ? Number(gst_percentage) : 0,
         is_gst_enabled ? 1 : 0,
         template_id || 'CLASSIC',
         table_count || 0,
@@ -2206,7 +2206,7 @@ async function startServer() {
       });
 
       // Defaults: if gst_percent not set on session, use restaurant setting
-      const defaultGstPct  = restaurant?.is_gst_enabled ? (Number(restaurant.gst_percentage) || 5) : 0;
+      const defaultGstPct  = restaurant?.is_gst_enabled ? (Number(restaurant.gst_percentage) || 0) : 0;
       const defaultApplyGst = restaurant?.is_gst_enabled ? 1 : 0;
 
       res.json({
@@ -2215,8 +2215,7 @@ async function startServer() {
           table_display_name: tableRow?.name || session.table_name || session.table_id,
           discount_amount:        Number(session.discount_amount || 0),
           service_charge_percent: Number(session.service_charge_percent || 0),
-          gst_percent:  (session.gst_percent != null && Number(session.gst_percent) > 0)
-                          ? Number(session.gst_percent) : defaultGstPct,
+          gst_percent:  session.gst_percent != null ? Number(session.gst_percent) : defaultGstPct,
           apply_gst:    session.apply_gst != null ? Number(session.apply_gst) : defaultApplyGst,
           orders,
         },
@@ -3636,7 +3635,7 @@ async function startServer() {
       let items = order.items;
       if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
       if (!Array.isArray(items)) items = [];
-      res.json({ ...order, items, discount_amount: Number(order.discount_amount || 0), service_charge_percent: Number(order.service_charge_percent || 0), gst_percent: Number(order.gst_percent || 0), apply_gst: order.apply_gst === undefined ? 1 : Number(order.apply_gst) });
+      res.json({ ...order, items, discount_amount: Number(order.discount_amount || 0), service_charge_percent: Number(order.service_charge_percent || 0), gst_percent: Number(order.gst_percent || 0), apply_gst: order.apply_gst === undefined ? 0 : Number(order.apply_gst) });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch invoice" });
     }
@@ -3650,7 +3649,7 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge_percent FLOAT DEFAULT 0").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0").catch(() => {});
-      const { items, discount_amount = 0, service_charge_percent = 0, gst_percent = 5, apply_gst = 1 } = req.body;
+      const { items, discount_amount = 0, service_charge_percent = 0, gst_percent = 0, apply_gst = 0 } = req.body;
       const rawSubtotal   = (items as any[]).reduce((s, it) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
       const afterDiscount = Math.max(0, rawSubtotal - Number(discount_amount));
       const svcAmt        = afterDiscount * Number(service_charge_percent) / 100;

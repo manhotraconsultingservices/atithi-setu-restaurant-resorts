@@ -61,6 +61,7 @@ import {
   LayoutGrid,
   List,
   Sparkles,
+  IndianRupee,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize, TableSession, LiveTableView, TableStatus } from './types';
@@ -2506,7 +2507,7 @@ function AnalyticsDashboard({
                     restaurantName: restaurant?.name || 'Restaurant',
                     gstin:          restaurant?.gst_number,
                     gstEnabled:     restaurant?.is_gst_enabled,
-                    gstPercent:     restaurant?.gst_percentage ?? 5,
+                    gstPercent:     restaurant?.gst_percentage ?? 0,
                     billId:         String(order.id).slice(-8).toUpperCase(),
                     tableName:      order.table_number ? `T-${order.table_number}` : undefined,
                     customerName:   order.customer_name || undefined,
@@ -2947,8 +2948,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setInvoiceItems(items.map((it: any) => ({ ...it })));
       setInvoiceDiscount(Number(data.discount_amount || 0));
       setInvoiceServiceCharge(Number(data.service_charge_percent || 0));
-      setInvoiceGstPercent(Number(data.gst_percent ?? restaurant?.gst_percentage ?? 5));
-      setInvoiceApplyGst(Number(data.apply_gst ?? 1) !== 0);
+      setInvoiceGstPercent(Number(data.gst_percent ?? restaurant?.gst_percentage ?? 0));
+      setInvoiceApplyGst(Number(data.apply_gst ?? 0) !== 0);
       setInvoiceMode(mode);
       setAddItemForm({ name: '', price: '', quantity: '1' });
     } catch {
@@ -2958,8 +2959,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setInvoiceItems(items.map((it: any) => ({ ...it })));
       setInvoiceDiscount(Number(order.discount_amount || 0));
       setInvoiceServiceCharge(Number(order.service_charge_percent || 0));
-      setInvoiceGstPercent(Number(restaurant?.gst_percentage ?? 5));
-      setInvoiceApplyGst(true);
+      setInvoiceGstPercent(Number(restaurant?.gst_percentage ?? 0));
+      setInvoiceApplyGst(Boolean(restaurant?.is_gst_enabled));
       setInvoiceMode(mode);
       setAddItemForm({ name: '', price: '', quantity: '1' });
     }
@@ -4878,7 +4879,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               className="p-2 rounded-xl border border-[#e8721c]/20 text-[#e8721c] hover:bg-[#e8721c]/5 transition-all"
                               onClick={() => {
                                 const items = Array.isArray(order.items) ? order.items : [];
-                                printInvoiceOrder(order, items, Number((order as any).discount_amount || 0), (order as any).apply_gst !== 0, Number((order as any).service_charge_percent || 0), Number((order as any).gst_percent ?? restaurant?.gst_percentage ?? 5));
+                                printInvoiceOrder(order, items, Number((order as any).discount_amount || 0), (order as any).apply_gst !== 0, Number((order as any).service_charge_percent || 0), Number((order as any).gst_percent ?? restaurant?.gst_percentage ?? 0));
                               }}
                             >
                               <Printer size={14} />
@@ -7704,7 +7705,7 @@ function buildThermalHTML(d: ThermalReceiptData): string {
     });
   });
 
-  const gstLabel = `GST @ ${d.gstPercent ?? 5}%`;
+  const gstLabel = `GST @ ${d.gstPercent ?? 0}%`;
 
   return `<!DOCTYPE html>
 <html>
@@ -8517,7 +8518,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         restaurantName: restaurant?.name || 'Restaurant',
         gstin:          restaurant?.gst_number,
         gstEnabled:     restaurant?.is_gst_enabled,
-        gstPercent:     restaurant?.gst_percentage ?? 5,
+        gstPercent:     restaurant?.gst_percentage ?? 0,
         billId:         order.id.slice(-8).toUpperCase(),
         tableName:      tableName || undefined,
         customerName:   order.customerName || undefined,
@@ -8632,7 +8633,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
               </div>
               {order.gstAmount ? (
                 <div className="flex justify-between text-sm text-[#0d0a07]/60">
-                  <span>GST ({restaurant?.gst_percentage ?? 5}%)</span>
+                  <span>GST ({restaurant?.gst_percentage ?? 0}%)</span>
                   <span className="font-mono">₹{(order.gstAmount).toFixed(2)}</span>
                 </div>
               ) : null}
@@ -8775,7 +8776,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       restaurantName: restaurant?.name || 'Restaurant',
       gstin:          restaurant?.gst_number,
       gstEnabled:     restaurant?.is_gst_enabled,
-      gstPercent:     restaurant?.gst_percentage ?? 5,
+      gstPercent:     restaurant?.gst_percentage ?? 0,
       billId:         (session.id || '').slice(-8).toUpperCase(),
       tableName:      session.table_name || tableName || undefined,
       customerName:   session.customer_name || undefined,
@@ -8911,7 +8912,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                   </div>
                   {sessionGstTotal > 0 && (
                     <div className="flex justify-between text-sm text-[#0d0a07]/60">
-                      <span>GST ({restaurant?.gst_percentage ?? 5}%)</span>
+                      <span>GST ({restaurant?.gst_percentage ?? 0}%)</span>
                       <span className="font-mono">₹{sessionGstTotal.toFixed(2)}</span>
                     </div>
                   )}
@@ -9403,7 +9404,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                     disabled={isPlacingOrder}
                     className="w-full bg-[#e8721c] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#c9592a] transition-all disabled:opacity-60"
                   >
-                    {isPlacingOrder ? <RefreshCw size={20} className="animate-spin" /> : <Receipt size={20} />}
+                    {isPlacingOrder ? <RefreshCw size={20} className="animate-spin" /> : <IndianRupee size={20} />}
                     {isPlacingOrder ? 'Placing Order…' : 'Add to Bill'}
                   </button>
                 ) : (
@@ -10992,7 +10993,7 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
   const filteredMenu = selectedCat === 'All' ? menu : menu.filter(m => m.category === selectedCat);
   const sessionOrders = session?.orders || [];
   const sessionTotal = sessionOrders.reduce((s: number, o: any) => s + Number(o.totalAmount || 0), 0);
-  const gstRate = restaurant?.is_gst_enabled ? (restaurant.gst_percentage ?? 5) : 0;
+  const gstRate = restaurant?.is_gst_enabled ? (restaurant.gst_percentage ?? 0) : 0;
   const sessionGst = sessionOrders.reduce((s: number, o: any) => s + Number(o.gst_amount ?? o.gstAmount ?? 0), 0);
 
   const placeOrder = async () => {
@@ -11237,8 +11238,8 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
           setRestaurant(rest);
           setDiscount(Number(sess.discount_amount || 0));
           setSvcPct(Number(sess.service_charge_percent || 0));
-          setGstPct(Number(sess.gst_percent || (rest?.is_gst_enabled ? (rest?.gst_percentage ?? 5) : 5)));
-          setApplyGst(Number(sess.apply_gst) === 1);
+          setGstPct(Number(sess.gst_percent != null ? sess.gst_percent : (rest?.is_gst_enabled ? (rest?.gst_percentage ?? 0) : 0)));
+          setApplyGst(sess.apply_gst != null ? Number(sess.apply_gst) === 1 : Boolean(rest?.is_gst_enabled));
           if (sess.payment_method) setPayMethod(sess.payment_method as 'CASH' | 'CARD' | 'UPI');
           // All rounds expanded by default
           const exp: Record<number, boolean> = {};
