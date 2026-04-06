@@ -11,6 +11,7 @@ import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, DbInter
 import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, buildNotificationContent } from "./notificationService.ts";
 import { downloadFromDrive } from "./googleDriveService.ts";
 import multer from "multer";
+import cron from "node-cron";
 
 /** Returns a map of { "HH:MI" → bookedCount } for a given date, excluding cancelled bookings. */
 async function getSlotCountMap(db: DbInterface, dateStr: string): Promise<Record<string, number>> {
@@ -632,16 +633,17 @@ async function startServer() {
       const db = await getTenantDb(req.user!.restaurantId);
       for (const s of settings) {
         await db.run(`
-          INSERT INTO notification_settings (event_name, role, email_enabled, sms_enabled, whatsapp_enabled, telegram_enabled, telegram_chat_id, recipients)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO notification_settings (event_name, role, email_enabled, sms_enabled, whatsapp_enabled, telegram_enabled, telegram_chat_id, recipients, schedule_time)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(event_name, role) DO UPDATE SET
-            email_enabled = excluded.email_enabled,
-            sms_enabled = excluded.sms_enabled,
+            email_enabled    = excluded.email_enabled,
+            sms_enabled      = excluded.sms_enabled,
             whatsapp_enabled = excluded.whatsapp_enabled,
             telegram_enabled = excluded.telegram_enabled,
             telegram_chat_id = excluded.telegram_chat_id,
-            recipients = excluded.recipients
-        `, [s.event_name, s.role, s.email_enabled ? 1 : 0, s.sms_enabled ? 1 : 0, s.whatsapp_enabled ? 1 : 0, s.telegram_enabled ? 1 : 0, s.telegram_chat_id || '', s.recipients || '']);
+            recipients       = excluded.recipients,
+            schedule_time    = excluded.schedule_time
+        `, [s.event_name, s.role, s.email_enabled ? 1 : 0, s.sms_enabled ? 1 : 0, s.whatsapp_enabled ? 1 : 0, s.telegram_enabled ? 1 : 0, s.telegram_chat_id || '', s.recipients || '', s.schedule_time || '']);
       }
       res.json({ success: true });
     } catch (err) {
@@ -3850,6 +3852,89 @@ async function startServer() {
   app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  // ── Notification Scheduler ──────────────────────────────────────────────────
+  // Runs every minute. For each tenant that has a schedule_time set on a
+  // schedulable event (e.g. DAILY_REPORT), fires that notification with real data.
+  cron.schedule('* * * * *', async () => {
+    try {
+      const now = new Date();
+      const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+      // Get all active restaurants
+      const restaurants = await centralDb.query("SELECT id FROM restaurants WHERE id <> 'SYSTEM'");
+
+      for (const restaurant of restaurants) {
+        try {
+          const db = await getTenantDb(restaurant.id);
+          // Find any notification settings scheduled for right now
+          const scheduled = await db.query(
+            "SELECT * FROM notification_settings WHERE schedule_time = ? AND schedule_time <> ''",
+            [currentTime]
+          );
+
+          for (const setting of scheduled) {
+            console.log(`[Scheduler] Firing ${setting.event_name} for restaurant ${restaurant.id} at ${currentTime}`);
+
+            let data: any = {};
+
+            // Build real data payload for each schedulable event type
+            if (setting.event_name === 'DAILY_REPORT') {
+              const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+              // Total orders and revenue for today (exclude cancelled)
+              const summary = await db.get(
+                `SELECT COUNT(*) as order_count, COALESCE(SUM(total_amount), 0) as revenue
+                 FROM orders
+                 WHERE DATE(created_at) = ?
+                   AND LOWER(status) <> 'cancelled'`,
+                [today]
+              );
+
+              // Top-selling item for today
+              let topItem = 'N/A';
+              try {
+                const itemRows = await db.query(
+                  `SELECT items FROM orders
+                   WHERE DATE(created_at) = ?
+                     AND LOWER(status) <> 'cancelled'`,
+                  [today]
+                );
+                const countMap: Record<string, number> = {};
+                for (const row of itemRows) {
+                  try {
+                    const items = JSON.parse(row.items || '[]');
+                    for (const item of items) {
+                      const n = (item.name || '').replace(/\s*\(.*?\)\s*$/, '').trim(); // strip size suffix
+                      countMap[n] = (countMap[n] || 0) + (item.quantity || 1);
+                    }
+                  } catch { /* skip malformed row */ }
+                }
+                const sorted = Object.entries(countMap).sort((a, b) => b[1] - a[1]);
+                if (sorted.length > 0) topItem = sorted[0][0];
+              } catch { /* fallback to N/A */ }
+
+              data = {
+                date: new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+                orderCount: parseInt(summary?.order_count ?? '0', 10),
+                revenue: parseFloat(summary?.revenue ?? '0').toFixed(2),
+                topItem,
+              };
+
+              console.log(`[Scheduler] DAILY_REPORT data: orders=${data.orderCount}, revenue=₹${data.revenue}, top="${data.topItem}"`);
+            }
+
+            await triggerNotification(restaurant.id, setting.event_name, data);
+          }
+        } catch (tenantErr) {
+          console.error(`[Scheduler] Error processing restaurant ${restaurant.id}:`, tenantErr);
+        }
+      }
+    } catch (err) {
+      console.error('[Scheduler] Cron job error:', err);
+    }
+  });
+  console.log('[Scheduler] Notification scheduler started — checking every minute');
 }
 
 startServer().catch(console.error);

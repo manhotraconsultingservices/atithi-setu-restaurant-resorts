@@ -12902,7 +12902,7 @@ const NOTIFICATION_EVENTS: {
   { id: 'BOOKING_CANCELLED',          label: 'Booking Cancelled',             roles: ['OWNER', 'CUSTOMER'], group: 'Bookings',            description: 'Fired when a booking is cancelled by owner or customer' },
   // Feedback & Reports
   { id: 'NEW_FEEDBACK',               label: 'New Customer Feedback',         roles: ['OWNER'],              group: 'Feedback & Reports',  description: 'Fired when a customer submits a rating or review' },
-  { id: 'DAILY_REPORT',               label: 'Daily Sales Summary',           roles: ['OWNER'],              group: 'Feedback & Reports',  description: 'End-of-day summary of orders and revenue' },
+  { id: 'DAILY_REPORT',               label: 'Daily Sales Summary',           roles: ['OWNER'],              group: 'Feedback & Reports',  description: 'End-of-day summary of orders and revenue', schedulable: true },
   { id: 'STAFF_ATTENDANCE',           label: 'Staff Check-In / Check-Out',    roles: ['OWNER'],              group: 'Feedback & Reports',  description: 'Fired when a staff member logs attendance' },
 ];
 
@@ -13054,6 +13054,7 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
                   ))}
                   <th className="px-4 py-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50 min-w-[160px]">Telegram Chat ID</th>
                   <th className="px-4 py-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50 min-w-[220px]">Additional Recipients</th>
+                  <th className="px-4 py-4 text-center text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50 min-w-[130px]">Schedule Time</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#5A5A40]/5">
@@ -13134,6 +13135,36 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
                                 });
                               }}
                             />
+                          </td>
+                          {/* Schedule Time — only for schedulable events */}
+                          <td className="px-4 py-5 text-center">
+                            {(event as any).schedulable ? (
+                              <div className="flex flex-col items-center gap-1">
+                                <input
+                                  type="time"
+                                  className="bg-[#faf5ee] border border-[#e8721c]/20 rounded-xl px-3 py-2 text-xs outline-none focus:ring-2 ring-[#e8721c]/30 font-mono w-[110px] cursor-pointer"
+                                  value={setting?.schedule_time || ''}
+                                  title={setting?.schedule_time ? `Fires daily at ${setting.schedule_time}` : 'Set a time to auto-send daily'}
+                                  onChange={e => {
+                                    const val = e.target.value;
+                                    setSettings(prev => {
+                                      const existing = prev.find(s => s.event_name === event.id && s.role === role);
+                                      if (existing) {
+                                        return prev.map(s => (s.event_name === event.id && s.role === role) ? { ...s, schedule_time: val } : s);
+                                      }
+                                      return [...prev, { event_name: event.id, role, schedule_time: val }];
+                                    });
+                                  }}
+                                />
+                                {setting?.schedule_time ? (
+                                  <span className="text-[9px] text-[#e8721c] font-bold">Daily at {setting.schedule_time}</span>
+                                ) : (
+                                  <span className="text-[9px] text-[#0d0a07]/30">Not scheduled</span>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-[9px] text-[#0d0a07]/20">—</span>
+                            )}
                           </td>
                         </tr>
                       );
