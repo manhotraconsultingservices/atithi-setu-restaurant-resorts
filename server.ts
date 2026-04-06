@@ -2206,8 +2206,10 @@ async function startServer() {
       });
 
       // Defaults: if gst_percent not set on session, use restaurant setting
-      const defaultGstPct  = restaurant?.is_gst_enabled ? (Number(restaurant.gst_percentage) || 0) : 0;
-      const defaultApplyGst = restaurant?.is_gst_enabled ? 1 : 0;
+      // If restaurant has GST disabled, always override to 0 / off regardless of stored session value
+      const gstEnabled      = Boolean(restaurant?.is_gst_enabled);
+      const defaultGstPct   = gstEnabled ? (Number(restaurant.gst_percentage) || 0) : 0;
+      const defaultApplyGst = gstEnabled ? 1 : 0;
 
       res.json({
         session: {
@@ -2215,8 +2217,8 @@ async function startServer() {
           table_display_name: tableRow?.name || session.table_name || session.table_id,
           discount_amount:        Number(session.discount_amount || 0),
           service_charge_percent: Number(session.service_charge_percent || 0),
-          gst_percent:  session.gst_percent != null ? Number(session.gst_percent) : defaultGstPct,
-          apply_gst:    session.apply_gst != null ? Number(session.apply_gst) : defaultApplyGst,
+          gst_percent:  gstEnabled ? (session.gst_percent != null ? Number(session.gst_percent) : defaultGstPct) : 0,
+          apply_gst:    gstEnabled ? (session.apply_gst != null ? Number(session.apply_gst) : defaultApplyGst) : 0,
           orders,
         },
         restaurant,

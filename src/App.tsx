@@ -8827,7 +8827,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
               activeCustomerTab === 'MY_ORDERS' ? "bg-[#e8721c] text-white shadow-md" : "text-[#0d0a07]/60 hover:text-[#0d0a07]"
             )}
           >
-            <Receipt size={16} /> My Orders
+            <ShoppingCart size={16} /> My Orders
             {(session.orders?.length || 0) > 0 && (
               <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
                 {session.orders?.length}
@@ -9061,7 +9061,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                   onClick={() => setShowBillRequestModal(true)}
                   className="w-full bg-[#1a1a1a] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:scale-[1.01] transition-transform shadow-xl"
                 >
-                  <Receipt size={20} /> Request Bill — ₹{(sessionRunningTotal + sessionGstTotal).toFixed(2)}
+                  <IndianRupee size={20} /> Request Bill — ₹{(sessionRunningTotal + sessionGstTotal).toFixed(2)}
                 </button>
               )}
 
@@ -11238,8 +11238,8 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
           setRestaurant(rest);
           setDiscount(Number(sess.discount_amount || 0));
           setSvcPct(Number(sess.service_charge_percent || 0));
-          setGstPct(Number(sess.gst_percent != null ? sess.gst_percent : (rest?.is_gst_enabled ? (rest?.gst_percentage ?? 0) : 0)));
-          setApplyGst(sess.apply_gst != null ? Number(sess.apply_gst) === 1 : Boolean(rest?.is_gst_enabled));
+          setGstPct(Number(rest?.is_gst_enabled ? (sess.gst_percent != null ? sess.gst_percent : (rest?.gst_percentage ?? 0)) : 0));
+          setApplyGst(Boolean(rest?.is_gst_enabled) && (sess.apply_gst != null ? Number(sess.apply_gst) === 1 : true));
           if (sess.payment_method) setPayMethod(sess.payment_method as 'CASH' | 'CARD' | 'UPI');
           // All rounds expanded by default
           const exp: Record<number, boolean> = {};
