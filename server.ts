@@ -90,6 +90,12 @@ const MAX_TENANTS_IN_MEMORY = 100;
 
 async function triggerNotification(restaurantId: string, eventName: string, data: any) {
   try {
+    // Inject restaurant name so all notifications display the correct restaurant
+    if (!data.restaurantName) {
+      const rRow = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]);
+      data = { ...data, restaurantName: rRow?.name || 'Atithi-Setu' };
+    }
+
     const db = await getTenantDb(restaurantId);
     const settings = await db.query("SELECT * FROM notification_settings WHERE event_name = ?", [eventName]);
     if (!settings || settings.length === 0) return;

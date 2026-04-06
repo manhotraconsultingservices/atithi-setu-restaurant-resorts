@@ -448,14 +448,19 @@ export async function sendEmail(
     return;
   }
   try {
+    // Always BCC the configured SMTP account so the owner gets a copy of every notification.
+    // Skip BCC if the recipient is already the SMTP user (avoid duplicate).
+    const smtpUser = process.env.SMTP_USER;
+    const bcc = smtpUser && smtpUser.toLowerCase() !== to.toLowerCase() ? smtpUser : undefined;
     await mailTransporter.sendMail({
       from: process.env.SMTP_FROM,
       to,
+      bcc,
       subject,
       text,
       html,
     });
-    console.log(`[Notification] Email sent → ${to}`);
+    console.log(`[Notification] Email sent → ${to}${bcc ? ` (bcc: ${bcc})` : ''}`);
   } catch (err) {
     console.error('[Notification] Email send failed:', err);
   }

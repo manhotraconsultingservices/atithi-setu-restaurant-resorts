@@ -82,6 +82,52 @@ import {
   Legend,
 } from 'recharts';
 
+// ── Reusable Pagination Bar ────────────────────────────────────────────────
+const PAGE_SIZE = 20;
+
+function PaginationBar({ page, totalPages, setPage, total, pageSize = PAGE_SIZE }: {
+  page: number; totalPages: number;
+  setPage: (p: number | ((prev: number) => number)) => void;
+  total: number; pageSize?: number;
+}) {
+  if (total === 0) return null;
+  const start = Math.min((page - 1) * pageSize + 1, total);
+  const end   = Math.min(page * pageSize, total);
+  const rawPages = Array.from({ length: totalPages }, (_, i) => i + 1)
+    .filter(p => p === 1 || p === totalPages || Math.abs(p - page) <= 1);
+  const withEllipsis: (number | '...')[] = [];
+  rawPages.forEach((p, i) => {
+    if (i > 0 && p - rawPages[i - 1] > 1) withEllipsis.push('...');
+    withEllipsis.push(p);
+  });
+  return (
+    <div className="flex items-center justify-between px-6 py-3 border-t border-[#e8721c]/5 bg-[#faf5ee]/40 select-none">
+      <span className="text-xs text-[#0d0a07]/40 font-medium">{start}–{end} of {total}</span>
+      <div className="flex items-center gap-1">
+        <button onClick={() => setPage(1)} disabled={page === 1}
+          className="px-2 py-1 rounded-lg text-xs font-bold hover:bg-[#e8721c]/10 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">«</button>
+        <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}
+          className="px-2 py-1 rounded-lg text-xs font-bold hover:bg-[#e8721c]/10 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">‹</button>
+        {withEllipsis.map((p, i) =>
+          p === '...' ? (
+            <span key={`e${i}`} className="px-1.5 text-[#0d0a07]/30 text-xs">…</span>
+          ) : (
+            <button key={p} onClick={() => setPage(p as number)}
+              className={cn('w-7 h-7 rounded-lg text-xs font-bold transition-colors',
+                p === page ? 'bg-[#e8721c] text-white' : 'hover:bg-[#e8721c]/10 text-[#0d0a07]')}>
+              {p}
+            </button>
+          )
+        )}
+        <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}
+          className="px-2 py-1 rounded-lg text-xs font-bold hover:bg-[#e8721c]/10 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">›</button>
+        <button onClick={() => setPage(totalPages)} disabled={page === totalPages}
+          className="px-2 py-1 rounded-lg text-xs font-bold hover:bg-[#e8721c]/10 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">»</button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [role, setRole] = useState<UserRole | null>(localStorage.getItem('role') as UserRole);
   const [userName, setUserName] = useState<string | null>(localStorage.getItem('userName'));
@@ -2021,6 +2067,10 @@ function AnalyticsDashboard({
     const d = new Date(); d.setDate(d.getDate() - 30); return d.toISOString().slice(0, 10);
   });
   const [dateTo, setDateTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const [analyticsOrderPage, setAnalyticsOrderPage] = useState(1);
+  const [analyticsOrderSearch, setAnalyticsOrderSearch] = useState('');
+  const [analyticsOrderSortCol, setAnalyticsOrderSortCol] = useState<string>('created_at');
+  const [analyticsOrderSortDir, setAnalyticsOrderSortDir] = useState<'asc'|'desc'>('desc');
 
   useEffect(() => { fetchData(); onDateRangeChange(dateFrom, dateTo); }, [dateFrom, dateTo]);
 
@@ -2340,26 +2390,67 @@ function AnalyticsDashboard({
 
       {/* ── Order History Table ── */}
       <div className="bg-white rounded-[32px] border border-[#e8721c]/5 shadow-sm overflow-hidden">
-        <div className="p-8 border-b border-[#e8721c]/5">
-          <h3 className="text-xl font-bold font-serif">Order History</h3>
-          <p className="text-xs text-[#0d0a07]/40 mt-0.5">{reports?.allOrders?.length || 0} orders in selected range</p>
+        <div className="p-8 border-b border-[#e8721c]/5 flex items-center justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-bold font-serif">Order History</h3>
+            <p className="text-xs text-[#0d0a07]/40 mt-0.5">{reports?.allOrders?.length || 0} orders in selected range</p>
+          </div>
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#0d0a07]/30 pointer-events-none" />
+            <input type="text" placeholder="Search orders…" value={analyticsOrderSearch}
+              onChange={e => { setAnalyticsOrderSearch(e.target.value); setAnalyticsOrderPage(1); }}
+              className="bg-[#faf5ee] border-none rounded-xl pl-9 pr-4 py-2 text-sm outline-none focus:ring-2 ring-[#e8721c]/20 w-52" />
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="bg-[#faf5ee]/60">
-                <th className="p-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50">Order</th>
-                <th className="p-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50">Date & Time</th>
-                <th className="p-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50">Customer</th>
-                <th className="p-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50">Table</th>
-                <th className="p-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50">Amount</th>
-                <th className="p-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50">Payment</th>
-                <th className="p-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50">Status</th>
+                {([
+                  { col: 'id', label: 'Order' },
+                  { col: 'created_at', label: 'Date & Time' },
+                  { col: 'customer_name', label: 'Customer' },
+                  { col: 'table_number', label: 'Table' },
+                  { col: 'total_amount', label: 'Amount' },
+                  { col: 'payment_method', label: 'Payment' },
+                  { col: 'status', label: 'Status' },
+                ] as const).map(({ col, label }) => (
+                  <th key={col} onClick={() => {
+                    if (analyticsOrderSortCol === col) setAnalyticsOrderSortDir(d => d === 'asc' ? 'desc' : 'asc');
+                    else { setAnalyticsOrderSortCol(col); setAnalyticsOrderSortDir('asc'); }
+                    setAnalyticsOrderPage(1);
+                  }} className="p-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50 cursor-pointer hover:text-[#e8721c] select-none transition-colors">
+                    <span className="flex items-center gap-1">{label}
+                      {analyticsOrderSortCol === col ? <span className="text-[#e8721c]">{analyticsOrderSortDir === 'asc' ? '↑' : '↓'}</span> : <span className="opacity-20">↕</span>}
+                    </span>
+                  </th>
+                ))}
                 <th className="p-4 text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50">Receipt</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#5A5A40]/5">
-              {(reports?.allOrders || []).map((order: any) => {
+              {(() => {
+                const q = analyticsOrderSearch.toLowerCase();
+                const allOrders = reports?.allOrders || [];
+                const filtered = allOrders.filter((o: any) =>
+                  !q || (o.id||'').toLowerCase().includes(q) || (o.customer_name||'').toLowerCase().includes(q) ||
+                  (o.customer_phone||'').includes(q) || (o.table_number||'').toString().includes(q)
+                );
+                const sorted = [...filtered].sort((a: any, b: any) => {
+                  const va = a[analyticsOrderSortCol] ?? '';
+                  const vb = b[analyticsOrderSortCol] ?? '';
+                  const n = typeof va === 'number';
+                  return analyticsOrderSortDir === 'asc'
+                    ? n ? va - vb : String(va).localeCompare(String(vb))
+                    : n ? vb - va : String(vb).localeCompare(String(va));
+                });
+                const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+                const safePage = Math.min(analyticsOrderPage, totalPages);
+                const pageRows = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+                if (pageRows.length === 0) return (
+                  <tr><td colSpan={8} className="p-16 text-center text-[#0d0a07]/30 italic">No orders in selected date range</td></tr>
+                );
+                return pageRows.map((order: any) => {
                 const printOwnerReceipt = () => {
                   const norm = normalizeOrder(order);
                   const dt   = new Date(order.created_at);
@@ -2428,15 +2519,20 @@ function AnalyticsDashboard({
                   </td>
                 </tr>
                 );
-              })}
-              {(!reports?.allOrders || reports.allOrders.length === 0) && (
-                <tr>
-                  <td colSpan={8} className="p-16 text-center text-[#0d0a07]/30 italic">No orders in selected date range</td>
-                </tr>
-              )}
+                });
+              })()}
             </tbody>
           </table>
         </div>
+        {(() => {
+          const q = analyticsOrderSearch.toLowerCase();
+          const allOrders = reports?.allOrders || [];
+          const filtered = allOrders.filter((o: any) =>
+            !q || (o.id||'').toLowerCase().includes(q) || (o.customer_name||'').toLowerCase().includes(q)
+          );
+          const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+          return <PaginationBar page={Math.min(analyticsOrderPage, totalPages)} totalPages={totalPages} setPage={setAnalyticsOrderPage} total={filtered.length} />;
+        })()}
         <p className="text-center text-[10px] text-[#0d0a07]/30 py-1.5 md:hidden select-none">‹ scroll ›</p>
       </div>
     </div>
@@ -2674,6 +2770,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Payment table sort + search
   const [paymentSearch, setPaymentSearch]               = useState('');
   const [paymentSort, setPaymentSort]                   = useState<{ col: string; dir: 'asc' | 'desc' }>({ col: 'createdAt', dir: 'desc' });
+
+  // ── Pagination + extra filter state for all tables ────────────────────────
+  const [ordersPage, setOrdersPage]           = useState(1);
+  const [ordersDateFrom, setOrdersDateFrom]   = useState('');
+  const [ordersDateTo, setOrdersDateTo]       = useState('');
+  const [invoicesPage, setInvoicesPage]       = useState(1);
+  const [staffSearch, setStaffSearch]         = useState('');
+  const [staffRoleFilter, setStaffRoleFilter] = useState<'ALL'|'CHEF'|'WAITER'|'MANAGER'>('ALL');
+  const [staffPage, setStaffPage]             = useState(1);
+  const [feedbackSearch, setFeedbackSearch]   = useState('');
+  const [feedbackMinRating, setFeedbackMinRating] = useState(0);
+  const [feedbackSortDir, setFeedbackSortDir] = useState<'asc'|'desc'>('desc');
+  const [feedbackPage, setFeedbackPage]       = useState(1);
+
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
   const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'CHEF' as UserRole, phone: '', email: '' });
@@ -4252,7 +4362,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="space-y-6">
           <div className="flex justify-between items-center">
             <h2 className="text-3xl font-bold font-serif">Staff Management</h2>
-            <button 
+            <button
               onClick={() => setIsAddingStaff(true)}
               className="bg-[#e8721c] text-white px-6 py-3 rounded-full flex items-center gap-2 hover:bg-[#c9592a] transition-colors"
             >
@@ -4260,8 +4370,41 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {staff.map((s) => (
+          {/* Search + Role filter */}
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div className="relative flex-1">
+              <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#0d0a07]/30 pointer-events-none" />
+              <input type="text" placeholder="Search by name, login ID, email, phone…"
+                value={staffSearch} onChange={e => { setStaffSearch(e.target.value); setStaffPage(1); }}
+                className="w-full bg-white border border-[#e8721c]/10 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-2 ring-[#e8721c]/20 shadow-sm" />
+            </div>
+            <div className="flex gap-2">
+              {(['ALL','CHEF','WAITER','MANAGER'] as const).map(r => (
+                <button key={r} onClick={() => { setStaffRoleFilter(r); setStaffPage(1); }}
+                  className={cn("px-4 py-2 rounded-xl text-xs font-bold transition-all",
+                    staffRoleFilter === r ? "bg-[#e8721c] text-white" : "bg-white border border-[#e8721c]/10 text-[#0d0a07] hover:bg-[#e8721c]/5")}>
+                  {r === 'ALL' ? 'All' : r.charAt(0) + r.slice(1).toLowerCase()}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {(() => {
+            const q = staffSearch.toLowerCase();
+            const filtered = staff.filter(s =>
+              (staffRoleFilter === 'ALL' || s.role === staffRoleFilter) &&
+              (!q || (s.name||'').toLowerCase().includes(q) || (s.login_id||'').toLowerCase().includes(q) ||
+               (s.email||'').toLowerCase().includes(q) || (s.phone||'').includes(q))
+            );
+            const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+            const safePage   = Math.min(staffPage, totalPages);
+            const pageItems  = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+            return (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {pageItems.length === 0 ? (
+                    <div className="col-span-full py-16 text-center text-[#0d0a07]/30">No staff members found</div>
+                  ) : pageItems.map((s) => (
               <div key={s.id} className="bg-white rounded-[32px] border border-[#e8721c]/5 shadow-sm overflow-hidden">
                 {/* Card header — role-coloured strip */}
                 <div className={cn(
@@ -4342,8 +4485,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </button>
                 </div>
               </div>
-            ))}
-          </div>
+                  ))}
+                </div>
+                {totalPages > 1 && (
+                  <div className="bg-white rounded-2xl border border-[#e8721c]/5 shadow-sm overflow-hidden">
+                    <PaginationBar page={safePage} totalPages={totalPages} setPage={setStaffPage} total={filtered.length} />
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
           {isAddingStaff && (
             <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-[100] p-4 overflow-y-auto">
@@ -4435,7 +4586,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="space-y-8">
           <div className="flex justify-between items-center">
             <h2 className="text-3xl font-bold font-serif">Customer Feedback</h2>
-            <button 
+            <button
               onClick={fetchFeedback}
               className="px-4 py-2 bg-white border border-[#e8721c]/10 rounded-2xl text-[#0d0a07] hover:bg-[#faf5ee] transition-all flex items-center gap-2 text-xs font-bold uppercase tracking-widest"
             >
@@ -4444,14 +4595,53 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {feedback.length === 0 ? (
-              <div className="col-span-full py-20 text-center bg-white rounded-[32px] border border-[#e8721c]/5">
-                <Star className="mx-auto mb-4 text-[#0d0a07]/20" size={48} />
-                <p className="text-[#0d0a07]/50 font-bold uppercase tracking-widest text-sm">No feedback received yet</p>
-              </div>
-            ) : (
-              feedback.map((f) => (
+          {/* Feedback filters */}
+          <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+            <div className="relative flex-1">
+              <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#0d0a07]/30 pointer-events-none" />
+              <input type="text" placeholder="Search by customer name or comment…"
+                value={feedbackSearch} onChange={e => { setFeedbackSearch(e.target.value); setFeedbackPage(1); }}
+                className="w-full bg-white border border-[#e8721c]/10 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-2 ring-[#e8721c]/20 shadow-sm" />
+            </div>
+            <div className="flex gap-2 items-center flex-wrap">
+              <span className="text-xs text-[#0d0a07]/50 font-bold uppercase tracking-widest shrink-0">Min Rating</span>
+              {[0,1,2,3,4,5].map(r => (
+                <button key={r} onClick={() => { setFeedbackMinRating(r); setFeedbackPage(1); }}
+                  className={cn("w-8 h-8 rounded-full text-xs font-bold transition-all",
+                    feedbackMinRating === r ? "bg-yellow-400 text-yellow-900" : "bg-white border border-[#e8721c]/10 text-[#0d0a07] hover:bg-yellow-50")}>
+                  {r === 0 ? 'All' : `${r}★`}
+                </button>
+              ))}
+              <button onClick={() => setFeedbackSortDir(d => d === 'desc' ? 'asc' : 'desc')}
+                className="ml-2 px-3 py-1.5 bg-white border border-[#e8721c]/10 rounded-xl text-xs font-bold text-[#0d0a07] hover:bg-[#e8721c]/5 transition-all flex items-center gap-1">
+                Date {feedbackSortDir === 'desc' ? '↓' : '↑'}
+              </button>
+            </div>
+          </div>
+
+          {(() => {
+            const q = feedbackSearch.toLowerCase();
+            const filtered = feedback.filter(f =>
+              (feedbackMinRating === 0 || f.rating >= feedbackMinRating) &&
+              (!q || (f.customer_name||'').toLowerCase().includes(q) || (f.comment||'').toLowerCase().includes(q))
+            );
+            const sorted = [...filtered].sort((a, b) =>
+              feedbackSortDir === 'desc'
+                ? new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+                : new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+            );
+            const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+            const safePage   = Math.min(feedbackPage, totalPages);
+            const pageItems  = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+            return (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {pageItems.length === 0 ? (
+                    <div className="col-span-full py-20 text-center bg-white rounded-[32px] border border-[#e8721c]/5">
+                      <Star className="mx-auto mb-4 text-[#0d0a07]/20" size={48} />
+                      <p className="text-[#0d0a07]/50 font-bold uppercase tracking-widest text-sm">No feedback found</p>
+                    </div>
+                  ) : pageItems.map((f) => (
                 <div key={f.id} className="bg-white p-6 rounded-[32px] border border-[#e8721c]/5 shadow-sm space-y-4">
                   <div className="flex justify-between items-start">
                     <div>
@@ -4475,9 +4665,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     {new Date(f.created_at).toLocaleString()}
                   </div>
                 </div>
-              ))
-            )}
-          </div>
+                  ))
+                  }
+                </div>
+                {totalPages > 1 && (
+                  <div className="bg-white rounded-2xl border border-[#e8721c]/5 shadow-sm overflow-hidden">
+                    <PaginationBar page={safePage} totalPages={totalPages} setPage={setFeedbackPage} total={sorted.length} />
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       ) : activeTab === 'ORDERS' ? (
         <div className="space-y-8">
@@ -4492,16 +4690,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </button>
           </div>
 
-          {/* Search bar */}
-          <div className="relative">
-            <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#0d0a07]/30 pointer-events-none" />
-            <input
-              type="text"
-              placeholder="Search by order ID, customer name, phone, table…"
-              value={paymentSearch}
-              onChange={e => setPaymentSearch(e.target.value)}
-              className="w-full bg-white border border-[#e8721c]/10 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-2 ring-[#e8721c]/20 shadow-sm"
-            />
+          {/* Search + Date filters */}
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div className="relative flex-1">
+              <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#0d0a07]/30 pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Search by order ID, customer name, phone, table…"
+                value={paymentSearch}
+                onChange={e => { setPaymentSearch(e.target.value); setOrdersPage(1); }}
+                className="w-full bg-white border border-[#e8721c]/10 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-2 ring-[#e8721c]/20 shadow-sm"
+              />
+            </div>
+            <div className="flex gap-2 items-center">
+              <input type="date" value={ordersDateFrom} onChange={e => { setOrdersDateFrom(e.target.value); setOrdersPage(1); }}
+                className="bg-white border border-[#e8721c]/10 rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#e8721c]/20 shadow-sm text-[#0d0a07] cursor-pointer" title="From date" />
+              <span className="text-[#0d0a07]/30 text-xs font-bold">to</span>
+              <input type="date" value={ordersDateTo} onChange={e => { setOrdersDateTo(e.target.value); setOrdersPage(1); }}
+                className="bg-white border border-[#e8721c]/10 rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#e8721c]/20 shadow-sm text-[#0d0a07] cursor-pointer" title="To date" />
+              {(ordersDateFrom || ordersDateTo) && (
+                <button onClick={() => { setOrdersDateFrom(''); setOrdersDateTo(''); setOrdersPage(1); }}
+                  className="p-2 text-[#0d0a07]/40 hover:text-[#e8721c] transition-colors" title="Clear date filter">
+                  <X size={16} />
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="bg-white rounded-[32px] border border-[#e8721c]/5 shadow-sm overflow-hidden">
@@ -4537,15 +4750,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <tbody className="divide-y divide-[#5A5A40]/5">
                   {(() => {
                     const q = paymentSearch.toLowerCase();
-                    const filtered = orders.filter(o =>
-                      !q ||
-                      (o.id || '').toLowerCase().includes(q) ||
-                      (o.customerName || '').toLowerCase().includes(q) ||
-                      (o.customerPhone || '').includes(q) ||
-                      (o.tableNumber || '').toLowerCase().includes(q) ||
-                      (o.paymentMethod || '').toLowerCase().includes(q) ||
-                      (o.paymentStatus || '').toLowerCase().includes(q)
-                    );
+                    const filtered = orders.filter(o => {
+                      const matchesSearch = !q ||
+                        (o.id || '').toLowerCase().includes(q) ||
+                        (o.customerName || '').toLowerCase().includes(q) ||
+                        (o.customerPhone || '').includes(q) ||
+                        (o.tableNumber || '').toLowerCase().includes(q) ||
+                        (o.paymentMethod || '').toLowerCase().includes(q) ||
+                        (o.paymentStatus || '').toLowerCase().includes(q);
+                      const orderDate = (o as any).createdAt ? (o as any).createdAt.slice(0, 10) : '';
+                      const matchesFrom = !ordersDateFrom || orderDate >= ordersDateFrom;
+                      const matchesTo   = !ordersDateTo   || orderDate <= ordersDateTo;
+                      return matchesSearch && matchesFrom && matchesTo;
+                    });
                     const sorted = [...filtered].sort((a, b) => {
                       const col = paymentSort.col;
                       let va: any, vb: any;
@@ -4561,8 +4778,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         ? String(va).localeCompare(String(vb))
                         : String(vb).localeCompare(String(va));
                     });
-                    return sorted;
-                  })().map(order => (
+                    // pagination
+                    const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+                    const safePage   = Math.min(ordersPage, totalPages);
+                    const pageRows   = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+                    if (pageRows.length === 0) return (
+                      <tr><td colSpan={8} className="py-16 text-center text-[#0d0a07]/30 italic">No orders found</td></tr>
+                    );
+                    return pageRows.map(order => (
                     <tr key={order.id} className={cn("hover:bg-[#faf5ee]/30 transition-colors", (order as any).status === 'CANCELLED' && "opacity-50")}>
                       {/* Order ID — clickable to open invoice */}
                       <td className="px-6 py-4">
@@ -4659,25 +4882,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         </div>
                       </td>
                     </tr>
-                  ))}
-                  {orders.length === 0 && (
-                    <tr><td colSpan={8} className="px-6 py-12 text-center text-[#0d0a07]/40 italic">No orders found.</td></tr>
-                  )}
-                  {orders.length > 0 && paymentSearch && (() => {
-                    const q = paymentSearch.toLowerCase();
-                    const count = orders.filter(o =>
-                      (o.id || '').toLowerCase().includes(q) ||
-                      (o.customerName || '').toLowerCase().includes(q) ||
-                      (o.customerPhone || '').includes(q) ||
-                      (o.tableNumber || '').toLowerCase().includes(q)
-                    ).length;
-                    return count === 0 ? (
-                      <tr><td colSpan={8} className="px-6 py-12 text-center text-[#0d0a07]/40 italic">No results for "{paymentSearch}"</td></tr>
-                    ) : null;
+                    ));
                   })()}
                 </tbody>
               </table>
             </div>
+            {/* Pagination */}
+            {(() => {
+              const q = paymentSearch.toLowerCase();
+              const filtered = orders.filter(o => {
+                const matchesSearch = !q || (o.id||'').toLowerCase().includes(q)||(o.customerName||'').toLowerCase().includes(q)||(o.customerPhone||'').includes(q)||(o.tableNumber||'').toLowerCase().includes(q);
+                const orderDate = (o as any).createdAt ? (o as any).createdAt.slice(0,10) : '';
+                return matchesSearch && (!ordersDateFrom || orderDate >= ordersDateFrom) && (!ordersDateTo || orderDate <= ordersDateTo);
+              });
+              const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+              return <PaginationBar page={Math.min(ordersPage, totalPages)} totalPages={totalPages} setPage={setOrdersPage} total={filtered.length} />;
+            })()}
             <p className="text-center text-[10px] text-[#0d0a07]/30 py-1.5 md:hidden select-none">‹ scroll ›</p>
           </div>
         </div>
@@ -4716,7 +4936,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 type="text"
                 placeholder="Search by invoice ID, customer, table…"
                 value={invoiceSearch}
-                onChange={e => setInvoiceSearch(e.target.value)}
+                onChange={e => { setInvoiceSearch(e.target.value); setInvoicesPage(1); }}
                 className="w-full bg-white border border-[#e8721c]/10 rounded-2xl pl-9 pr-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#e8721c]/20 shadow-sm"
               />
             </div>
@@ -4724,7 +4944,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               {(['ALL','UNPAID','PAID','PRINTED'] as const).map(s => (
                 <button
                   key={s}
-                  onClick={() => setInvoiceStatusFilter(s)}
+                  onClick={() => { setInvoiceStatusFilter(s); setInvoicesPage(1); }}
                   className={cn(
                     "px-3 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all",
                     invoiceStatusFilter === s ? "bg-[#e8721c] text-white" : "bg-white border border-[#e8721c]/10 text-[#0d0a07]/50 hover:bg-[#faf5ee]"
@@ -4779,6 +4999,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             onClick={() => {
                               if (invoiceSortKey === key) setInvoiceSortDir(d => d === 'asc' ? 'desc' : 'asc');
                               else { setInvoiceSortKey(key); setInvoiceSortDir('asc'); }
+                              setInvoicesPage(1);
                             }}
                             className="flex items-center gap-1 hover:text-[#e8721c] transition-colors group"
                           >
@@ -4836,7 +5057,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         {invoices.length === 0 ? 'No invoices yet. Orders will appear here.' : 'No invoices match your filters.'}
                       </td></tr>
                     );
-                    return rows.map(inv => {
+                    // pagination
+                    const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+                    const safePage   = Math.min(invoicesPage, totalPages);
+                    const pageRows   = rows.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+                    return pageRows.map(inv => {
                       const isSession  = inv.invoice_type === 'SESSION';
                       const isPaid     = isSession
                         ? inv.session_status === 'closed'
@@ -4940,6 +5165,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </tbody>
               </table>
             </div>
+            {/* Pagination */}
+            {(() => {
+              const q = invoiceSearch.toLowerCase();
+              let rows = invoices.filter(inv => {
+                const paidNow = inv.invoice_type === 'SESSION' ? inv.session_status === 'closed' : inv.payment_status === 'PAID';
+                if (invoiceStatusFilter === 'PAID'    && !paidNow) return false;
+                if (invoiceStatusFilter === 'UNPAID'  && paidNow)  return false;
+                if (invoiceStatusFilter === 'PRINTED' && (inv.invoice_status !== 'PRINTED' || paidNow)) return false;
+                if (!q) return true;
+                return (
+                  String(inv.id||'').toLowerCase().includes(q) ||
+                  (inv.customerName||'').toLowerCase().includes(q) ||
+                  (inv.customerPhone||'').includes(q) ||
+                  (inv.tableNumber||'').toLowerCase().includes(q)
+                );
+              });
+              const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+              return <PaginationBar page={Math.min(invoicesPage, totalPages)} totalPages={totalPages} setPage={setInvoicesPage} total={rows.length} />;
+            })()}
           </div>
         </div>
 
@@ -12028,6 +12272,9 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
   const [loading, setLoading] = useState(true);
   const [activeSection, setActiveSection] = useState<'RESERVATIONS' | 'AVAILABILITY'>('RESERVATIONS');
   const [activeFilter, setActiveFilter] = useState<'ALL' | 'TODAY' | 'UPCOMING' | 'PENDING' | 'CONFIRMED' | 'CANCELLED'>('ALL');
+  const [bookingSearch, setBookingSearch] = useState('');
+  const [bookingSort, setBookingSort]     = useState<{col: string; dir: 'asc'|'desc'}>({col: 'booking_date', dir: 'asc'});
+  const [bookingPage, setBookingPage]     = useState(1);
   const [showNewBooking, setShowNewBooking] = useState(false);
 
   // Availability calendar month navigation
@@ -12295,6 +12542,14 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
             ))}
           </div>
 
+          {/* Search bar */}
+          <div className="relative">
+            <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#0d0a07]/30 pointer-events-none" />
+            <input type="text" placeholder="Search by customer name, phone, email…"
+              value={bookingSearch} onChange={e => { setBookingSearch(e.target.value); setBookingPage(1); }}
+              className="w-full bg-white border border-black/5 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-2 ring-[#e8721c]/20 shadow-sm" />
+          </div>
+
           {/* Filter tabs */}
           <div className="flex gap-2 overflow-x-auto pb-1">
             {(['ALL', 'TODAY', 'UPCOMING', 'PENDING', 'CONFIRMED', 'CANCELLED'] as const).map(f => (
@@ -12320,16 +12575,43 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
               <table className="w-full text-left">
                 <thead>
                   <tr className="bg-[#faf5ee] text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/50">
-                    <th className="px-5 py-4">Customer</th>
-                    <th className="px-5 py-4">Date & Time</th>
-                    <th className="px-5 py-4">Guests</th>
+                    {([
+                      { col: 'customer_name', label: 'Customer' },
+                      { col: 'booking_date',  label: 'Date & Time' },
+                      { col: 'guests',        label: 'Guests' },
+                    ] as const).map(({ col, label }) => (
+                      <th key={col} onClick={() => {
+                        setBookingSort(s => ({ col, dir: s.col === col && s.dir === 'asc' ? 'desc' : 'asc' }));
+                        setBookingPage(1);
+                      }} className="px-5 py-4 cursor-pointer select-none hover:text-[#e8721c] transition-colors">
+                        <span className="flex items-center gap-1">{label}
+                          {bookingSort.col === col ? <span className="text-[#e8721c]">{bookingSort.dir === 'asc' ? '↑' : '↓'}</span> : <span className="opacity-30">↕</span>}
+                        </span>
+                      </th>
+                    ))}
                     <th className="px-5 py-4">Source</th>
                     <th className="px-5 py-4">Status</th>
                     <th className="px-5 py-4">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-black/5">
-                  {filteredBookings.map(booking => (
+                  {(() => {
+                    const q = bookingSearch.toLowerCase();
+                    const searched = filteredBookings.filter(b =>
+                      !q || (b.customer_name||'').toLowerCase().includes(q) ||
+                      (b.customer_phone||'').includes(q) || (b.customer_email||'').toLowerCase().includes(q)
+                    );
+                    const sorted = [...searched].sort((a, b) => {
+                      const col = bookingSort.col;
+                      const va = (a as any)[col] ?? '';
+                      const vb = (b as any)[col] ?? '';
+                      const cmp = typeof va === 'number' ? va - vb : String(va).localeCompare(String(vb));
+                      return bookingSort.dir === 'asc' ? cmp : -cmp;
+                    });
+                    const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+                    const safePage   = Math.min(bookingPage, totalPages);
+                    const pageRows   = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+                    return pageRows.map(booking => (
                     <tr key={booking.id} className="hover:bg-[#faf5ee]/40 transition-colors">
                       <td className="px-5 py-4">
                         <p className="font-bold text-sm">{booking.customer_name}</p>
@@ -12379,7 +12661,8 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    ));
+                  })()}
                 </tbody>
               </table>
               {filteredBookings.length === 0 && !loading && (
@@ -12389,6 +12672,14 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
                 </div>
               )}
             </div>
+            {(() => {
+              const q = bookingSearch.toLowerCase();
+              const searched = filteredBookings.filter(b =>
+                !q || (b.customer_name||'').toLowerCase().includes(q) || (b.customer_phone||'').includes(q)
+              );
+              const totalPages = Math.max(1, Math.ceil(searched.length / PAGE_SIZE));
+              return <PaginationBar page={Math.min(bookingPage, totalPages)} totalPages={totalPages} setPage={setBookingPage} total={searched.length} />;
+            })()}
             <p className="text-center text-[10px] text-[#0d0a07]/30 py-1.5 md:hidden select-none">‹ scroll ›</p>
           </div>
         </div>
