@@ -562,11 +562,31 @@ async function startServer() {
   });
 
   // Admin: Reset Owner Password
+  // Updates both legacy users table AND new owner_accounts table
   app.post("/api/admin/reset-owner-password", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     const { restaurantId, newPassword } = req.body;
     try {
       const hashedPassword = await bcrypt.hash(newPassword, 12);
-      await centralDb.run("UPDATE users SET password = ? WHERE restaurant_id = ? AND role = 'OWNER'", [hashedPassword, restaurantId]);
+
+      // Legacy path: update users table (older admin-created accounts)
+      await centralDb.run(
+        "UPDATE users SET password = ? WHERE restaurant_id = ? AND role = 'OWNER'",
+        [hashedPassword, restaurantId]
+      );
+
+      // New path: update owner_accounts table (self-registered owners)
+      // Look up owner email via restaurants.admin_id
+      const restaurant = await centralDb.get(
+        "SELECT admin_id FROM restaurants WHERE id = ?",
+        [restaurantId]
+      );
+      if (restaurant?.admin_id) {
+        await centralDb.run(
+          "UPDATE owner_accounts SET password_hash = ? WHERE LOWER(email) = LOWER(?)",
+          [hashedPassword, restaurant.admin_id]
+        );
+      }
+
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to reset owner password" });
