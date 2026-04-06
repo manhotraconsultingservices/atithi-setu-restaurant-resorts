@@ -226,13 +226,14 @@ async function startServer() {
     try {
       let query = `
         SELECT r.*,
-          u.name  AS owner_name,
-          u.email AS owner_email,
-          u.login_id AS owner_login_id,
-          u.phone AS owner_phone,
+          COALESCE(u.name,  oa.owner_name)   AS owner_name,
+          COALESCE(u.email, oa.email)         AS owner_email,
+          COALESCE(u.login_id, oa.email)      AS owner_login_id,
+          COALESCE(u.phone, oa.phone_number)  AS owner_phone,
           u.id AS owner_user_id
         FROM restaurants r
-        LEFT JOIN users u ON u.restaurant_id = r.id AND u.role = 'OWNER'
+        LEFT JOIN users u        ON u.restaurant_id = r.id AND u.role = 'OWNER'
+        LEFT JOIN owner_accounts oa ON LOWER(oa.email) = LOWER(r.admin_id)
       `;
       let params: any[] = [];
       if (req.user?.role === 'SALES_REP') {
