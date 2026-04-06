@@ -147,7 +147,7 @@ export default function App() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // EMAIL-BASED OWNER AUTH STATE
-  const [ownerAuthStep, setOwnerAuthStep] = useState<'login' | 'register' | 'restaurant' | 'forgot' | 'reset'>('login');
+  const [ownerAuthStep, setOwnerAuthStep] = useState<'login' | 'register' | 'restaurant' | 'forgot' | 'reset' | 'pending'>('login');
   const [ownerIdentifier, setOwnerIdentifier] = useState(''); // email or phone for login
   const [ownerPassword, setOwnerPassword] = useState('');
   const [ownerConfirmPassword, setOwnerConfirmPassword] = useState('');
@@ -252,6 +252,12 @@ export default function App() {
         body: JSON.stringify({ identifier: ownerIdentifier.trim(), password: ownerPassword })
       });
       const data = await res.json();
+      // Show pending screen if account awaiting approval
+      if (!res.ok && data.pending) {
+        setOwnerEmail(ownerIdentifier.trim());
+        setOwnerAuthStep('pending');
+        return;
+      }
       if (!res.ok) throw new Error(data.error || 'Login failed');
 
       if (data.restaurants) {
@@ -350,15 +356,23 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Registration failed');
 
-      setToken(data.jwt_token);
-      setRestaurantId(data.restaurant_id);
-      setRole('OWNER');
-      setUserName(ownerName.trim());
-      localStorage.setItem('token', data.jwt_token);
-      localStorage.setItem('restaurantId', data.restaurant_id);
-      localStorage.setItem('role', 'OWNER');
-      localStorage.setItem('userName', ownerName.trim());
-      setView('DASHBOARD');
+      // Registration is now pending admin approval — show pending screen
+      if (data.pending) {
+        setOwnerAuthStep('pending');
+        return;
+      }
+      // Fallback: if server somehow returns a token immediately, log in
+      if (data.jwt_token) {
+        setToken(data.jwt_token);
+        setRestaurantId(data.restaurant_id);
+        setRole('OWNER');
+        setUserName(ownerName.trim());
+        localStorage.setItem('token', data.jwt_token);
+        localStorage.setItem('restaurantId', data.restaurant_id);
+        localStorage.setItem('role', 'OWNER');
+        localStorage.setItem('userName', ownerName.trim());
+        setView('DASHBOARD');
+      }
     } catch (err: any) {
       setOwnerAuthError(err.message || 'Registration failed');
     } finally {
@@ -647,6 +661,37 @@ export default function App() {
                         </button>
                       </div>
                     </>
+                  )}
+
+                  {/* ── PENDING APPROVAL SCREEN ── */}
+                  {ownerAuthStep === 'pending' && (
+                    <div className="text-center space-y-5">
+                      <div className="w-20 h-20 bg-amber-100 rounded-full flex items-center justify-center mx-auto">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                        </svg>
+                      </div>
+                      <div>
+                        <h2 className="text-2xl font-bold mb-2">Registration Submitted!</h2>
+                        <p className="text-[#0d0a07]/60 text-sm leading-relaxed">
+                          Your restaurant registration is under review. Our team will activate your account within <strong>24 hours</strong>.
+                        </p>
+                      </div>
+                      <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-left space-y-2">
+                        <p className="text-sm font-semibold text-amber-800">What happens next?</p>
+                        <ul className="text-sm text-amber-700 space-y-1">
+                          <li className="flex items-start gap-2"><span className="text-amber-500 mt-0.5">✓</span> A confirmation email has been sent to <strong>{ownerEmail}</strong></li>
+                          <li className="flex items-start gap-2"><span className="text-amber-500 mt-0.5">✓</span> Our team will review and approve your account</li>
+                          <li className="flex items-start gap-2"><span className="text-amber-500 mt-0.5">✓</span> You'll receive an approval email once activated</li>
+                          <li className="flex items-start gap-2"><span className="text-amber-500 mt-0.5">✓</span> Log in using your registered email & password</li>
+                        </ul>
+                      </div>
+                      <button
+                        onClick={() => { setOwnerAuthStep('login'); setOwnerAuthError(''); setOwnerPassword(''); setOwnerConfirmPassword(''); }}
+                        className="w-full bg-[#0d0a07]/8 text-[#0d0a07]/70 py-3 rounded-2xl font-semibold text-sm hover:bg-[#0d0a07]/12 transition-all">
+                        Back to Login
+                      </button>
+                    </div>
                   )}
 
                   {/* ── FORGOT PASSWORD ── */}

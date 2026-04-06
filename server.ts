@@ -362,7 +362,40 @@ async function startServer() {
         return res.status(403).json({ error: "Access denied" });
       }
 
+      // Check previous status before updating (to detect pending→active transition)
+      const prev = await centralDb.get("SELECT is_active, name, admin_id FROM restaurants WHERE id = ?", [req.params.id]);
       await centralDb.run("UPDATE restaurants SET is_active = ? WHERE id = ?", [is_active, req.params.id]);
+
+      // If activating a previously pending (is_active=0) restaurant, send approval email
+      if (is_active === 1 && prev && prev.is_active === 0) {
+        try {
+          const { sendEmail } = await import('./notificationService.js');
+          const { buildNotificationContent } = await import('./notificationService.js');
+          // Look up owner email from owner_accounts (new flow) or users (legacy)
+          const ownerAccount = await centralDb.get(
+            "SELECT email FROM owner_accounts WHERE LOWER(email) = ?",
+            [prev.admin_id?.toLowerCase()]
+          );
+          const ownerEmail = ownerAccount?.email || prev.admin_id;
+          const ownerInfo = ownerAccount
+            ? await centralDb.get("SELECT owner_name FROM owner_accounts WHERE LOWER(email) = ?", [prev.admin_id?.toLowerCase()])
+            : await centralDb.get("SELECT name AS owner_name FROM users WHERE LOWER(email) = ? OR restaurant_id = ?", [prev.admin_id?.toLowerCase(), req.params.id]);
+
+          if (ownerEmail) {
+            const emailContent = buildNotificationContent('ACCOUNT_APPROVED', {
+              restaurantName: prev.name,
+              ownerName: ownerInfo?.owner_name || '',
+              restaurantId: req.params.id,
+              email: ownerEmail,
+            });
+            await sendEmail(ownerEmail, emailContent.subject, emailContent.text, emailContent.html);
+            console.log(`[Approval] Account activated & email sent to ${ownerEmail} for restaurant ${req.params.id}`);
+          }
+        } catch (emailErr) {
+          console.warn('[Approval] Could not send approval email:', emailErr);
+        }
+      }
+
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update restaurant status" });
@@ -474,8 +507,19 @@ async function startServer() {
   });
 
   // Owner: Get own profile (name, email, phone)
+  // Supports both new email-based accounts (owner_accounts) and legacy id-based accounts (users)
   app.get("/api/owner/profile", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      // New owner accounts use email in JWT; legacy accounts use id
+      if (req.user!.email) {
+        const profile = await centralDb.get(
+          "SELECT owner_name AS name, email, phone_number AS phone FROM owner_accounts WHERE LOWER(email) = ?",
+          [req.user!.email.toLowerCase()]
+        );
+        if (!profile) return res.status(404).json({ error: "Profile not found" });
+        return res.json(profile);
+      }
+      // Legacy path
       const profile = await centralDb.get(
         "SELECT id, name, email, phone, login_id FROM users WHERE id = ?",
         [req.user!.id]
@@ -494,10 +538,19 @@ async function startServer() {
       return res.status(400).json({ error: "Name and email are required" });
     }
     try {
-      await centralDb.run(
-        "UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?",
-        [name.trim(), email.trim().toLowerCase(), phone?.trim() || null, req.user!.id]
-      );
+      if (req.user!.email) {
+        // New email-based owner account
+        await centralDb.run(
+          "UPDATE owner_accounts SET owner_name = ?, phone_number = ? WHERE LOWER(email) = ?",
+          [name.trim(), phone?.trim() || null, req.user!.email.toLowerCase()]
+        );
+      } else {
+        // Legacy id-based owner account
+        await centralDb.run(
+          "UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?",
+          [name.trim(), email.trim().toLowerCase(), phone?.trim() || null, req.user!.id]
+        );
+      }
       res.json({ success: true });
     } catch (err: any) {
       if (err.code === '23505' && err.constraint?.includes('email')) {
@@ -1141,10 +1194,10 @@ async function startServer() {
         [email.toLowerCase(), restaurantId, restaurant_name.trim(), location_city.trim(), cuisine_type?.trim() || null]
       );
 
-      // Insert into legacy restaurants table so /api/restaurant/:id works
+      // Insert into legacy restaurants table — is_active=0 (pending admin approval)
       await centralDb.run(
         `INSERT INTO restaurants (id, name, admin_id, state, city, is_active, registered_at)
-         VALUES (?, ?, ?, ?, ?, 1, NOW())
+         VALUES (?, ?, ?, ?, ?, 0, NOW())
          ON CONFLICT (id) DO NOTHING`,
         [restaurantId, restaurant_name.trim(), email.toLowerCase(), 'N/A', location_city.trim()]
       );
@@ -1181,20 +1234,30 @@ async function startServer() {
         );
       `);
 
-      const jwtToken = jwt.sign(
-        { email: email.toLowerCase(), restaurantId, role: 'OWNER', userName: owner_name.trim() },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
+      // Send registration confirmation email to owner (async — don't block response)
+      try {
+        const { sendEmail } = await import('./notificationService.js');
+        const { buildNotificationContent } = await import('./notificationService.js');
+        const emailContent = buildNotificationContent('REGISTRATION_RECEIVED', {
+          restaurantName: restaurant_name.trim(),
+          ownerName: owner_name.trim(),
+          email: email.toLowerCase(),
+          restaurantId,
+        });
+        await sendEmail(email.toLowerCase(), emailContent.subject, emailContent.text, emailContent.html);
+        console.log(`[Registration] Confirmation email sent to ${email}`);
+      } catch (emailErr) {
+        console.warn('[Registration] Could not send confirmation email:', emailErr);
+      }
 
-      console.log(`✅ Owner registered: ${email} → ${restaurantId}`);
+      console.log(`✅ Owner registered (PENDING): ${email} → ${restaurantId}`);
       res.json({
         success: true,
-        jwt_token: jwtToken,
+        pending: true,
         restaurant_id: restaurantId,
         restaurant_name: restaurant_name.trim(),
-        role: 'OWNER',
-        message: 'Registration successful! Welcome to AtithiSetu.'
+        email: email.toLowerCase(),
+        message: 'Registration submitted! Your account is pending admin approval. You will be notified by email once activated.'
       });
     } catch (err: any) {
       console.error("Error in /api/auth/owner/register:", err);
@@ -1254,9 +1317,12 @@ async function startServer() {
       }
 
       const restaurants = await centralDb.query(
-        `SELECT restaurant_id, restaurant_name, location_city, cuisine_type, role, is_primary
-         FROM owner_restaurants WHERE owner_email = ?
-         ORDER BY is_primary DESC, added_at ASC`,
+        `SELECT or2.restaurant_id, or2.restaurant_name, or2.location_city, or2.cuisine_type, or2.role, or2.is_primary,
+                COALESCE(r.is_active, 0) AS is_active
+         FROM owner_restaurants or2
+         LEFT JOIN restaurants r ON r.id = or2.restaurant_id
+         WHERE or2.owner_email = ?
+         ORDER BY or2.is_primary DESC, or2.added_at ASC`,
         [account.email]
       );
 
@@ -1266,6 +1332,13 @@ async function startServer() {
 
       if (restaurants.length === 1) {
         const r = restaurants[0];
+        // Block access if restaurant is pending admin approval
+        if (r.is_active === 0) {
+          return res.status(403).json({
+            error: "Your account is pending admin approval. You will receive an email once your account is activated.",
+            pending: true
+          });
+        }
         const jwtToken = jwt.sign(
           { email: account.email, restaurantId: r.restaurant_id, role: r.role, userName: account.owner_name },
           JWT_SECRET,
