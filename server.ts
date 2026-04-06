@@ -1645,59 +1645,238 @@ async function startServer() {
     }
   });
 
-  // AI: Generate food image for menu item using Gemini
+  // AI: Generate food image for menu item using Gemini (with fallbacks) — one-time only
   app.post("/api/restaurant/:id/menu/:itemId/generate-image", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const { name, category, dietary_type } = req.body;
+
+      // One-time guard: if this item already has an image, return it as-is — never overwrite
+      const db = await getTenantDb(req.params.id);
+      const existing = await db.get('SELECT image_url FROM menu WHERE id = ?', [req.params.itemId]);
+      if (existing?.image_url) {
+        console.log(`[AI Image] Skipping — item "${name}" already has image: ${existing.image_url}`);
+        return res.json({ success: true, image_url: existing.image_url, cached: true });
+      }
+
       const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
       let imageUrl: string | null = null;
+      let quotaExhausted = false;
 
-      // Try Gemini image generation first
+      // Helper: download an image from a URL (follows redirects, handles relative URLs) and save locally
+      const downloadAndSave = async (url: string, prefix: string): Promise<string | null> => {
+        const https = await import('https');
+        const http = await import('http');
+        return new Promise((resolve) => {
+          let resolved = false;
+          const done = (v: string | null) => { if (!resolved) { resolved = true; resolve(v); } };
+          const doGet = (targetUrl: string, baseUrl: string, depth: number) => {
+            if (depth > 5) return done(null);
+            try {
+              // Handle relative redirect URLs by resolving against base
+              const fullUrl = targetUrl.startsWith('http') ? targetUrl : new URL(targetUrl, baseUrl).href;
+              const mod = fullUrl.startsWith('https') ? https : http;
+              mod.get(fullUrl, (imgRes: any) => {
+                if (imgRes.statusCode >= 300 && imgRes.statusCode < 400 && imgRes.headers.location) {
+                  return doGet(imgRes.headers.location, fullUrl, depth + 1);
+                }
+                if (imgRes.statusCode !== 200) return done(null);
+                const chunks: Buffer[] = [];
+                imgRes.on('data', (c: Buffer) => chunks.push(c));
+                imgRes.on('end', () => {
+                  const data = Buffer.concat(chunks);
+                  if (data.length < 2000) return done(null);
+                  const ext = (imgRes.headers['content-type'] || '').includes('png') ? 'png' : 'jpg';
+                  const filename = `${prefix}_${req.params.itemId}_${Date.now()}.${ext}`;
+                  const localPath = path.join(process.cwd(), 'public', 'uploads', filename);
+                  fs.writeFileSync(localPath, data);
+                  done(`/uploads/${filename}`);
+                });
+              }).on('error', () => done(null));
+            } catch (e) {
+              console.warn(`[AI Image] downloadAndSave URL error: ${e}`);
+              done(null);
+            }
+          };
+          doGet(url, url, 0);
+          setTimeout(() => done(null), 20000);
+        });
+      };
+
+      // ---------- Strategy 1: Gemini AI Image Generation ----------
       if (GEMINI_API_KEY && GEMINI_API_KEY !== 'MY_GEMINI_API_KEY') {
-        try {
-          const { GoogleGenAI } = await import('@google/genai');
-          const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-          const prompt = `A professional, appetizing food photo of ${name}, an Indian ${(category || 'main course').toLowerCase()} dish. ${dietary_type === 'NON_VEG' ? 'Non-vegetarian.' : 'Vegetarian.'} Served on a restaurant plate, warm lighting, high resolution, food photography style.`;
-          const response = await ai.models.generateContent({
-            model: 'gemini-2.0-flash-preview-image-generation',
-            contents: prompt,
-            config: { responseModalities: ['TEXT', 'IMAGE'] } as any,
-          });
-          const parts = (response as any).candidates?.[0]?.content?.parts || [];
-          for (const part of parts) {
-            if (part.inlineData?.data) {
-              const buffer = Buffer.from(part.inlineData.data, 'base64');
-              const filename = `ai_${req.params.itemId}_${Date.now()}.jpg`;
-              const localPath = path.join(process.cwd(), 'public', 'uploads', filename);
-              fs.writeFileSync(localPath, buffer);
-              imageUrl = `/uploads/${filename}`;
-              break;
+        const dietLabel = dietary_type === 'NON_VEG' ? 'non-vegetarian' : dietary_type === 'VEGAN' ? 'vegan' : 'vegetarian';
+        const catLabel = (category || 'main course').toLowerCase();
+        const prompt = [
+          `Generate a photorealistic, mouth-watering food photograph of "${name}".`,
+          `This is an authentic Indian ${catLabel} dish (${dietLabel}).`,
+          `The dish is beautifully plated on traditional Indian restaurant crockery.`,
+          `Shot from a 45-degree angle with warm, golden lighting.`,
+          `Rich colors, garnished with fresh herbs and spices typical of Indian cuisine.`,
+          `Professional food photography, shallow depth of field, no text or watermarks.`,
+        ].join(' ');
+
+        // Models verified via ListModels API — try in order of preference
+        const imageModels = [
+          'gemini-2.5-flash-image',
+          'gemini-3.1-flash-image-preview',
+          'gemini-3-pro-image-preview',
+        ];
+
+        for (const modelName of imageModels) {
+          if (imageUrl) break;
+          try {
+            const { GoogleGenAI } = await import('@google/genai');
+            const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+            console.log(`[AI Image] Trying model: ${modelName} for "${name}"`);
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: prompt,
+              config: { responseModalities: ['TEXT', 'IMAGE'] } as any,
+            });
+            const parts = (response as any).candidates?.[0]?.content?.parts || [];
+            for (const part of parts) {
+              if (part.inlineData?.data) {
+                const buffer = Buffer.from(part.inlineData.data, 'base64');
+                const filename = `ai_${req.params.itemId}_${Date.now()}.jpg`;
+                const localPath = path.join(process.cwd(), 'public', 'uploads', filename);
+                fs.writeFileSync(localPath, buffer);
+                imageUrl = `/uploads/${filename}`;
+                console.log(`[AI Image] Success with ${modelName} → ${filename}`);
+                break;
+              }
+            }
+          } catch (modelErr: any) {
+            const errMsg = modelErr?.message || String(modelErr);
+            console.warn(`[AI Image] ${modelName} failed: ${errMsg.substring(0, 200)}`);
+            if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('quota')) {
+              quotaExhausted = true;
             }
           }
-        } catch (geminiErr) {
-          console.warn('[AI Image] Gemini generation failed, falling back to Unsplash:', geminiErr);
         }
+      } else {
+        console.warn('[AI Image] GEMINI_API_KEY not configured');
       }
 
-      // Fallback: fetch from Unsplash using item name as search term
+      // ---------- Strategy 2: TheMealDB (free, no auth, searches by dish name) ----------
       if (!imageUrl) {
-        const query = encodeURIComponent(`${name} indian food`);
-        const unsplashUrl = `https://source.unsplash.com/600x450/?${query}`;
-        const imgRes = await fetch(unsplashUrl, { redirect: 'follow' });
-        if (imgRes.ok) {
-          const buffer = Buffer.from(await imgRes.arrayBuffer());
-          const filename = `ai_${req.params.itemId}_${Date.now()}.jpg`;
-          const localPath = path.join(process.cwd(), 'public', 'uploads', filename);
-          fs.writeFileSync(localPath, buffer);
-          imageUrl = `/uploads/${filename}`;
+        try {
+          console.log(`[AI Image] Trying TheMealDB for: "${name}"`);
+          const https = await import('https');
+          const mealDbUrl = `https://www.themealdb.com/api/json/v1/1/search.php?s=${encodeURIComponent(name)}`;
+
+          const mealData: any = await new Promise((resolve, reject) => {
+            https.get(mealDbUrl, { headers: { 'User-Agent': 'AtithiSetu/1.0' } }, (pRes: any) => {
+              let body = '';
+              pRes.on('data', (c: string) => body += c);
+              pRes.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('MealDB parse error')); } });
+            }).on('error', reject);
+            setTimeout(() => reject(new Error('MealDB timeout')), 10000);
+          });
+
+          // Try exact match first, then first result
+          const meals: any[] = mealData?.meals || [];
+          const exactMatch = meals.find((m: any) => m.strMeal?.toLowerCase() === name.toLowerCase());
+          const chosen = exactMatch || meals[0];
+          if (chosen?.strMealThumb) {
+            const saved = await downloadAndSave(chosen.strMealThumb, 'meal');
+            if (saved) {
+              imageUrl = saved;
+              console.log(`[AI Image] TheMealDB success: "${chosen.strMeal}" → ${saved}`);
+            }
+          }
+
+          // If no match in MealDB, try a keyword-only search (first word of dish name)
+          if (!imageUrl && name.split(' ').length > 1) {
+            const keyword = name.split(' ').slice(-1)[0]; // e.g. "Tikka" from "Paneer Tikka"
+            const kwUrl = `https://www.themealdb.com/api/json/v1/1/search.php?s=${encodeURIComponent(keyword)}`;
+            const kwData: any = await new Promise((resolve, reject) => {
+              https.get(kwUrl, { headers: { 'User-Agent': 'AtithiSetu/1.0' } }, (r: any) => {
+                let b = '';
+                r.on('data', (c: string) => b += c);
+                r.on('end', () => { try { resolve(JSON.parse(b)); } catch { reject(new Error('parse')); } });
+              }).on('error', reject);
+              setTimeout(() => reject(new Error('timeout')), 8000);
+            });
+            const kwMeals: any[] = kwData?.meals || [];
+            if (kwMeals[0]?.strMealThumb) {
+              const saved = await downloadAndSave(kwMeals[0].strMealThumb, 'meal');
+              if (saved) {
+                imageUrl = saved;
+                console.log(`[AI Image] TheMealDB keyword "${keyword}" → ${saved}`);
+              }
+            }
+          }
+        } catch (mealErr: any) {
+          console.warn(`[AI Image] TheMealDB fallback failed: ${mealErr?.message || mealErr}`);
         }
       }
 
-      if (!imageUrl) return res.status(500).json({ error: 'Could not generate image' });
+      // ---------- Strategy 3: LoremFlickr (CC-licensed, keyword-search, no auth) ----------
+      if (!imageUrl) {
+        try {
+          // Use dish name + indian food as keywords for relevance
+          const cleanName = name.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, ',');
+          const keywords = `indian,${cleanName},food`.toLowerCase();
+          const flickrUrl = `https://loremflickr.com/480/480/${encodeURIComponent(keywords)}`;
+          console.log(`[AI Image] Trying LoremFlickr for keywords: "${keywords}"`);
+          const saved = await downloadAndSave(flickrUrl, 'flickr');
+          if (saved) {
+            imageUrl = saved;
+            console.log(`[AI Image] LoremFlickr success → ${saved}`);
+          }
+        } catch (flickrErr: any) {
+          console.warn(`[AI Image] LoremFlickr fallback failed: ${flickrErr?.message || flickrErr}`);
+        }
+      }
 
-      // Save to DB
-      const db = await getTenantDb(req.params.id);
+      // ---------- Strategy 4: Foodish (last resort — random food image) ----------
+      if (!imageUrl) {
+        try {
+          const foodishCategories: Record<string, string> = {
+            'biryani': 'biryani', 'rice': 'rice', 'dosa': 'dosa',
+            'idly': 'idly', 'samosa': 'samosa', 'burger': 'burger',
+            'pizza': 'pizza', 'pasta': 'pasta', 'dessert': 'dessert',
+          };
+          const nameLower = name.toLowerCase();
+          let cat = '';
+          for (const [key, val] of Object.entries(foodishCategories)) {
+            if (nameLower.includes(key)) { cat = val; break; }
+          }
+          const foodishUrl = cat ? `https://foodish-api.com/api/images/${cat}` : 'https://foodish-api.com/api/';
+          console.log(`[AI Image] Trying Foodish last-resort (category: ${cat || 'random'})`);
+          const https = await import('https');
+
+          const foodishData: any = await new Promise((resolve, reject) => {
+            https.get(foodishUrl, (pRes: any) => {
+              let body = '';
+              pRes.on('data', (c: string) => body += c);
+              pRes.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('Foodish parse error')); } });
+            }).on('error', reject);
+            setTimeout(() => reject(new Error('Foodish timeout')), 10000);
+          });
+
+          if (foodishData?.image) {
+            const saved = await downloadAndSave(foodishData.image, 'foodish');
+            if (saved) {
+              imageUrl = saved;
+              console.log(`[AI Image] Foodish last-resort success → ${saved}`);
+            }
+          }
+        } catch (foodishErr: any) {
+          console.warn(`[AI Image] Foodish last-resort failed: ${foodishErr?.message || foodishErr}`);
+        }
+      }
+
+      // ---------- No image obtained ----------
+      if (!imageUrl) {
+        const msg = quotaExhausted
+          ? 'Gemini API quota exhausted (free tier limit reached). Please enable billing at https://ai.google.dev or try again later.'
+          : 'Image generation failed. All image sources unavailable. Please try again.';
+        return res.status(500).json({ error: msg });
+      }
+
+      // Save to DB (db was already obtained at the top of this handler)
       await db.run('UPDATE menu SET image_url = ? WHERE id = ?', [imageUrl, req.params.itemId]);
 
       res.json({ success: true, image_url: imageUrl });

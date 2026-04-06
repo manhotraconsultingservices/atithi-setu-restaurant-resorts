@@ -462,10 +462,10 @@ export default function App() {
               <Star size={14} /> The Future of Restaurant Management
             </div>
             <h1 className="text-5xl font-bold text-[#1a1a1a] mb-1 tracking-tight uppercase">Atithi Setu</h1>
-            <p className="text-xs text-[#0d0a07]/50 font-semibold tracking-wide mb-1">SaaS by Manhotra Consulting</p>
+            <p className="text-xs text-[#0d0a07]/70 font-semibold tracking-wide mb-1">SaaS by Manhotra Consulting</p>
             <a href="https://atithi-setu.com/" target="_blank" rel="noopener noreferrer"
-              className="text-xs text-[#e8721c] hover:underline">www.Atithi-Setu.com</a>
-            <p className="text-lg text-[#0d0a07]/70 leading-relaxed mt-4">
+              className="text-xs text-[#c9592a] hover:underline font-semibold">www.Atithi-Setu.com</a>
+            <p className="text-lg text-[#0d0a07]/85 leading-relaxed mt-4 font-medium">
               Seamless multi-tenant operations, real-time analytics, and effortless customer experiences.
             </p>
           </div>
@@ -486,14 +486,14 @@ export default function App() {
                     <>
                       <div className="text-center">
                         <h2 className="text-3xl font-bold mb-1">Owner Login</h2>
-                        <p className="text-[#0d0a07]/55 text-sm">Sign in with your email or mobile number</p>
+                        <p className="text-[#0d0a07]/70 text-sm">Sign in with your email or mobile number</p>
                       </div>
                       <div className="space-y-3">
                         <input
                           type="text"
                           autoFocus
                           placeholder="Email or Mobile Number *"
-                          className="w-full bg-[#faf5ee] border-none rounded-2xl px-5 py-4 text-base focus:ring-2 ring-[#e8721c]/30 outline-none font-sans"
+                          className="w-full bg-[#faf5ee] border-none rounded-2xl px-5 py-4 text-base text-[#0d0a07] placeholder:text-[#0d0a07]/50 focus:ring-2 ring-[#e8721c]/30 outline-none font-sans"
                           value={ownerIdentifier}
                           onChange={e => setOwnerIdentifier(e.target.value)}
                           onKeyDown={e => e.key === 'Enter' && handleOwnerLogin()}
@@ -502,13 +502,13 @@ export default function App() {
                           <input
                             type={showOwnerPassword ? 'text' : 'password'}
                             placeholder="Password *"
-                            className="w-full bg-[#faf5ee] border-none rounded-2xl px-5 py-4 pr-14 text-base focus:ring-2 ring-[#e8721c]/30 outline-none font-sans"
+                            className="w-full bg-[#faf5ee] border-none rounded-2xl px-5 py-4 pr-14 text-base text-[#0d0a07] placeholder:text-[#0d0a07]/50 focus:ring-2 ring-[#e8721c]/30 outline-none font-sans"
                             value={ownerPassword}
                             onChange={e => setOwnerPassword(e.target.value)}
                             onKeyDown={e => e.key === 'Enter' && handleOwnerLogin()}
                           />
                           <button type="button" onClick={() => setShowOwnerPassword(p => !p)}
-                            className="absolute right-4 top-1/2 -translate-y-1/2 text-[#0d0a07]/40 hover:text-[#0d0a07] transition-colors">
+                            className="absolute right-4 top-1/2 -translate-y-1/2 text-[#0d0a07]/60 hover:text-[#0d0a07] transition-colors">
                             {showOwnerPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                           </button>
                         </div>
@@ -526,21 +526,21 @@ export default function App() {
                           <button
                             type="button"
                             onClick={() => { setOwnerAuthStep('forgot'); setOwnerAuthError(''); setForgotEmail(''); setForgotSent(false); }}
-                            className="text-xs text-[#e8721c]/70 hover:text-[#e8721c] hover:underline transition-colors"
+                            className="text-xs text-[#c9592a] font-semibold hover:text-[#e8721c] hover:underline transition-colors"
                           >
                             Forgot password?
                           </button>
                         </div>
                       </div>
-                      <div className="pt-3 border-t border-[#e8721c]/5 text-center space-y-2">
-                        <p className="text-sm text-[#0d0a07]/50">
+                      <div className="pt-3 border-t border-[#e8721c]/10 text-center space-y-2">
+                        <p className="text-sm text-[#0d0a07]/70">
                           New to AtithiSetu?{' '}
                           <button onClick={() => { setOwnerAuthStep('register'); setOwnerAuthError(''); }}
-                            className="text-[#e8721c] font-bold hover:underline">Register your restaurant</button>
+                            className="text-[#c9592a] font-bold hover:underline">Register your restaurant</button>
                         </p>
-                        <p className="text-xs text-[#0d0a07]/35">
+                        <p className="text-xs text-[#0d0a07]/60">
                           Chef / Waiter?{' '}
-                          <button onClick={() => setLandingStep('ID')} className="text-[#0d0a07]/55 hover:text-[#e8721c] font-semibold hover:underline transition-colors">Use Staff Login</button>
+                          <button onClick={() => setLandingStep('ID')} className="text-[#0d0a07]/75 hover:text-[#e8721c] font-semibold hover:underline transition-colors">Use Staff Login</button>
                         </p>
                       </div>
                     </>
@@ -869,11 +869,11 @@ export default function App() {
             </AnimatePresence>
           </div>
 
-          <div className="mt-12 text-center text-[#0d0a07]/40 text-xs space-y-0.5">
+          <div className="mt-12 text-center text-[#0d0a07]/60 text-xs space-y-0.5">
             <div>&copy; {new Date().getFullYear()} Atithi Setu — SaaS by Manhotra Consulting</div>
             <div>
               <a href="https://atithi-setu.com/" target="_blank" rel="noopener noreferrer"
-                className="text-[#e8721c]/60 hover:text-[#e8721c] transition-colors">
+                className="text-[#c9592a] font-semibold hover:text-[#e8721c] transition-colors">
                 www.Atithi-Setu.com
               </a>
             </div>
@@ -13028,25 +13028,6 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
           {saving ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
           Save Changes
         </button>
-      </div>
-
-      {/* ── Channel connectivity status ── */}
-      <div className="bg-white rounded-[32px] border border-[#e8721c]/5 shadow-sm p-6">
-        <p className="text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40 mb-4">Channel Status</p>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {channelStatus.map(ch => (
-            <div key={ch.key} className="flex items-center gap-3 p-3 bg-[#faf5ee] rounded-2xl">
-              <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ backgroundColor: ch.color + '20' }}>
-                <ch.icon size={16} style={{ color: ch.color }} />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-bold text-[#0d0a07] truncate">{ch.label}</p>
-                <p className="text-[9px] text-[#0d0a07]/40 truncate">{ch.subtitle}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-        <p className="text-[10px] text-[#0d0a07]/40 mt-3">Configure channels in your server <code className="bg-[#e8721c]/10 px-1 rounded">.env</code> file.</p>
       </div>
 
       {/* ── Per-event toggle table, grouped by category ── */}
