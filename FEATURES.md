@@ -3,7 +3,7 @@
 RestoFlow ERP is a comprehensive, multi-tenant restaurant management system designed to streamline operations from customer ordering to kitchen management and business analytics.
 
 ## 1. Core Architecture
-- **Multi-Tenant System**: Isolated SQLite databases for each restaurant ensure data privacy and security.
+- **Multi-Tenant System**: Isolated PostgreSQL schemas per restaurant ensure data privacy and security.
 - **Real-Time Updates**: WebSocket integration provides live updates for orders across all staff interfaces.
 - **Responsive Design**: Mobile-first approach for customer ordering and tablet-optimized dashboards for staff.
 

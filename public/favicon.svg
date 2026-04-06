@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" shape-rendering="geometricPrecision">
+  <!-- Cream background -->
+  <rect width="64" height="64" rx="12" fill="#f5f0e8"/>
+
+  <!-- ── Sun / flame at top ── -->
+  <!-- Rays -->
+  <g stroke="#d4920a" stroke-width="1.6" stroke-linecap="round">
+    <line x1="32" y1="4"  x2="32" y2="7.5"/>
+    <line x1="39" y1="6.2" x2="37.2" y2="9"/>
+    <line x1="44" y1="11.5" x2="41.2" y2="13"/>
+    <line x1="25" y1="6.2" x2="26.8" y2="9"/>
+    <line x1="20" y1="11.5" x2="22.8" y2="13"/>
+  </g>
+  <!-- Flame / sun body -->
+  <path d="M32 8 C30 10 27 12.5 27 15.5 C27 18.5 29.2 20.5 32 20.5 C34.8 20.5 37 18.5 37 15.5 C37 12.5 34 10 32 8Z" fill="#d4920a"/>
+  <path d="M32 11 C31.2 12.5 30 13.8 30 15.5 C30 17.2 30.9 18.5 32 18.5" fill="#f5c842" opacity="0.7"/>
+
+  <!-- ── Left blue arch (namaste left hand) ── -->
+  <path d="
+    M 10 50
+    C 10 36, 16 24, 32 21
+    C 24 24, 19 34, 20 50
+    Z"
+    fill="#1a3a6e"/>
+
+  <!-- ── Right gold arch (namaste right hand) ── -->
+  <path d="
+    M 54 50
+    C 54 36, 48 24, 32 21
+    C 40 24, 45 34, 44 50
+    Z"
+    fill="#c88c14"/>
+
+  <!-- Highlight / sheen on left arch -->
+  <path d="
+    M 14 46
+    C 13 34, 18 23, 32 21
+    C 22 25, 17 35, 18 46
+    Z"
+    fill="#2650a0" opacity="0.45"/>
+
+  <!-- Highlight / sheen on right arch -->
+  <path d="
+    M 50 46
+    C 51 34, 46 23, 32 21
+    C 42 25, 47 35, 46 46
+    Z"
+    fill="#e8a82a" opacity="0.45"/>
+
+  <!-- ── Centre gap (cream) between the two arches ── -->
+  <path d="
+    M 20 50
+    C 20 38, 25 27, 32 24
+    C 39 27, 44 38, 44 50
+    Z"
+    fill="#f5f0e8"/>
+
+  <!-- ── Hands meeting in namaste (simplified V shape) ── -->
+  <path d="M32 44 L26 34 L28 33 L32 41 L36 33 L38 34 Z" fill="#1a3a6e" opacity="0.7"/>
+  <path d="M32 44 L29 36 L32 41 L35 36 L38 34 L36 33 L32 41 L28 33 L26 34 Z" fill="#c88c14" opacity="0.5"/>
+
+  <!-- Bottom bar -->
+  <rect x="16" y="52" width="32" height="2.5" rx="1.25" fill="#1a3a6e" opacity="0.15"/>
+</svg>

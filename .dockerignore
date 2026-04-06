@@ -1,0 +1,57 @@
+# ── Dependencies (reinstalled inside image) ─────────────────
+node_modules
+
+# ── Build output (rebuilt inside image) ─────────────────────
+dist
+
+# ── Version control ──────────────────────────────────────────
+.git
+.gitignore
+
+# ── IDE & editor ─────────────────────────────────────────────
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Claude Code workspace ────────────────────────────────────
+.claude
+
+# ── Secrets — NEVER bake into the image ─────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Local database files ─────────────────────────────────────
+dbs
+*.db
+*.db-shm
+*.db-wal
+
+# ── Uploaded media (mounted as a volume at runtime) ─────────
+public/uploads
+
+# ── Backups (not needed in image) ───────────────────────────
+backups
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+logs
+
+# ── OS / temp files ──────────────────────────────────────────
+*.tmp
+*.temp
+
+# ── Documentation (reduces image size, not needed at runtime)
+*.md
+USER_MANUAL.md
+ATITHI_SETU_USER_MANUAL.md
+FEATURES.md
+DOCKER_DEPLOY.md
+
+# ── Deployment scripts (not needed inside the container) ─────
+deploy.bat
+deploy.sh
+create_manual.js

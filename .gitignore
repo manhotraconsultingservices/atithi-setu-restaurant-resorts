@@ -6,3 +6,21 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Docker database backups
+backups/
+
+# Claude Code internal files
+.claude/
+
+# Temp / generated / local files
+unpacked_catalog/
+catalog_content.txt
+build_catalog.py
+create_docx.sh
+create_manual.js
+*.docx
+feature-showcase.html
+atithi-setu-feature-showcase.png
+*login_resp.json
+smtptest.mjs
