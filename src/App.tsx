@@ -3398,6 +3398,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
       setInvoiceEditTarget(null);
       fetchInvoices();
+      fetchLiveTables(); // refresh Command Center so closed table clears immediately
     } catch (err) { console.error('Mark paid error', err); }
     finally { setInvEdit(p => ({ ...p, markingPaid: false })); }
   };
@@ -6331,7 +6332,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             restaurantId={restaurantId}
             token={token}
             table={viewBillTable}
-            onClose={() => setViewBillTable(null)}
+            onClose={() => { setViewBillTable(null); fetchLiveTables(); }}
           />
         )}
       </AnimatePresence>
@@ -11327,13 +11328,17 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
     setClosing(true);
     try {
       await persistAdjustments();
-      await fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/close`, {
+      const res = await fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/close`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ payment_method: payMethod, final_amount: grandTotal }),
       });
-      onClose();
-    } catch { setClosing(false); }
+      if (!res.ok) throw new Error('Close failed');
+      onClose(); // parent refreshes live tables via onClose callback
+    } catch (err) {
+      setClosing(false);
+      setFetchErr('Failed to close session — please try again.');
+    }
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
