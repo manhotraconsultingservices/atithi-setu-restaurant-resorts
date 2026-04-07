@@ -8405,9 +8405,10 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     }
 
     if (template === 'EDITORIAL') {
+      const editorialCategories = Array.from(new Set(sortedMenu.map(i => i.category).filter(Boolean))).sort() as string[];
       return (
         <div className="max-w-3xl mx-auto space-y-16 py-12">
-          {['Starters', 'Mains', 'Desserts', 'Drinks'].map(cat => {
+          {editorialCategories.map(cat => {
             const items = sortedMenu.filter(i => i.category === cat);
             if (items.length === 0) return null;
             return (
@@ -9136,7 +9137,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         </div>
         
         <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
-          {['All', 'Starters', 'Mains', 'Sides', 'Drinks', 'Desserts'].map(cat => (
+          {['All', ...Array.from(new Set(menu.map(m => m.category).filter(Boolean))).sort()].map(cat => (
             <button
               key={cat}
               onClick={() => setFilterCategory(cat)}
