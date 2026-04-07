@@ -474,6 +474,9 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS telegram_enabled INT DEFAULT 0");
   await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT DEFAULT ''");
 
+  // Scheduler support — HH:MM time for auto-fire (e.g. "22:00" = 10 PM daily)
+  await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS schedule_time TEXT DEFAULT ''")
+
   tenantDbCache.set(schema, db);
   return db;
 }

@@ -290,7 +290,81 @@ export function buildNotificationContent(
           `<p>Time: ${data.time || new Date().toLocaleTimeString()}</p>`,
       };
 
-    /* ── Business Registration ────────────────────────────────────────── */
+    /* ── Self-Registration Received (new owner self-registers) ──────── */
+
+    case 'REGISTRATION_RECEIVED':
+      return {
+        subject: `✅ Registration Received — ${data.restaurantName || 'Your Restaurant'} | Atithi-Setu`,
+        text:
+          `Hello ${data.ownerName || 'there'},\n\n` +
+          `Thank you for registering "${data.restaurantName || 'your restaurant'}" on Atithi-Setu!\n\n` +
+          `📋 Your Registration Details:\n` +
+          `Restaurant : ${data.restaurantName || '—'}\n` +
+          `Restaurant ID: ${data.restaurantId || '—'}\n` +
+          `Email      : ${data.email || '—'}\n\n` +
+          `⏳ What happens next?\n` +
+          `Our team will review your registration and activate your account within 24 hours.\n` +
+          `You will receive another email with confirmation once your account is approved and ready to use.\n\n` +
+          `For any questions, reply to this email.\n\n` +
+          `— The Atithi-Setu Team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#5A5A40;margin-top:0">✅ Registration Received!</h2>` +
+          `<p>Hello <strong>${data.ownerName || 'there'}</strong>,</p>` +
+          `<p>Thank you for registering <strong>${data.restaurantName || 'your restaurant'}</strong> on Atithi-Setu! Your registration has been received and is under review.</p>` +
+          `<table style="border-collapse:collapse;width:100%;margin:16px 0">` +
+          `<tr style="background:#f9fafb"><td style="padding:10px 14px;border:1px solid #e5e7eb;font-weight:600;width:40%">Restaurant</td><td style="padding:10px 14px;border:1px solid #e5e7eb">${data.restaurantName || '—'}</td></tr>` +
+          `<tr><td style="padding:10px 14px;border:1px solid #e5e7eb;font-weight:600">Restaurant ID</td><td style="padding:10px 14px;border:1px solid #e5e7eb;font-family:monospace">${data.restaurantId || '—'}</td></tr>` +
+          `<tr style="background:#f9fafb"><td style="padding:10px 14px;border:1px solid #e5e7eb;font-weight:600">Email</td><td style="padding:10px 14px;border:1px solid #e5e7eb">${data.email || '—'}</td></tr>` +
+          `</table>` +
+          `<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:14px;margin:16px 0">` +
+          `<strong>⏳ Pending Approval</strong><br>` +
+          `<span style="color:#1e40af">Our team will review and activate your account within 24 hours. You will receive a confirmation email once approved.</span>` +
+          `</div>` +
+          `<p style="color:#6b7280;font-size:13px">For any questions, simply reply to this email.</p>` +
+          `<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— The Atithi-Setu Team</p>` +
+          `</div>`,
+      };
+
+    /* ── Account Approved (admin activates a pending registration) ───── */
+
+    case 'ACCOUNT_APPROVED':
+      return {
+        subject: `🎉 Your Account is Approved — ${data.restaurantName || 'Your Restaurant'} is Live on Atithi-Setu!`,
+        text:
+          `Hello ${data.ownerName || 'there'},\n\n` +
+          `Great news! Your Atithi-Setu account has been reviewed and approved.\n\n` +
+          `🚀 You can now log in and start managing your restaurant:\n` +
+          `Login URL: https://dev-erp.atithi-setu.com\n` +
+          `Email    : ${data.email || '—'}\n` +
+          `Restaurant: ${data.restaurantName || '—'}\n` +
+          `Restaurant ID: ${data.restaurantId || '—'}\n\n` +
+          `Use the email and password you set during registration to log in.\n\n` +
+          `Welcome aboard! If you need any help getting started, reply to this email.\n\n` +
+          `— The Atithi-Setu Team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#5A5A40;margin-top:0">🎉 You're Approved!</h2>` +
+          `<p>Hello <strong>${data.ownerName || 'there'}</strong>,</p>` +
+          `<p>Great news — your Atithi-Setu account has been approved! Your restaurant is now live on the platform.</p>` +
+          `<table style="border-collapse:collapse;width:100%;margin:16px 0">` +
+          `<tr style="background:#f9fafb"><td style="padding:10px 14px;border:1px solid #e5e7eb;font-weight:600;width:40%">Restaurant</td><td style="padding:10px 14px;border:1px solid #e5e7eb">${data.restaurantName || '—'}</td></tr>` +
+          `<tr><td style="padding:10px 14px;border:1px solid #e5e7eb;font-weight:600">Restaurant ID</td><td style="padding:10px 14px;border:1px solid #e5e7eb;font-family:monospace">${data.restaurantId || '—'}</td></tr>` +
+          `<tr style="background:#f9fafb"><td style="padding:10px 14px;border:1px solid #e5e7eb;font-weight:600">Login Email</td><td style="padding:10px 14px;border:1px solid #e5e7eb">${data.email || '—'}</td></tr>` +
+          `</table>` +
+          `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:14px;margin:16px 0">` +
+          `<strong>🚀 Ready to Go!</strong><br>` +
+          `<span style="color:#166534">Log in with your registered email and password at </span>` +
+          `<a href="https://dev-erp.atithi-setu.com" style="color:#166534">dev-erp.atithi-setu.com</a>` +
+          `</div>` +
+          `<p style="color:#6b7280;font-size:13px">Welcome to Atithi-Setu! We're excited to help you grow your restaurant business. If you need any assistance, reply to this email.</p>` +
+          `<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— The Atithi-Setu Team</p>` +
+          `</div>`,
+      };
+
+    /* ── Business Registration (admin-created accounts) ──────────────── */
 
     case 'BUSINESS_REGISTRATION':
       return {
@@ -448,14 +522,19 @@ export async function sendEmail(
     return;
   }
   try {
+    // Always BCC the configured SMTP account so the owner gets a copy of every notification.
+    // Skip BCC if the recipient is already the SMTP user (avoid duplicate).
+    const smtpUser = process.env.SMTP_USER;
+    const bcc = smtpUser && smtpUser.toLowerCase() !== to.toLowerCase() ? smtpUser : undefined;
     await mailTransporter.sendMail({
       from: process.env.SMTP_FROM,
       to,
+      bcc,
       subject,
       text,
       html,
     });
-    console.log(`[Notification] Email sent → ${to}`);
+    console.log(`[Notification] Email sent → ${to}${bcc ? ` (bcc: ${bcc})` : ''}`);
   } catch (err) {
     console.error('[Notification] Email send failed:', err);
   }

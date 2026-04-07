@@ -11,6 +11,7 @@ import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, DbInter
 import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, buildNotificationContent } from "./notificationService.ts";
 import { downloadFromDrive } from "./googleDriveService.ts";
 import multer from "multer";
+import cron from "node-cron";
 
 /** Returns a map of { "HH:MI" → bookedCount } for a given date, excluding cancelled bookings. */
 async function getSlotCountMap(db: DbInterface, dateStr: string): Promise<Record<string, number>> {
@@ -89,6 +90,12 @@ const MAX_TENANTS_IN_MEMORY = 100;
 
 async function triggerNotification(restaurantId: string, eventName: string, data: any) {
   try {
+    // Inject restaurant name so all notifications display the correct restaurant
+    if (!data.restaurantName) {
+      const rRow = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [restaurantId]);
+      data = { ...data, restaurantName: rRow?.name || 'Atithi-Setu' };
+    }
+
     const db = await getTenantDb(restaurantId);
     const settings = await db.query("SELECT * FROM notification_settings WHERE event_name = ?", [eventName]);
     if (!settings || settings.length === 0) return;
@@ -219,13 +226,14 @@ async function startServer() {
     try {
       let query = `
         SELECT r.*,
-          u.name  AS owner_name,
-          u.email AS owner_email,
-          u.login_id AS owner_login_id,
-          u.phone AS owner_phone,
+          COALESCE(u.name,  oa.owner_name)   AS owner_name,
+          COALESCE(u.email, oa.email)         AS owner_email,
+          COALESCE(u.login_id, oa.email)      AS owner_login_id,
+          COALESCE(u.phone, oa.phone_number)  AS owner_phone,
           u.id AS owner_user_id
         FROM restaurants r
-        LEFT JOIN users u ON u.restaurant_id = r.id AND u.role = 'OWNER'
+        LEFT JOIN users u        ON u.restaurant_id = r.id AND u.role = 'OWNER'
+        LEFT JOIN owner_accounts oa ON LOWER(oa.email) = LOWER(r.admin_id)
       `;
       let params: any[] = [];
       if (req.user?.role === 'SALES_REP') {
@@ -355,7 +363,40 @@ async function startServer() {
         return res.status(403).json({ error: "Access denied" });
       }
 
+      // Check previous status before updating (to detect pending→active transition)
+      const prev = await centralDb.get("SELECT is_active, name, admin_id FROM restaurants WHERE id = ?", [req.params.id]);
       await centralDb.run("UPDATE restaurants SET is_active = ? WHERE id = ?", [is_active, req.params.id]);
+
+      // If activating a previously pending (is_active=0) restaurant, send approval email
+      if (is_active === 1 && prev && prev.is_active === 0) {
+        try {
+          const { sendEmail } = await import('./notificationService.js');
+          const { buildNotificationContent } = await import('./notificationService.js');
+          // Look up owner email from owner_accounts (new flow) or users (legacy)
+          const ownerAccount = await centralDb.get(
+            "SELECT email FROM owner_accounts WHERE LOWER(email) = ?",
+            [prev.admin_id?.toLowerCase()]
+          );
+          const ownerEmail = ownerAccount?.email || prev.admin_id;
+          const ownerInfo = ownerAccount
+            ? await centralDb.get("SELECT owner_name FROM owner_accounts WHERE LOWER(email) = ?", [prev.admin_id?.toLowerCase()])
+            : await centralDb.get("SELECT name AS owner_name FROM users WHERE LOWER(email) = ? OR restaurant_id = ?", [prev.admin_id?.toLowerCase(), req.params.id]);
+
+          if (ownerEmail) {
+            const emailContent = buildNotificationContent('ACCOUNT_APPROVED', {
+              restaurantName: prev.name,
+              ownerName: ownerInfo?.owner_name || '',
+              restaurantId: req.params.id,
+              email: ownerEmail,
+            });
+            await sendEmail(ownerEmail, emailContent.subject, emailContent.text, emailContent.html);
+            console.log(`[Approval] Account activated & email sent to ${ownerEmail} for restaurant ${req.params.id}`);
+          }
+        } catch (emailErr) {
+          console.warn('[Approval] Could not send approval email:', emailErr);
+        }
+      }
+
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update restaurant status" });
@@ -467,8 +508,19 @@ async function startServer() {
   });
 
   // Owner: Get own profile (name, email, phone)
+  // Supports both new email-based accounts (owner_accounts) and legacy id-based accounts (users)
   app.get("/api/owner/profile", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      // New owner accounts use email in JWT; legacy accounts use id
+      if (req.user!.email) {
+        const profile = await centralDb.get(
+          "SELECT owner_name AS name, email, phone_number AS phone FROM owner_accounts WHERE LOWER(email) = ?",
+          [req.user!.email.toLowerCase()]
+        );
+        if (!profile) return res.status(404).json({ error: "Profile not found" });
+        return res.json(profile);
+      }
+      // Legacy path
       const profile = await centralDb.get(
         "SELECT id, name, email, phone, login_id FROM users WHERE id = ?",
         [req.user!.id]
@@ -487,10 +539,19 @@ async function startServer() {
       return res.status(400).json({ error: "Name and email are required" });
     }
     try {
-      await centralDb.run(
-        "UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?",
-        [name.trim(), email.trim().toLowerCase(), phone?.trim() || null, req.user!.id]
-      );
+      if (req.user!.email) {
+        // New email-based owner account
+        await centralDb.run(
+          "UPDATE owner_accounts SET owner_name = ?, phone_number = ? WHERE LOWER(email) = ?",
+          [name.trim(), phone?.trim() || null, req.user!.email.toLowerCase()]
+        );
+      } else {
+        // Legacy id-based owner account
+        await centralDb.run(
+          "UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?",
+          [name.trim(), email.trim().toLowerCase(), phone?.trim() || null, req.user!.id]
+        );
+      }
       res.json({ success: true });
     } catch (err: any) {
       if (err.code === '23505' && err.constraint?.includes('email')) {
@@ -501,11 +562,31 @@ async function startServer() {
   });
 
   // Admin: Reset Owner Password
+  // Updates both legacy users table AND new owner_accounts table
   app.post("/api/admin/reset-owner-password", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     const { restaurantId, newPassword } = req.body;
     try {
       const hashedPassword = await bcrypt.hash(newPassword, 12);
-      await centralDb.run("UPDATE users SET password = ? WHERE restaurant_id = ? AND role = 'OWNER'", [hashedPassword, restaurantId]);
+
+      // Legacy path: update users table (older admin-created accounts)
+      await centralDb.run(
+        "UPDATE users SET password = ? WHERE restaurant_id = ? AND role = 'OWNER'",
+        [hashedPassword, restaurantId]
+      );
+
+      // New path: update owner_accounts table (self-registered owners)
+      // Look up owner email via restaurants.admin_id
+      const restaurant = await centralDb.get(
+        "SELECT admin_id FROM restaurants WHERE id = ?",
+        [restaurantId]
+      );
+      if (restaurant?.admin_id) {
+        await centralDb.run(
+          "UPDATE owner_accounts SET password_hash = ? WHERE LOWER(email) = LOWER(?)",
+          [hashedPassword, restaurant.admin_id]
+        );
+      }
+
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to reset owner password" });
@@ -632,16 +713,17 @@ async function startServer() {
       const db = await getTenantDb(req.user!.restaurantId);
       for (const s of settings) {
         await db.run(`
-          INSERT INTO notification_settings (event_name, role, email_enabled, sms_enabled, whatsapp_enabled, telegram_enabled, telegram_chat_id, recipients)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO notification_settings (event_name, role, email_enabled, sms_enabled, whatsapp_enabled, telegram_enabled, telegram_chat_id, recipients, schedule_time)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(event_name, role) DO UPDATE SET
-            email_enabled = excluded.email_enabled,
-            sms_enabled = excluded.sms_enabled,
+            email_enabled    = excluded.email_enabled,
+            sms_enabled      = excluded.sms_enabled,
             whatsapp_enabled = excluded.whatsapp_enabled,
             telegram_enabled = excluded.telegram_enabled,
             telegram_chat_id = excluded.telegram_chat_id,
-            recipients = excluded.recipients
-        `, [s.event_name, s.role, s.email_enabled ? 1 : 0, s.sms_enabled ? 1 : 0, s.whatsapp_enabled ? 1 : 0, s.telegram_enabled ? 1 : 0, s.telegram_chat_id || '', s.recipients || '']);
+            recipients       = excluded.recipients,
+            schedule_time    = excluded.schedule_time
+        `, [s.event_name, s.role, s.email_enabled ? 1 : 0, s.sms_enabled ? 1 : 0, s.whatsapp_enabled ? 1 : 0, s.telegram_enabled ? 1 : 0, s.telegram_chat_id || '', s.recipients || '', s.schedule_time || '']);
       }
       res.json({ success: true });
     } catch (err) {
@@ -1133,10 +1215,10 @@ async function startServer() {
         [email.toLowerCase(), restaurantId, restaurant_name.trim(), location_city.trim(), cuisine_type?.trim() || null]
       );
 
-      // Insert into legacy restaurants table so /api/restaurant/:id works
+      // Insert into legacy restaurants table — is_active=0 (pending admin approval)
       await centralDb.run(
         `INSERT INTO restaurants (id, name, admin_id, state, city, is_active, registered_at)
-         VALUES (?, ?, ?, ?, ?, 1, NOW())
+         VALUES (?, ?, ?, ?, ?, 0, NOW())
          ON CONFLICT (id) DO NOTHING`,
         [restaurantId, restaurant_name.trim(), email.toLowerCase(), 'N/A', location_city.trim()]
       );
@@ -1173,20 +1255,30 @@ async function startServer() {
         );
       `);
 
-      const jwtToken = jwt.sign(
-        { email: email.toLowerCase(), restaurantId, role: 'OWNER', userName: owner_name.trim() },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
+      // Send registration confirmation email to owner (async — don't block response)
+      try {
+        const { sendEmail } = await import('./notificationService.js');
+        const { buildNotificationContent } = await import('./notificationService.js');
+        const emailContent = buildNotificationContent('REGISTRATION_RECEIVED', {
+          restaurantName: restaurant_name.trim(),
+          ownerName: owner_name.trim(),
+          email: email.toLowerCase(),
+          restaurantId,
+        });
+        await sendEmail(email.toLowerCase(), emailContent.subject, emailContent.text, emailContent.html);
+        console.log(`[Registration] Confirmation email sent to ${email}`);
+      } catch (emailErr) {
+        console.warn('[Registration] Could not send confirmation email:', emailErr);
+      }
 
-      console.log(`✅ Owner registered: ${email} → ${restaurantId}`);
+      console.log(`✅ Owner registered (PENDING): ${email} → ${restaurantId}`);
       res.json({
         success: true,
-        jwt_token: jwtToken,
+        pending: true,
         restaurant_id: restaurantId,
         restaurant_name: restaurant_name.trim(),
-        role: 'OWNER',
-        message: 'Registration successful! Welcome to AtithiSetu.'
+        email: email.toLowerCase(),
+        message: 'Registration submitted! Your account is pending admin approval. You will be notified by email once activated.'
       });
     } catch (err: any) {
       console.error("Error in /api/auth/owner/register:", err);
@@ -1246,9 +1338,12 @@ async function startServer() {
       }
 
       const restaurants = await centralDb.query(
-        `SELECT restaurant_id, restaurant_name, location_city, cuisine_type, role, is_primary
-         FROM owner_restaurants WHERE owner_email = ?
-         ORDER BY is_primary DESC, added_at ASC`,
+        `SELECT or2.restaurant_id, or2.restaurant_name, or2.location_city, or2.cuisine_type, or2.role, or2.is_primary,
+                COALESCE(r.is_active, 0) AS is_active
+         FROM owner_restaurants or2
+         LEFT JOIN restaurants r ON r.id = or2.restaurant_id
+         WHERE or2.owner_email = ?
+         ORDER BY or2.is_primary DESC, or2.added_at ASC`,
         [account.email]
       );
 
@@ -1258,6 +1353,13 @@ async function startServer() {
 
       if (restaurants.length === 1) {
         const r = restaurants[0];
+        // Block access if restaurant is pending admin approval
+        if (r.is_active === 0) {
+          return res.status(403).json({
+            error: "Your account is pending admin approval. You will receive an email once your account is activated.",
+            pending: true
+          });
+        }
         const jwtToken = jwt.sign(
           { email: account.email, restaurantId: r.restaurant_id, role: r.role, userName: account.owner_name },
           JWT_SECRET,
@@ -1645,59 +1747,238 @@ async function startServer() {
     }
   });
 
-  // AI: Generate food image for menu item using Gemini
+  // AI: Generate food image for menu item using Gemini (with fallbacks) — one-time only
   app.post("/api/restaurant/:id/menu/:itemId/generate-image", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const { name, category, dietary_type } = req.body;
+
+      // One-time guard: if this item already has an image, return it as-is — never overwrite
+      const db = await getTenantDb(req.params.id);
+      const existing = await db.get('SELECT image_url FROM menu WHERE id = ?', [req.params.itemId]);
+      if (existing?.image_url) {
+        console.log(`[AI Image] Skipping — item "${name}" already has image: ${existing.image_url}`);
+        return res.json({ success: true, image_url: existing.image_url, cached: true });
+      }
+
       const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
       let imageUrl: string | null = null;
+      let quotaExhausted = false;
 
-      // Try Gemini image generation first
+      // Helper: download an image from a URL (follows redirects, handles relative URLs) and save locally
+      const downloadAndSave = async (url: string, prefix: string): Promise<string | null> => {
+        const https = await import('https');
+        const http = await import('http');
+        return new Promise((resolve) => {
+          let resolved = false;
+          const done = (v: string | null) => { if (!resolved) { resolved = true; resolve(v); } };
+          const doGet = (targetUrl: string, baseUrl: string, depth: number) => {
+            if (depth > 5) return done(null);
+            try {
+              // Handle relative redirect URLs by resolving against base
+              const fullUrl = targetUrl.startsWith('http') ? targetUrl : new URL(targetUrl, baseUrl).href;
+              const mod = fullUrl.startsWith('https') ? https : http;
+              mod.get(fullUrl, (imgRes: any) => {
+                if (imgRes.statusCode >= 300 && imgRes.statusCode < 400 && imgRes.headers.location) {
+                  return doGet(imgRes.headers.location, fullUrl, depth + 1);
+                }
+                if (imgRes.statusCode !== 200) return done(null);
+                const chunks: Buffer[] = [];
+                imgRes.on('data', (c: Buffer) => chunks.push(c));
+                imgRes.on('end', () => {
+                  const data = Buffer.concat(chunks);
+                  if (data.length < 2000) return done(null);
+                  const ext = (imgRes.headers['content-type'] || '').includes('png') ? 'png' : 'jpg';
+                  const filename = `${prefix}_${req.params.itemId}_${Date.now()}.${ext}`;
+                  const localPath = path.join(process.cwd(), 'public', 'uploads', filename);
+                  fs.writeFileSync(localPath, data);
+                  done(`/uploads/${filename}`);
+                });
+              }).on('error', () => done(null));
+            } catch (e) {
+              console.warn(`[AI Image] downloadAndSave URL error: ${e}`);
+              done(null);
+            }
+          };
+          doGet(url, url, 0);
+          setTimeout(() => done(null), 20000);
+        });
+      };
+
+      // ---------- Strategy 1: Gemini AI Image Generation ----------
       if (GEMINI_API_KEY && GEMINI_API_KEY !== 'MY_GEMINI_API_KEY') {
-        try {
-          const { GoogleGenAI } = await import('@google/genai');
-          const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-          const prompt = `A professional, appetizing food photo of ${name}, an Indian ${(category || 'main course').toLowerCase()} dish. ${dietary_type === 'NON_VEG' ? 'Non-vegetarian.' : 'Vegetarian.'} Served on a restaurant plate, warm lighting, high resolution, food photography style.`;
-          const response = await ai.models.generateContent({
-            model: 'gemini-2.0-flash-preview-image-generation',
-            contents: prompt,
-            config: { responseModalities: ['TEXT', 'IMAGE'] } as any,
-          });
-          const parts = (response as any).candidates?.[0]?.content?.parts || [];
-          for (const part of parts) {
-            if (part.inlineData?.data) {
-              const buffer = Buffer.from(part.inlineData.data, 'base64');
-              const filename = `ai_${req.params.itemId}_${Date.now()}.jpg`;
-              const localPath = path.join(process.cwd(), 'public', 'uploads', filename);
-              fs.writeFileSync(localPath, buffer);
-              imageUrl = `/uploads/${filename}`;
-              break;
+        const dietLabel = dietary_type === 'NON_VEG' ? 'non-vegetarian' : dietary_type === 'VEGAN' ? 'vegan' : 'vegetarian';
+        const catLabel = (category || 'main course').toLowerCase();
+        const prompt = [
+          `Generate a photorealistic, mouth-watering food photograph of "${name}".`,
+          `This is an authentic Indian ${catLabel} dish (${dietLabel}).`,
+          `The dish is beautifully plated on traditional Indian restaurant crockery.`,
+          `Shot from a 45-degree angle with warm, golden lighting.`,
+          `Rich colors, garnished with fresh herbs and spices typical of Indian cuisine.`,
+          `Professional food photography, shallow depth of field, no text or watermarks.`,
+        ].join(' ');
+
+        // Models verified via ListModels API — try in order of preference
+        const imageModels = [
+          'gemini-2.5-flash-image',
+          'gemini-3.1-flash-image-preview',
+          'gemini-3-pro-image-preview',
+        ];
+
+        for (const modelName of imageModels) {
+          if (imageUrl) break;
+          try {
+            const { GoogleGenAI } = await import('@google/genai');
+            const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+            console.log(`[AI Image] Trying model: ${modelName} for "${name}"`);
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: prompt,
+              config: { responseModalities: ['TEXT', 'IMAGE'] } as any,
+            });
+            const parts = (response as any).candidates?.[0]?.content?.parts || [];
+            for (const part of parts) {
+              if (part.inlineData?.data) {
+                const buffer = Buffer.from(part.inlineData.data, 'base64');
+                const filename = `ai_${req.params.itemId}_${Date.now()}.jpg`;
+                const localPath = path.join(process.cwd(), 'public', 'uploads', filename);
+                fs.writeFileSync(localPath, buffer);
+                imageUrl = `/uploads/${filename}`;
+                console.log(`[AI Image] Success with ${modelName} → ${filename}`);
+                break;
+              }
+            }
+          } catch (modelErr: any) {
+            const errMsg = modelErr?.message || String(modelErr);
+            console.warn(`[AI Image] ${modelName} failed: ${errMsg.substring(0, 200)}`);
+            if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('quota')) {
+              quotaExhausted = true;
             }
           }
-        } catch (geminiErr) {
-          console.warn('[AI Image] Gemini generation failed, falling back to Unsplash:', geminiErr);
         }
+      } else {
+        console.warn('[AI Image] GEMINI_API_KEY not configured');
       }
 
-      // Fallback: fetch from Unsplash using item name as search term
+      // ---------- Strategy 2: TheMealDB (free, no auth, searches by dish name) ----------
       if (!imageUrl) {
-        const query = encodeURIComponent(`${name} indian food`);
-        const unsplashUrl = `https://source.unsplash.com/600x450/?${query}`;
-        const imgRes = await fetch(unsplashUrl, { redirect: 'follow' });
-        if (imgRes.ok) {
-          const buffer = Buffer.from(await imgRes.arrayBuffer());
-          const filename = `ai_${req.params.itemId}_${Date.now()}.jpg`;
-          const localPath = path.join(process.cwd(), 'public', 'uploads', filename);
-          fs.writeFileSync(localPath, buffer);
-          imageUrl = `/uploads/${filename}`;
+        try {
+          console.log(`[AI Image] Trying TheMealDB for: "${name}"`);
+          const https = await import('https');
+          const mealDbUrl = `https://www.themealdb.com/api/json/v1/1/search.php?s=${encodeURIComponent(name)}`;
+
+          const mealData: any = await new Promise((resolve, reject) => {
+            https.get(mealDbUrl, { headers: { 'User-Agent': 'AtithiSetu/1.0' } }, (pRes: any) => {
+              let body = '';
+              pRes.on('data', (c: string) => body += c);
+              pRes.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('MealDB parse error')); } });
+            }).on('error', reject);
+            setTimeout(() => reject(new Error('MealDB timeout')), 10000);
+          });
+
+          // Try exact match first, then first result
+          const meals: any[] = mealData?.meals || [];
+          const exactMatch = meals.find((m: any) => m.strMeal?.toLowerCase() === name.toLowerCase());
+          const chosen = exactMatch || meals[0];
+          if (chosen?.strMealThumb) {
+            const saved = await downloadAndSave(chosen.strMealThumb, 'meal');
+            if (saved) {
+              imageUrl = saved;
+              console.log(`[AI Image] TheMealDB success: "${chosen.strMeal}" → ${saved}`);
+            }
+          }
+
+          // If no match in MealDB, try a keyword-only search (first word of dish name)
+          if (!imageUrl && name.split(' ').length > 1) {
+            const keyword = name.split(' ').slice(-1)[0]; // e.g. "Tikka" from "Paneer Tikka"
+            const kwUrl = `https://www.themealdb.com/api/json/v1/1/search.php?s=${encodeURIComponent(keyword)}`;
+            const kwData: any = await new Promise((resolve, reject) => {
+              https.get(kwUrl, { headers: { 'User-Agent': 'AtithiSetu/1.0' } }, (r: any) => {
+                let b = '';
+                r.on('data', (c: string) => b += c);
+                r.on('end', () => { try { resolve(JSON.parse(b)); } catch { reject(new Error('parse')); } });
+              }).on('error', reject);
+              setTimeout(() => reject(new Error('timeout')), 8000);
+            });
+            const kwMeals: any[] = kwData?.meals || [];
+            if (kwMeals[0]?.strMealThumb) {
+              const saved = await downloadAndSave(kwMeals[0].strMealThumb, 'meal');
+              if (saved) {
+                imageUrl = saved;
+                console.log(`[AI Image] TheMealDB keyword "${keyword}" → ${saved}`);
+              }
+            }
+          }
+        } catch (mealErr: any) {
+          console.warn(`[AI Image] TheMealDB fallback failed: ${mealErr?.message || mealErr}`);
         }
       }
 
-      if (!imageUrl) return res.status(500).json({ error: 'Could not generate image' });
+      // ---------- Strategy 3: LoremFlickr (CC-licensed, keyword-search, no auth) ----------
+      if (!imageUrl) {
+        try {
+          // Use dish name + indian food as keywords for relevance
+          const cleanName = name.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, ',');
+          const keywords = `indian,${cleanName},food`.toLowerCase();
+          const flickrUrl = `https://loremflickr.com/480/480/${encodeURIComponent(keywords)}`;
+          console.log(`[AI Image] Trying LoremFlickr for keywords: "${keywords}"`);
+          const saved = await downloadAndSave(flickrUrl, 'flickr');
+          if (saved) {
+            imageUrl = saved;
+            console.log(`[AI Image] LoremFlickr success → ${saved}`);
+          }
+        } catch (flickrErr: any) {
+          console.warn(`[AI Image] LoremFlickr fallback failed: ${flickrErr?.message || flickrErr}`);
+        }
+      }
 
-      // Save to DB
-      const db = await getTenantDb(req.params.id);
+      // ---------- Strategy 4: Foodish (last resort — random food image) ----------
+      if (!imageUrl) {
+        try {
+          const foodishCategories: Record<string, string> = {
+            'biryani': 'biryani', 'rice': 'rice', 'dosa': 'dosa',
+            'idly': 'idly', 'samosa': 'samosa', 'burger': 'burger',
+            'pizza': 'pizza', 'pasta': 'pasta', 'dessert': 'dessert',
+          };
+          const nameLower = name.toLowerCase();
+          let cat = '';
+          for (const [key, val] of Object.entries(foodishCategories)) {
+            if (nameLower.includes(key)) { cat = val; break; }
+          }
+          const foodishUrl = cat ? `https://foodish-api.com/api/images/${cat}` : 'https://foodish-api.com/api/';
+          console.log(`[AI Image] Trying Foodish last-resort (category: ${cat || 'random'})`);
+          const https = await import('https');
+
+          const foodishData: any = await new Promise((resolve, reject) => {
+            https.get(foodishUrl, (pRes: any) => {
+              let body = '';
+              pRes.on('data', (c: string) => body += c);
+              pRes.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('Foodish parse error')); } });
+            }).on('error', reject);
+            setTimeout(() => reject(new Error('Foodish timeout')), 10000);
+          });
+
+          if (foodishData?.image) {
+            const saved = await downloadAndSave(foodishData.image, 'foodish');
+            if (saved) {
+              imageUrl = saved;
+              console.log(`[AI Image] Foodish last-resort success → ${saved}`);
+            }
+          }
+        } catch (foodishErr: any) {
+          console.warn(`[AI Image] Foodish last-resort failed: ${foodishErr?.message || foodishErr}`);
+        }
+      }
+
+      // ---------- No image obtained ----------
+      if (!imageUrl) {
+        const msg = quotaExhausted
+          ? 'Gemini API quota exhausted (free tier limit reached). Please enable billing at https://ai.google.dev or try again later.'
+          : 'Image generation failed. All image sources unavailable. Please try again.';
+        return res.status(500).json({ error: msg });
+      }
+
+      // Save to DB (db was already obtained at the top of this handler)
       await db.run('UPDATE menu SET image_url = ? WHERE id = ?', [imageUrl, req.params.itemId]);
 
       res.json({ success: true, image_url: imageUrl });
@@ -1789,7 +2070,7 @@ async function startServer() {
       `, [
         name,
         gst_number || null,
-        gst_percentage || 5,
+        gst_percentage != null ? Number(gst_percentage) : 0,
         is_gst_enabled ? 1 : 0,
         template_id || 'CLASSIC',
         table_count || 0,
@@ -1925,8 +2206,10 @@ async function startServer() {
       });
 
       // Defaults: if gst_percent not set on session, use restaurant setting
-      const defaultGstPct  = restaurant?.is_gst_enabled ? (Number(restaurant.gst_percentage) || 5) : 0;
-      const defaultApplyGst = restaurant?.is_gst_enabled ? 1 : 0;
+      // If restaurant has GST disabled, always override to 0 / off regardless of stored session value
+      const gstEnabled      = Boolean(restaurant?.is_gst_enabled);
+      const defaultGstPct   = gstEnabled ? (Number(restaurant.gst_percentage) || 0) : 0;
+      const defaultApplyGst = gstEnabled ? 1 : 0;
 
       res.json({
         session: {
@@ -1934,9 +2217,8 @@ async function startServer() {
           table_display_name: tableRow?.name || session.table_name || session.table_id,
           discount_amount:        Number(session.discount_amount || 0),
           service_charge_percent: Number(session.service_charge_percent || 0),
-          gst_percent:  (session.gst_percent != null && Number(session.gst_percent) > 0)
-                          ? Number(session.gst_percent) : defaultGstPct,
-          apply_gst:    session.apply_gst != null ? Number(session.apply_gst) : defaultApplyGst,
+          gst_percent:  gstEnabled ? (session.gst_percent != null ? Number(session.gst_percent) : defaultGstPct) : 0,
+          apply_gst:    gstEnabled ? (session.apply_gst != null ? Number(session.apply_gst) : defaultApplyGst) : 0,
           orders,
         },
         restaurant,
@@ -3311,8 +3593,15 @@ async function startServer() {
           "UPDATE orders SET payment_status = 'PAID', kitchen_status = 'queued', status = 'CONFIRMED' WHERE id = ?",
           [req.params.id]
         );
+      } else if (isPaid) {
+        // For manual invoices and other non-prepaid orders: mark PAID + DELIVERED
+        // so they leave the live KDS view immediately
+        await db.run(
+          "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED' WHERE id = ?",
+          [req.params.id]
+        );
       } else {
-        await db.run("UPDATE orders SET payment_status = ? WHERE id = ?", [status || 'PAID', req.params.id]);
+        await db.run("UPDATE orders SET payment_status = ? WHERE id = ?", [status, req.params.id]);
       }
       res.json({ success: true });
 
@@ -3355,7 +3644,7 @@ async function startServer() {
       let items = order.items;
       if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
       if (!Array.isArray(items)) items = [];
-      res.json({ ...order, items, discount_amount: Number(order.discount_amount || 0), service_charge_percent: Number(order.service_charge_percent || 0), gst_percent: Number(order.gst_percent || 0), apply_gst: order.apply_gst === undefined ? 1 : Number(order.apply_gst) });
+      res.json({ ...order, items, discount_amount: Number(order.discount_amount || 0), service_charge_percent: Number(order.service_charge_percent || 0), gst_percent: Number(order.gst_percent || 0), apply_gst: order.apply_gst === undefined ? 0 : Number(order.apply_gst) });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch invoice" });
     }
@@ -3369,7 +3658,7 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge_percent FLOAT DEFAULT 0").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0").catch(() => {});
-      const { items, discount_amount = 0, service_charge_percent = 0, gst_percent = 5, apply_gst = 1 } = req.body;
+      const { items, discount_amount = 0, service_charge_percent = 0, gst_percent = 0, apply_gst = 0 } = req.body;
       const rawSubtotal   = (items as any[]).reduce((s, it) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
       const afterDiscount = Math.max(0, rawSubtotal - Number(discount_amount));
       const svcAmt        = afterDiscount * Number(service_charge_percent) / 100;
@@ -3671,6 +3960,89 @@ async function startServer() {
   app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  // ── Notification Scheduler ──────────────────────────────────────────────────
+  // Runs every minute. For each tenant that has a schedule_time set on a
+  // schedulable event (e.g. DAILY_REPORT), fires that notification with real data.
+  cron.schedule('* * * * *', async () => {
+    try {
+      const now = new Date();
+      const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+      // Get all active restaurants
+      const restaurants = await centralDb.query("SELECT id FROM restaurants WHERE id <> 'SYSTEM'");
+
+      for (const restaurant of restaurants) {
+        try {
+          const db = await getTenantDb(restaurant.id);
+          // Find any notification settings scheduled for right now
+          const scheduled = await db.query(
+            "SELECT * FROM notification_settings WHERE schedule_time = ? AND schedule_time <> ''",
+            [currentTime]
+          );
+
+          for (const setting of scheduled) {
+            console.log(`[Scheduler] Firing ${setting.event_name} for restaurant ${restaurant.id} at ${currentTime}`);
+
+            let data: any = {};
+
+            // Build real data payload for each schedulable event type
+            if (setting.event_name === 'DAILY_REPORT') {
+              const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+              // Total orders and revenue for today (exclude cancelled)
+              const summary = await db.get(
+                `SELECT COUNT(*) as order_count, COALESCE(SUM(total_amount), 0) as revenue
+                 FROM orders
+                 WHERE DATE(created_at) = ?
+                   AND LOWER(status) <> 'cancelled'`,
+                [today]
+              );
+
+              // Top-selling item for today
+              let topItem = 'N/A';
+              try {
+                const itemRows = await db.query(
+                  `SELECT items FROM orders
+                   WHERE DATE(created_at) = ?
+                     AND LOWER(status) <> 'cancelled'`,
+                  [today]
+                );
+                const countMap: Record<string, number> = {};
+                for (const row of itemRows) {
+                  try {
+                    const items = JSON.parse(row.items || '[]');
+                    for (const item of items) {
+                      const n = (item.name || '').replace(/\s*\(.*?\)\s*$/, '').trim(); // strip size suffix
+                      countMap[n] = (countMap[n] || 0) + (item.quantity || 1);
+                    }
+                  } catch { /* skip malformed row */ }
+                }
+                const sorted = Object.entries(countMap).sort((a, b) => b[1] - a[1]);
+                if (sorted.length > 0) topItem = sorted[0][0];
+              } catch { /* fallback to N/A */ }
+
+              data = {
+                date: new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+                orderCount: parseInt(summary?.order_count ?? '0', 10),
+                revenue: parseFloat(summary?.revenue ?? '0').toFixed(2),
+                topItem,
+              };
+
+              console.log(`[Scheduler] DAILY_REPORT data: orders=${data.orderCount}, revenue=₹${data.revenue}, top="${data.topItem}"`);
+            }
+
+            await triggerNotification(restaurant.id, setting.event_name, data);
+          }
+        } catch (tenantErr) {
+          console.error(`[Scheduler] Error processing restaurant ${restaurant.id}:`, tenantErr);
+        }
+      }
+    } catch (err) {
+      console.error('[Scheduler] Cron job error:', err);
+    }
+  });
+  console.log('[Scheduler] Notification scheduler started — checking every minute');
 }
 
 startServer().catch(console.error);
