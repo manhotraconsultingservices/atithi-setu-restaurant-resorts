@@ -3593,8 +3593,15 @@ async function startServer() {
           "UPDATE orders SET payment_status = 'PAID', kitchen_status = 'queued', status = 'CONFIRMED' WHERE id = ?",
           [req.params.id]
         );
+      } else if (isPaid) {
+        // For manual invoices and other non-prepaid orders: mark PAID + DELIVERED
+        // so they leave the live KDS view immediately
+        await db.run(
+          "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED' WHERE id = ?",
+          [req.params.id]
+        );
       } else {
-        await db.run("UPDATE orders SET payment_status = ? WHERE id = ?", [status || 'PAID', req.params.id]);
+        await db.run("UPDATE orders SET payment_status = ? WHERE id = ?", [status, req.params.id]);
       }
       res.json({ success: true });
 

@@ -6087,7 +6087,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             >
                               {/* Table # */}
                               <td className="px-4 py-3 font-bold text-[#0d0a07] whitespace-nowrap">
-                                Table {o.tableNumber}
+                                {String(o.id || '').startsWith('MAN-') ? (
+                                  <span className="text-purple-700">Manual</span>
+                                ) : (
+                                  <>Table {o.tableNumber}</>
+                                )}
                                 {(o as any).round_number > 1 && (
                                   <span className="ml-1 text-[9px] text-[#0d0a07]/35">R{(o as any).round_number}</span>
                                 )}
@@ -7469,7 +7473,7 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
                   <div className="p-5 border-b border-[#faf5ee] flex justify-between items-start bg-[#faf5ee]/40">
                     <div>
                       <span className="text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40 block">
-                        Table {order.tableNumber}
+                        {String(order.id || '').startsWith('MAN-') ? '📋 Manual Invoice' : `Table ${order.tableNumber}`}
                       </span>
                       <h4 className="text-base font-bold font-mono text-[#0d0a07]">{order.id}</h4>
                       <div className="flex flex-wrap gap-1.5 mt-1.5">
