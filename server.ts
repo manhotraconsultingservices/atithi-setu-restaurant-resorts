@@ -1747,6 +1747,43 @@ async function startServer() {
     }
   });
 
+  // ── Import Token: SUPER_ADMIN generates a scoped token for any restaurant ──
+  // Allows admins to run menu imports without knowing the owner's password.
+  // POST /api/auth/import-token  { loginId, password, restaurantId }
+  // Returns { token } valid for 24 hours, scoped to the given restaurantId.
+  app.post("/api/auth/import-token", async (req: Request, res: Response) => {
+    const { loginId, password, restaurantId } = req.body;
+    try {
+      if (!loginId || !password || !restaurantId) {
+        return res.status(400).json({ error: "loginId, password, and restaurantId are required" });
+      }
+      // Only SUPER_ADMIN or CTO may generate import tokens
+      const user = await centralDb.get("SELECT * FROM users WHERE login_id = ?", [loginId]);
+      if (!user) return res.status(401).json({ error: "User not found" });
+      if (!['SUPER_ADMIN', 'CTO'].includes(user.role)) {
+        return res.status(403).json({ error: "Only SUPER_ADMIN or CTO accounts can generate import tokens" });
+      }
+      if (user.is_active === 0) return res.status(403).json({ error: "Account is deactivated" });
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) return res.status(401).json({ error: "Invalid credentials" });
+
+      // Verify the target restaurant exists
+      const restaurant = await centralDb.get("SELECT id, name FROM restaurants WHERE id = ?", [restaurantId]);
+      if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
+
+      // Sign a token scoped to that restaurant as OWNER role (enough for menu writes)
+      const token = jwt.sign(
+        { id: user.id, restaurantId, role: 'OWNER', generatedBy: loginId },
+        JWT_SECRET,
+        { expiresIn: "24h" }
+      );
+      res.json({ success: true, token, restaurantId, restaurantName: restaurant.name });
+    } catch (err) {
+      console.error("Import token error:", err);
+      res.status(500).json({ error: "Failed to generate import token" });
+    }
+  });
+
   // AI: Generate food image for menu item using Gemini (with fallbacks) — one-time only
   app.post("/api/restaurant/:id/menu/:itemId/generate-image", authenticate, async (req: AuthRequest, res: Response) => {
     try {
