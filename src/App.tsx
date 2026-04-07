@@ -3810,7 +3810,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   // ── Menu CSV Export ───────────────────────────────────────────────────────
   const handleMenuExportCsv = () => {
-    const header = 'name,category,description,dietary_type,price_half,price_full,is_daily_special,image_filename';
+    const header = 'name,category,description,dietary_type,price_half,price_full,is_daily_special,image_path';
     const rows = menu.map(item => [
       `"${(item.name||'').replace(/"/g,'""')}"`,
       `"${(item.category||'').replace(/"/g,'""')}"`,
@@ -3819,7 +3819,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       item.price_half != null ? item.price_half : '',
       item.price_full || item.price || '',
       item.is_daily_special ? 'true' : 'false',
-      '', // image_filename: left blank on export (images are server-side)
+      '', // image_path: left blank on export (images are already on server)
     ].join(','));
     const csv = [header, ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -3831,12 +3831,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   // ── Menu CSV Template Download ────────────────────────────────────────────
   const handleMenuTemplateCsv = () => {
-    const csv = `name,category,description,dietary_type,price_half,price_full,is_daily_special,image_filename
-"Butter Chicken","Mains","Rich creamy tomato-based curry","NON_VEG",180,320,false,butter_chicken.jpg
-"Dal Makhani","Mains","Slow-cooked black lentils in butter","VEG",150,280,false,dal_makhani.jpg
-"Paneer Tikka","Starters","Grilled cottage cheese with spices","VEG",120,220,true,paneer_tikka.jpg
-"Masala Chai","Drinks","Spiced Indian tea","VEG",,60,false,masala_chai.jpg
-"Gulab Jamun","Desserts","Soft milk-solid dumplings in syrup","VEG",,80,false,gulab_jamun.jpg`;
+    // image_path accepts either:
+    //   • a full Windows/Linux path:  C:\Photos\food\butter_chicken.jpg
+    //   • just a filename:            butter_chicken.jpg  (when using the browser folder picker)
+    const csv = `name,category,description,dietary_type,price_half,price_full,is_daily_special,image_path
+"Butter Chicken","Mains","Rich creamy tomato-based curry","NON_VEG",180,320,false,C:\Photos\food\butter_chicken.jpg
+"Dal Makhani","Mains","Slow-cooked black lentils in butter","VEG",150,280,false,C:\Photos\food\dal_makhani.jpg
+"Paneer Tikka","Starters","Grilled cottage cheese with spices","VEG",120,220,true,C:\Photos\food\paneer_tikka.jpg
+"Masala Chai","Drinks","Spiced Indian tea","VEG",,60,false,C:\Photos\food\masala_chai.jpg
+"Gulab Jamun","Desserts","Soft milk-solid dumplings in syrup","VEG",,80,false,C:\Photos\food\gulab_jamun.jpg`;
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;
@@ -3909,10 +3912,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       fd.append('dietary_type', row.dietary_type || 'VEG');
       fd.append('is_daily_special', row.is_daily_special === 'true' ? 'true' : 'false');
 
-      // Attach local image file if filename provided and matched in the selected folder
-      const imgKey = (row.image_filename || '').trim().toLowerCase();
-      if (imgKey && csvImageFiles.has(imgKey)) {
-        fd.append('image', csvImageFiles.get(imgKey)!);
+      // Attach local image file if image_path provided and matched in the selected folder.
+      // Supports both full paths (C:\Photos\food\item.jpg) and plain filenames (item.jpg).
+      // The browser can only access files the user explicitly selected — we match by basename.
+      const rawImgPath = (row.image_path || row.image_filename || '').trim();
+      if (rawImgPath) {
+        // Extract just the filename from a full path (handles both \ and / separators)
+        const basename = rawImgPath.split(/[\\/]/).pop()?.toLowerCase() || '';
+        if (basename && csvImageFiles.has(basename)) {
+          fd.append('image', csvImageFiles.get(basename)!);
+        }
       }
 
       try {
@@ -4393,9 +4402,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {csvPreviewRows && (() => {
             const readyCount  = csvPreviewRows.filter(r => !r._isDuplicate && r._selected).length;
             const dupCount    = csvPreviewRows.filter(r => r._isDuplicate).length;
-            const hasImgCol   = csvPreviewRows.some(r => r.image_filename);
-            const matchedImgs = hasImgCol ? csvPreviewRows.filter(r => r.image_filename && csvImageFiles.has((r.image_filename||'').toLowerCase())).length : 0;
-            const needImgCol  = hasImgCol ? csvPreviewRows.filter(r => r.image_filename).length : 0;
+            // Support both image_path (new) and image_filename (legacy) column names
+            const getImgField = (r: any) => (r.image_path || r.image_filename || '').trim();
+            const getBasename = (p: string) => p.split(/[\\/]/).pop()?.toLowerCase() || '';
+            const hasImgCol   = csvPreviewRows.some(r => getImgField(r));
+            const matchedImgs = hasImgCol ? csvPreviewRows.filter(r => { const b = getBasename(getImgField(r)); return b && csvImageFiles.has(b); }).length : 0;
+            const needImgCol  = hasImgCol ? csvPreviewRows.filter(r => getImgField(r)).length : 0;
             return (
               <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
                 <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
@@ -4486,7 +4498,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </thead>
                       <tbody>
                         {csvPreviewRows.map((row, i) => {
-                          const imgKey = (row.image_filename || '').trim().toLowerCase();
+                          const rawPath    = getImgField(row);
+                          const imgKey     = getBasename(rawPath);
                           const imgMatched = imgKey && csvImageFiles.has(imgKey);
                           const imgPending = imgKey && !imgMatched;
                           return (
@@ -4511,8 +4524,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   {!imgKey
                                     ? <span className="text-[#0d0a07]/25 text-xs">—</span>
                                     : imgMatched
-                                    ? <span title={row.image_filename} className="text-[9px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">✓ Ready</span>
-                                    : <span title={`File not found: ${row.image_filename}`} className="text-[9px] font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">Missing</span>
+                                    ? <span title={rawPath} className="text-[9px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">✓ Ready</span>
+                                    : <span title={`File not found: ${rawPath}`} className="text-[9px] font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">Missing</span>
                                   }
                                 </td>
                               )}
