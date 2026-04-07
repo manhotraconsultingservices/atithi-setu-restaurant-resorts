@@ -62,6 +62,8 @@ import {
   List,
   Sparkles,
   IndianRupee,
+  Image as ImageIcon,
+  FolderOpen,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize, TableSession, LiveTableView, TableStatus } from './types';
@@ -2763,6 +2765,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [menuViewMode, setMenuViewMode] = useState<'grid' | 'grouped'>('grouped');
   const [csvPreviewRows, setCsvPreviewRows] = useState<any[] | null>(null);
   const [csvImporting, setCsvImporting] = useState(false);
+  const [csvImageFiles, setCsvImageFiles] = useState<Map<string, File>>(new Map());
+  const [csvImportProgress, setCsvImportProgress] = useState<{ done: number; total: number } | null>(null);
   const [generatingImageId, setGeneratingImageId] = useState<string | null>(null);
   const [newItemCategoryCustom, setNewItemCategoryCustom] = useState<string>('');
 
@@ -3806,7 +3810,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   // ── Menu CSV Export ───────────────────────────────────────────────────────
   const handleMenuExportCsv = () => {
-    const header = 'name,category,description,dietary_type,price_half,price_full,is_daily_special';
+    const header = 'name,category,description,dietary_type,price_half,price_full,is_daily_special,image_filename';
     const rows = menu.map(item => [
       `"${(item.name||'').replace(/"/g,'""')}"`,
       `"${(item.category||'').replace(/"/g,'""')}"`,
@@ -3815,6 +3819,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       item.price_half != null ? item.price_half : '',
       item.price_full || item.price || '',
       item.is_daily_special ? 'true' : 'false',
+      '', // image_filename: left blank on export (images are server-side)
     ].join(','));
     const csv = [header, ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -3826,16 +3831,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   // ── Menu CSV Template Download ────────────────────────────────────────────
   const handleMenuTemplateCsv = () => {
-    const csv = `name,category,description,dietary_type,price_half,price_full,is_daily_special
-"Butter Chicken","Mains","Rich creamy tomato-based curry","NON_VEG",180,320,false
-"Dal Makhani","Mains","Slow-cooked black lentils in butter","VEG",150,280,false
-"Paneer Tikka","Starters","Grilled cottage cheese with spices","VEG",120,220,true
-"Masala Chai","Drinks","Spiced Indian tea","VEG",,60,false
-"Gulab Jamun","Desserts","Soft milk-solid dumplings in syrup","VEG",,80,false`;
+    const csv = `name,category,description,dietary_type,price_half,price_full,is_daily_special,image_filename
+"Butter Chicken","Mains","Rich creamy tomato-based curry","NON_VEG",180,320,false,butter_chicken.jpg
+"Dal Makhani","Mains","Slow-cooked black lentils in butter","VEG",150,280,false,dal_makhani.jpg
+"Paneer Tikka","Starters","Grilled cottage cheese with spices","VEG",120,220,true,paneer_tikka.jpg
+"Masala Chai","Drinks","Spiced Indian tea","VEG",,60,false,masala_chai.jpg
+"Gulab Jamun","Desserts","Soft milk-solid dumplings in syrup","VEG",,80,false,gulab_jamun.jpg`;
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;
     a.download = 'menu_template.csv'; a.click(); URL.revokeObjectURL(url);
+  };
+
+  // ── Image Folder / Multi-File Select ─────────────────────────────────────
+  const handleImageFolderSelect = (files: FileList) => {
+    const map = new Map<string, File>();
+    Array.from(files).forEach(f => map.set(f.name.toLowerCase(), f));
+    setCsvImageFiles(map);
   };
 
   // ── CSV File Parse ────────────────────────────────────────────────────────
@@ -3878,9 +3890,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!csvPreviewRows) return;
     const toImport = csvPreviewRows.filter(r => r._selected && !r._isDuplicate);
     if (toImport.length === 0) { alert('No items selected for import.'); return; }
+
     setCsvImporting(true);
+    setCsvImportProgress({ done: 0, total: toImport.length });
+
     let imported = 0, failed = 0;
-    for (const row of toImport) {
+    const CONCURRENCY = 10; // 10 parallel uploads — safe for server + handles 200 images fast
+
+    // Build and POST a single row; returns true on success
+    const uploadRow = async (row: any): Promise<boolean> => {
       const fd = new FormData();
       fd.append('name', row.name);
       fd.append('description', row.description || '');
@@ -3890,13 +3908,37 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       fd.append('category', row.category || 'Mains');
       fd.append('dietary_type', row.dietary_type || 'VEG');
       fd.append('is_daily_special', row.is_daily_special === 'true' ? 'true' : 'false');
-      const res = await fetch(`/api/restaurant/${restaurantId}/menu`, {
-        method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: fd
-      });
-      if (res.ok) imported++; else failed++;
+
+      // Attach local image file if filename provided and matched in the selected folder
+      const imgKey = (row.image_filename || '').trim().toLowerCase();
+      if (imgKey && csvImageFiles.has(imgKey)) {
+        fd.append('image', csvImageFiles.get(imgKey)!);
+      }
+
+      try {
+        const res = await fetch(`/api/restaurant/${restaurantId}/menu`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: fd,
+        });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    };
+
+    // Process in concurrent batches of CONCURRENCY
+    for (let i = 0; i < toImport.length; i += CONCURRENCY) {
+      const batch = toImport.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(batch.map(uploadRow));
+      results.forEach(ok => { if (ok) imported++; else failed++; });
+      setCsvImportProgress({ done: Math.min(i + CONCURRENCY, toImport.length), total: toImport.length });
     }
+
     setCsvImporting(false);
+    setCsvImportProgress(null);
     setCsvPreviewRows(null);
+    setCsvImageFiles(new Map());
     fetchMenu();
     alert(`Import complete: ${imported} added${failed > 0 ? `, ${failed} failed` : ''}.`);
   };
@@ -4026,6 +4068,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <Upload size={14}/> Import CSV
                 <input type="file" accept=".csv" className="hidden" onChange={e => { if (e.target.files?.[0]) handleCsvFileParse(e.target.files[0]); e.target.value=''; }} />
               </label>
+              {/* Image folder picker — visible only when a CSV has been parsed and awaits import */}
+              {csvPreviewRows && (
+                <label title="Select a folder or multiple image files to attach during import"
+                  className={cn(
+                    "px-4 py-2.5 rounded-2xl text-xs font-bold border flex items-center gap-1.5 transition-all cursor-pointer",
+                    csvImageFiles.size > 0
+                      ? "border-emerald-500 text-emerald-700 bg-emerald-50 hover:bg-emerald-100"
+                      : "border-[#e8721c]/30 text-[#e8721c] hover:bg-[#e8721c]/5"
+                  )}>
+                  <ImageIcon size={14}/>
+                  {csvImageFiles.size > 0 ? `${csvImageFiles.size} image${csvImageFiles.size > 1 ? 's' : ''} ready` : 'Select Images'}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    /* @ts-ignore — webkitdirectory is non-standard but widely supported */
+                    webkitdirectory=""
+                    onChange={e => { if (e.target.files?.length) handleImageFolderSelect(e.target.files); e.target.value=''; }}
+                  />
+                </label>
+              )}
               <button onClick={() => setIsAddingItem(true)}
                 className="bg-[#e8721c] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#c9592a] transition-all">
                 <Plus size={14}/> Add Item
@@ -4326,74 +4390,166 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
 
           {/* ── CSV Import Preview Modal ── */}
-          {csvPreviewRows && (
-            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
-              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-                className="bg-white rounded-[32px] shadow-2xl w-full max-w-3xl my-auto overflow-hidden">
-                <div className="p-6 border-b border-[#e8721c]/10 bg-[#faf5ee]/50 flex justify-between items-center">
-                  <div>
-                    <h3 className="text-xl font-bold font-serif">CSV Import Preview</h3>
-                    <p className="text-sm text-[#0d0a07]/50 mt-0.5">
-                      {csvPreviewRows.filter(r => !r._isDuplicate && r._selected).length} items ready to import •{' '}
-                      <span className="text-amber-600 font-semibold">{csvPreviewRows.filter(r => r._isDuplicate).length} duplicates skipped</span>
-                    </p>
+          {csvPreviewRows && (() => {
+            const readyCount  = csvPreviewRows.filter(r => !r._isDuplicate && r._selected).length;
+            const dupCount    = csvPreviewRows.filter(r => r._isDuplicate).length;
+            const hasImgCol   = csvPreviewRows.some(r => r.image_filename);
+            const matchedImgs = hasImgCol ? csvPreviewRows.filter(r => r.image_filename && csvImageFiles.has((r.image_filename||'').toLowerCase())).length : 0;
+            const needImgCol  = hasImgCol ? csvPreviewRows.filter(r => r.image_filename).length : 0;
+            return (
+              <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+                <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
+                  className="bg-white rounded-[32px] shadow-2xl w-full max-w-4xl my-auto overflow-hidden">
+
+                  {/* ── Header ── */}
+                  <div className="p-6 border-b border-[#e8721c]/10 bg-[#faf5ee]/50">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h3 className="text-xl font-bold font-serif">CSV Import Preview</h3>
+                        <p className="text-sm text-[#0d0a07]/50 mt-0.5">
+                          {readyCount} item{readyCount !== 1 ? 's' : ''} ready to import
+                          {dupCount > 0 && <> • <span className="text-amber-600 font-semibold">{dupCount} duplicate{dupCount !== 1 ? 's' : ''} skipped</span></>}
+                        </p>
+                      </div>
+                      <button onClick={() => { setCsvPreviewRows(null); setCsvImageFiles(new Map()); }}
+                        className="p-2 hover:bg-white rounded-full"><X size={20}/></button>
+                    </div>
+
+                    {/* ── Image folder picker banner ── */}
+                    {hasImgCol && (
+                      <div className={cn(
+                        "mt-4 rounded-2xl px-4 py-3 flex items-center gap-3 border text-sm",
+                        matchedImgs === needImgCol && needImgCol > 0
+                          ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                          : csvImageFiles.size > 0
+                          ? "bg-amber-50 border-amber-200 text-amber-800"
+                          : "bg-blue-50 border-blue-200 text-blue-800"
+                      )}>
+                        <ImageIcon size={18} className="shrink-0"/>
+                        <div className="flex-1 min-w-0">
+                          {csvImageFiles.size === 0
+                            ? <><span className="font-bold">Images detected in CSV.</span> Select the image folder to upload photos with each item.</>
+                            : matchedImgs === needImgCol
+                            ? <><span className="font-bold">All {matchedImgs} image{matchedImgs !== 1 ? 's' : ''} matched!</span> Ready to upload.</>
+                            : <><span className="font-bold">{matchedImgs} of {needImgCol} images matched.</span> {needImgCol - matchedImgs} filename{needImgCol - matchedImgs !== 1 ? 's' : ''} not found in selected folder.</>
+                          }
+                        </div>
+                        <label className="shrink-0 cursor-pointer flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-xs bg-white border border-current/30 hover:bg-[#faf5ee] transition-all">
+                          <FolderOpen size={13}/>
+                          {csvImageFiles.size > 0 ? 'Change Folder' : 'Select Folder'}
+                          <input
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            className="hidden"
+                            /* @ts-ignore */
+                            webkitdirectory=""
+                            onChange={e => { if (e.target.files?.length) handleImageFolderSelect(e.target.files); e.target.value=''; }}
+                          />
+                        </label>
+                      </div>
+                    )}
                   </div>
-                  <button onClick={() => setCsvPreviewRows(null)} className="p-2 hover:bg-white rounded-full"><X size={20}/></button>
-                </div>
-                <div className="max-h-[55vh] overflow-y-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-[#faf5ee] sticky top-0">
-                      <tr>
-                        <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40 w-10">✓</th>
-                        <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Name</th>
-                        <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Category</th>
-                        <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Type</th>
-                        <th className="px-4 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Half</th>
-                        <th className="px-4 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Full</th>
-                        <th className="px-4 py-3 text-center text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {csvPreviewRows.map((row, i) => (
-                        <tr key={i} className={cn('border-t border-[#e8721c]/5', row._isDuplicate ? 'opacity-40 bg-amber-50/50' : '')}>
-                          <td className="px-4 py-3">
-                            <input type="checkbox" checked={row._selected && !row._isDuplicate} disabled={row._isDuplicate}
-                              onChange={e => setCsvPreviewRows(prev => prev!.map((r,j) => j===i ? {...r, _selected: e.target.checked} : r))}
-                              className="w-4 h-4 rounded text-[#e8721c]"/>
-                          </td>
-                          <td className="px-4 py-3 font-semibold">{row.name}</td>
-                          <td className="px-4 py-3 text-[#0d0a07]/60">{row.category}</td>
-                          <td className="px-4 py-3">
-                            <span className={cn('text-[9px] font-bold px-2 py-0.5 rounded-full uppercase',
-                              row.dietary_type === 'NON_VEG' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700')}>
-                              {row.dietary_type || 'VEG'}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-right font-mono text-[#0d0a07]/60">{row.price_half ? `₹${row.price_half}` : '—'}</td>
-                          <td className="px-4 py-3 text-right font-mono font-bold">₹{row.price_full || row.price || '?'}</td>
-                          <td className="px-4 py-3 text-center">
-                            {row._isDuplicate
-                              ? <span className="text-[9px] font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">Duplicate</span>
-                              : <span className="text-[9px] font-bold text-green-700 bg-green-100 px-2 py-0.5 rounded-full">New</span>}
-                          </td>
+
+                  {/* ── Progress bar (visible only while importing) ── */}
+                  {csvImportProgress && (
+                    <div className="px-6 py-3 bg-[#faf5ee]/50 border-b border-[#e8721c]/10">
+                      <div className="flex justify-between text-xs font-bold text-[#0d0a07]/60 mb-1.5">
+                        <span>Uploading items…</span>
+                        <span>{csvImportProgress.done} / {csvImportProgress.total}</span>
+                      </div>
+                      <div className="w-full bg-[#e8721c]/10 rounded-full h-2 overflow-hidden">
+                        <div
+                          className="bg-[#e8721c] h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.round((csvImportProgress.done / csvImportProgress.total) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── Table ── */}
+                  <div className="max-h-[50vh] overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf5ee] sticky top-0">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40 w-10">✓</th>
+                          <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Name</th>
+                          <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Category</th>
+                          <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Type</th>
+                          <th className="px-4 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Half</th>
+                          <th className="px-4 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Full</th>
+                          {hasImgCol && (
+                            <th className="px-4 py-3 text-center text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Image</th>
+                          )}
+                          <th className="px-4 py-3 text-center text-[10px] font-bold uppercase tracking-widest text-[#0d0a07]/40">Status</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="p-6 border-t border-[#e8721c]/10 flex items-center justify-between gap-4">
-                  <button onClick={() => setCsvPreviewRows(null)}
-                    className="px-6 py-3 rounded-2xl font-bold border border-[#e8721c]/10 hover:bg-[#faf5ee] transition-all">Cancel</button>
-                  <button onClick={handleCsvImport} disabled={csvImporting || csvPreviewRows.filter(r=>r._selected&&!r._isDuplicate).length===0}
-                    className="bg-[#e8721c] text-white px-8 py-3 rounded-2xl font-bold hover:bg-[#c9592a] transition-all flex items-center gap-2 disabled:opacity-50">
-                    {csvImporting
-                      ? <><div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"/> Importing…</>
-                      : <><Upload size={16}/> Import {csvPreviewRows.filter(r=>r._selected&&!r._isDuplicate).length} Items</>}
-                  </button>
-                </div>
-              </motion.div>
-            </div>
-          )}
+                      </thead>
+                      <tbody>
+                        {csvPreviewRows.map((row, i) => {
+                          const imgKey = (row.image_filename || '').trim().toLowerCase();
+                          const imgMatched = imgKey && csvImageFiles.has(imgKey);
+                          const imgPending = imgKey && !imgMatched;
+                          return (
+                            <tr key={i} className={cn('border-t border-[#e8721c]/5', row._isDuplicate ? 'opacity-40 bg-amber-50/50' : '')}>
+                              <td className="px-4 py-3">
+                                <input type="checkbox" checked={row._selected && !row._isDuplicate} disabled={row._isDuplicate}
+                                  onChange={e => setCsvPreviewRows(prev => prev!.map((r,j) => j===i ? {...r, _selected: e.target.checked} : r))}
+                                  className="w-4 h-4 rounded text-[#e8721c]"/>
+                              </td>
+                              <td className="px-4 py-3 font-semibold">{row.name}</td>
+                              <td className="px-4 py-3 text-[#0d0a07]/60">{row.category}</td>
+                              <td className="px-4 py-3">
+                                <span className={cn('text-[9px] font-bold px-2 py-0.5 rounded-full uppercase',
+                                  row.dietary_type === 'NON_VEG' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700')}>
+                                  {row.dietary_type || 'VEG'}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-right font-mono text-[#0d0a07]/60">{row.price_half ? `₹${row.price_half}` : '—'}</td>
+                              <td className="px-4 py-3 text-right font-mono font-bold">₹{row.price_full || row.price || '?'}</td>
+                              {hasImgCol && (
+                                <td className="px-4 py-3 text-center">
+                                  {!imgKey
+                                    ? <span className="text-[#0d0a07]/25 text-xs">—</span>
+                                    : imgMatched
+                                    ? <span title={row.image_filename} className="text-[9px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">✓ Ready</span>
+                                    : <span title={`File not found: ${row.image_filename}`} className="text-[9px] font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">Missing</span>
+                                  }
+                                </td>
+                              )}
+                              <td className="px-4 py-3 text-center">
+                                {row._isDuplicate
+                                  ? <span className="text-[9px] font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">Duplicate</span>
+                                  : <span className="text-[9px] font-bold text-green-700 bg-green-100 px-2 py-0.5 rounded-full">New</span>}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* ── Footer ── */}
+                  <div className="p-6 border-t border-[#e8721c]/10 flex items-center justify-between gap-4">
+                    <button onClick={() => { setCsvPreviewRows(null); setCsvImageFiles(new Map()); }}
+                      disabled={csvImporting}
+                      className="px-6 py-3 rounded-2xl font-bold border border-[#e8721c]/10 hover:bg-[#faf5ee] transition-all disabled:opacity-40">Cancel</button>
+                    <button onClick={handleCsvImport} disabled={csvImporting || readyCount === 0}
+                      className="bg-[#e8721c] text-white px-8 py-3 rounded-2xl font-bold hover:bg-[#c9592a] transition-all flex items-center gap-2 disabled:opacity-50">
+                      {csvImporting
+                        ? <><div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"/>
+                            {csvImportProgress ? `${csvImportProgress.done}/${csvImportProgress.total} uploaded…` : 'Importing…'}
+                          </>
+                        : <><Upload size={16}/> Import {readyCount} Item{readyCount !== 1 ? 's' : ''}
+                            {hasImgCol && matchedImgs > 0 && <span className="text-white/70 font-normal text-xs">+ {matchedImgs} image{matchedImgs !== 1 ? 's' : ''}</span>}
+                          </>
+                      }
+                    </button>
+                  </div>
+
+                </motion.div>
+              </div>
+            );
+          })()}
         </div>
       ) : activeTab === 'BOOKINGS' ? (
         <BookingsManagement restaurantId={restaurantId} token={token} />
