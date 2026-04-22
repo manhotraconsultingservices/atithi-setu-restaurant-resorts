@@ -14011,6 +14011,8 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
   };
 
   const removeFromCart = (name: string) => setCart(prev => prev.filter(c => c.name !== name));
+  const incQty = (name: string) => setCart(prev => prev.map(c => c.name === name ? { ...c, quantity: c.quantity + 1 } : c));
+  const decQty = (name: string) => setCart(prev => prev.flatMap(c => c.name === name ? (c.quantity > 1 ? [{ ...c, quantity: c.quantity - 1 }] : []) : [c]));
   const cartTotal = cart.reduce((s, c) => s + c.price * c.quantity, 0);
   const categories = ['All', ...Array.from(new Set(menu.map(m => m.category).filter(Boolean)))];
   const filteredMenu = selectedCat === 'All' ? menu : menu.filter(m => m.category === selectedCat);
@@ -14152,10 +14154,25 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
             <div className="sticky bottom-0 bg-white border-t border-[#cc5a16]/10 px-4 py-3 space-y-2">
               {cart.map(c => (
                 <div key={c.name} className="flex items-center justify-between text-sm">
-                  <span className="truncate flex-1">{c.name} ×{c.quantity}</span>
+                  <span className="truncate flex-1">{c.name}</span>
                   <div className="flex items-center gap-2 shrink-0">
-                    <span className="font-mono font-bold">₹{(c.price * c.quantity).toFixed(0)}</span>
-                    <button onClick={() => removeFromCart(c.name)} className="p-1 text-red-400 hover:text-red-600 rounded"><Trash2 size={12} /></button>
+                    <button
+                      onClick={() => decQty(c.name)}
+                      className="w-6 h-6 rounded-full bg-[#faf7f2] border border-[#cc5a16]/10 flex items-center justify-center hover:bg-[#cc5a16]/10"
+                      aria-label="Decrease quantity"
+                    >
+                      <Minus size={12} />
+                    </button>
+                    <span className="w-5 text-center font-bold">{c.quantity}</span>
+                    <button
+                      onClick={() => incQty(c.name)}
+                      className="w-6 h-6 rounded-full bg-[#cc5a16] text-white flex items-center justify-center hover:bg-[#a84612]"
+                      aria-label="Increase quantity"
+                    >
+                      <Plus size={12} />
+                    </button>
+                    <span className="font-mono font-bold w-12 text-right">₹{(c.price * c.quantity).toFixed(0)}</span>
+                    <button onClick={() => removeFromCart(c.name)} className="p-1 text-red-400 hover:text-red-600 rounded" aria-label="Remove item"><Trash2 size={12} /></button>
                   </div>
                 </div>
               ))}
