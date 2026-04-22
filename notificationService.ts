@@ -290,6 +290,100 @@ export function buildNotificationContent(
           `<p>Time: ${data.time || new Date().toLocaleTimeString()}</p>`,
       };
 
+    /* ── Hospitality module (Phase 2) ───────────────────────────────── */
+
+    case 'HOUSEKEEPING_REQUESTED':
+      return {
+        subject: `🧹 ${data.category || 'Service'} request — Room ${data.roomId || '?'} — ${r}`,
+        text:
+          `🧹 *New guest request*\n` +
+          `Room: ${data.roomId}\n` +
+          `Service: ${data.serviceName}\n` +
+          `Category: ${data.category}\n` +
+          (data.priority && data.priority !== 'NORMAL' ? `Priority: ${data.priority}\n` : '') +
+          `Ref: ${data.requestId}`,
+        html:
+          `<h2 style="color:#cc5a16">🧹 New guest request</h2>` +
+          `<p>Room: <strong>${data.roomId}</strong></p>` +
+          `<p>Service: <strong>${data.serviceName}</strong></p>` +
+          `<p>Category: ${data.category}</p>` +
+          (data.priority && data.priority !== 'NORMAL' ? `<p>Priority: <strong>${data.priority}</strong></p>` : '') +
+          `<p style="color:#9c8e85">Ref: ${data.requestId}</p>`,
+      };
+
+    case 'SERVICE_REQUEST_COMPLETED':
+      return {
+        subject: `✅ Your request is complete — ${r}`,
+        text:
+          `✅ *Request complete!*\n` +
+          `${data.serviceName} for Room ${data.roomId}\n` +
+          `How did we do? Rate your experience in the app.`,
+        html:
+          `<h2 style="color:#0f766e">✅ Your request is complete</h2>` +
+          `<p><strong>${data.serviceName}</strong> for Room ${data.roomId}</p>` +
+          `<p>How did we do? Rate your experience in the app.</p>`,
+      };
+
+    case 'SLA_BREACH':
+      return {
+        subject: `⚠️ SLA breach — ${data.serviceName} — ${r}`,
+        text:
+          `⚠️ *SLA Breach*\n` +
+          `Request: ${data.serviceName}\n` +
+          `Room: ${data.roomName}\n` +
+          `SLA: ${data.slaMinutes} min · Elapsed: ${data.elapsedMinutes} min\n` +
+          `Ref: ${data.requestId}`,
+        html:
+          `<h2 style="color:#c13b3b">⚠️ SLA Breach</h2>` +
+          `<p>Request: <strong>${data.serviceName}</strong></p>` +
+          `<p>Room: <strong>${data.roomName}</strong></p>` +
+          `<p>SLA: ${data.slaMinutes} min — <span style="color:#c13b3b">elapsed ${data.elapsedMinutes} min</span></p>` +
+          `<p style="color:#9c8e85">Ref: ${data.requestId}</p>`,
+      };
+
+    case 'BOOKING_CREATED':
+      return {
+        subject: `📅 New booking — ${data.guestName} — ${r}`,
+        text:
+          `📅 *New booking*\n` +
+          `Guest: ${data.guestName}\n` +
+          `Check-in: ${data.checkIn}\n` +
+          `Check-out: ${data.checkOut}\n` +
+          `Ref: ${data.bookingId}`,
+        html:
+          `<h2 style="color:#cc5a16">📅 New booking</h2>` +
+          `<p>Guest: <strong>${data.guestName}</strong></p>` +
+          `<p>Check-in: ${data.checkIn}</p>` +
+          `<p>Check-out: ${data.checkOut}</p>` +
+          `<p style="color:#9c8e85">Ref: ${data.bookingId}</p>`,
+      };
+
+    case 'GUEST_CHECKED_IN':
+      return {
+        subject: `🛎 Guest checked in — Room ${data.roomId} — ${r}`,
+        text:
+          `🛎 *Guest checked in*\n` +
+          `Guest: ${data.guestName}\n` +
+          `Room: ${data.roomId}`,
+        html:
+          `<h2 style="color:#b8860b">🛎 Guest checked in</h2>` +
+          `<p>Guest: <strong>${data.guestName}</strong></p>` +
+          `<p>Room: <strong>${data.roomId}</strong></p>`,
+      };
+
+    case 'GUEST_CHECKED_OUT':
+      return {
+        subject: `👋 Guest checked out — Room ${data.roomId} — ${r}`,
+        text:
+          `👋 *Guest checked out*\n` +
+          `Guest: ${data.guestName}\n` +
+          `Room: ${data.roomId} · prepare for cleaning`,
+        html:
+          `<h2 style="color:#6b5d52">👋 Guest checked out</h2>` +
+          `<p>Guest: <strong>${data.guestName}</strong></p>` +
+          `<p>Room <strong>${data.roomId}</strong> — prepare for cleaning.</p>`,
+      };
+
     /* ── Self-Registration Received (new owner self-registers) ──────── */
 
     case 'REGISTRATION_RECEIVED':
@@ -511,15 +605,22 @@ export async function sendTelegram(chatId: string | null | undefined, message: s
 // ─────────────────────────────────────────────────────────────────────────────
 // sendEmail  — SMTP / Nodemailer
 // ─────────────────────────────────────────────────────────────────────────────
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer | string;
+  contentType?: string;
+}
+
 export async function sendEmail(
-  to:       string,
-  subject:  string,
-  text:     string,
-  html?:    string
-): Promise<void> {
+  to:          string,
+  subject:     string,
+  text:        string,
+  html?:       string,
+  attachments?: EmailAttachment[]
+): Promise<boolean> {
   if (!mailTransporter) {
     console.warn('[Notification] SMTP not configured — skipping email.');
-    return;
+    return false;
   }
   try {
     // Always BCC the configured SMTP account so the owner gets a copy of every notification.
@@ -533,9 +634,14 @@ export async function sendEmail(
       subject,
       text,
       html,
+      attachments: attachments && attachments.length > 0
+        ? attachments.map(a => ({ filename: a.filename, content: a.content, contentType: a.contentType }))
+        : undefined,
     });
-    console.log(`[Notification] Email sent → ${to}${bcc ? ` (bcc: ${bcc})` : ''}`);
+    console.log(`[Notification] Email sent → ${to}${bcc ? ` (bcc: ${bcc})` : ''}${attachments?.length ? ` +${attachments.length} attachment(s)` : ''}`);
+    return true;
   } catch (err) {
     console.error('[Notification] Email send failed:', err);
+    return false;
   }
 }

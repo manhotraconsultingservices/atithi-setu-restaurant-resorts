@@ -1,0 +1,87 @@
+name: PR Notification
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+    branches: [master, main]
+
+jobs:
+  notify-telegram:
+    name: Telegram Notification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for file count)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Count changed files
+        id: changes
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          COUNT=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null | wc -l || echo "?")
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Send Telegram notification
+        run: |
+          PR_NUM="${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          BASE="${{ github.event.pull_request.base.ref }}"
+          HEAD="${{ github.event.pull_request.head.ref }}"
+          FILES="${{ steps.changes.outputs.count }}"
+          ACTION="${{ github.event.action }}"
+
+          # Emoji based on action
+          case "$ACTION" in
+            opened)           EMOJI="🔔" ;;
+            ready_for_review) EMOJI="👀" ;;
+            reopened)         EMOJI="🔄" ;;
+            *)                EMOJI="📢" ;;
+          esac
+
+          MSG="${EMOJI} *PR #${PR_NUM} ${ACTION}* — Atithi Setu
+
+Title:  ${PR_TITLE}
+Author: ${AUTHOR}
+Branch: \`${HEAD}\` → \`${BASE}\`
+Files:  ${FILES} changed
+URL:    ${PR_URL}
+
+Review and merge when ready."
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\":\"${{ secrets.DEPLOY_TELEGRAM_CHAT_ID }}\",\"text\":\"${MSG}\",\"parse_mode\":\"Markdown\",\"disable_web_page_preview\":true}"
+
+  notify-email:
+    name: Email Notification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send email notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          secure: false
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASS }}
+          subject: "🔔 PR #${{ github.event.pull_request.number }} — ${{ github.event.pull_request.title }}"
+          to: ${{ secrets.DEPLOY_NOTIFY_EMAIL }}
+          from: "Atithi Setu CI <${{ secrets.SMTP_USER }}>"
+          body: |
+            A pull request requires your review on Atithi Setu.
+
+            PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}
+            Author : ${{ github.event.pull_request.user.login }}
+            Branch : ${{ github.event.pull_request.head.ref }} → ${{ github.event.pull_request.base.ref }}
+            Status : ${{ github.event.action }}
+
+            Review URL:
+            ${{ github.event.pull_request.html_url }}
+
+            ---
+            Merge this PR to trigger an automated deployment to dev-erp.atithi-setu.com

@@ -1,0 +1,59 @@
+# ══════════════════════════════════════════════════════════════════
+# Atithi Setu — Production B compose file
+# ══════════════════════════════════════════════════════════════════
+# Use instead of the dev `docker-compose.yml` on the new VPS.
+# Includes: Postgres, Node app, and the Cloudflare tunnel connector
+# on one network so `node_app:5001` is reachable from cloudflared.
+#
+# Boot with:
+#   docker compose -f docker-compose.prod.yml up -d --build
+# ══════════════════════════════════════════════════════════════════
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: postgres_db
+    restart: always
+    environment:
+      - POSTGRES_USER=${PGUSER}
+      - POSTGRES_PASSWORD=${PGPASSWORD}
+      - POSTGRES_DB=${PGDATABASE}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER} -d ${PGDATABASE}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: node_app
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5001:5001"
+    environment:
+      - PORT=5001
+    env_file:
+      - .env
+    volumes:
+      - app_uploads:/app/public/uploads
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: atithi-setu-tenants-cloudflared
+    restart: always
+    depends_on:
+      - app
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN}
+    environment:
+      - TUNNEL_TRANSPORT_PROTOCOL=quic
+
+volumes:
+  pg_data:
+  app_uploads:

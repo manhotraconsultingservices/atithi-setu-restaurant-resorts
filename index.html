@@ -17,19 +17,89 @@
     <meta property="og:description" content="Smart QR ordering, live kitchen display, owner analytics and more." />
     <meta property="og:image" content="/favicon.svg" />
     <meta property="og:type" content="website" />
+
+    <!-- Optimised font loading: 2 families only (Inter + Cormorant Garamond) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400;1,9..40,700&family=DM+Mono:wght@400;500&family=Playfair+Display:ital,wght@0,700;0,800;0,900;1,700;1,800&display=swap" rel="stylesheet" />
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,600;0,700;1,600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,600;0,700;1,600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" />
+
     <style>
       :root {
-        --color-cream: #faf5ee;
-        --color-deep: #0d0a07;
-        --color-saffron: #e8721c;
+        /* ============ ATITHI SETU — HERITAGE PREMIUM v3 ============ */
+        /* Inspired by Taj/Oberoi hospitality branding — warm, refined, confident */
+
+        /* Primary Brand — deeper, richer saffron */
+        --color-primary:        #cc5a16;   /* deeper saffron — premium feel */
+        --color-primary-hover:  #a84612;   /* caramelized saffron on hover */
+        --color-primary-light:  #fef0e4;
+        --color-primary-subtle: #fdf6ef;
+
+        /* Heritage Accent Colors (used for KPIs, categories, navigation) */
+        --color-indigo:         #1e3a5f;   /* deep indigo — trust, night */
+        --color-indigo-light:   #e8edf4;
+        --color-emerald:        #0f766e;   /* emerald — prosperity */
+        --color-emerald-light:  #e0f2f0;
+        --color-brass:          #b8860b;   /* aged brass — heritage metal */
+        --color-brass-light:    #fbf3db;
+        --color-ruby:           #9f1239;   /* ruby — premium accent */
+        --color-ruby-light:     #fce7ed;
+        --color-charcoal:       #14110c;   /* warm charcoal — for hero cards */
+
+        /* Surface Hierarchy (warm ivory — more refined than previous cream) */
+        --color-surface-page:   #faf7f2;   /* warm ivory — premium paper */
+        --color-surface-card:   #ffffff;
+        --color-surface-raised: #fffcf7;
+        --color-surface-input:  #f5efe6;
+
+        /* Text Hierarchy — all WCAG AA/AAA compliant */
+        --color-text-heading:   #1a1208;
+        --color-text-body:      #3d3128;
+        --color-text-secondary: #6b5d52;
+        --color-text-muted:     #9c8e85;
+        --color-text-disabled:  #c5b9b2;
+
+        /* Semantic Status Colors */
+        --color-success:        #2d7d5a;
+        --color-success-light:  #edf7f2;
+        --color-warning:        #b96b0f;
+        --color-warning-light:  #fef6e7;
+        --color-error:          #c13b3b;
+        --color-error-light:    #fdf0f0;
+        --color-info:           #2563a8;
+        --color-info-light:     #eff5fd;
+        --color-bill:           #d97706;
+        --color-bill-light:     #fef3e2;
+
+        /* Dark Glass Surface (Table Monitor) */
+        --color-dark-page:      #0c1628;
+        --color-dark-card:      rgba(255, 255, 255, 0.07);
+        --color-dark-border:    rgba(255, 255, 255, 0.12);
+        --color-dark-text:      #f0ede8;
+        --color-dark-muted:     rgba(240, 237, 232, 0.55);
+
+        /* Status glows for dark glassmorphism */
+        --glow-emerald: 0 0 20px rgba(16, 185, 129, 0.35);
+        --glow-amber:   0 0 20px rgba(245, 158, 11, 0.35);
+        --glow-rose:    0 0 20px rgba(244,  63,  94, 0.35);
+        --glow-orange:  0 0 20px rgba(249, 115,  22, 0.35);
+        --glow-purple:  0 0 20px rgba(168,  85, 247, 0.35);
+
+        /* Warm-tinted shadow tokens */
+        --shadow-card:   0 1px 3px rgba(232,114,28,0.06), 0 1px 2px rgba(26,18,8,0.04);
+        --shadow-raised: 0 4px 12px rgba(232,114,28,0.08), 0 2px 4px rgba(26,18,8,0.04);
+        --shadow-modal:  0 20px 60px rgba(26,18,8,0.18), 0 8px 24px rgba(26,18,8,0.08);
+        --shadow-focus:  0 0 0 3px rgba(232,114,28,0.28);
+
+        /* ============ LEGACY TOKENS (kept for backward compatibility) ============ */
+        --color-cream:      #faf5ee;
+        --color-deep:       #0d0a07;
+        --color-saffron:    #e8721c;
         --color-terracotta: #b85c38;
-        --color-gold: #c9952a;
-        --color-sage: #5c7a5a;
+        --color-gold:       #c9952a;
+        --color-sage:       #5c7a5a;
       }
-      body { font-family: 'DM Sans', ui-sans-serif, system-ui, sans-serif; }
+      body { font-family: 'Inter', ui-sans-serif, system-ui, sans-serif; }
     </style>
   </head>
   <body>
@@ -37,4 +107,3 @@
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

@@ -1,0 +1,54 @@
+name: Deploy to Production (with auto-rollback)
+
+# Triggers on every push to main. Also allows manual trigger from GitHub UI.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:    # lets you re-deploy on demand via the GitHub UI
+
+# Only one deploy at a time — if a second push arrives mid-deploy, it waits.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy via SSH + health check + rollback
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout (needed for action context only — VPS pulls its own copy)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run deploy script on VPS
+        id: deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host:     ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key:      ${{ secrets.VPS_SSH_KEY }}
+          port:     ${{ secrets.VPS_PORT || 22 }}
+          timeout: 10m
+          command_timeout: 10m
+          # Pass commit metadata into the deploy script's environment
+          envs: GITHUB_SHA,GITHUB_ACTOR,GITHUB_REF_NAME
+          script: |
+            export GITHUB_SHA="${{ github.sha }}"
+            export GITHUB_ACTOR="${{ github.actor }}"
+            export GITHUB_REF_NAME="${{ github.ref_name }}"
+            bash /opt/atithi-setu/deploy/deploy-with-rollback.sh
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Deployment failed. Auto-rollback was attempted on the VPS."
+          echo "Check the deploy-history.log on the VPS for details:"
+          echo "  ssh root@<vps> tail -80 /opt/atithi-setu/deploy-history.log"
+
+      - name: Notify on success
+        if: success()
+        run: |
+          echo "::notice::✅ Production updated to commit ${{ github.sha }}"
