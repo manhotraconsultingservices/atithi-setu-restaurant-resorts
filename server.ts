@@ -1043,16 +1043,30 @@ async function startServer() {
         [hashedPassword, restaurantId]
       );
 
-      // New path: update owner_accounts table (self-registered owners)
-      // Look up owner email via restaurants.admin_id
-      const restaurant = await centralDb.get(
-        "SELECT admin_id FROM restaurants WHERE id = ?",
+      // New path: update owner_accounts table (self-registered owners).
+      // Resolve owner email via owner_restaurants (authoritative FK), with a
+      // fallback to restaurants.admin_id for very old rows where admin_id did
+      // hold the email directly. Using admin_id alone breaks when it's a user
+      // UUID instead of an email (legacy data), which silently leaves the
+      // owner_accounts password out of sync with users.password.
+      const ownerMap = await centralDb.get(
+        "SELECT owner_email FROM owner_restaurants WHERE restaurant_id = ? LIMIT 1",
         [restaurantId]
       );
-      if (restaurant?.admin_id) {
+      let ownerEmail: string | null = ownerMap?.owner_email ?? null;
+      if (!ownerEmail) {
+        const restaurant = await centralDb.get(
+          "SELECT admin_id FROM restaurants WHERE id = ?",
+          [restaurantId]
+        );
+        if (restaurant?.admin_id && String(restaurant.admin_id).includes('@')) {
+          ownerEmail = restaurant.admin_id;
+        }
+      }
+      if (ownerEmail) {
         await centralDb.run(
           "UPDATE owner_accounts SET password_hash = ? WHERE LOWER(email) = LOWER(?)",
-          [hashedPassword, restaurant.admin_id]
+          [hashedPassword, ownerEmail]
         );
       }
 

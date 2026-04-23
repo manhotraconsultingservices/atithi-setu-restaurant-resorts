@@ -236,6 +236,7 @@ export default function App() {
   const [tenantPassword, setTenantPassword] = useState('');
   const [tenantLoginLoading, setTenantLoginLoading] = useState(false);
   const [tenantLoginError, setTenantLoginError] = useState('');
+  const [tenantForgotMode, setTenantForgotMode] = useState(false);
   const [showTenantPassword, setShowTenantPassword] = useState(false);
 
   // On mount: if we have a tenant slug, load its branding info.
@@ -311,6 +312,26 @@ export default function App() {
       setView('DASHBOARD');
     } catch (err: any) {
       setTenantLoginError(err.message || 'Login failed');
+    } finally {
+      setTenantLoginLoading(false);
+    }
+  };
+
+  const handleTenantForgotPassword = async () => {
+    setTenantLoginError('');
+    if (!forgotEmail.trim()) { setTenantLoginError('Please enter your email address'); return; }
+    try {
+      setTenantLoginLoading(true);
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: forgotEmail.trim() })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to send reset email');
+      setForgotSent(true);
+    } catch (err: any) {
+      setTenantLoginError(err.message || 'Failed to send reset email');
     } finally {
       setTenantLoginLoading(false);
     }
@@ -826,73 +847,130 @@ export default function App() {
               </div>
             )}
 
-            {/* Login form */}
-            <form onSubmit={handleTenantLogin} className="space-y-4">
-              <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52] mb-2">
-                  Email, phone, or staff ID
-                </label>
-                <input
-                  type="text"
-                  autoFocus
-                  autoComplete="username"
-                  placeholder="you@example.com or CHEF-001"
-                  className="w-full bg-[#f5efe6] border border-[#cc5a16]/10 rounded-2xl px-4 py-3 text-base text-[#1a1208] placeholder:text-[#9c8e85] focus:outline-none focus:ring-2 ring-[#cc5a16]/30 focus:border-[#cc5a16]/30 transition-all"
-                  value={tenantIdentifier}
-                  onChange={e => setTenantIdentifier(e.target.value)}
-                  disabled={tenantLoginLoading}
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52] mb-2">
-                  Password
-                </label>
-                <div className="relative">
-                  <input
-                    type={showTenantPassword ? 'text' : 'password'}
-                    autoComplete="current-password"
-                    placeholder="Enter your password"
-                    className="w-full bg-[#f5efe6] border border-[#cc5a16]/10 rounded-2xl px-4 py-3 pr-12 text-base text-[#1a1208] placeholder:text-[#9c8e85] focus:outline-none focus:ring-2 ring-[#cc5a16]/30 focus:border-[#cc5a16]/30 transition-all"
-                    value={tenantPassword}
-                    onChange={e => setTenantPassword(e.target.value)}
-                    disabled={tenantLoginLoading}
-                  />
+            {/* Login form OR Forgot-password panel */}
+            {tenantForgotMode ? (
+              <div className="space-y-4">
+                <div className="text-center">
+                  <div className="w-12 h-12 bg-[#cc5a16]/10 rounded-full flex items-center justify-center mx-auto mb-2">
+                    <Mail size={22} className="text-[#cc5a16]" />
+                  </div>
+                  <h2 className="text-xl font-bold text-[#1a1208]">Forgot Password?</h2>
+                  <p className="text-[#6b5d52] text-sm mt-1">Enter your registered email — we'll send a reset link.</p>
+                </div>
+                {!forgotSent ? (
+                  <>
+                    <input
+                      type="email"
+                      autoFocus
+                      autoComplete="email"
+                      placeholder="you@example.com"
+                      className="w-full bg-[#f5efe6] border border-[#cc5a16]/10 rounded-2xl px-4 py-3 text-base text-[#1a1208] placeholder:text-[#9c8e85] focus:outline-none focus:ring-2 ring-[#cc5a16]/30 focus:border-[#cc5a16]/30 transition-all"
+                      value={forgotEmail}
+                      onChange={e => setForgotEmail(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && handleTenantForgotPassword()}
+                      disabled={tenantLoginLoading}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleTenantForgotPassword}
+                      disabled={tenantLoginLoading || !forgotEmail.trim()}
+                      className="w-full bg-[#cc5a16] hover:bg-[#a84612] text-white py-3.5 rounded-2xl font-semibold text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-md shadow-[#cc5a16]/20"
+                    >
+                      {tenantLoginLoading ? (
+                        <><Clock className="animate-spin" size={18} /> Sending…</>
+                      ) : (
+                        <><Mail size={18} /> Send Reset Link</>
+                      )}
+                    </button>
+                  </>
+                ) : (
+                  <div className="bg-green-50 border border-green-200 rounded-2xl px-5 py-4 text-center">
+                    <CheckCircle2 size={28} className="text-green-500 mx-auto mb-2" />
+                    <p className="font-bold text-green-700 text-sm">Reset link sent</p>
+                    <p className="text-green-600 text-xs mt-1">Check your inbox at <strong>{forgotEmail}</strong>. The link expires in 1 hour.</p>
+                  </div>
+                )}
+                <div className="text-center">
                   <button
                     type="button"
-                    onClick={() => setShowTenantPassword(v => !v)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#9c8e85] hover:text-[#1a1208] transition-colors p-1"
-                    tabIndex={-1}
+                    onClick={() => { setTenantForgotMode(false); setForgotSent(false); setForgotEmail(''); setTenantLoginError(''); }}
+                    className="text-sm text-[#cc5a16] hover:text-[#a84612] font-medium transition-colors"
                   >
-                    {showTenantPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                    ← Back to Login
                   </button>
                 </div>
               </div>
+            ) : (
+              <>
+                <form onSubmit={handleTenantLogin} className="space-y-4">
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52] mb-2">
+                      Email, phone, or staff ID
+                    </label>
+                    <input
+                      type="text"
+                      autoFocus
+                      autoComplete="username"
+                      placeholder="you@example.com or CHEF-001"
+                      className="w-full bg-[#f5efe6] border border-[#cc5a16]/10 rounded-2xl px-4 py-3 text-base text-[#1a1208] placeholder:text-[#9c8e85] focus:outline-none focus:ring-2 ring-[#cc5a16]/30 focus:border-[#cc5a16]/30 transition-all"
+                      value={tenantIdentifier}
+                      onChange={e => setTenantIdentifier(e.target.value)}
+                      disabled={tenantLoginLoading}
+                    />
+                  </div>
 
-              <button
-                type="submit"
-                disabled={tenantLoginLoading || !tenantIdentifier || !tenantPassword}
-                className="w-full bg-[#cc5a16] hover:bg-[#a84612] text-white py-3.5 rounded-2xl font-semibold text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-md shadow-[#cc5a16]/20"
-              >
-                {tenantLoginLoading ? (
-                  <>
-                    <Clock className="animate-spin" size={18} /> Signing in…
-                  </>
-                ) : (
-                  <>Sign In <ChevronRight size={18} /></>
-                )}
-              </button>
-            </form>
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wide text-[#6b5d52] mb-2">
+                      Password
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showTenantPassword ? 'text' : 'password'}
+                        autoComplete="current-password"
+                        placeholder="Enter your password"
+                        className="w-full bg-[#f5efe6] border border-[#cc5a16]/10 rounded-2xl px-4 py-3 pr-12 text-base text-[#1a1208] placeholder:text-[#9c8e85] focus:outline-none focus:ring-2 ring-[#cc5a16]/30 focus:border-[#cc5a16]/30 transition-all"
+                        value={tenantPassword}
+                        onChange={e => setTenantPassword(e.target.value)}
+                        disabled={tenantLoginLoading}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowTenantPassword(v => !v)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-[#9c8e85] hover:text-[#1a1208] transition-colors p-1"
+                        tabIndex={-1}
+                      >
+                        {showTenantPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                      </button>
+                    </div>
+                  </div>
 
-            {/* Forgot password link */}
-            <div className="mt-5 text-center">
-              <a
-                href="https://atithi-setu.com/?forgot=1"
-                className="text-sm text-[#cc5a16] hover:text-[#a84612] font-medium transition-colors"
-              >
-                Forgot password?
-              </a>
-            </div>
+                  <button
+                    type="submit"
+                    disabled={tenantLoginLoading || !tenantIdentifier || !tenantPassword}
+                    className="w-full bg-[#cc5a16] hover:bg-[#a84612] text-white py-3.5 rounded-2xl font-semibold text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-md shadow-[#cc5a16]/20"
+                  >
+                    {tenantLoginLoading ? (
+                      <>
+                        <Clock className="animate-spin" size={18} /> Signing in…
+                      </>
+                    ) : (
+                      <>Sign In <ChevronRight size={18} /></>
+                    )}
+                  </button>
+                </form>
+
+                {/* Forgot password link */}
+                <div className="mt-5 text-center">
+                  <button
+                    type="button"
+                    onClick={() => { setTenantForgotMode(true); setForgotSent(false); setForgotEmail(tenantIdentifier.includes('@') ? tenantIdentifier : ''); setTenantLoginError(''); }}
+                    className="text-sm text-[#cc5a16] hover:text-[#a84612] font-medium transition-colors"
+                  >
+                    Forgot password?
+                  </button>
+                </div>
+              </>
+            )}
 
             {/* Role hint */}
             <div className="mt-6 pt-5 border-t border-[#cc5a16]/10">
@@ -8391,10 +8469,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
                       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
                       const blob = await res.blob();
-                      const url = URL.createObjectURL(blob);
-                      const w = window.open(url, '_blank');
-                      if (w) w.addEventListener('load', () => { try { w.focus(); w.print(); } catch {} });
-                      setTimeout(() => URL.revokeObjectURL(url), 30000);
+                      printPdfBlob(blob);
                     } catch (err: any) { alert(err.message); }
                   }}
                   className="flex-1 min-w-[110px] px-4 py-2.5 rounded-2xl border-2 border-[#cc5a16] text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5 flex items-center justify-center gap-2"
@@ -9816,7 +9891,7 @@ interface ThermalReceiptData {
 }
 
 function buildThermalHTML(d: ThermalReceiptData): string {
-  const W = 42; // chars per line at 10px Courier on 72mm printable width
+  const W = 36; // chars per line at 12px Consolas/monospace on 72mm printable width
 
   const centre = (s: string) => {
     const pad = Math.max(0, Math.floor((W - s.length) / 2));
@@ -9860,15 +9935,17 @@ function buildThermalHTML(d: ThermalReceiptData): string {
   <meta charset="utf-8">
   <title>Receipt – ${d.billId}</title>
   <style>
-    @page { size: 80mm auto; margin: 4mm 4mm 8mm 4mm; }
+    @page { size: 80mm auto; margin: 0; }
+    html, body { margin: 0; padding: 0; height: auto; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: 'Consolas', 'Liberation Mono', 'Courier New', monospace;
       font-size: 12px;
       font-weight: 500;
-      line-height: 1.45;
+      line-height: 1.4;
       color: #000;
-      width: 72mm;
+      width: 80mm;
+      padding: 4mm;
       background: #fff;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
@@ -9919,19 +9996,85 @@ function buildThermalHTML(d: ThermalReceiptData): string {
   <div class="center dim" style="margin-top:2px;">ATITHI SETU</div>
   <div class="center dim">SaaS by Manhotra Consulting</div>
   <div class="center dim">www.Atithi-Setu.com</div>
-  <div class="spacer"></div>
-
-  <script>window.onload = function() { window.print(); }<\/script>
 </body>
 </html>`;
 }
 
-/** Opens a new window, writes thermal HTML, and auto-prints it. */
+/**
+ * Loads a PDF Blob URL in a hidden iframe and triggers print.
+ * Same popup-blocker-safe pattern as openThermalPrint, but via iframe.src
+ * (document.write can't render PDFs).
+ */
+function printPdfBlob(blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  document.body.appendChild(iframe);
+
+  const cleanup = () => {
+    try { URL.revokeObjectURL(url); } catch { /* noop */ }
+    try { iframe.remove(); } catch { /* noop */ }
+  };
+
+  iframe.onload = () => {
+    try {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+    } catch (err) {
+      console.error('PDF print failed:', err);
+    }
+    const win = iframe.contentWindow;
+    if (win) { win.onafterprint = () => setTimeout(cleanup, 100); }
+    setTimeout(cleanup, 60_000);
+  };
+
+  iframe.src = url;
+}
+
+/**
+ * Writes thermal HTML into a hidden iframe and triggers print.
+ * Uses an iframe (not window.open) to survive popup blockers and async contexts.
+ */
 function openThermalPrint(html: string) {
-  const win = window.open('', '_blank', 'width=400,height=600');
-  if (!win) { alert('Please allow popups to print receipts.'); return; }
-  win.document.write(html);
-  win.document.close();
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  document.body.appendChild(iframe);
+
+  const cleanup = () => { try { iframe.remove(); } catch { /* noop */ } };
+
+  const doc = iframe.contentDocument || iframe.contentWindow?.document;
+  if (!doc) { cleanup(); alert('Print unavailable — browser blocked the print frame.'); return; }
+
+  doc.open();
+  doc.write(html);
+  doc.close();
+
+  const trigger = () => {
+    try {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+    } catch (err) {
+      console.error('Thermal print failed:', err);
+    }
+    // Remove iframe after the print dialog closes (onafterprint fires even on cancel).
+    const win = iframe.contentWindow;
+    if (win) {
+      win.onafterprint = () => setTimeout(cleanup, 100);
+    }
+    // Safety net in case onafterprint never fires (e.g. user dismisses via Esc on some browsers).
+    setTimeout(cleanup, 60_000);
+  };
+
+  // Wait for iframe document to be ready before calling print().
+  if (iframe.contentWindow?.document.readyState === 'complete') {
+    trigger();
+  } else {
+    iframe.onload = trigger;
+    // Fallback: some browsers don't fire onload for document.write() iframes.
+    setTimeout(() => { if (document.body.contains(iframe)) trigger(); }, 300);
+  }
 }
 
 // ─── Kitchen Order Slip (KOT) ────────────────────────────────────────────────
@@ -9960,8 +10103,10 @@ function buildKitchenSlipHTML(d: {
   <meta charset="UTF-8"/>
   <title>KOT - Table ${d.tableNumber}</title>
   <style>
+    @page { size: 80mm auto; margin: 0; }
+    html, body { margin: 0; padding: 0; height: auto; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Consolas', 'Liberation Mono', 'Courier New', monospace; width: 80mm; padding: 10px; background: #fff; color: #000; font-weight: 500; -webkit-print-color-adjust: exact; print-color-adjust: exact; -webkit-font-smoothing: none; }
+    body { font-family: 'Consolas', 'Liberation Mono', 'Courier New', monospace; width: 80mm; padding: 4mm; background: #fff; color: #000; font-weight: 500; -webkit-print-color-adjust: exact; print-color-adjust: exact; -webkit-font-smoothing: none; }
     .header { text-align: center; border-bottom: 3px solid #000; padding-bottom: 8px; margin-bottom: 8px; }
     .kot-label { font-size: 11px; font-weight: 700; letter-spacing: 3px; color: #000; }
     .table-name { font-size: 26px; font-weight: 900; letter-spacing: 1px; margin: 4px 0; color: #000; }
@@ -9975,7 +10120,7 @@ function buildKitchenSlipHTML(d: {
     .eta-box { margin-top: 8px; border: 2px solid #000; border-radius: 4px; padding: 4px 8px; text-align: center; }
     .eta-label { font-size: 10px; font-weight: 700; letter-spacing: 2px; }
     .eta-value { font-size: 20px; font-weight: 900; }
-    @media print { body { width: 72mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; } @page { margin: 0; size: 80mm auto; } }
+    @media print { body { width: 80mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; } @page { margin: 0; size: 80mm auto; } }
   </style>
 </head>
 <body>
@@ -10000,8 +10145,6 @@ function buildKitchenSlipHTML(d: {
   ${d.eta ? `<div class="eta-box"><div class="eta-label">TARGET ETA</div><div class="eta-value">${d.eta}</div></div>` : ''}
 
   <div class="footer">${d.restaurantName || ''} · ${new Date().toLocaleDateString('en-IN')}</div>
-
-  <script>window.onload = function(){ window.print(); }<\/script>
 </body>
 </html>`;
 }
