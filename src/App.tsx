@@ -9863,22 +9863,26 @@ function buildThermalHTML(d: ThermalReceiptData): string {
     @page { size: 80mm auto; margin: 4mm 4mm 8mm 4mm; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: 'Courier New', Courier, monospace;
-      font-size: 11px;
+      font-family: 'Consolas', 'Liberation Mono', 'Courier New', monospace;
+      font-size: 12px;
+      font-weight: 500;
       line-height: 1.45;
       color: #000;
       width: 72mm;
       background: #fff;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+      -webkit-font-smoothing: none;
     }
     .center { text-align: center; }
-    .bold   { font-weight: bold; }
-    .dim    { color: #555; font-size: 10px; margin-top: 3px; }
+    .bold   { font-weight: 700; }
+    .dim    { color: #000; font-size: 11px; margin-top: 3px; }
     .rule   { white-space: pre; letter-spacing: 0; }
     .spacer { height: 4px; }
-    .big    { font-size: 14px; font-weight: bold; }
+    .big    { font-size: 16px; font-weight: 900; }
     pre     { font-family: inherit; font-size: inherit; white-space: pre-wrap; }
     @media print {
-      body { margin: 0; }
+      body { margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       button { display: none; }
     }
   </style>
@@ -9946,7 +9950,7 @@ function buildKitchenSlipHTML(d: {
   const itemRows = d.items.map(it =>
     `<tr>
       <td style="font-size:18px;font-weight:700;padding:6px 4px 6px 0;">${it.quantity}×</td>
-      <td style="font-size:16px;font-weight:700;padding:6px 0;">${it.name}${it.size ? ` <span style="font-size:12px;font-weight:400;color:#666;">(${it.size})</span>` : ''}</td>
+      <td style="font-size:16px;font-weight:700;padding:6px 0;">${it.name}${it.size ? ` <span style="font-size:12px;font-weight:500;color:#000;">(${it.size})</span>` : ''}</td>
     </tr>`
   ).join('');
 
@@ -9957,21 +9961,21 @@ function buildKitchenSlipHTML(d: {
   <title>KOT - Table ${d.tableNumber}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Courier New', monospace; width: 80mm; padding: 10px; background: #fff; }
+    body { font-family: 'Consolas', 'Liberation Mono', 'Courier New', monospace; width: 80mm; padding: 10px; background: #fff; color: #000; font-weight: 500; -webkit-print-color-adjust: exact; print-color-adjust: exact; -webkit-font-smoothing: none; }
     .header { text-align: center; border-bottom: 3px solid #000; padding-bottom: 8px; margin-bottom: 8px; }
-    .kot-label { font-size: 11px; font-weight: 700; letter-spacing: 3px; color: #555; }
-    .table-name { font-size: 26px; font-weight: 900; letter-spacing: 1px; margin: 4px 0; }
-    .round-badge { display: inline-block; background: #000; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 20px; margin-top: 2px; }
-    .meta { font-size: 12px; color: #333; margin: 6px 0 2px; border-bottom: 1px dashed #999; padding-bottom: 6px; }
+    .kot-label { font-size: 11px; font-weight: 700; letter-spacing: 3px; color: #000; }
+    .table-name { font-size: 26px; font-weight: 900; letter-spacing: 1px; margin: 4px 0; color: #000; }
+    .round-badge { display: inline-block; background: #000; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 20px; margin-top: 2px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .meta { font-size: 12px; color: #000; margin: 6px 0 2px; border-bottom: 2px dashed #000; padding-bottom: 6px; }
     .meta-row { display: flex; justify-content: space-between; margin-bottom: 3px; }
     .meta-label { font-weight: 700; min-width: 70px; }
     .items-table { width: 100%; margin-top: 8px; border-collapse: collapse; }
     .items-sep { border-top: 2px solid #000; margin: 8px 0; }
-    .footer { margin-top: 10px; border-top: 1px dashed #999; padding-top: 6px; font-size: 11px; color: #666; text-align: center; }
+    .footer { margin-top: 10px; border-top: 2px dashed #000; padding-top: 6px; font-size: 11px; color: #000; text-align: center; }
     .eta-box { margin-top: 8px; border: 2px solid #000; border-radius: 4px; padding: 4px 8px; text-align: center; }
     .eta-label { font-size: 10px; font-weight: 700; letter-spacing: 2px; }
     .eta-value { font-size: 20px; font-weight: 900; }
-    @media print { body { width: 72mm; } @page { margin: 0; size: 80mm auto; } }
+    @media print { body { width: 72mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; } @page { margin: 0; size: 80mm auto; } }
   </style>
 </head>
 <body>
