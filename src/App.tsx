@@ -10005,31 +10005,49 @@ function buildThermalHTML(d: ThermalReceiptData): string {
  * Same popup-blocker-safe pattern as openThermalPrint, but via iframe.src
  * (document.write can't render PDFs).
  */
+// Off-screen 1×1 positioning: hidden from the user but still rendered by the
+// browser. Pure 0×0 or display:none iframes cause some Chromium builds to
+// skip rendering, which then prints blank.
+const PRINT_IFRAME_STYLE = 'position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+
 function printPdfBlob(blob: Blob) {
   const url = URL.createObjectURL(blob);
   const iframe = document.createElement('iframe');
   iframe.setAttribute('aria-hidden', 'true');
-  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  iframe.style.cssText = PRINT_IFRAME_STYLE;
   document.body.appendChild(iframe);
 
+  let triggered = false;
+  let cleaned = false;
   const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
     try { URL.revokeObjectURL(url); } catch { /* noop */ }
     try { iframe.remove(); } catch { /* noop */ }
   };
 
-  iframe.onload = () => {
+  const trigger = () => {
+    if (triggered) return;
+    triggered = true;
     try {
       iframe.contentWindow?.focus();
       iframe.contentWindow?.print();
     } catch (err) {
       console.error('PDF print failed:', err);
+      alert('Printing failed. Check that a printer is configured as default in Windows.');
+      cleanup();
+      return;
     }
     const win = iframe.contentWindow;
-    if (win) { win.onafterprint = () => setTimeout(cleanup, 100); }
+    if (win) { win.onafterprint = () => setTimeout(cleanup, 2000); }
     setTimeout(cleanup, 60_000);
   };
 
+  iframe.onload = trigger;
   iframe.src = url;
+  // Belt-and-suspenders: PDFs take time to parse in the iframe. If onload
+  // somehow never fires, kick off print after 2s so the user isn't stuck.
+  setTimeout(trigger, 2000);
 }
 
 /**
@@ -10039,10 +10057,16 @@ function printPdfBlob(blob: Blob) {
 function openThermalPrint(html: string) {
   const iframe = document.createElement('iframe');
   iframe.setAttribute('aria-hidden', 'true');
-  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  iframe.style.cssText = PRINT_IFRAME_STYLE;
   document.body.appendChild(iframe);
 
-  const cleanup = () => { try { iframe.remove(); } catch { /* noop */ } };
+  let triggered = false;
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try { iframe.remove(); } catch { /* noop */ }
+  };
 
   const doc = iframe.contentDocument || iframe.contentWindow?.document;
   if (!doc) { cleanup(); alert('Print unavailable — browser blocked the print frame.'); return; }
@@ -10052,28 +10076,32 @@ function openThermalPrint(html: string) {
   doc.close();
 
   const trigger = () => {
+    if (triggered) return;
+    triggered = true;
     try {
       iframe.contentWindow?.focus();
       iframe.contentWindow?.print();
     } catch (err) {
       console.error('Thermal print failed:', err);
+      alert('Printing failed. Check that a printer is configured as default in Windows.');
+      cleanup();
+      return;
     }
-    // Remove iframe after the print dialog closes (onafterprint fires even on cancel).
+    // Let the print stream finish before removing the iframe — thermal
+    // printers over USB/serial can take a couple of seconds after the dialog
+    // closes. Removing too early truncates the receipt.
     const win = iframe.contentWindow;
-    if (win) {
-      win.onafterprint = () => setTimeout(cleanup, 100);
-    }
-    // Safety net in case onafterprint never fires (e.g. user dismisses via Esc on some browsers).
+    if (win) { win.onafterprint = () => setTimeout(cleanup, 2000); }
     setTimeout(cleanup, 60_000);
   };
 
-  // Wait for iframe document to be ready before calling print().
+  // Chromium fires load for document.write() iframes immediately after
+  // .close(), but we also guard with readyState and a timeout fallback.
+  iframe.onload = trigger;
   if (iframe.contentWindow?.document.readyState === 'complete') {
     trigger();
   } else {
-    iframe.onload = trigger;
-    // Fallback: some browsers don't fire onload for document.write() iframes.
-    setTimeout(() => { if (document.body.contains(iframe)) trigger(); }, 300);
+    setTimeout(trigger, 300);
   }
 }
 
