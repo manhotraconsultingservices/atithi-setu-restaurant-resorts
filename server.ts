@@ -55,7 +55,7 @@ const upload = multer({ storage });
 // above — they're low-volume and stay on the VPS filesystem.
 const menuImageUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 } // 5 MB cap
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB cap (modern phone photos often exceed 5 MB)
 });
 
 // ── Cloudflare R2 client (lazy-initialised on first use) ─────────────────────
