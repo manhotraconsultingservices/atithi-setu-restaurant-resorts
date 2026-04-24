@@ -2063,10 +2063,14 @@ async function startServer() {
         }
       }
 
-      // ── Source 2: legacy users table (login_id scoped to this restaurant) ──
+      // ── Source 2: legacy users table (login_id OR email scoped to this restaurant) ──
+      // Owners registered via the legacy /api/auth/register path only exist in
+      // this table (no owner_accounts row) — and they expect to log in with
+      // their email, not the generated OWNER-XXXX login_id. Accepting either
+      // is what matches their expectation and the email they receive at signup.
       const legacyUser: any = await centralDb.get(
-        `SELECT * FROM users WHERE login_id = ? AND restaurant_id = ? AND is_active = 1`,
-        [cleanIdentifier, restaurantId]
+        `SELECT * FROM users WHERE (login_id = ? OR LOWER(email) = ?) AND restaurant_id = ? AND is_active = 1`,
+        [cleanIdentifier, cleanIdentifier.toLowerCase(), restaurantId]
       );
       if (legacyUser) {
         const okLegacy = await bcrypt.compare(password, legacyUser.password);
