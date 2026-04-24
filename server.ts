@@ -16,6 +16,7 @@ import { provisionTenantSubdomain, deprovisionTenantSubdomain, cloudflareIsConfi
 import { downloadFromDrive } from "./googleDriveService.ts";
 import multer from "multer";
 import cron from "node-cron";
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 
 /** Returns a map of { "HH:MI" → bookedCount } for a given date, excluding cancelled bookings. */
 async function getSlotCountMap(db: DbInterface, dateStr: string): Promise<Record<string, number>> {
@@ -47,6 +48,74 @@ const storage = multer.diskStorage({
   }
 });
 const upload = multer({ storage });
+
+// Menu image uploads use in-memory multer so the buffer can go either to
+// Cloudflare R2 (when UPLOAD_BACKEND=r2) or fall back to local disk. The
+// other upload endpoints (logos, watermarks, UPI QRs) keep using `upload`
+// above — they're low-volume and stay on the VPS filesystem.
+const menuImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 } // 5 MB cap
+});
+
+// ── Cloudflare R2 client (lazy-initialised on first use) ─────────────────────
+// Keeping this lazy means UPLOAD_BACKEND=disk deployments don't need R2
+// credentials configured, and a misconfigured R2 fails loudly at upload time
+// rather than blocking server startup.
+let _r2Client: S3Client | null = null;
+function getR2Client(): S3Client {
+  if (_r2Client) return _r2Client;
+  const { R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = process.env;
+  if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
+    throw new Error("R2 is enabled but R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY are not set");
+  }
+  _r2Client = new S3Client({
+    region: "auto",
+    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
+  });
+  return _r2Client;
+}
+
+const useR2ForMenuImages = () => process.env.UPLOAD_BACKEND === "r2";
+
+/**
+ * Persists an uploaded menu image either to Cloudflare R2 or to the local
+ * filesystem, depending on UPLOAD_BACKEND. Returns the URL that should be
+ * stored in menu.image_url — a full https:// URL when R2 is active, or the
+ * legacy "/uploads/<filename>" path otherwise.
+ */
+async function persistMenuImage(
+  restaurantId: string,
+  file: Express.Multer.File
+): Promise<string> {
+  if (useR2ForMenuImages()) {
+    const bucket = process.env.R2_BUCKET;
+    const baseUrl = process.env.R2_PUBLIC_BASE_URL;
+    if (!bucket || !baseUrl) {
+      throw new Error("R2 is enabled but R2_BUCKET / R2_PUBLIC_BASE_URL are not set");
+    }
+    const ext = (file.originalname.match(/\.[a-zA-Z0-9]+$/)?.[0] || ".jpg").toLowerCase();
+    const key = `menu/${restaurantId}/${randomUUID()}${ext}`;
+    await getR2Client().send(new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype || "application/octet-stream",
+      CacheControl: "public, max-age=31536000, immutable",
+    }));
+    return `${baseUrl.replace(/\/$/, "")}/${key}`;
+  }
+
+  // Disk fallback — mirrors the legacy multer.diskStorage filename scheme so
+  // the existing /uploads/:filename handler keeps working unchanged.
+  const uploadDir = path.join(process.cwd(), "public", "uploads");
+  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+  const safeName = file.originalname.replace(/[^\w.\-]+/g, "_");
+  const filename = `${Date.now()}-${safeName}`;
+  fs.writeFileSync(path.join(uploadDir, filename), file.buffer);
+  return `/uploads/${filename}`;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2328,12 +2397,12 @@ async function startServer() {
   });
 
   // Menu: Add Item
-  app.post("/api/restaurant/:id/menu", authenticate, upload.single('image'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/menu", authenticate, menuImageUpload.single('image'), async (req: AuthRequest, res: Response) => {
     try {
       const { name, description, price, price_half, price_full, category, dietary_type, is_daily_special, drive_url } = req.body;
       const db = await getTenantDb(req.params.id);
       const id = randomUUID();
-      let imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
+      let imageUrl: string | null = req.file ? await persistMenuImage(req.params.id, req.file) : null;
       let driveFileId = null;
 
       if (drive_url) {
@@ -2367,14 +2436,14 @@ async function startServer() {
   });
 
   // Menu: Update Item
-  app.patch("/api/menu/:id", authenticate, upload.single('image'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/menu/:id", authenticate, menuImageUpload.single('image'), async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.user!.restaurantId);
       const updates: Record<string, any> = { ...req.body };
 
       // If a new image file was uploaded, replace image_url
       if (req.file) {
-        updates['image_url'] = `/uploads/${req.file.filename}`;
+        updates['image_url'] = await persistMenuImage(req.user!.restaurantId, req.file);
       }
 
       // Remove any empty price_half so we don't write empty string
