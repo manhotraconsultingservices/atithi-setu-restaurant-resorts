@@ -4427,11 +4427,18 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_name TEXT").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS eta TEXT").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS kitchen_status TEXT DEFAULT 'queued'").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'").catch(() => {});
 
+      // Exclude orders whose invoice has been PRINTED — the bill is closed,
+      // no further kitchen action is expected. This matters especially for
+      // MANUAL invoices (id starts with MAN-): they INSERT with status
+      // 'CONFIRMED' but never transition to DELIVERED, so without this guard
+      // they'd stick in Live Kitchen Orders forever after printing.
       const orders = await db.query(
         `SELECT * FROM orders
          WHERE status NOT IN ('DELIVERED','CANCELLED')
            AND (kitchen_status IS NULL OR kitchen_status NOT IN ('held_for_payment'))
+           AND (invoice_status IS NULL OR invoice_status <> 'PRINTED')
          ORDER BY
            CASE status WHEN 'READY' THEN 1 WHEN 'PREPARING' THEN 2 ELSE 3 END,
            created_at ASC`
