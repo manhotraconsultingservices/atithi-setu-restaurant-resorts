@@ -1,0 +1,106 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# Atithi Setu — Auto-deploy to Hostinger VPS
+# ═════════════════════════════════════════════════════════════════════════════
+# Triggers on a push to `dev` (or manual run from the Actions tab). SSHes into
+# the VPS and runs deploy/deploy-with-rollback.sh, which pulls the new code,
+# rebuilds the Docker image, swaps containers, health-checks, and
+# auto-rollbacks if the new version doesn't come up.
+#
+# Secrets required on the GitHub repo (Settings -> Secrets and variables ->
+# Actions):
+#   VPS_HOST        → Public IP or hostname of the Hostinger VPS
+#   VPS_USER        → SSH username (usually "root")
+#   VPS_SSH_KEY     → Private SSH key (Ed25519), matching the public key
+#                      that's been added to ~/.ssh/authorized_keys on the VPS
+#   VPS_SSH_PORT    → Optional, defaults to 22
+#
+# One-time VPS setup (before the first run of this workflow):
+#   1. Install Docker + docker compose v2
+#   2. `git clone https://github.com/manhotraconsultingservices/atithi-setu-restaurant-resorts.git /opt/atithi-setu`
+#   3. Populate `/opt/atithi-setu/.env` (copy from .env.example, fill 36 vars)
+#   4. Start the stack once manually: `cd /opt/atithi-setu/deploy && docker compose -f docker-compose.prod.yml up -d`
+#   5. Add this repo's public deploy key to /root/.ssh/authorized_keys
+#
+# After that, every push to `dev` rebuilds + redeploys in ~2 minutes.
+# ═════════════════════════════════════════════════════════════════════════════
+
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to deploy (default: dev)"
+        required: false
+        default: "dev"
+
+concurrency:
+  # Never run two deploys in parallel — one would race the other's docker swap.
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: SSH + rebuild + rollback-on-failure
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Resolve branch to deploy
+        id: branch
+        run: |
+          if [ -n "${{ inputs.branch }}" ]; then
+            echo "name=${{ inputs.branch }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT || 22 }}
+          # Note: the `env` block in ssh-action makes these available inside
+          # the remote shell, but ssh-action wraps the script in its own shell
+          # wrapper, so we also explicitly export them at the top of `script:`
+          # to be safe across action versions.
+          envs: BRANCH,GITHUB_SHA,GITHUB_ACTOR,GITHUB_REF_NAME
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export BRANCH="${{ steps.branch.outputs.name }}"
+            export GITHUB_SHA="${{ github.sha }}"
+            export GITHUB_ACTOR="${{ github.actor }}"
+            export GITHUB_REF_NAME="${{ github.ref_name }}"
+
+            cd /opt/atithi-setu
+
+            # Make the deploy script executable in case permissions reset
+            chmod +x deploy/deploy-with-rollback.sh
+
+            # Hand off to the rollback-aware deploy script
+            ./deploy/deploy-with-rollback.sh
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+
+      - name: Post-deploy smoke test
+        if: success()
+        run: |
+          URL="https://rishu-kitchen.atithi-setu.com/api/public/restaurants"
+          echo "→ Smoke-testing $URL"
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$URL" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "✓ Public health check: HTTP 200"
+              exit 0
+            fi
+            echo "  attempt $i: HTTP $code — retrying in 3s"
+            sleep 3
+          done
+          echo "⚠ Public URL did not return 200 after 5 attempts (but on-VPS health already passed)."
+          echo "   This could be a Cloudflare propagation delay. Check manually."
+          # Don't fail the workflow — on-VPS health check already passed.

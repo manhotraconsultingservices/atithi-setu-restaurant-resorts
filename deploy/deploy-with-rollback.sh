@@ -26,6 +26,7 @@ ROLLBACK_TAG="atithi-setu:rollback"
 HEALTH_URL="http://localhost:5001/api/public/restaurants"
 HEALTH_MAX_WAIT=60                  # seconds to wait for new version to become healthy
 LOG_FILE="$APP_DIR/deploy-history.log"
+BRANCH="${BRANCH:-main}"           # which branch to deploy; override with env BRANCH=dev
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 log() {
@@ -91,9 +92,10 @@ fi
 
 # Step 2: Pull latest code
 cd "$APP_DIR" || fail "App directory missing"
-git fetch origin main --depth=1 || fail "git fetch failed"
+log "→ Deploying branch: $BRANCH"
+git fetch origin "$BRANCH" --depth=1 || fail "git fetch failed"
 OLD_SHA=$(git rev-parse HEAD)
-git reset --hard origin/main || fail "git reset failed"
+git reset --hard "origin/$BRANCH" || fail "git reset failed"
 NEW_SHA=$(git rev-parse HEAD)
 log "✓ Code updated: $OLD_SHA → $NEW_SHA"
 
