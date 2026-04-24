@@ -5022,6 +5022,23 @@ async function startServer() {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `, [userId, loginId, name, email, phone, hashedPassword, restaurantId, 'OWNER']);
 
+      // Auto-provision Cloudflare DNS + Tunnel Public Hostname for the tenant
+      // subdomain. Best-effort: if CF env vars aren't set or the API is down,
+      // registration still succeeds and the operator can backfill later via
+      // POST /api/admin/tenants/bulk-provision-dns.
+      try {
+        const cf = await provisionTenantSubdomain(repCreatedSlug);
+        if (cf.skipped) {
+          console.log(`[register-legacy] Cloudflare auto-provision skipped for ${repCreatedSlug} (CF not configured)`);
+        } else if (cf.error) {
+          console.error(`[register-legacy] CF provision failed for ${repCreatedSlug}:`, cf.error);
+        } else {
+          console.log(`[register-legacy] Cloudflare provisioned ${cf.hostname} (dns=${cf.dns_record_id}, tunnel=${cf.tunnel_config_updated})`);
+        }
+      } catch (cfErr) {
+        console.error(`[register-legacy] CF provision threw for ${repCreatedSlug}:`, cfErr);
+      }
+
       // Send welcome email with credentials — await so we can report success/failure
       let emailSent = false;
       if (email) {
