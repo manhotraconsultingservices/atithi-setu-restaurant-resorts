@@ -3447,6 +3447,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [odGstPct, setOdGstPct]               = useState(0);
   const [odApplyGst, setOdApplyGst]           = useState(false);
   const [odSaving, setOdSaving]               = useState(false);
+  const [odSearchActive, setOdSearchActive]   = useState<number | null>(null);
   // ── Invoice Edit Modal State ──────────────────────────────────────────────
   const [invoiceEditTarget, setInvoiceEditTarget] = useState<any|null>(null);
   const [invEdit, setInvEdit] = useState<{
@@ -9260,9 +9261,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                     {odInvoiceItems.map((it, i) => (
                       <div key={i} className="grid grid-cols-12 gap-2 items-center">
-                        <input type="text" placeholder="Item name" value={it.name}
-                          onChange={e => setOdInvoiceItems(p => p.map((x,j) => j===i ? {...x, name: e.target.value} : x))}
-                          className="col-span-6 border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                        <div className="col-span-6 relative">
+                          <input type="text" placeholder="Item name or search menu…" value={it.name}
+                            onChange={e => setOdInvoiceItems(p => p.map((x,j) => j===i ? {...x, name: e.target.value} : x))}
+                            onFocus={() => setOdSearchActive(i)}
+                            onBlur={() => setTimeout(() => setOdSearchActive(null), 150)}
+                            className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                          {odSearchActive === i && it.name.length > 0 && (() => {
+                            const hits = menu.filter(m => m.available !== false && m.name.toLowerCase().includes(it.name.toLowerCase())).slice(0, 8);
+                            return hits.length > 0 ? (
+                              <div className="absolute top-full left-0 mt-1 z-[300] w-full bg-white rounded-xl shadow-2xl border border-[#cc5a16]/10 max-h-52 overflow-y-auto">
+                                {hits.map(m => (
+                                  <button key={m.id} type="button"
+                                    onMouseDown={() => {
+                                      setOdInvoiceItems(p => p.map((x,j) => j===i ? {...x, name: m.name, price: m.price} : x));
+                                      setOdSearchActive(null);
+                                    }}
+                                    className="w-full flex justify-between items-center px-3 py-2 text-sm text-[#3d3128] hover:bg-[#faf7f2] transition-colors first:rounded-t-xl last:rounded-b-xl">
+                                    <span>{m.name}</span>
+                                    <span className="text-xs font-semibold text-[#cc5a16] ml-2 shrink-0">₹{m.price}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null;
+                          })()}
+                        </div>
                         <input type="number" min="1" value={it.qty}
                           onChange={e => setOdInvoiceItems(p => p.map((x,j) => j===i ? {...x, qty: Number(e.target.value)||1} : x))}
                           className="col-span-2 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center outline-none focus:ring-2 ring-[#cc5a16]/20" />
