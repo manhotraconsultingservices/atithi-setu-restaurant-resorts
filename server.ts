@@ -4570,6 +4570,10 @@ async function startServer() {
     try {
       const db = await getTenantDb(req.params.id);
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount FLOAT DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge_percent FLOAT DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1").catch(() => {});
       const { customer_name, customer_phone, reference, items, discount_amount, service_charge_percent, gst_percent, apply_gst } = req.body;
       const id = `MAN-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
       const total = (items || []).reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
@@ -4579,9 +4583,10 @@ async function startServer() {
       const gst = apply_gst ? taxable * Number(gst_percent || 0) / 100 : 0;
       const grand = taxable + gst;
       await db.run(
-        `INSERT INTO orders (id, table_number, customer_name, customer_phone, items, total_amount, status, payment_status, invoice_status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'CONFIRMED', 'PENDING', 'DRAFT', NOW())`,
-        [id, reference || 'Manual', customer_name || '', customer_phone || '', JSON.stringify(items || []), grand]
+        `INSERT INTO orders (id, table_number, customer_name, customer_phone, items, total_amount, discount_amount, service_charge_percent, gst_percent, apply_gst, status, payment_status, invoice_status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', 'PENDING', 'DRAFT', NOW())`,
+        [id, reference || 'Manual', customer_name || '', customer_phone || '', JSON.stringify(items || []), grand,
+         Number(discount_amount || 0), Number(service_charge_percent || 0), Number(gst_percent || 0), apply_gst ? 1 : 0]
       );
       res.json({ success: true, id, grand_total: grand });
     } catch (err) {
