@@ -12521,8 +12521,11 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
               </div>
               <div className="bg-[#faf7f2] rounded-2xl p-5 mb-6 text-center">
                 <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Session Total</p>
-                <p className="text-4xl font-bold font-mono">₹{sessionRunningTotal.toFixed(2)}</p>
+                <p className="text-4xl font-bold font-mono">₹{(sessionRunningTotal + sessionGstTotal).toFixed(2)}</p>
                 <p className="text-xs text-[#6b5d52] mt-1">{session?.orders?.length || 0} round{(session?.orders?.length || 0) !== 1 ? 's' : ''} of orders</p>
+                {sessionGstTotal > 0 && (
+                  <p className="text-xs text-[#9c8e85] mt-1">Incl. GST ({restaurant?.gst_percentage ?? 0}%) ₹{sessionGstTotal.toFixed(2)}</p>
+                )}
               </div>
               <p className="text-sm text-[#6b5d52] text-center mb-6">How would you like to pay?</p>
               <div className="space-y-3">
