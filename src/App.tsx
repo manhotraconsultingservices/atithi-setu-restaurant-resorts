@@ -5841,7 +5841,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <Settings size={14} /> Template
               </button>
               <button
-                onClick={() => { setShowOnDemandModal(true); setOdInvoiceItems([{name:'',qty:1,price:0}]); setOdCustomer({name:'',phone:'',reference:''}); setOdDiscount(0); setOdSvcPct(0); setOdGstPct(0); setOdApplyGst(false); }}
+                onClick={() => { setShowOnDemandModal(true); setOdInvoiceItems([{name:'',qty:1,price:0}]); setOdCustomer({name:'',phone:'',reference:''}); setOdDiscount(0); setOdSvcPct(0); setOdGstPct(restaurant?.is_gst_enabled ? (restaurant?.gst_percentage ?? 0) : 0); setOdApplyGst(Boolean(restaurant?.is_gst_enabled)); }}
                 className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] transition-all shadow-sm"
               >
                 <Plus size={14} /> New Invoice
