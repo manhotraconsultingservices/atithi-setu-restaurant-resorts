@@ -12126,12 +12126,19 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 
               {/* Request Bill CTA */}
               {session.status === 'open' && (session.orders?.length || 0) > 0 && (
-                <button
-                  onClick={() => setShowBillRequestModal(true)}
-                  className="w-full bg-[#1a1a1a] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:scale-[1.01] transition-transform shadow-xl"
-                >
-                  <IndianRupee size={20} /> Request Bill — ₹{(sessionRunningTotal + sessionGstTotal).toFixed(2)}
-                </button>
+                <div className="space-y-1.5">
+                  <button
+                    onClick={() => setShowBillRequestModal(true)}
+                    className="w-full bg-[#1a1a1a] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:scale-[1.01] transition-transform shadow-xl"
+                  >
+                    <IndianRupee size={20} /> Request Bill — ₹{(sessionRunningTotal + sessionGstTotal).toFixed(2)}
+                  </button>
+                  {sessionGstTotal > 0 && (
+                    <p className="text-center text-xs text-[#9c8e85]">
+                      Subtotal ₹{sessionRunningTotal.toFixed(2)} + GST ({restaurant?.gst_percentage ?? 0}%) ₹{sessionGstTotal.toFixed(2)}
+                    </p>
+                  )}
+                </div>
               )}
 
               {/* ── Call Waiter CTA ── */}
