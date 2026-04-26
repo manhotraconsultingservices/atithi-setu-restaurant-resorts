@@ -179,6 +179,7 @@ interface TenantInfo {
   state?: string;
   logo?: string | null;
   templateId?: string | null;
+  invoice_delete_enabled?: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3448,6 +3449,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [odApplyGst, setOdApplyGst]           = useState(false);
   const [odSaving, setOdSaving]               = useState(false);
   const [odSearchActive, setOdSearchActive]   = useState<number | null>(null);
+  // ── Invoice Delete Modal State (admin-gated feature) ──────────────────────
+  const [deleteInvoiceTarget, setDeleteInvoiceTarget] = useState<any|null>(null);
+  const [deleteIdConfirm, setDeleteIdConfirm]         = useState('');
+  const [deleteReason, setDeleteReason]               = useState('');
+  const [deletingInvoice, setDeletingInvoice]         = useState(false);
+  const [deleteError, setDeleteError]                 = useState<string|null>(null);
   // ── Invoice Edit Modal State ──────────────────────────────────────────────
   const [invoiceEditTarget, setInvoiceEditTarget] = useState<any|null>(null);
   const [invEdit, setInvEdit] = useState<{
@@ -3899,6 +3906,60 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
     } catch {}
     finally { setLoadingInvoices(false); }
+  };
+
+  // ── Invoice deletion (admin-gated per-tenant) ─────────────────────────────
+  // Returns true if this invoice row is in a state safe to delete: PRINTED,
+  // PAID, or its order status is DELIVERED/CANCELLED. Active in-kitchen orders
+  // can never be deleted.
+  const isInvoiceDeletable = (inv: any): boolean => {
+    if (!inv) return false;
+    const isSession = inv.invoice_type === 'SESSION';
+    const sessClosed = isSession && (inv.session_status === 'closed' || inv.session_status === 'bill_requested');
+    const orderDone = !isSession && (
+      String(inv.status || '').toUpperCase() === 'DELIVERED' ||
+      String(inv.status || '').toUpperCase() === 'CANCELLED' ||
+      String(inv.payment_status || '').toUpperCase() === 'PAID'
+    );
+    const printed = String(inv.invoice_status || '').toUpperCase() === 'PRINTED';
+    return sessClosed || orderDone || printed;
+  };
+
+  const openDeleteInvoiceModal = (inv: any) => {
+    setDeleteInvoiceTarget(inv);
+    setDeleteIdConfirm('');
+    setDeleteReason('');
+    setDeleteError(null);
+  };
+
+  const confirmDeleteInvoice = async () => {
+    if (!deleteInvoiceTarget || !restaurantId || !token) return;
+    setDeletingInvoice(true);
+    setDeleteError(null);
+    try {
+      const isSession = deleteInvoiceTarget.invoice_type === 'SESSION';
+      const url = isSession
+        ? `/api/restaurant/${restaurantId}/invoice/session/${deleteInvoiceTarget.session_token || deleteInvoiceTarget.session_db_id || deleteInvoiceTarget.id}`
+        : `/api/restaurant/${restaurantId}/invoice/order/${deleteInvoiceTarget.id}`;
+      const res = await fetch(url, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ reason: deleteReason.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Failed (${res.status})`);
+      }
+      // Remove from local list immediately
+      setInvoices(prev => prev.filter((x: any) => x.id !== deleteInvoiceTarget.id));
+      setDeleteInvoiceTarget(null);
+      // Refresh from server to be safe
+      fetchInvoices();
+    } catch (err: any) {
+      setDeleteError(err?.message || 'Failed to delete invoice');
+    } finally {
+      setDeletingInvoice(false);
+    }
   };
 
   // Update invoice status — routes to session or order endpoint by type
@@ -6081,6 +6142,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   title="Open to mark as paid"
                                 >
                                   ₹ Paid
+                                </button>
+                              )}
+                              {/* Delete (admin-gated, per-tenant flag) — restaurant
+                                  state is loaded from GET /api/restaurant/:id which
+                                  returns SELECT *, so it includes invoice_delete_enabled */}
+                              {Number((restaurant as any)?.invoice_delete_enabled || 0) === 1 && isInvoiceDeletable(inv) && (
+                                <button
+                                  onClick={() => openDeleteInvoiceModal(inv)}
+                                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-red-50 text-red-700 hover:bg-red-100 transition-all whitespace-nowrap flex items-center gap-1"
+                                  title="Permanently delete this invoice"
+                                >
+                                  <Trash2 size={11} /> Delete
                                 </button>
                               )}
                             </div>
@@ -9214,6 +9287,143 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
         )}
+
+        {/* ── Delete Invoice Confirmation Modal (admin-gated, per-tenant) ── */}
+        {deleteInvoiceTarget && (() => {
+          const inv = deleteInvoiceTarget;
+          const idStr = String(inv.id || '');
+          const last6 = idStr.slice(-6).toUpperCase();
+          const idTypedOk = deleteIdConfirm.trim().toUpperCase() === last6;
+          const reasonTrim = deleteReason.trim();
+          const reasonOk = reasonTrim.length >= 10;
+          const canDelete = idTypedOk && reasonOk && !deletingInvoice;
+          const isSession = inv.invoice_type === 'SESSION';
+          return (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg flex flex-col" style={{ maxHeight: '92vh' }}>
+                {/* Header */}
+                <div className="px-6 py-5 border-b border-red-100 shrink-0 bg-red-50/60 rounded-t-3xl">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="font-bold text-red-700 flex items-center gap-2">
+                        <Trash2 size={16} /> Permanently Delete Invoice
+                      </h3>
+                      <p className="text-[11px] text-red-600/80 mt-1 leading-snug">
+                        This cannot be undone. Reports and analytics will recompute without this invoice. A JSON snapshot is preserved in the central audit log for compliance.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => { if (!deletingInvoice) setDeleteInvoiceTarget(null); }}
+                      disabled={deletingInvoice}
+                      className="p-1.5 hover:bg-red-100 rounded-xl text-red-600 transition-all disabled:opacity-40"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                </div>
+                {/* Body */}
+                <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+                  {/* Summary */}
+                  <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-2">
+                    <div className="flex justify-between text-xs">
+                      <span className="font-bold uppercase tracking-widest text-[#9c8e85]">Invoice ID</span>
+                      <span className="font-mono font-bold text-[#cc5a16]">#{idStr.slice(-8).toUpperCase()}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="font-bold uppercase tracking-widest text-[#9c8e85]">Type</span>
+                      <span className="font-bold">{isSession ? `TABLE · ${inv.round_count || 1} round${(inv.round_count || 1) !== 1 ? 's' : ''}` : 'ORDER'}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="font-bold uppercase tracking-widest text-[#9c8e85]">Customer</span>
+                      <span className="font-bold">{inv.customerName || inv.customer_name || '—'}</span>
+                    </div>
+                    {inv.tableNumber && (
+                      <div className="flex justify-between text-xs">
+                        <span className="font-bold uppercase tracking-widest text-[#9c8e85]">Table</span>
+                        <span className="font-bold">{inv.tableNumber}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between text-xs">
+                      <span className="font-bold uppercase tracking-widest text-[#9c8e85]">Total</span>
+                      <span className="font-mono font-bold text-[#1a1208]">₹{Number(inv.totalAmount || inv.total_amount || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
+                    </div>
+                  </div>
+                  {/* Type-the-ID confirmation */}
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1.5">
+                      Type the last 6 characters of the invoice ID to confirm
+                    </label>
+                    <div className="text-[11px] text-[#9c8e85] mb-2 font-mono">
+                      Expected: <span className="font-bold text-[#cc5a16]">{last6}</span>
+                    </div>
+                    <input
+                      type="text"
+                      value={deleteIdConfirm}
+                      onChange={e => setDeleteIdConfirm(e.target.value)}
+                      placeholder={last6}
+                      className={cn(
+                        "w-full font-mono uppercase border-2 rounded-xl px-3 py-2 text-sm outline-none transition-all",
+                        idTypedOk
+                          ? "border-green-500 bg-green-50 text-green-700"
+                          : "border-[#cc5a16]/20 focus:ring-2 ring-[#cc5a16]/20"
+                      )}
+                      autoFocus
+                      disabled={deletingInvoice}
+                    />
+                  </div>
+                  {/* Reason */}
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1.5">
+                      Reason for deletion <span className="text-red-600">*</span>
+                    </label>
+                    <textarea
+                      value={deleteReason}
+                      onChange={e => setDeleteReason(e.target.value)}
+                      placeholder="e.g. Duplicate invoice raised by waiter; cancelled by customer; test record"
+                      rows={3}
+                      className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 resize-none"
+                      disabled={deletingInvoice}
+                    />
+                    <p className={cn("text-[11px] mt-1", reasonOk ? 'text-green-600' : 'text-[#9c8e85]')}>
+                      {reasonTrim.length}/10 minimum characters
+                    </p>
+                  </div>
+                  {deleteError && (
+                    <div className="bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-xs text-red-700">
+                      {deleteError}
+                    </div>
+                  )}
+                </div>
+                {/* Footer */}
+                <div className="px-6 py-4 border-t border-[#cc5a16]/10 flex gap-2 shrink-0">
+                  <button
+                    onClick={() => { if (!deletingInvoice) setDeleteInvoiceTarget(null); }}
+                    disabled={deletingInvoice}
+                    className="flex-1 py-3 rounded-2xl border border-[#cc5a16]/20 text-[#6b5d52] font-bold text-sm hover:bg-[#faf7f2] transition-all disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmDeleteInvoice}
+                    disabled={!canDelete}
+                    className={cn(
+                      "flex-1 py-3 rounded-2xl text-white font-bold text-sm transition-all flex items-center justify-center gap-2",
+                      canDelete
+                        ? "bg-red-600 hover:bg-red-700 shadow-lg shadow-red-600/30"
+                        : "bg-red-300 cursor-not-allowed"
+                    )}
+                  >
+                    {deletingInvoice ? (
+                      <>Deleting…</>
+                    ) : (
+                      <><Trash2 size={14} /> Permanently delete</>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* ── On-Demand Invoice Modal ── */}
         {showOnDemandModal && (
@@ -12808,13 +13018,43 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const setStatus = async (id: string, newStatus: number) => {
     await fetch(`/api/admin/restaurants/${id}/toggle-status`, {
       method: 'POST',
-      headers: { 
+      headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify({ is_active: newStatus })
     });
     fetchRestaurants();
+  };
+
+  // Toggle the per-tenant Invoice Deletion feature flag. Calls the admin
+  // PATCH endpoint and refreshes the restaurants list on success.
+  const setInvoiceDeleteFlag = async (id: string, currentlyEnabled: boolean) => {
+    const next = currentlyEnabled ? 0 : 1;
+    if (next === 1) {
+      const ok = window.confirm(
+        "Enable invoice deletion for this restaurant?\n\n" +
+        "The OWNER will be able to permanently delete invoices (including PRINTED).\n" +
+        "Every deletion is recorded in the central audit log.\n\n" +
+        "GST records: this is a regulatory-sensitive feature. Proceed only after the operator has acknowledged compliance implications."
+      );
+      if (!ok) return;
+    }
+    try {
+      const res = await fetch(`/api/admin/restaurants/${id}/invoice-delete-flag`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ enabled: next })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(`Failed: ${data.error || res.status}`);
+        return;
+      }
+      fetchRestaurants();
+    } catch (err) {
+      alert('Network error. Please try again.');
+    }
   };
 
   const resetPassword = async (restaurantId: string) => {
@@ -13230,6 +13470,26 @@ function SuperAdminDashboard({ token }: { token: string }) {
                   >
                     <Globe size={13} /> Provision DNS
                   </button>
+                  {/* Invoice Deletion feature flag — high-risk, per-tenant gate.
+                      SuperAdminDashboard is only rendered for SUPER_ADMIN, so the
+                      backend's isAdmin middleware (SUPER_ADMIN/CTO) will accept calls. */}
+                  {(() => {
+                    const enabled = Number(r.invoice_delete_enabled || 0) === 1;
+                    return (
+                      <button
+                        onClick={() => setInvoiceDeleteFlag(r.id, enabled)}
+                        title={enabled ? "Click to disable invoice deletion for this tenant" : "Click to enable invoice deletion for this tenant"}
+                        className={cn(
+                          "w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 border",
+                          enabled
+                            ? "text-red-700 border-red-300 bg-red-50 hover:bg-red-100"
+                            : "text-[#6b5d52] border-[#cc5a16]/10 hover:bg-[#cc5a16]/5"
+                        )}
+                      >
+                        <Trash2 size={13} /> Invoice Deletion: {enabled ? 'ENABLED' : 'OFF'}
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
             ))}
