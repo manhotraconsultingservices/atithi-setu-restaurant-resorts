@@ -302,7 +302,8 @@
   .india-card p { font-size: 13px; color: var(--ink-muted); }
 
   /* ── Print rules ── */
-  @page { size: A4 landscape; margin: 0; }
+  /* Explicit A4 landscape (297×210mm). Margins zero; slide pads its own space. */
+  @page { size: 297mm 210mm; margin: 0; }
   @media print {
     body { background: white; }
     .brand-badge { display: none !important; }
@@ -312,17 +313,108 @@
       box-shadow: none !important;
       margin: 0 !important;
       width: 100% !important;
-      min-height: 100vh;
+      height: 210mm !important;
+      min-height: 210mm !important;
+      max-height: 210mm !important;
       border-radius: 0 !important;
-      padding: 36px 48px !important;
+      padding: 24px 36px !important;
+      overflow: hidden;
+      justify-content: flex-start;
     }
     .slide:last-child { page-break-after: auto; }
-    h1 { font-size: 48px; }
-    .cover h1 { font-size: 60px; }
-    h2 { font-size: 34px; }
-    p { font-size: 15px; }
-    .price-amount { font-size: 48px; }
-    .partner-block .commission { font-size: 72px; }
+    /* Compact typography */
+    h1 { font-size: 42px; }
+    .cover h1 { font-size: 54px; }
+    h2 { font-size: 28px; }
+    h3 { font-size: 17px; }
+    p  { font-size: 13px; line-height: 1.45; }
+    .small { font-size: 10px; margin-top: 10px !important; }
+    .eyebrow { padding: 4px 10px; font-size: 10px; margin-bottom: 10px; }
+    .accent-bar { margin: 12px 0 12px; height: 4px; width: 48px; }
+    /* Stat cards (pain slides) */
+    .stats-grid { gap: 10px; margin-top: 14px; }
+    .stat-card { padding: 13px 16px; }
+    .stat-card .big { font-size: 30px; margin-bottom: 3px; }
+    .stat-card p { font-size: 12px; }
+    /* 2/3-column feature grids */
+    .grid-3, .grid-2, .india-grid { margin-top: 12px; gap: 10px; }
+    .feat-card { padding: 14px 14px; }
+    .feat-card h3 { font-size: 15px; margin-bottom: 4px; }
+    .feat-card p { font-size: 11.5px; }
+    .feat-card .icon { width: 34px; height: 34px; font-size: 16px; margin-bottom: 6px; border-radius: 8px; }
+    /* India tiles */
+    .india-card { padding: 10px 14px; gap: 10px; }
+    .india-card .icn { font-size: 20px; }
+    .india-card h4 { font-size: 12.5px; margin-bottom: 2px; }
+    .india-card p { font-size: 11px; }
+    /* Pricing */
+    .price-grid { gap: 14px; margin-top: 14px; }
+    .price-card { padding: 22px 20px; }
+    .price-card h3 { margin-bottom: 8px; font-size: 11px; }
+    .price-amount { font-size: 40px; }
+    .price-amount .currency { font-size: 24px; }
+    .price-period { font-size: 12px; margin: 4px 0 10px; }
+    .price-bonus { padding: 5px 10px; font-size: 11px; margin-bottom: 12px; }
+    .price-features li { padding: 3px 0 3px 18px; font-size: 12px; }
+    /* Partner block */
+    .partner-block { padding: 22px 26px; margin-top: 12px; border-radius: 14px; }
+    .partner-block .commission { font-size: 60px; }
+    .partner-block .commission small { font-size: 16px; }
+    .partner-block p { font-size: 13px; }
+    .partner-block .install-grid { gap: 12px; margin-top: 14px; }
+    .partner-block .install-card { padding: 12px 14px; }
+    .partner-block .install-card h4 { font-size: 11px; margin-bottom: 4px; }
+    .partner-block .install-card p { font-size: 12px; }
+    /* Guest journey timeline (6 steps) */
+    .journey { margin-top: 18px; gap: 6px; }
+    .journey::before { top: 20px; }
+    .journey-step .num { width: 40px; height: 40px; font-size: 15px; border-width: 2px; margin-bottom: 8px; }
+    .journey-step h4 { font-size: 11px; }
+    .journey-step p { font-size: 10px; }
+    /* Service catalog mock (slide 6) */
+    .svc-mock { padding: 14px 18px; margin-top: 12px; border-radius: 14px; }
+    .svc-row { padding: 8px 0; gap: 10px; grid-template-columns: 28px 1fr auto auto; }
+    .svc-icn { font-size: 18px; }
+    .svc-name { font-size: 12.5px; }
+    .svc-meta { font-size: 10px; margin-top: 1px; }
+    .svc-pill { padding: 3px 8px; font-size: 10px; }
+    .svc-time { font-size: 10px; }
+    /* Folio mock (slide 7) */
+    .folio-mock { padding: 14px 16px; margin-top: 12px; font-size: 11px; border-radius: 10px; }
+    .folio-row { padding: 4px 0; }
+    /* Chat / AI Concierge mock (slide 8) */
+    .chat-mock { padding: 14px 18px; margin-top: 12px; border-radius: 14px; }
+    .chat-bubble { padding: 8px 12px; font-size: 11.5px; margin: 6px 0; }
+    /* KPI strip (slide 9) */
+    .kpi-strip { gap: 10px; margin-top: 16px; }
+    .kpi-card { padding: 14px 14px; }
+    .kpi-card .label { font-size: 10px; margin-bottom: 5px; }
+    .kpi-card .val { font-size: 24px; }
+    .kpi-card .delta { font-size: 10px; margin-top: 3px; }
+    /* Founder */
+    .founder-block { margin-top: 14px; gap: 24px; grid-template-columns: 150px 1fr; }
+    .founder-photo { width: 150px; height: 150px; font-size: 56px; }
+    .founder-info h2 { font-size: 24px !important; }
+    .founder-info .role { font-size: 13px; margin-bottom: 8px; }
+    .founder-info p { font-size: 13px; line-height: 1.55; }
+    .linkedin-btn { padding: 7px 14px; font-size: 12px; margin-top: 10px; }
+    /* CTA */
+    .cta-grid { gap: 14px; margin-top: 16px; }
+    .cta-card { padding: 22px; border-radius: 14px; }
+    .cta-card .label { font-size: 10px; margin-bottom: 6px; }
+    .cta-card .val { font-size: 20px; }
+    .cta-card .sub { font-size: 11px; }
+    /* Cover slide */
+    .cover { justify-content: center; }
+    .cover .pillars { margin-top: 28px; gap: 16px; }
+    .cover p { font-size: 18px; }
+    .cover .logo-row { margin-bottom: 22px; }
+    /* Closing */
+    .closing .big-logo { width: 110px; height: 110px; margin-bottom: 18px; border-radius: 22px; }
+    .closing .big-logo svg { width: 80px; height: 80px; }
+    .closing .closing-line { font-size: 24px; margin-top: 8px; }
+    /* Slide number */
+    .slide-num { bottom: 12px; right: 18px; font-size: 10px; }
   }
 
   /* ── Mobile rules ── */
