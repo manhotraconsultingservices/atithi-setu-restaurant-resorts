@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>AtithiSetu Hospitality — Hotel Pitch Deck</title>
+<meta name="description" content="The Hospitality OS for Modern Hotels. Front desk, housekeeping, AI concierge and folios — in one cloud platform built for India." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  /* ════════════════════════════════════════════════════════════
+     ATITHISETU — HOTEL PITCH DECK
+     Heritage palette · responsive · print-ready
+     ════════════════════════════════════════════════════════════ */
+  :root {
+    --saffron: #cc5a16;
+    --saffron-2: #a84612;
+    --saffron-light: #fef0e4;
+    --indigo: #1e3a5f;
+    --indigo-light: #e8edf4;
+    --emerald: #0f766e;
+    --brass: #b8860b;
+    --ruby: #9f1239;
+    --cream: #faf7f2;
+    --cream-2: #f3ece0;
+    --ink: #14110c;
+    --ink-2: #3d3128;
+    --ink-muted: #6b5d52;
+    --ink-light: #9a8c7e;
+    --border: #e8dfd0;
+    --white: #ffffff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'DM Sans', system-ui, sans-serif;
+    background: var(--cream-2);
+    color: var(--ink-2);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif; color: var(--ink); line-height: 1.15; }
+  h1 { font-size: 56px; font-weight: 800; letter-spacing: -1px; }
+  h2 { font-size: 40px; font-weight: 700; letter-spacing: -0.5px; }
+  h3 { font-size: 22px; font-weight: 700; }
+  p  { font-size: 17px; color: var(--ink-2); }
+  .muted { color: var(--ink-muted); }
+  .small { font-size: 13px; color: var(--ink-light); letter-spacing: 0.5px; }
+
+  /* Floating brand badge */
+  .brand-badge {
+    position: fixed; top: 18px; right: 18px; z-index: 100;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 14px; background: var(--white);
+    border: 1px solid var(--border); border-radius: 999px;
+    font-size: 12px; font-weight: 700; color: var(--ink-2);
+    text-decoration: none; box-shadow: 0 4px 18px rgba(20,17,12,0.08);
+  }
+  .brand-badge:hover { color: var(--indigo); }
+
+  /* ─── Slide ─── */
+  .slide {
+    width: min(1100px, 96vw);
+    min-height: 700px;
+    margin: 30px auto;
+    padding: 64px 72px;
+    background: var(--white);
+    border-radius: 24px;
+    box-shadow: 0 20px 60px rgba(20,17,12,0.08), 0 4px 12px rgba(20,17,12,0.04);
+    position: relative; overflow: hidden;
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .slide-num {
+    position: absolute; bottom: 22px; right: 28px;
+    font-size: 11px; font-weight: 700; letter-spacing: 2px;
+    color: var(--ink-light);
+  }
+  .eyebrow {
+    display: inline-block; padding: 6px 14px;
+    background: var(--indigo-light); color: var(--indigo);
+    border-radius: 999px;
+    font-size: 11px; font-weight: 700; letter-spacing: 2px;
+    text-transform: uppercase; margin-bottom: 20px;
+  }
+  .accent-bar {
+    width: 60px; height: 5px; border-radius: 3px;
+    background: linear-gradient(90deg, var(--indigo), var(--brass));
+    margin: 24px 0 20px;
+  }
+
+  /* Cover slide */
+  .cover {
+    background:
+      radial-gradient(circle at 80% 100%, rgba(184,134,11,0.18), transparent 50%),
+      linear-gradient(135deg, #1e3a5f 0%, #0d1f3a 100%);
+    color: var(--cream);
+    text-align: left;
+  }
+  .cover h1 { color: var(--cream); font-size: 72px; }
+  .cover p  { color: rgba(245,240,232,0.85); font-size: 22px; max-width: 700px; }
+  .cover .logo-row { display: flex; align-items: center; gap: 16px; margin-bottom: 36px; }
+  .cover .logo-row .name { font-family: 'Playfair Display', serif; font-size: 28px; font-weight: 700; color: var(--cream); }
+  .cover .tagline-mini { color: var(--brass); font-size: 13px; font-weight: 700; letter-spacing: 4px; text-transform: uppercase; margin-bottom: 14px; }
+  .cover .pillars { display: flex; gap: 24px; margin-top: 48px; flex-wrap: wrap; }
+  .cover .pillar { display: flex; align-items: center; gap: 10px; color: rgba(245,240,232,0.9); font-size: 14px; font-weight: 600; }
+  .cover .pillar .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--brass); }
+  .cover .pillar:nth-child(2) .dot { background: var(--emerald); }
+  .cover .pillar:nth-child(3) .dot { background: var(--saffron); }
+
+  /* Stats grid */
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 32px; }
+  .stat-card {
+    padding: 26px; background: var(--cream); border-left: 4px solid var(--ruby);
+    border-radius: 14px;
+  }
+  .stat-card .big { font-family: 'Playfair Display', serif; font-size: 44px; font-weight: 800; color: var(--ruby); line-height: 1; margin-bottom: 8px; }
+  .stat-card p { font-size: 15px; color: var(--ink-2); }
+
+  /* Pillars / 3-column */
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 22px; margin-top: 28px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 28px; }
+  .feat-card {
+    padding: 26px 22px; background: var(--cream); border-radius: 14px;
+    border-top: 4px solid var(--indigo); height: 100%;
+  }
+  .feat-card.saffron { border-top-color: var(--saffron); }
+  .feat-card.emerald { border-top-color: var(--emerald); }
+  .feat-card.brass { border-top-color: var(--brass); }
+  .feat-card .icon {
+    width: 48px; height: 48px; border-radius: 12px;
+    background: var(--indigo-light); color: var(--indigo);
+    display: flex; align-items: center; justify-content: center; font-size: 22px; margin-bottom: 14px;
+  }
+  .feat-card h3 { font-size: 18px; margin-bottom: 8px; }
+  .feat-card p { font-size: 14px; color: var(--ink-muted); }
+
+  /* Guest journey */
+  .journey { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 36px; position: relative; }
+  .journey::before {
+    content: ''; position: absolute; top: 26px; left: 5%; right: 5%; height: 2px;
+    background: linear-gradient(90deg, var(--indigo), var(--brass)); z-index: 0;
+  }
+  .journey-step { text-align: center; position: relative; z-index: 1; }
+  .journey-step .num {
+    width: 52px; height: 52px; border-radius: 50%;
+    background: var(--white); border: 3px solid var(--indigo);
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 12px; font-weight: 800; font-size: 18px; color: var(--indigo);
+    box-shadow: 0 4px 14px rgba(30,58,95,0.18);
+  }
+  .journey-step h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; color: var(--ink); }
+  .journey-step p { font-size: 11px; color: var(--ink-muted); line-height: 1.4; }
+
+  /* Service catalog mock */
+  .svc-mock {
+    background: var(--cream); border-radius: 18px; padding: 24px; margin-top: 22px;
+  }
+  .svc-row {
+    display: grid; grid-template-columns: 38px 1fr auto auto; gap: 14px; align-items: center;
+    padding: 12px 0; border-bottom: 1px solid var(--border);
+  }
+  .svc-row:last-child { border-bottom: none; }
+  .svc-icn { font-size: 22px; }
+  .svc-name { font-weight: 700; font-size: 14px; color: var(--ink); }
+  .svc-meta { font-size: 12px; color: var(--ink-muted); margin-top: 2px; }
+  .svc-pill {
+    padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 700;
+  }
+  .svc-pill.pending { background: rgba(184,134,11,0.18); color: var(--brass); }
+  .svc-pill.progress { background: rgba(30,58,95,0.16); color: var(--indigo); }
+  .svc-pill.done { background: rgba(15,118,110,0.16); color: var(--emerald); }
+  .svc-time { font-size: 11px; color: var(--ink-light); font-weight: 600; }
+
+  /* Folio mock */
+  .folio-mock {
+    background: var(--white); border: 1px solid var(--border); border-radius: 14px;
+    padding: 20px; margin-top: 22px; font-family: 'DM Mono', monospace; font-size: 13px;
+  }
+  .folio-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dotted var(--border); }
+  .folio-row:last-of-type { border-bottom: none; }
+  .folio-total { font-weight: 800; color: var(--indigo); border-top: 2px solid var(--ink); margin-top: 8px; padding-top: 8px; }
+
+  /* Concierge chat mock */
+  .chat-mock {
+    background: var(--cream); border-radius: 18px; padding: 24px; margin-top: 22px;
+    max-width: 480px;
+  }
+  .chat-bubble {
+    margin: 8px 0; padding: 10px 14px; border-radius: 14px; max-width: 75%;
+    font-size: 13px; line-height: 1.5;
+  }
+  .chat-bubble.guest { background: var(--white); color: var(--ink-2); border: 1px solid var(--border); }
+  .chat-bubble.bot   { background: var(--indigo); color: var(--cream); margin-left: auto; }
+  .chat-bubble small { display: block; font-size: 10px; opacity: 0.7; margin-bottom: 4px; }
+
+  /* KPI strip */
+  .kpi-strip {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-top: 28px;
+  }
+  .kpi-card {
+    padding: 22px 18px; background: var(--cream); border-radius: 14px;
+    border-top: 4px solid var(--brass); text-align: left;
+  }
+  .kpi-card .label { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: var(--ink-muted); text-transform: uppercase; margin-bottom: 8px; }
+  .kpi-card .val { font-family: 'Playfair Display', serif; font-size: 32px; font-weight: 800; color: var(--ink); line-height: 1; }
+  .kpi-card .delta { font-size: 11px; font-weight: 700; color: var(--emerald); margin-top: 4px; }
+
+  /* Pricing */
+  .price-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; margin-top: 32px; }
+  .price-card {
+    padding: 36px 32px; background: var(--cream); border-radius: 18px;
+    border: 2px solid var(--border); position: relative;
+  }
+  .price-card.featured { border-color: var(--indigo); background: linear-gradient(135deg, #f3f5fa, var(--indigo-light)); }
+  .price-card .ribbon {
+    position: absolute; top: -14px; right: 24px;
+    background: var(--indigo); color: var(--white);
+    padding: 6px 14px; border-radius: 8px; font-size: 11px; font-weight: 800; letter-spacing: 1.5px;
+  }
+  .price-card h3 { font-family: 'DM Sans'; font-size: 13px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--ink-muted); margin-bottom: 12px; }
+  .price-amount { font-family: 'Playfair Display', serif; font-size: 56px; font-weight: 800; color: var(--ink); line-height: 1; }
+  .price-amount .currency { font-size: 32px; vertical-align: top; margin-right: 4px; }
+  .price-period { font-size: 14px; color: var(--ink-muted); margin: 6px 0 18px; }
+  .price-bonus { display: inline-block; padding: 6px 12px; background: var(--indigo); color: var(--white); border-radius: 6px; font-size: 12px; font-weight: 700; margin-bottom: 18px; }
+  .price-features { list-style: none; }
+  .price-features li { padding: 6px 0; font-size: 14px; color: var(--ink-2); padding-left: 22px; position: relative; }
+  .price-features li::before { content: '✓'; position: absolute; left: 0; color: var(--indigo); font-weight: 800; }
+
+  /* Channel partner */
+  .partner-block {
+    background: linear-gradient(135deg, var(--indigo), #14283f);
+    color: var(--cream); padding: 40px; border-radius: 18px; margin-top: 28px;
+  }
+  .partner-block h2 { color: var(--cream); }
+  .partner-block .commission {
+    font-family: 'Playfair Display', serif; font-size: 88px; font-weight: 900;
+    color: var(--brass); line-height: 1;
+  }
+  .partner-block .commission small { font-size: 22px; font-weight: 600; color: rgba(245,240,232,0.7); }
+  .partner-block .install-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 22px; }
+  .partner-block .install-card { background: rgba(255,255,255,0.08); padding: 20px; border-radius: 12px; }
+  .partner-block .install-card h4 { color: var(--brass); font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 6px; }
+  .partner-block .install-card p { color: rgba(245,240,232,0.95); font-size: 14px; }
+
+  /* Founder */
+  .founder-block { display: grid; grid-template-columns: 200px 1fr; gap: 36px; align-items: start; margin-top: 28px; }
+  .founder-photo {
+    width: 200px; height: 200px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--indigo), var(--brass));
+    color: var(--white); font-family: 'Playfair Display', serif;
+    font-size: 76px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 12px 36px rgba(30,58,95,0.25);
+  }
+  .founder-info h2 { margin-bottom: 6px; }
+  .founder-info .role { color: var(--indigo); font-weight: 700; font-size: 16px; margin-bottom: 16px; }
+  .founder-info p { font-size: 16px; line-height: 1.7; }
+  .linkedin-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    margin-top: 18px; padding: 10px 18px;
+    background: #0077b5; color: white; text-decoration: none;
+    border-radius: 8px; font-weight: 700; font-size: 14px;
+  }
+
+  /* CTA */
+  .cta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 32px; }
+  .cta-card {
+    padding: 32px; background: var(--cream); border-radius: 18px;
+    border: 2px solid transparent; transition: all 0.2s;
+    text-decoration: none; color: var(--ink); display: block;
+  }
+  .cta-card:hover { border-color: var(--indigo); }
+  .cta-card .label { font-size: 11px; font-weight: 700; letter-spacing: 2px; color: var(--ink-muted); text-transform: uppercase; margin-bottom: 10px; }
+  .cta-card .val { font-family: 'Playfair Display', serif; font-size: 26px; font-weight: 700; color: var(--indigo); }
+  .cta-card .sub { font-size: 13px; color: var(--ink-muted); margin-top: 6px; }
+
+  /* Closing */
+  .closing {
+    background: linear-gradient(135deg, var(--cream), var(--cream-2));
+    text-align: center; align-items: center; justify-content: center;
+  }
+  .closing .big-logo {
+    width: 140px; height: 140px; border-radius: 28px;
+    background: var(--white);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 16px 48px rgba(20,17,12,0.1);
+    margin: 0 auto 28px;
+  }
+  .closing .big-logo svg { width: 100px; height: 100px; }
+  .closing .closing-line { font-family: 'Playfair Display', serif; font-size: 32px; font-style: italic; color: var(--ink); margin-top: 12px; }
+  .closing .url { display: inline-block; margin-top: 24px; padding: 12px 24px; background: var(--ink); color: var(--cream); border-radius: 999px; font-weight: 700; text-decoration: none; }
+
+  /* Built-for-India tile grid */
+  .india-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 24px; }
+  .india-card {
+    padding: 18px 22px; background: var(--cream); border-radius: 12px;
+    display: flex; gap: 14px; align-items: start;
+  }
+  .india-card .icn { font-size: 28px; flex-shrink: 0; }
+  .india-card h4 { font-size: 15px; font-weight: 700; color: var(--ink); margin-bottom: 4px; }
+  .india-card p { font-size: 13px; color: var(--ink-muted); }
+
+  /* ── Print rules ── */
+  @page { size: A4 landscape; margin: 0; }
+  @media print {
+    body { background: white; }
+    .brand-badge { display: none !important; }
+    .slide {
+      page-break-after: always;
+      page-break-inside: avoid;
+      box-shadow: none !important;
+      margin: 0 !important;
+      width: 100% !important;
+      min-height: 100vh;
+      border-radius: 0 !important;
+      padding: 36px 48px !important;
+    }
+    .slide:last-child { page-break-after: auto; }
+    h1 { font-size: 48px; }
+    .cover h1 { font-size: 60px; }
+    h2 { font-size: 34px; }
+    p { font-size: 15px; }
+    .price-amount { font-size: 48px; }
+    .partner-block .commission { font-size: 72px; }
+  }
+
+  /* ── Mobile rules ── */
+  @media (max-width: 768px) {
+    .slide {
+      width: 100%; min-height: auto;
+      padding: 36px 22px; margin: 16px 0;
+      border-radius: 16px;
+    }
+    h1 { font-size: 34px; }
+    .cover h1 { font-size: 38px; }
+    h2 { font-size: 24px; line-height: 1.2; }
+    h3 { font-size: 18px; }
+    p  { font-size: 15px; }
+    .grid-3, .grid-2, .stats-grid, .price-grid, .india-grid, .cta-grid { grid-template-columns: 1fr !important; }
+    .journey { grid-template-columns: 1fr 1fr; gap: 18px; }
+    .journey::before { display: none; }
+    .kpi-strip { grid-template-columns: 1fr 1fr; }
+    .founder-block { grid-template-columns: 1fr; text-align: center; }
+    .founder-photo { margin: 0 auto; }
+    .partner-block .install-grid { grid-template-columns: 1fr; }
+    .partner-block .commission { font-size: 64px; }
+    .cover .pillars { gap: 14px; }
+    .brand-badge { top: 8px; right: 8px; padding: 6px 10px; font-size: 11px; }
+    .slide-num { bottom: 10px; right: 14px; }
+  }
+</style>
+</head>
+<body>
+
+<a class="brand-badge" href="https://atithi-setu.com" target="_blank" rel="noopener">
+  <span style="display:inline-flex;width:18px;height:18px;">
+    <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="12" fill="#f5f0e8"/><path d="M32 8 C30 10 27 12.5 27 15.5 C27 18.5 29.2 20.5 32 20.5 C34.8 20.5 37 18.5 37 15.5 C37 12.5 34 10 32 8Z" fill="#d4920a"/><path d="M 10 50 C 10 36, 16 24, 32 21 C 24 24, 19 34, 20 50 Z" fill="#1a3a6e"/><path d="M 54 50 C 54 36, 48 24, 32 21 C 40 24, 45 34, 44 50 Z" fill="#c88c14"/><path d="M 20 50 C 20 38, 25 27, 32 24 C 39 27, 44 38, 44 50 Z" fill="#f5f0e8"/></svg>
+  </span>
+  atithi-setu.com
+</a>
+
+<!-- ════ SLIDE 1: COVER ════ -->
+<section class="slide cover">
+  <div class="logo-row">
+    <div style="width:64px;height:64px;border-radius:14px;background:#f5f0e8;padding:6px;">
+      <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;"><rect width="64" height="64" rx="12" fill="#f5f0e8"/><path d="M32 8 C30 10 27 12.5 27 15.5 C27 18.5 29.2 20.5 32 20.5 C34.8 20.5 37 18.5 37 15.5 C37 12.5 34 10 32 8Z" fill="#d4920a"/><path d="M 10 50 C 10 36, 16 24, 32 21 C 24 24, 19 34, 20 50 Z" fill="#1a3a6e"/><path d="M 54 50 C 54 36, 48 24, 32 21 C 40 24, 45 34, 44 50 Z" fill="#c88c14"/><path d="M 20 50 C 20 38, 25 27, 32 24 C 39 27, 44 38, 44 50 Z" fill="#f5f0e8"/></svg>
+    </div>
+    <div class="name">AtithiSetu Hospitality</div>
+  </div>
+  <div class="tagline-mini">For Boutique Hotels · Resorts · Service Apartments</div>
+  <h1>Run your hotel<br/>like it's 2026.</h1>
+  <p style="margin-top:18px;">Front desk, housekeeping, AI concierge, and folios — one cloud platform. Compliance-ready for India. Loved by guests.</p>
+  <div class="pillars">
+    <div class="pillar"><span class="dot"></span>Guest Self-Service</div>
+    <div class="pillar"><span class="dot"></span>Operations Visibility</div>
+    <div class="pillar"><span class="dot"></span>Compliance-Ready</div>
+  </div>
+</section>
+
+<!-- ════ SLIDE 2: PAIN ════ -->
+<section class="slide">
+  <div class="eyebrow">The Reality</div>
+  <h2>Hotels run on sticky notes.<br/>Guests review them on Google.</h2>
+  <div class="accent-bar"></div>
+  <p style="max-width:780px;">Paper folios. Forgotten Form-C. A wake-up call that nobody made. Housekeeping requests scribbled on a chit and lost between shifts. The reception sees one version of the truth, the back office sees another, the guest sees neither.</p>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="big">1.4 ★</div>
+      <p>average drop in Google rating after a single missed wake-up call or unanswered service request.</p>
+    </div>
+    <div class="stat-card">
+      <div class="big">~₹40K</div>
+      <p>monthly leakage in misposted folios, missed minibar charges &amp; manual GST mismatches (mid-size hotel).</p>
+    </div>
+    <div class="stat-card">
+      <div class="big">₹50K</div>
+      <p>FRRO penalty risk per missed Form-C submission for foreign nationals — and most hotels file late.</p>
+    </div>
+    <div class="stat-card">
+      <div class="big">38%</div>
+      <p>of guests want to request services from their phone — instead of calling reception. Hotels still don't offer it.</p>
+    </div>
+  </div>
+  <p class="small" style="margin-top:18px;">*Industry estimates · Replace with your own data before sharing externally.</p>
+  <div class="slide-num">02</div>
+</section>
+
+<!-- ════ SLIDE 3: WHY NOW ════ -->
+<section class="slide">
+  <div class="eyebrow">What Owners Don't See</div>
+  <h2>Without real-time data,<br/>you're flying blind.</h2>
+  <div class="accent-bar"></div>
+  <p>ADR, RevPAR, occupancy, ancillary revenue — the four numbers that decide whether a hotel grows or struggles. Most independent hotels in India still calculate these in spreadsheets. Once a month. After damage is already done.</p>
+  <div class="grid-3" style="margin-top:32px;">
+    <div class="feat-card saffron">
+      <div class="icon" style="background:#fef0e4;color:#cc5a16;">📉</div>
+      <h3>Revenue blindspots</h3>
+      <p>You don't know your real RevPAR until your accountant calls — by which time the month is gone.</p>
+    </div>
+    <div class="feat-card emerald">
+      <div class="icon" style="background:#e2f1ee;color:#0f766e;">⏱️</div>
+      <h3>SLA chaos</h3>
+      <p>"Extra towels" and "AC not cooling" sit in the same WhatsApp group with no priority, no SLA, no log.</p>
+    </div>
+    <div class="feat-card brass">
+      <div class="icon" style="background:#fef3d4;color:#b8860b;">📋</div>
+      <h3>Compliance risk</h3>
+      <p>Form-C, GSTR filings, foreign-guest registration — every one of them done manually, in time-pressure.</p>
+    </div>
+  </div>
+  <div class="slide-num">03</div>
+</section>
+
+<!-- ════ SLIDE 4: SOLUTION ════ -->
+<section class="slide">
+  <div class="eyebrow">Meet AtithiSetu Hospitality</div>
+  <h2>Front desk to checkout.<br/>One platform. Every guest.</h2>
+  <div class="accent-bar"></div>
+  <p style="max-width:780px;">AtithiSetu Hospitality is a complete cloud OS for boutique hotels and resorts. Bookings, check-ins, in-room QR services, an AI concierge, GST-ready folios, Form-C compliance — all unified, all real-time, all on your phone.</p>
+  <div class="grid-3">
+    <div class="feat-card">
+      <div class="icon">🛎️</div>
+      <h3>Guest Self-Service</h3>
+      <p>Per-room QR. Guests order F&amp;B, request housekeeping, browse FAQs, talk to AI concierge — all from their phone.</p>
+    </div>
+    <div class="feat-card saffron">
+      <div class="icon" style="background:#fef0e4;color:#cc5a16;">⚙️</div>
+      <h3>Ops Visibility</h3>
+      <p>Live room status, SLA-tracked service requests routed to the right team, sentiment analysis on feedback.</p>
+    </div>
+    <div class="feat-card emerald">
+      <div class="icon" style="background:#e2f1ee;color:#0f766e;">📊</div>
+      <h3>Compliance &amp; KPIs</h3>
+      <p>Auto-folios with state-aware GST. Form-C PDFs. ADR, RevPAR, occupancy — calculated live, not monthly.</p>
+    </div>
+  </div>
+  <div class="slide-num">04</div>
+</section>
+
+<!-- ════ SLIDE 5: GUEST JOURNEY ════ -->
+<section class="slide">
+  <div class="eyebrow">Story #1 — The Guest</div>
+  <h2>Six steps. Frictionless.<br/>From booking to checkout.</h2>
+  <div class="accent-bar"></div>
+  <div class="journey">
+    <div class="journey-step">
+      <div class="num">1</div>
+      <h4>Book</h4>
+      <p>Direct or partner channel. Profile created.</p>
+    </div>
+    <div class="journey-step">
+      <div class="num">2</div>
+      <h4>Check-in</h4>
+      <p>ID upload, Form-C if foreign, room assigned.</p>
+    </div>
+    <div class="journey-step">
+      <div class="num">3</div>
+      <h4>In-Room QR</h4>
+      <p>Guest scans &amp; orders services or F&amp;B.</p>
+    </div>
+    <div class="journey-step">
+      <div class="num">4</div>
+      <h4>AI Concierge</h4>
+      <p>24/7 chat answers FAQs in guest's language.</p>
+    </div>
+    <div class="journey-step">
+      <div class="num">5</div>
+      <h4>Folio</h4>
+      <p>Auto-itemized. GST state-aware. Real time.</p>
+    </div>
+    <div class="journey-step">
+      <div class="num">6</div>
+      <h4>Checkout</h4>
+      <p>Pay, settle, invoice emailed instantly.</p>
+    </div>
+  </div>
+  <p style="margin-top:36px;font-size:16px;color:var(--ink-muted);"><strong style="color:var(--indigo);">Result:</strong> reception spends time delighting guests, not chasing paperwork. Reviews mention "smooth" and "modern" — and Google rating moves up.</p>
+  <div class="slide-num">05</div>
+</section>
+
+<!-- ════ SLIDE 6: SERVICES ════ -->
+<section class="slide">
+  <div class="eyebrow">Story #2 — Service Operations</div>
+  <h2>Every request. Routed.<br/>Tracked. Closed on SLA.</h2>
+  <div class="accent-bar"></div>
+  <p>The Service Catalog turns every "extra towels" or "AC not working" into a structured ticket — auto-routed to the right team (Housekeeping, Maintenance, Front Desk, Concierge) with an SLA timer and a guest notification when complete.</p>
+  <div class="svc-mock">
+    <div class="svc-row">
+      <div class="svc-icn">🛏️</div>
+      <div><div class="svc-name">Extra towels — Room 204</div><div class="svc-meta">Housekeeping · SLA 15 min</div></div>
+      <div class="svc-pill done">Completed</div>
+      <div class="svc-time">9 min</div>
+    </div>
+    <div class="svc-row">
+      <div class="svc-icn">❄️</div>
+      <div><div class="svc-name">AC not cooling — Room 312</div><div class="svc-meta">Maintenance · SLA 30 min · Priority</div></div>
+      <div class="svc-pill progress">In Progress</div>
+      <div class="svc-time">14 min</div>
+    </div>
+    <div class="svc-row">
+      <div class="svc-icn">📞</div>
+      <div><div class="svc-name">Wake-up call 06:30 — Room 108</div><div class="svc-meta">Front Desk · Scheduled</div></div>
+      <div class="svc-pill pending">Scheduled</div>
+      <div class="svc-time">06:30</div>
+    </div>
+    <div class="svc-row">
+      <div class="svc-icn">🚗</div>
+      <div><div class="svc-name">Airport drop tomorrow 10am — Room 204</div><div class="svc-meta">Concierge · Quoted ₹1,200</div></div>
+      <div class="svc-pill progress">Confirming</div>
+      <div class="svc-time">2 min</div>
+    </div>
+  </div>
+  <p style="margin-top:22px;font-size:14px;color:var(--ink-muted);">Configurable services · Complimentary or chargeable · Auto-post to folio when complete · Sentiment analysis on guest feedback.</p>
+  <div class="slide-num">06</div>
+</section>
+
+<!-- ════ SLIDE 7: COMPLIANCE ════ -->
+<section class="slide">
+  <div class="eyebrow">Story #3 — Compliance</div>
+  <h2>Folios, GST, Form-C —<br/>compliance on autopilot.</h2>
+  <div class="accent-bar"></div>
+  <div class="grid-2">
+    <div>
+      <h3 style="margin-bottom:14px;">Auto-folio at check-in</h3>
+      <p style="font-size:15px;">Folios open automatically when a guest checks in. Per-night room rates post nightly. Service charges flow in as they complete. GST is calculated state-aware: <strong>CGST + SGST</strong> for intra-state guests, <strong>IGST</strong> for inter-state. No spreadsheet at checkout.</p>
+      <h3 style="margin-top:24px;margin-bottom:14px;">Form-C for foreign guests</h3>
+      <p style="font-size:15px;">For foreign nationals, Form-C is auto-generated as a PDF. Submit to FRRO directly. Compliance log keeps an audit trail of every form filed — no penalty surprises.</p>
+    </div>
+    <div class="folio-mock">
+      <div style="font-weight:800;color:var(--indigo);margin-bottom:8px;font-family:'DM Sans';font-size:14px;">FOLIO · ROOM 204 · BKG-2387</div>
+      <div class="folio-row"><span>Room (3 nights × ₹4,500)</span><span>13,500.00</span></div>
+      <div class="folio-row"><span>Breakfast (2 days)</span><span>800.00</span></div>
+      <div class="folio-row"><span>Laundry service</span><span>320.00</span></div>
+      <div class="folio-row"><span>Subtotal</span><span>14,620.00</span></div>
+      <div class="folio-row"><span>CGST 6%</span><span>877.20</span></div>
+      <div class="folio-row"><span>SGST 6%</span><span>877.20</span></div>
+      <div class="folio-row folio-total"><span>GRAND TOTAL</span><span>₹16,374.40</span></div>
+    </div>
+  </div>
+  <div class="slide-num">07</div>
+</section>
+
+<!-- ════ SLIDE 8: AI CONCIERGE ════ -->
+<section class="slide">
+  <div class="eyebrow">Differentiator</div>
+  <h2>An AI concierge —<br/>that knows your hotel.</h2>
+  <div class="accent-bar"></div>
+  <div class="grid-2">
+    <div>
+      <p style="font-size:16px;">A 24/7 guest assistant trained on your hotel's FAQs, menus, services, and local recommendations. Answers in the guest's language. Frees your reception team for high-touch moments — and keeps guests happy at 2am when they want to know the pool's hours.</p>
+      <p style="font-size:15px;color:var(--ink-muted);margin-top:18px;">Supported by Groq's lightning-fast inference. Grounded in your knowledge base. Fully customizable per property. Sentiment analysis tracks every conversation.</p>
+    </div>
+    <div class="chat-mock">
+      <div class="chat-bubble guest"><small>Guest · Room 312</small>What time is breakfast?</div>
+      <div class="chat-bubble bot">Breakfast is served from <b>7:00 AM to 10:30 AM</b> at the rooftop café. Would you like a wake-up call before breakfast?</div>
+      <div class="chat-bubble guest">Yes — 7am please</div>
+      <div class="chat-bubble bot">Done ✓ — wake-up call set for 7:00 AM. Shall I reserve a table for breakfast at 7:30?</div>
+    </div>
+  </div>
+  <div class="slide-num">08</div>
+</section>
+
+<!-- ════ SLIDE 9: KPIs ════ -->
+<section class="slide">
+  <div class="eyebrow">The Owner Dashboard</div>
+  <h2>ADR. RevPAR. Occupancy.<br/>Live. Not monthly.</h2>
+  <div class="accent-bar"></div>
+  <p>Every hotel KPI that matters — calculated in real time, viewable on your phone. Sentiment trends from guest feedback. Top services. Booking source mix. Foreign guest %. The numbers that make franchise meetings short.</p>
+  <div class="kpi-strip">
+    <div class="kpi-card"><div class="label">ADR</div><div class="val">₹4,820</div><div class="delta">▲ 8.3% MoM</div></div>
+    <div class="kpi-card"><div class="label">RevPAR</div><div class="val">₹3,612</div><div class="delta">▲ 6.1% MoM</div></div>
+    <div class="kpi-card"><div class="label">OCCUPANCY</div><div class="val">75%</div><div class="delta">▲ 4 pts</div></div>
+    <div class="kpi-card"><div class="label">ANCILLARY</div><div class="val">22%</div><div class="delta">of revenue</div></div>
+    <div class="kpi-card"><div class="label">RATING</div><div class="val">4.6 ★</div><div class="delta">120 reviews</div></div>
+  </div>
+  <p style="margin-top:24px;font-size:14px;color:var(--ink-muted);">Plus: top services by booking inclusion · sentiment trend over time · channel-wise booking split · Form-C compliance log.</p>
+  <div class="slide-num">09</div>
+</section>
+
+<!-- ════ SLIDE 10: PRICING ════ -->
+<section class="slide">
+  <div class="eyebrow">Pricing — Simple. Honest.</div>
+  <h2>One price. Every feature.<br/>No setup fee. No commission.</h2>
+  <div class="accent-bar"></div>
+  <div class="price-grid">
+    <div class="price-card">
+      <h3>Monthly</h3>
+      <div class="price-amount"><span class="currency">₹</span>1,199</div>
+      <div class="price-period">+ GST · per month · per property</div>
+      <ul class="price-features">
+        <li>All hospitality features</li>
+        <li>Unlimited rooms &amp; bookings</li>
+        <li>AI concierge included</li>
+        <li>Owner analytics dashboard</li>
+        <li>Email &amp; chat support</li>
+        <li>Cancel anytime</li>
+      </ul>
+    </div>
+    <div class="price-card featured">
+      <div class="ribbon">SAVE 17%</div>
+      <h3>Annual</h3>
+      <div class="price-amount"><span class="currency">₹</span>11,999</div>
+      <div class="price-period">+ GST · per year · per property</div>
+      <div class="price-bonus">Pay 10 months · Enjoy 12 months</div>
+      <ul class="price-features">
+        <li>Everything in Monthly</li>
+        <li>2 months free</li>
+        <li>Priority onboarding (live training)</li>
+        <li>Free room QR design &amp; FAQ setup</li>
+        <li>Priority phone support</li>
+      </ul>
+    </div>
+  </div>
+  <p style="margin-top:28px;text-align:center;font-size:14px;color:var(--ink-muted);">No hidden costs. No commission on bookings. No per-guest charges. <strong style="color:var(--ink);">What you see is what you pay.</strong></p>
+  <div class="slide-num">10</div>
+</section>
+
+<!-- ════ SLIDE 11: PARTNER PROGRAM ════ -->
+<section class="slide">
+  <div class="eyebrow">For Sales Partners</div>
+  <h2>Sell AtithiSetu.<br/>Keep half the first year.</h2>
+  <div class="accent-bar"></div>
+  <div class="partner-block">
+    <div style="display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap;margin-bottom:8px;">
+      <div class="commission">50%<small> commission</small></div>
+    </div>
+    <p style="font-size:18px;color:rgba(245,240,232,0.95);max-width:680px;margin-top:10px;">Earn 50% of every annual subscription you close. No targets. No quotas. No ceiling. Paid only after the customer has paid us — clean, transparent, no surprises.</p>
+    <div class="install-grid">
+      <div class="install-card">
+        <h4>1st Installment · 50%</h4>
+        <p>Released within <strong>30 days</strong> of customer payment landing in our account.</p>
+      </div>
+      <div class="install-card">
+        <h4>2nd Installment · 50%</h4>
+        <p>Released within <strong>3 months</strong> of customer payment landing in our account.</p>
+      </div>
+    </div>
+    <p style="margin-top:22px;font-size:13px;color:rgba(245,240,232,0.7);">Want to partner with us? Email <strong style="color:var(--brass);">sales@atithi-setu.com</strong> with subject "Partner Program".</p>
+  </div>
+  <div class="slide-num">11</div>
+</section>
+
+<!-- ════ SLIDE 12: FOUNDER ════ -->
+<section class="slide">
+  <div class="eyebrow">About the Founder</div>
+  <h2>Built by an operator,<br/>for operators.</h2>
+  <div class="accent-bar"></div>
+  <div class="founder-block">
+    <div class="founder-photo">AM</div>
+    <div class="founder-info">
+      <h2 style="font-size:32px;">Ankush Manhotra</h2>
+      <div class="role">Founder · AtithiSetu &nbsp;·&nbsp; Gurugram, India</div>
+      <p>16+ years architecting Product Lifecycle Management (PLM) and SaaS systems for global enterprises across IT consulting, application development, and cloud platforms. Founder of <strong>PLM Pundits LLP</strong> and <strong>Manhotra Consulting</strong>. Computer Science engineer from Guru Nanak Dev University, Amritsar.</p>
+      <p style="margin-top:12px;">AtithiSetu is the result of seeing the same operational gap repeat in every restaurant and hotel he visited — and deciding to build the platform he wished existed.</p>
+      <a class="linkedin-btn" href="https://in.linkedin.com/in/ankushmanhotra" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/></svg>
+        Connect on LinkedIn
+      </a>
+    </div>
+  </div>
+  <div class="slide-num">12</div>
+</section>
+
+<!-- ════ SLIDE 13: CTA / CLOSING ════ -->
+<section class="slide closing">
+  <div class="big-logo">
+    <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="12" fill="#f5f0e8"/><g stroke="#d4920a" stroke-width="1.6" stroke-linecap="round"><line x1="32" y1="4" x2="32" y2="7.5"/><line x1="39" y1="6.2" x2="37.2" y2="9"/><line x1="44" y1="11.5" x2="41.2" y2="13"/><line x1="25" y1="6.2" x2="26.8" y2="9"/><line x1="20" y1="11.5" x2="22.8" y2="13"/></g><path d="M32 8 C30 10 27 12.5 27 15.5 C27 18.5 29.2 20.5 32 20.5 C34.8 20.5 37 18.5 37 15.5 C37 12.5 34 10 32 8Z" fill="#d4920a"/><path d="M 10 50 C 10 36, 16 24, 32 21 C 24 24, 19 34, 20 50 Z" fill="#1a3a6e"/><path d="M 54 50 C 54 36, 48 24, 32 21 C 40 24, 45 34, 44 50 Z" fill="#c88c14"/><path d="M 20 50 C 20 38, 25 27, 32 24 C 39 27, 44 38, 44 50 Z" fill="#f5f0e8"/></svg>
+  </div>
+  <div style="font-family:'Playfair Display',serif;font-size:48px;font-weight:800;color:var(--ink);">AtithiSetu Hospitality</div>
+  <div class="closing-line">"Atithi Devo Bhava."<br/><span style="font-size:18px;font-style:normal;color:var(--ink-muted);">Every guest. Every detail. Every moment.</span></div>
+  <div style="margin-top:28px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap;">
+    <a class="url" href="mailto:sales@atithi-setu.com?subject=Hotel%20Demo%20%E2%80%94%20AtithiSetu%20Hospitality" style="background:var(--indigo);">sales@atithi-setu.com</a>
+    <a class="url" href="https://atithi-setu.com" target="_blank" rel="noopener">atithi-setu.com</a>
+  </div>
+</section>
+
+</body>
+</html>
