@@ -247,11 +247,17 @@
   .founder-block { display: grid; grid-template-columns: 200px 1fr; gap: 36px; align-items: start; margin-top: 28px; }
   .founder-photo {
     width: 200px; height: 200px; border-radius: 50%;
+    overflow: hidden;
     background: linear-gradient(135deg, var(--indigo), var(--brass));
+    box-shadow: 0 12px 36px rgba(30,58,95,0.25);
+    flex-shrink: 0;
+  }
+  .founder-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .founder-photo .initials {
+    width: 100%; height: 100%;
     color: var(--white); font-family: 'Playfair Display', serif;
     font-size: 76px; font-weight: 800;
     display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 12px 36px rgba(30,58,95,0.25);
   }
   .founder-info h2 { margin-bottom: 6px; }
   .founder-info .role { color: var(--indigo); font-weight: 700; font-size: 16px; margin-bottom: 16px; }
@@ -393,10 +399,11 @@
     .kpi-card .delta { font-size: 10px; margin-top: 3px; }
     /* Founder */
     .founder-block { margin-top: 14px; gap: 24px; grid-template-columns: 150px 1fr; }
-    .founder-photo { width: 150px; height: 150px; font-size: 56px; }
+    .founder-photo { width: 150px; height: 150px; }
+    .founder-photo .initials { font-size: 56px; }
     .founder-info h2 { font-size: 24px !important; }
     .founder-info .role { font-size: 13px; margin-bottom: 8px; }
-    .founder-info p { font-size: 13px; line-height: 1.55; }
+    .founder-info p { font-size: 12.5px; line-height: 1.5; margin-top: 8px; }
     .linkedin-btn { padding: 7px 14px; font-size: 12px; margin-top: 10px; }
     /* CTA */
     .cta-grid { gap: 14px; margin-top: 16px; }
@@ -759,12 +766,15 @@
   <h2>Built by an operator,<br/>for operators.</h2>
   <div class="accent-bar"></div>
   <div class="founder-block">
-    <div class="founder-photo">AM</div>
+    <div class="founder-photo">
+      <img src="founder.jpg" alt="Ankush Manhotra" onerror="this.style.display='none';this.parentNode.insertAdjacentHTML('beforeend','<div class=&quot;initials&quot;>AM</div>');" />
+    </div>
     <div class="founder-info">
       <h2 style="font-size:32px;">Ankush Manhotra</h2>
-      <div class="role">Founder · AtithiSetu &nbsp;·&nbsp; Gurugram, India</div>
-      <p>16+ years architecting Product Lifecycle Management (PLM) and SaaS systems for global enterprises across IT consulting, application development, and cloud platforms. Founder of <strong>PLM Pundits LLP</strong> and <strong>Manhotra Consulting</strong>. Computer Science engineer from Guru Nanak Dev University, Amritsar.</p>
-      <p style="margin-top:12px;">AtithiSetu is the result of seeing the same operational gap repeat in every restaurant and hotel he visited — and deciding to build the platform he wished existed.</p>
+      <div class="role">Founder &amp; CEO · AtithiSetu</div>
+      <p>A seasoned transformation leader dedicated to engineering the next generation of business growth. With a deep background in enterprise digitization and supply chain optimization, Ankush founded <strong>Manhotra Consulting</strong> to bridge the critical gap between cutting-edge AI technology and real-world operational execution.</p>
+      <p style="margin-top:10px;">His expertise lies in architecting high-velocity outreach systems and autonomous supply chains that allow enterprises to scale exponentially — without the traditional overhead of complexity.</p>
+      <p style="margin-top:10px;">AtithiSetu Hospitality is the application of that same philosophy to India's hotel industry — turning fragmented, paper-driven front-desk operations into a single, AI-augmented platform that helps owners delight guests at scale.</p>
       <a class="linkedin-btn" href="https://in.linkedin.com/in/ankushmanhotra" target="_blank" rel="noopener">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/></svg>
         Connect on LinkedIn
