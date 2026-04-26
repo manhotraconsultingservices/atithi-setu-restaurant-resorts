@@ -628,6 +628,47 @@ async function startServer() {
     console.error("[hospitality-migration] Warning:", err);
   }
 
+  // ====== Invoice deletion feature flag + audit tables ======
+  // Per-tenant feature gate. When invoice_delete_enabled = 1, the tenant's
+  // OWNER can permanently delete invoices (incl. PRINTED). OFF by default;
+  // only SUPER_ADMIN can flip it. Every deletion writes a JSON snapshot to
+  // invoice_deletion_audit so a forensic record exists post-delete.
+  try {
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_delete_enabled INT DEFAULT 0`);
+    await centralDb.run(`UPDATE restaurants SET invoice_delete_enabled = 0 WHERE invoice_delete_enabled IS NULL`);
+
+    await centralDb.run(`
+      CREATE TABLE IF NOT EXISTS invoice_deletion_audit (
+        id              TEXT PRIMARY KEY,
+        restaurant_id   TEXT NOT NULL,
+        invoice_type    TEXT NOT NULL,
+        invoice_id      TEXT NOT NULL,
+        customer_name   TEXT,
+        total_amount    NUMERIC,
+        gst_amount      NUMERIC,
+        reason          TEXT NOT NULL,
+        deleted_by_user_id TEXT NOT NULL,
+        deleted_by_role TEXT NOT NULL,
+        deleted_at      TIMESTAMPTZ DEFAULT NOW(),
+        snapshot_json   TEXT NOT NULL
+      )
+    `);
+    await centralDb.run(`CREATE INDEX IF NOT EXISTS ix_inv_del_audit_restaurant ON invoice_deletion_audit (restaurant_id, deleted_at DESC)`);
+
+    await centralDb.run(`
+      CREATE TABLE IF NOT EXISTS invoice_delete_flag_audit (
+        id              TEXT PRIMARY KEY,
+        restaurant_id   TEXT NOT NULL,
+        enabled         INT NOT NULL,
+        changed_by      TEXT NOT NULL,
+        changed_at      TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    console.log("[invoice-delete-migration] flag column + audit tables ensured");
+  } catch (err) {
+    console.error("[invoice-delete-migration] Warning:", err);
+  }
+
   // ====== Per-tenant hotel schema migrations ======
   // On every startup, re-run createHotelTables() for tenants that have the
   // hotel module enabled. This makes ALTER TABLE ... ADD COLUMN IF NOT EXISTS
@@ -886,6 +927,42 @@ async function startServer() {
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update restaurant status" });
+    }
+  });
+
+  // Admin: Toggle per-tenant Invoice Deletion feature flag
+  // Only SUPER_ADMIN/CTO can flip. Records a row in invoice_delete_flag_audit
+  // for accountability — easy to see who enabled what and when.
+  app.patch("/api/admin/restaurants/:id/invoice-delete-flag", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { enabled } = req.body;
+      const flag = enabled === 1 || enabled === true ? 1 : 0;
+
+      const restaurant = await centralDb.get(
+        "SELECT id FROM restaurants WHERE id = ?",
+        [req.params.id]
+      );
+      if (!restaurant) {
+        return res.status(404).json({ error: "Restaurant not found" });
+      }
+
+      await centralDb.run(
+        "UPDATE restaurants SET invoice_delete_enabled = ? WHERE id = ?",
+        [flag, req.params.id]
+      );
+
+      const auditId = `IDFA-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      await centralDb.run(
+        `INSERT INTO invoice_delete_flag_audit (id, restaurant_id, enabled, changed_by)
+         VALUES (?, ?, ?, ?)`,
+        [auditId, req.params.id, flag, req.user?.id || 'unknown']
+      );
+
+      console.log(`[invoice-delete-flag] ${flag ? 'ENABLED' : 'DISABLED'} for ${req.params.id} by ${req.user?.id} (${req.user?.role})`);
+      res.json({ success: true, enabled: flag });
+    } catch (err) {
+      console.error("[invoice-delete-flag] Error:", err);
+      res.status(500).json({ error: "Failed to update invoice deletion flag" });
     }
   });
 
@@ -1977,7 +2054,8 @@ async function startServer() {
         return res.status(404).json({ error: "Restaurant not found" });
       }
       const r: any = await centralDb.get(
-        `SELECT id, name, city, state, is_active, template_id, watermark_image, upi_id, slug
+        `SELECT id, name, city, state, is_active, template_id, watermark_image, upi_id, slug,
+                COALESCE(invoice_delete_enabled, 0) AS invoice_delete_enabled
          FROM restaurants WHERE slug = ?`,
         [slug]
       );
@@ -1992,7 +2070,8 @@ async function startServer() {
         city: r.city,
         state: r.state,
         templateId: r.template_id || null,
-        logo: r.watermark_image || null
+        logo: r.watermark_image || null,
+        invoice_delete_enabled: Number(r.invoice_delete_enabled || 0)
       });
     } catch (err: any) {
       console.error("/api/tenant/by-slug error:", err);
@@ -4347,11 +4426,31 @@ async function startServer() {
         0
       );
 
+      // ── Persist GST fields on the session so the printed invoice can show
+      //    the breakdown correctly. Without this, gst_percent stays at the
+      //    column default (0) and buildInvoiceHTML recomputes total without
+      //    GST → printed invoice shows subtotal as total. (See bug fix:
+      //    customer-side QR bill request was bypassing the close-session flow
+      //    that owns these fields.)
+      const restaurantSettings: any = await centralDb.get(
+        "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
+        [req.params.id]
+      );
+      const restGstEnabled = Boolean(restaurantSettings?.is_gst_enabled);
+      const restGstPct = Number(restaurantSettings?.gst_percentage || 0);
+      const sessionGstPct = restGstEnabled ? restGstPct : 0;
+      const sessionApplyGst = restGstEnabled ? 1 : 0;
+
       await db.run(
         `UPDATE table_sessions
-            SET status = 'bill_requested', bill_amount = ?, bill_requested_at = CURRENT_TIMESTAMP, payment_method = ?
+            SET status = 'bill_requested',
+                bill_amount = ?,
+                bill_requested_at = CURRENT_TIMESTAMP,
+                payment_method = ?,
+                gst_percent = ?,
+                apply_gst = ?
           WHERE id = ?`,
-        [billAmount, payment_method || null, session.id]
+        [billAmount, payment_method || null, sessionGstPct, sessionApplyGst, session.id]
       );
 
       // Notify owner + waiters
@@ -4461,6 +4560,17 @@ async function startServer() {
     try {
       const db = await getTenantDb(req.params.id);
 
+      // Restaurant GST settings — used as a defensive fallback when a session's
+      // gst_percent is at the column default (0) but GST is actually enabled
+      // for the restaurant. Fixes printed-invoice GST line for historical
+      // sessions created before the request-bill endpoint was patched.
+      const restSettings: any = await centralDb.get(
+        "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
+        [req.params.id]
+      );
+      const restGstEnabled = Boolean(restSettings?.is_gst_enabled);
+      const restGstPct = Number(restSettings?.gst_percentage || 0);
+
       // ── 1. SESSION invoices (postpaid): one consolidated invoice per session ──
       const sessions = await db.query(
         `SELECT ts.*,
@@ -4486,6 +4596,15 @@ async function startServer() {
         const combinedItems: any[] = [];
         orders.forEach((o: any) => { combinedItems.push(...(Array.isArray(o.items) ? o.items : [])); });
         const rawSubtotal = combinedItems.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
+        // Fallback for historical sessions where gst_percent stayed at the
+        // default 0 even though the restaurant has GST enabled. Without this,
+        // the printed invoice would recompute the total without GST.
+        const sessGstPctRaw = Number(sess.gst_percent || 0);
+        const sessApplyGstRaw = Number(sess.apply_gst ?? 1);
+        const sessionUnconfigured = sessGstPctRaw === 0 && sessApplyGstRaw === 1;
+        const effectiveGstPct = sessionUnconfigured && restGstEnabled ? restGstPct : sessGstPctRaw;
+        const effectiveApplyGst = sessionUnconfigured && restGstEnabled ? 1 : sessApplyGstRaw;
+
         sessionInvoices.push({
           id:                     sess.session_token,
           session_db_id:          sess.id,
@@ -4500,8 +4619,8 @@ async function startServer() {
           raw_subtotal:           rawSubtotal,
           discount_amount:        Number(sess.discount_amount || 0),
           service_charge_percent: Number(sess.service_charge_percent || 0),
-          gst_percent:            Number(sess.gst_percent || 0),
-          apply_gst:              Number(sess.apply_gst ?? 1),
+          gst_percent:            effectiveGstPct,
+          apply_gst:              effectiveApplyGst,
           session_status:         sess.status,
           round_count:            orders.length,
           items:                  combinedItems,
@@ -4591,6 +4710,200 @@ async function startServer() {
       res.json({ success: true, id, grand_total: grand });
     } catch (err) {
       res.status(500).json({ error: "Failed to create manual invoice" });
+    }
+  });
+
+  // ─── Invoice deletion (per-tenant, gated by invoice_delete_enabled flag) ──
+  // Hard-deletes an invoice from the tenant DB after writing a JSON snapshot
+  // to central.invoice_deletion_audit. Reports auto-update because no cache
+  // tables exist — all analytics queries hit the orders table directly.
+  //
+  // Auth gates (defense-in-depth):
+  //   1. authenticate — must have a valid JWT
+  //   2. role must be OWNER, SUPER_ADMIN, or CTO
+  //   3. for OWNER, req.user.restaurantId must match req.params.id
+  //   4. central.restaurants.invoice_delete_enabled = 1 for this tenant
+  //   5. invoice must be in a deletable state (DELIVERED / CANCELLED / PRINTED)
+  //
+  // Body: { reason: string }   reason is required, min 10 chars, logged
+  const ADMIN_ROLES_FOR_DELETE = new Set(['SUPER_ADMIN', 'CTO']);
+  const isDeletableOrderRow = (o: any): boolean => {
+    if (!o) return false;
+    const s = String(o.status || '').toUpperCase();
+    const inv = String(o.invoice_status || '').toUpperCase();
+    if (s === 'DELIVERED' || s === 'CANCELLED') return true;
+    if (inv === 'PRINTED') return true;
+    return false;
+  };
+
+  // Helper — verifies all 5 auth gates above. Returns null if OK, or a {status, body} to send.
+  const checkInvoiceDeleteGates = async (
+    req: AuthRequest,
+    reasonRaw: any
+  ): Promise<{ status: number; body: any } | null> => {
+    const role = req.user?.role || '';
+    const isAdminRole = ADMIN_ROLES_FOR_DELETE.has(role);
+    if (role !== 'OWNER' && !isAdminRole) {
+      return { status: 403, body: { error: 'Forbidden — invoice deletion requires OWNER, SUPER_ADMIN or CTO role' } };
+    }
+    if (!isAdminRole && req.user?.restaurantId !== req.params.id) {
+      return { status: 403, body: { error: 'Forbidden — cannot delete another restaurant\'s invoices' } };
+    }
+    const reason = typeof reasonRaw === 'string' ? reasonRaw.trim() : '';
+    if (reason.length < 10) {
+      return { status: 400, body: { error: 'A deletion reason of at least 10 characters is required' } };
+    }
+    const flag: any = await centralDb.get(
+      "SELECT COALESCE(invoice_delete_enabled, 0) AS f FROM restaurants WHERE id = ?",
+      [req.params.id]
+    );
+    if (!flag || Number(flag.f || 0) !== 1) {
+      return { status: 403, body: { error: 'Invoice deletion is not enabled for this restaurant' } };
+    }
+    return null;
+  };
+
+  // DELETE one ORDER invoice (standalone — no session_id)
+  app.delete("/api/restaurant/:id/invoice/order/:orderId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { reason } = (req.body || {}) as any;
+      const gateFail = await checkInvoiceDeleteGates(req, reason);
+      if (gateFail) return res.status(gateFail.status).json(gateFail.body);
+
+      const db = await getTenantDb(req.params.id);
+      const order: any = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.orderId]);
+      if (!order) return res.status(404).json({ error: "Invoice not found" });
+      if (!isDeletableOrderRow(order)) {
+        return res.status(409).json({
+          error: "Invoice is in active state and cannot be deleted",
+          state: { status: order.status, invoice_status: order.invoice_status }
+        });
+      }
+
+      // Snapshot before delete (includes any feedback rows)
+      const feedbackRows = await db.query(
+        "SELECT * FROM feedback WHERE order_id = ?",
+        [req.params.orderId]
+      ).catch(() => []);
+
+      const snapshot = {
+        order,
+        feedback: feedbackRows,
+      };
+
+      const auditId = `IDA-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      await centralDb.run(
+        `INSERT INTO invoice_deletion_audit
+           (id, restaurant_id, invoice_type, invoice_id, customer_name, total_amount, gst_amount, reason, deleted_by_user_id, deleted_by_role, snapshot_json)
+         VALUES (?, ?, 'ORDER', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          auditId,
+          req.params.id,
+          req.params.orderId,
+          order.customer_name || null,
+          Number(order.total_amount || 0),
+          Number(order.gst_amount || 0),
+          String(reason).trim(),
+          req.user?.id || 'unknown',
+          req.user?.role || 'unknown',
+          JSON.stringify(snapshot),
+        ]
+      );
+
+      // Cascade-delete child rows then the order itself
+      await db.run("DELETE FROM feedback WHERE order_id = ?", [req.params.orderId]).catch(() => {});
+      await db.run("DELETE FROM orders WHERE id = ?", [req.params.orderId]);
+
+      console.log(`[invoice-delete] ORDER ${req.params.orderId} from ${req.params.id} by ${req.user?.id} (${req.user?.role}) — audit ${auditId}`);
+      res.json({ success: true, audit_id: auditId });
+    } catch (err) {
+      console.error("[invoice-delete] order error:", err);
+      res.status(500).json({ error: "Failed to delete invoice" });
+    }
+  });
+
+  // DELETE one SESSION invoice — cascades through all child orders + session row
+  app.delete("/api/restaurant/:id/invoice/session/:sessionId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { reason } = (req.body || {}) as any;
+      const gateFail = await checkInvoiceDeleteGates(req, reason);
+      if (gateFail) return res.status(gateFail.status).json(gateFail.body);
+
+      const db = await getTenantDb(req.params.id);
+      const sessionId = req.params.sessionId;
+
+      // Accept either DB id or public session_token in the URL
+      const session: any = await db.get(
+        "SELECT * FROM table_sessions WHERE id = ? OR session_token = ?",
+        [sessionId, sessionId]
+      );
+      if (!session) return res.status(404).json({ error: "Session invoice not found" });
+
+      const orders = await db.query(
+        "SELECT * FROM orders WHERE session_id = ?",
+        [session.id]
+      );
+
+      // All child orders must be deletable (or session must be closed)
+      const sessionStatus = String(session.status || '').toLowerCase();
+      const sessionDone = sessionStatus === 'closed' || sessionStatus === 'bill_requested';
+      if (!sessionDone) {
+        const undeletable = orders.find((o: any) => !isDeletableOrderRow(o));
+        if (undeletable) {
+          return res.status(409).json({
+            error: "Session contains active orders and cannot be deleted",
+            session_status: session.status,
+            offending_order: { id: undeletable.id, status: undeletable.status }
+          });
+        }
+      }
+
+      const orderIds = orders.map((o: any) => o.id);
+      const feedbackRows = orderIds.length > 0
+        ? await db.query(
+            `SELECT * FROM feedback WHERE order_id = ANY(?)`,
+            [orderIds]
+          ).catch(() => [])
+        : [];
+
+      const snapshot = {
+        session,
+        orders,
+        feedback: feedbackRows,
+      };
+
+      const sessionTotal = Number(session.bill_amount || session.final_amount || 0);
+      const auditId = `IDA-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      await centralDb.run(
+        `INSERT INTO invoice_deletion_audit
+           (id, restaurant_id, invoice_type, invoice_id, customer_name, total_amount, gst_amount, reason, deleted_by_user_id, deleted_by_role, snapshot_json)
+         VALUES (?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          auditId,
+          req.params.id,
+          session.session_token || session.id,
+          session.customer_name || null,
+          sessionTotal,
+          0,
+          String(reason).trim(),
+          req.user?.id || 'unknown',
+          req.user?.role || 'unknown',
+          JSON.stringify(snapshot),
+        ]
+      );
+
+      // Cascade — feedback → orders → session
+      if (orderIds.length > 0) {
+        await db.run("DELETE FROM feedback WHERE order_id = ANY(?)", [orderIds]).catch(() => {});
+        await db.run("DELETE FROM orders WHERE session_id = ?", [session.id]);
+      }
+      await db.run("DELETE FROM table_sessions WHERE id = ?", [session.id]);
+
+      console.log(`[invoice-delete] SESSION ${session.session_token || session.id} from ${req.params.id} by ${req.user?.id} (${req.user?.role}) — ${orderIds.length} orders + 1 session — audit ${auditId}`);
+      res.json({ success: true, audit_id: auditId, deleted_orders: orderIds.length });
+    } catch (err) {
+      console.error("[invoice-delete] session error:", err);
+      res.status(500).json({ error: "Failed to delete session invoice" });
     }
   });
 
