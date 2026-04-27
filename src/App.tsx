@@ -5845,45 +5845,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex justify-end items-center gap-1.5 flex-wrap">
-                          {/* Print button — hidden for cancelled orders */}
-                          {(order as any).status !== 'CANCELLED' && (
-                            <button
-                              title="Print Invoice"
-                              className="p-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] hover:bg-[#cc5a16]/5 transition-all"
-                              onClick={() => {
-                                const items = Array.isArray(order.items) ? order.items : [];
-                                printInvoiceOrder(order, items, Number((order as any).discount_amount || 0), (order as any).apply_gst !== 0, Number((order as any).service_charge_percent || 0), Number((order as any).gst_percent ?? restaurant?.gst_percentage ?? 0));
-                              }}
-                            >
-                              <Printer size={14} />
-                            </button>
-                          )}
-                          {/* Edit Invoice button — hidden for cancelled orders */}
-                          {(order as any).status !== 'CANCELLED' && (
-                            <button
-                              onClick={() => openInvoice(order, 'edit')}
-                              title="Edit Invoice"
-                              className="p-2 rounded-xl border border-[#cc5a16]/20 text-[#6b5d52] hover:bg-[#faf7f2] transition-all"
-                            >
-                              <Edit3 size={14} />
-                            </button>
-                          )}
-                          {/* Mark Paid — hidden for cancelled orders */}
-                          {(order as any).status !== 'CANCELLED' && order.paymentStatus !== 'PAID' && (
-                            <button
-                              onClick={async () => {
-                                const res = await fetch(`/api/orders/${order.id}/payment`, {
-                                  method: 'PATCH',
-                                  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                                  body: JSON.stringify({ status: 'PAID', restaurantId })
-                                });
-                                if (res.ok) fetchOrders();
-                              }}
-                              className="bg-green-600 text-white px-3 py-2 rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-green-700 transition-all"
-                            >
-                              Mark Paid
-                            </button>
-                          )}
+                          {/* Print Invoice / Edit Invoice / Mark Paid — intentionally
+                              hidden on the ORDER list. A single invoice can group
+                              multiple orders (postpaid sessions with multiple rounds),
+                              so per-order invoice actions confused owners. All three
+                              actions remain available on the Invoices tab where the
+                              context is correct. */}
                           {/* Request Feedback */}
                           {order.paymentStatus === 'PAID' && !order.feedbackRequested && (
                             <button
