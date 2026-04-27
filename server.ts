@@ -7,7 +7,7 @@ import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
-import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, DbInterface } from "./db.ts";
+import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
 import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, buildNotificationContent } from "./notificationService.ts";
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
@@ -667,6 +667,23 @@ async function startServer() {
     console.log("[invoice-delete-migration] flag column + audit tables ensured");
   } catch (err) {
     console.error("[invoice-delete-migration] Warning:", err);
+  }
+
+  // ====== Owner-configurable invoice numbering (RANDOM / SEQUENTIAL) ======
+  // Three new per-tenant settings on `restaurants`. Defaults preserve existing
+  // behaviour for every tenant — RANDOM mode means we don't populate the new
+  // invoice_number column, and the frontend continues to display the legacy
+  // "#last-8-chars" form.
+  try {
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_numbering_mode TEXT DEFAULT 'RANDOM'`);
+    await centralDb.run(`UPDATE restaurants SET invoice_numbering_mode = 'RANDOM' WHERE invoice_numbering_mode IS NULL`);
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_number_prefix TEXT DEFAULT 'INV-'`);
+    await centralDb.run(`UPDATE restaurants SET invoice_number_prefix = 'INV-' WHERE invoice_number_prefix IS NULL`);
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_yearly_reset INTEGER DEFAULT 0`);
+    await centralDb.run(`UPDATE restaurants SET invoice_yearly_reset = 0 WHERE invoice_yearly_reset IS NULL`);
+    console.log("[invoice-numbering-migration] mode + prefix + yearly_reset columns ensured");
+  } catch (err) {
+    console.error("[invoice-numbering-migration] Warning:", err);
   }
 
   // ====== Per-tenant hotel schema migrations ======
@@ -4152,12 +4169,37 @@ async function startServer() {
   // Update Restaurant Settings
   app.patch("/api/restaurant/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const { name, gst_number, gst_percentage, is_gst_enabled, template_id, table_count, upi_id, checkout_mode, logo_url, menu_display_mode, alerts_enabled } = req.body;
+      const {
+        name, gst_number, gst_percentage, is_gst_enabled, template_id, table_count,
+        upi_id, checkout_mode, logo_url, menu_display_mode, alerts_enabled,
+        invoice_numbering_mode, invoice_number_prefix, invoice_yearly_reset,
+      } = req.body;
       const allowedModes = ['PHOTO', 'CARD', 'COMPACT', 'MAGAZINE'];
       const menuMode = menu_display_mode !== undefined
         ? (allowedModes.includes(menu_display_mode) ? menu_display_mode : null)
         : null;
       const alertsVal = alerts_enabled === undefined ? null : (alerts_enabled ? 1 : 0);
+
+      // Invoice numbering — validate; only forward to UPDATE when fields provided.
+      const allowedInvoiceModes = new Set(['RANDOM', 'SEQUENTIAL']);
+      const safeInvoiceMode = invoice_numbering_mode === undefined
+        ? null
+        : (allowedInvoiceModes.has(String(invoice_numbering_mode || '').toUpperCase())
+            ? String(invoice_numbering_mode).toUpperCase()
+            : 'RANDOM');
+      let safeInvoicePrefix: string | null = null;
+      if (invoice_number_prefix !== undefined) {
+        const trimmed = String(invoice_number_prefix || '').trim();
+        if (trimmed && !INVOICE_PREFIX_RE.test(trimmed)) {
+          return res.status(400).json({
+            error: "Invalid invoice prefix. Allowed characters: A-Z a-z 0-9 - _ / . (1-12 chars)."
+          });
+        }
+        safeInvoicePrefix = trimmed || 'INV-';
+      }
+      const safeYearlyReset = invoice_yearly_reset === undefined
+        ? null
+        : (invoice_yearly_reset ? 1 : 0);
 
       await centralDb.run(`
         UPDATE restaurants SET
@@ -4171,7 +4213,10 @@ async function startServer() {
           checkout_mode = ?,
           logo_url = COALESCE(?, logo_url),
           menu_display_mode = COALESCE(?, menu_display_mode),
-          alerts_enabled = COALESCE(?, alerts_enabled)
+          alerts_enabled = COALESCE(?, alerts_enabled),
+          invoice_numbering_mode = COALESCE(?, invoice_numbering_mode),
+          invoice_number_prefix = COALESCE(?, invoice_number_prefix),
+          invoice_yearly_reset = COALESCE(?, invoice_yearly_reset)
         WHERE id = ?
       `, [
         name,
@@ -4185,6 +4230,9 @@ async function startServer() {
         logo_url !== undefined ? (logo_url || null) : null,
         menuMode,
         alertsVal,
+        safeInvoiceMode,
+        safeInvoicePrefix,
+        safeYearlyReset,
         req.params.id
       ]);
 
@@ -4573,6 +4621,58 @@ async function startServer() {
     }
   });
 
+  // ─── Invoice numbering helpers (RANDOM / SEQUENTIAL with prefix + yearly reset) ──
+  // Allowed prefix charset — keeps audit logs / file paths safe.
+  const INVOICE_PREFIX_RE = /^[A-Za-z0-9_\-./]{1,12}$/;
+
+  // Compute the year in IST (Asia/Kolkata, UTC+05:30) — used for yearly-reset
+  // counters. Uses pure offset math so it works regardless of the host's
+  // system timezone.
+  const getYearIST = (): number => {
+    const istNowMs = Date.now() + (5.5 * 60 * 60 * 1000);
+    return new Date(istNowMs).getUTCFullYear();
+  };
+
+  const formatInvoiceNumber = (prefix: string, n: number, year: number | null): string => {
+    const padded = String(n).padStart(4, '0');
+    return year !== null ? `${prefix}${year}-${padded}` : `${prefix}${padded}`;
+  };
+
+  // Returns a sequential invoice number string IF the tenant has SEQUENTIAL mode
+  // enabled; returns null when the tenant is in RANDOM mode or settings can't be
+  // read. Caller writes the returned value into the orders.invoice_number or
+  // table_sessions.invoice_number column. Atomic counter via getNextTenantSequence.
+  const generateInvoiceNumberIfSequential = async (
+    tenantDb: DbInterface,
+    restaurantId: string
+  ): Promise<string | null> => {
+    try {
+      const r: any = await centralDb.get(
+        `SELECT invoice_numbering_mode, invoice_number_prefix, invoice_yearly_reset
+         FROM restaurants WHERE id = ?`,
+        [restaurantId]
+      );
+      if (!r) return null;
+      const mode = String(r.invoice_numbering_mode || 'RANDOM').toUpperCase();
+      if (mode !== 'SEQUENTIAL') return null;
+      const rawPrefix = String(r.invoice_number_prefix || '').trim();
+      const prefix = (rawPrefix && INVOICE_PREFIX_RE.test(rawPrefix)) ? rawPrefix : 'INV-';
+      const yearlyReset = Number(r.invoice_yearly_reset || 0) === 1;
+      const year = yearlyReset ? getYearIST() : null;
+      const seqName = yearlyReset ? `invoice-${year}` : 'invoice';
+      const n = await getNextTenantSequence(tenantDb, seqName);
+      return formatInvoiceNumber(prefix, n, year);
+    } catch (err) {
+      console.warn(`[invoice-numbering] Failed to generate sequential number for ${restaurantId}; falling back to RANDOM:`, err);
+      return null;
+    }
+  };
+
+  // Helper to compute display_number consistently when serializing invoices.
+  const computeDisplayNumber = (row: { id: any; invoice_number?: string | null }): string => {
+    return row.invoice_number || `#${String(row.id || '').slice(-8).toUpperCase()}`;
+  };
+
   // ─── Invoice Endpoints ─────────────────────────────────────────────────────
 
   // Invoices: consolidated list — SESSION invoices (postpaid, 1 per session) + ORDER invoices (prepaid/manual)
@@ -4647,6 +4747,8 @@ async function startServer() {
           id:                     sess.session_token,
           session_db_id:          sess.id,
           session_token:          sess.session_token,
+          invoice_number:         sess.invoice_number || null,
+          display_number:         sess.invoice_number || `#${String(sess.session_token || sess.id || '').slice(-8).toUpperCase()}`,
           invoice_type:           'SESSION',
           invoice_status:         sess.invoice_status,
           customer_name:          sess.customer_name || '',
@@ -4691,6 +4793,8 @@ async function startServer() {
       );
       standaloneOrders.forEach((o: any) => {
         if (typeof o.items === 'string') { try { o.items = JSON.parse(o.items); } catch { o.items = []; } }
+        // display_number — sequential value if present, otherwise legacy "#ABCD1234"
+        o.display_number = computeDisplayNumber(o);
       });
 
       // Merge and sort by date descending
@@ -4739,6 +4843,7 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge_percent FLOAT DEFAULT 0").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT").catch(() => {});
       const { customer_name, customer_phone, reference, items, discount_amount, service_charge_percent, gst_percent, apply_gst } = req.body;
       const id = `MAN-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
       const total = (items || []).reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
@@ -4747,13 +4852,17 @@ async function startServer() {
       const taxable = after + svc;
       const gst = apply_gst ? taxable * Number(gst_percent || 0) / 100 : 0;
       const grand = taxable + gst;
+      // Sequential invoice number IF the tenant has SEQUENTIAL mode enabled.
+      // Returns null in RANDOM mode → frontend falls back to legacy "#ABCD1234".
+      const invoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
       await db.run(
-        `INSERT INTO orders (id, table_number, customer_name, customer_phone, items, total_amount, discount_amount, service_charge_percent, gst_percent, apply_gst, status, payment_status, invoice_status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', 'PENDING', 'DRAFT', NOW())`,
+        `INSERT INTO orders (id, table_number, customer_name, customer_phone, items, total_amount, discount_amount, service_charge_percent, gst_percent, apply_gst, invoice_number, status, payment_status, invoice_status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', 'PENDING', 'DRAFT', NOW())`,
         [id, reference || 'Manual', customer_name || '', customer_phone || '', JSON.stringify(items || []), grand,
-         Number(discount_amount || 0), Number(service_charge_percent || 0), Number(gst_percent || 0), apply_gst ? 1 : 0]
+         Number(discount_amount || 0), Number(service_charge_percent || 0), Number(gst_percent || 0), apply_gst ? 1 : 0, invoiceNumber]
       );
-      res.json({ success: true, id, grand_total: grand });
+      const display_number = invoiceNumber || `#${id.slice(-8).toUpperCase()}`;
+      res.json({ success: true, id, grand_total: grand, invoice_number: invoiceNumber, display_number });
     } catch (err) {
       res.status(500).json({ error: "Failed to create manual invoice" });
     }
@@ -5100,6 +5209,8 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_id TEXT");
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS chef_name TEXT");
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS eta TEXT");
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT");
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT");
 
       // Resolve restaurant checkout_mode (body overrides, then DB, then default)
       let checkoutMode = bodyCheckoutMode;
@@ -5141,9 +5252,15 @@ async function startServer() {
 
           // Update session customer info + round_count on first round
           if (roundNumber === 1) {
+            // Sequential invoice number for the SESSION (assigned on first round only)
+            const sessionInvoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
             await db.run(
-              `UPDATE table_sessions SET customer_name = COALESCE(customer_name, ?), customer_phone = COALESCE(customer_phone, ?) WHERE id = ?`,
-              [finalCustomerName || null, finalCustomerPhone || null, finalSessionId]
+              `UPDATE table_sessions
+                  SET customer_name = COALESCE(customer_name, ?),
+                      customer_phone = COALESCE(customer_phone, ?),
+                      invoice_number = COALESCE(invoice_number, ?)
+                WHERE id = ?`,
+              [finalCustomerName || null, finalCustomerPhone || null, sessionInvoiceNumber, finalSessionId]
             );
           }
           await db.run(
@@ -5158,11 +5275,19 @@ async function startServer() {
       const kitchenStatus = checkoutMode === 'prepaid' ? 'held_for_payment' : 'queued';
       const orderStatus   = checkoutMode === 'prepaid' ? 'PENDING' : 'CONFIRMED';
 
+      // Sequential invoice number for the ORDER row — only meaningful for
+      // standalone (non-session) orders since session-based ones are billed
+      // at the session level. We still assign one here so prepaid/standalone
+      // orders get their own invoice_number.
+      const orderInvoiceNumber = !finalSessionId
+        ? await generateInvoiceNumberIfSequential(db, req.params.id)
+        : null;
+
       await db.run(`
         INSERT INTO orders
           (id, table_number, items, total_amount, gst_amount, status, customer_name, customer_phone,
-           customer_email, payment_method, session_id, checkout_mode, round_number, kitchen_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           customer_email, payment_method, session_id, checkout_mode, round_number, kitchen_status, invoice_number)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         id,
         finalTableNumber || null,
@@ -5178,9 +5303,10 @@ async function startServer() {
         checkoutMode,
         roundNumber,
         kitchenStatus,
+        orderInvoiceNumber,
       ]);
 
-      res.json({ success: true, id, orderId: id, checkout_mode: checkoutMode, kitchen_status: kitchenStatus });
+      res.json({ success: true, id, orderId: id, checkout_mode: checkoutMode, kitchen_status: kitchenStatus, invoice_number: orderInvoiceNumber });
 
       // ── Notifications (non-blocking) ─────────────────────────────────────
       const itemLabels = (items as any[]).map((i: any) =>
@@ -6094,7 +6220,15 @@ async function startServer() {
       let items = order.items;
       if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
       if (!Array.isArray(items)) items = [];
-      res.json({ ...order, items, discount_amount: Number(order.discount_amount || 0), service_charge_percent: Number(order.service_charge_percent || 0), gst_percent: Number(order.gst_percent || 0), apply_gst: order.apply_gst === undefined ? 0 : Number(order.apply_gst) });
+      res.json({
+        ...order,
+        items,
+        discount_amount: Number(order.discount_amount || 0),
+        service_charge_percent: Number(order.service_charge_percent || 0),
+        gst_percent: Number(order.gst_percent || 0),
+        apply_gst: order.apply_gst === undefined ? 0 : Number(order.apply_gst),
+        display_number: computeDisplayNumber(order),
+      });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch invoice" });
     }

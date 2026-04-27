@@ -31,6 +31,7 @@ import {
   Search,
   Smartphone,
   Hash,
+  ListOrdered,
   Copy,
   Check,
   Info,
@@ -4011,12 +4012,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const gstAmt  = applyGst ? taxable * gstPct / 100 : 0;
     const total   = Number((taxable + gstAmt).toFixed(2));
 
+    // Prefer the sequential invoice_number (or backend-computed display_number)
+    // when available; fall back to the legacy "#last-8" form for older rows.
+    const billIdStr = String(
+      inv.invoice_number
+      || (inv.display_number && String(inv.display_number).replace(/^#/, ''))
+      || String(inv.id || '').slice(-8).toUpperCase()
+    );
+
     return buildThermalHTML({
       restaurantName:       restaurant?.name || 'Restaurant',
       gstin:                tpl.showGSTIN ? restaurant?.gst_number : undefined,
       gstEnabled:           applyGst,
       gstPercent:           gstPct,
-      billId:               String(inv.id).slice(-8).toUpperCase(),
+      billId:               billIdStr,
       tableName:            inv.tableNumber || inv.table_number,
       customerName:         inv.customerName || inv.customer_name || undefined,
       customerPhone:        tpl.showCustomerPhone ? (inv.customerPhone || inv.customer_phone || undefined) : undefined,
@@ -4488,9 +4497,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           checkout_mode: restaurant.checkout_mode || 'postpaid',
           menu_display_mode: (restaurant as any).menu_display_mode || 'PHOTO',
           alerts_enabled: (restaurant as any).alerts_enabled !== 0 && (restaurant as any).alerts_enabled !== false,
+          invoice_numbering_mode: String((restaurant as any).invoice_numbering_mode || 'RANDOM').toUpperCase(),
+          invoice_number_prefix: String((restaurant as any).invoice_number_prefix || 'INV-').trim() || 'INV-',
+          invoice_yearly_reset: (restaurant as any).invoice_yearly_reset ? 1 : 0,
         })
       });
-      if (!res.ok) throw new Error("Failed to update settings");
+      if (!res.ok) {
+        // Server returns a clear validation error for an invalid prefix; surface it
+        const errBody = await res.json().catch(() => ({}));
+        const msg = errBody?.error || "Failed to update settings";
+        alert(msg);
+        throw new Error(msg);
+      }
       await syncTables(restaurant.table_count || 0);
       onRestaurantUpdate(restaurant.name);
       fetchRestaurant();
@@ -6072,7 +6090,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           {/* Invoice ID + type badge */}
                           <td className="px-5 py-4">
                             <span className="font-mono text-xs font-bold text-[#cc5a16]">
-                              #{String(inv.id).slice(-8).toUpperCase()}
+                              {inv.display_number || `#${String(inv.id).slice(-8).toUpperCase()}`}
                             </span>
                             <div className="mt-0.5">
                               <span className={cn(
@@ -7124,6 +7142,122 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">Payment required before order is sent to kitchen.</p>
                 </button>
               </div>
+            </div>
+
+            {/* ── Invoice Numbering ── */}
+            <div className="p-5 bg-[#faf7f2] rounded-2xl space-y-4">
+              <div>
+                <p className="text-sm font-bold text-[#1a1a1a]">Invoice Numbering</p>
+                <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest mt-0.5">
+                  How invoice numbers are generated for this restaurant
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setRestaurant(prev => prev ? ({ ...prev, invoice_numbering_mode: 'RANDOM' } as any) : null)}
+                  className={cn(
+                    "p-4 rounded-2xl border-2 text-left transition-all",
+                    String((restaurant as any)?.invoice_numbering_mode || 'RANDOM').toUpperCase() === 'RANDOM'
+                      ? "border-[#cc5a16] bg-white shadow-sm"
+                      : "border-transparent bg-white/50"
+                  )}
+                >
+                  <Hash size={18} className="mb-2 text-[#1a1208]" />
+                  <p className="text-xs font-bold text-[#1a1a1a]">Random</p>
+                  <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">Auto-generated like <span className="font-mono">#54B672AE</span>. Default.</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRestaurant(prev => prev ? ({ ...prev, invoice_numbering_mode: 'SEQUENTIAL' } as any) : null)}
+                  className={cn(
+                    "p-4 rounded-2xl border-2 text-left transition-all",
+                    String((restaurant as any)?.invoice_numbering_mode || 'RANDOM').toUpperCase() === 'SEQUENTIAL'
+                      ? "border-[#cc5a16] bg-white shadow-sm"
+                      : "border-transparent bg-white/50"
+                  )}
+                >
+                  <ListOrdered size={18} className="mb-2 text-[#1a1208]" />
+                  <p className="text-xs font-bold text-[#1a1a1a]">Sequential</p>
+                  <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">Counter-based per tenant: <span className="font-mono">INV-0001</span>, <span className="font-mono">INV-0002</span> …</p>
+                </button>
+              </div>
+
+              {/* Sequential-only sub-controls */}
+              {String((restaurant as any)?.invoice_numbering_mode || 'RANDOM').toUpperCase() === 'SEQUENTIAL' && (() => {
+                const prefix = String((restaurant as any)?.invoice_number_prefix ?? 'INV-');
+                const yearlyReset = Number((restaurant as any)?.invoice_yearly_reset || 0) === 1;
+                const PREFIX_RE = /^[A-Za-z0-9_\-./]{1,12}$/;
+                const trimmed = prefix.trim();
+                const prefixValid = trimmed.length >= 1 && PREFIX_RE.test(trimmed);
+                const sample = yearlyReset
+                  ? `${trimmed || 'INV-'}${new Date().getFullYear()}-0001`
+                  : `${trimmed || 'INV-'}0001`;
+                return (
+                  <div className="space-y-4 pt-3 border-t border-[#cc5a16]/10">
+                    {/* Prefix */}
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1.5">
+                        Invoice Prefix
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={12}
+                        value={prefix}
+                        onChange={e => setRestaurant(prev => prev ? ({ ...prev, invoice_number_prefix: e.target.value } as any) : null)}
+                        placeholder="INV-"
+                        className={cn(
+                          "w-full bg-white border-2 rounded-xl px-4 py-3 text-sm font-mono outline-none transition-all",
+                          prefixValid ? "border-[#cc5a16]/20 focus:ring-2 ring-[#cc5a16]/20" : "border-red-400 focus:ring-2 ring-red-200"
+                        )}
+                      />
+                      <p className="text-[11px] text-[#6b5d52] mt-1.5">
+                        Allowed: A-Z a-z 0-9 - _ / . — 1 to 12 characters.
+                      </p>
+                      {!prefixValid && (
+                        <p className="text-[11px] text-red-600 mt-1">
+                          Invalid prefix. Use only letters, digits, dash, underscore, slash, or dot.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Yearly reset toggle */}
+                    <div className="flex items-center justify-between pt-2">
+                      <div>
+                        <p className="text-sm font-bold text-[#1a1a1a]">Reset counter every year</p>
+                        <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">
+                          Counter restarts at <span className="font-mono">0001</span> on Jan 1 (IST). Year is interleaved into the number.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs font-bold text-[#6b5d52] w-7 text-right">{yearlyReset ? 'ON' : 'OFF'}</span>
+                        <button
+                          type="button"
+                          onClick={() => setRestaurant(prev => prev ? ({ ...prev, invoice_yearly_reset: yearlyReset ? 0 : 1 } as any) : null)}
+                          className={cn(
+                            "w-12 h-6 rounded-full transition-colors relative",
+                            yearlyReset ? "bg-[#cc5a16]" : "bg-gray-300"
+                          )}
+                        >
+                          <motion.div
+                            animate={{ x: yearlyReset ? 24 : 4 }}
+                            className="absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm"
+                          />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Live preview */}
+                    <div className="bg-white rounded-xl border border-[#cc5a16]/10 px-4 py-3 flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Sample next invoice</span>
+                      <span className="font-mono font-bold text-[#cc5a16]">{sample}</span>
+                    </div>
+                    <p className="text-[11px] text-[#9c8e85] leading-snug">
+                      Note: Cancelled invoices may leave gaps in the sequence — this is normal and audit-friendly.
+                    </p>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="space-y-4">
@@ -9042,7 +9176,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <div>
                     <h3 className="font-bold text-[#1a1208] flex items-center gap-2">
                       <Edit3 size={16} className="text-[#cc5a16]" />
-                      Edit Invoice #{String(inv.id).slice(-8).toUpperCase()}
+                      Edit Invoice {inv.display_number || `#${String(inv.id).slice(-8).toUpperCase()}`}
                     </h3>
                     <p className="text-[11px] text-[#9c8e85] mt-0.5">
                       {isSess ? `Table Invoice · ${inv.round_count} round${inv.round_count !== 1 ? 's' : ''}` : 'Order Invoice'}
@@ -9332,7 +9466,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-2">
                     <div className="flex justify-between text-xs">
                       <span className="font-bold uppercase tracking-widest text-[#9c8e85]">Invoice ID</span>
-                      <span className="font-mono font-bold text-[#cc5a16]">#{idStr.slice(-8).toUpperCase()}</span>
+                      <span className="font-mono font-bold text-[#cc5a16]">{inv.display_number || `#${idStr.slice(-8).toUpperCase()}`}</span>
                     </div>
                     <div className="flex justify-between text-xs">
                       <span className="font-bold uppercase tracking-widest text-[#9c8e85]">Type</span>

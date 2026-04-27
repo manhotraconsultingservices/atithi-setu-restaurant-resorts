@@ -477,12 +477,38 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   // Scheduler support — HH:MM time for auto-fire (e.g. "22:00" = 10 PM daily)
   await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS schedule_time TEXT DEFAULT ''")
 
+  // ── Invoice numbering (per-tenant counters) ───────────────────────────────
+  // Owner-configurable RANDOM/SEQUENTIAL invoice numbers (see plan). Each
+  // tenant gets its own atomic counter table; orders + table_sessions get
+  // a nullable invoice_number column populated only in SEQUENTIAL mode.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS sequences (
+      name TEXT PRIMARY KEY,
+      current_value INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT");
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT");
+
   tenantDbCache.set(schema, db);
   return db;
 }
 
 export async function getNextSequence(name: string): Promise<number> {
   const rows = await centralDb.query(`
+    INSERT INTO sequences (name, current_value) VALUES (?, 1)
+    ON CONFLICT (name) DO UPDATE SET current_value = sequences.current_value + 1
+    RETURNING current_value
+  `, [name]);
+  return rows[0].current_value;
+}
+
+// Per-tenant atomic counter. Each tenant DB has its own `sequences` table
+// (created in the tenant schema during getTenantDb()). Used for sequential
+// invoice numbering — caller picks the sequence name (e.g. 'invoice' for a
+// continuous counter, or 'invoice-2026' for a yearly-reset counter).
+export async function getNextTenantSequence(tenantDb: DbInterface, name: string): Promise<number> {
+  const rows = await tenantDb.query(`
     INSERT INTO sequences (name, current_value) VALUES (?, 1)
     ON CONFLICT (name) DO UPDATE SET current_value = sequences.current_value + 1
     RETURNING current_value
