@@ -2702,8 +2702,8 @@ function AnalyticsDashboard({
             {label}
           </p>
           <p
-            style={{ color: '#ffffff', fontFamily: '"JetBrains Mono", monospace', letterSpacing: '-0.02em' }}
-            className="text-3xl font-bold leading-none truncate"
+            style={{ color: '#ffffff', fontFamily: '"JetBrains Mono", monospace', letterSpacing: '-0.03em' }}
+            className="text-2xl xl:text-xl font-bold leading-none whitespace-nowrap"
           >
             {value}
           </p>
