@@ -5303,6 +5303,9 @@ async function startServer() {
           // Update session customer info + round_count + (lazy) invoice_number
           // Always run COALESCE so an empty session still gets its invoice
           // number on the first order (regardless of round_number heuristic).
+          // Defensively re-create the sequences table inline in case the
+          // tenant connection somehow missed the migration in db.ts.
+          await db.exec(`CREATE TABLE IF NOT EXISTS sequences (name TEXT PRIMARY KEY, current_value INTEGER NOT NULL DEFAULT 0)`).catch(() => {});
           const sessionInvoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
           await db.run(
             `UPDATE table_sessions
@@ -5320,6 +5323,10 @@ async function startServer() {
             ]
           );
           console.log(`[orders-post] session=${finalSessionId} round=${roundNumber} invoice_number_generated=${sessionInvoiceNumber || '(null)'}`);
+          // Diagnostic: surface the generated number in the response so the
+          // QA / smoke tests can confirm sequential numbering works without
+          // needing access to VPS logs.
+          (req as any)._sessionInvoiceNumber = sessionInvoiceNumber;
         }
       }
 
@@ -5359,7 +5366,14 @@ async function startServer() {
         orderInvoiceNumber,
       ]);
 
-      res.json({ success: true, id, orderId: id, checkout_mode: checkoutMode, kitchen_status: kitchenStatus, invoice_number: orderInvoiceNumber });
+      res.json({
+        success: true,
+        id, orderId: id,
+        checkout_mode: checkoutMode,
+        kitchen_status: kitchenStatus,
+        invoice_number: orderInvoiceNumber,
+        session_invoice_number: (req as any)._sessionInvoiceNumber || null,
+      });
 
       // ── Notifications (non-blocking) ─────────────────────────────────────
       const itemLabels = (items as any[]).map((i: any) =>
