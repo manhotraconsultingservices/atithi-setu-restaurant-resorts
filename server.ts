@@ -4507,6 +4507,16 @@ async function startServer() {
         console.warn(`[request-bill] Failed to fetch GST settings for ${req.params.id}; keeping existing session values:`, settingsErr);
       }
 
+      // Safety net: if SEQUENTIAL invoice numbering is enabled and the session
+      // never got an invoice_number (because it was created via QR before the
+      // feature deployed, OR because the orders-POST first-round assignment
+      // path failed silently), assign one now at bill-request time. COALESCE
+      // ensures we never overwrite an existing number.
+      let assignedInvoiceNumber: string | null = null;
+      if (!session.invoice_number) {
+        assignedInvoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
+      }
+
       await db.run(
         `UPDATE table_sessions
             SET status = 'bill_requested',
@@ -4514,12 +4524,13 @@ async function startServer() {
                 bill_requested_at = COALESCE(bill_requested_at, CURRENT_TIMESTAMP),
                 payment_method = COALESCE(?, payment_method),
                 gst_percent = ?,
-                apply_gst = ?
+                apply_gst = ?,
+                invoice_number = COALESCE(invoice_number, ?)
           WHERE id = ?`,
-        [billAmount, payment_method || null, sessionGstPct, sessionApplyGst, session.id]
+        [billAmount, payment_method || null, sessionGstPct, sessionApplyGst, assignedInvoiceNumber, session.id]
       );
 
-      console.log(`[request-bill] OK ${req.params.id}/${req.params.token} → bill_requested, amount=₹${billAmount.toFixed(2)}, gst=${sessionGstPct}%, apply_gst=${sessionApplyGst}`);
+      console.log(`[request-bill] OK ${req.params.id}/${req.params.token} → bill_requested, amount=₹${billAmount.toFixed(2)}, gst=${sessionGstPct}%, apply_gst=${sessionApplyGst}, invoice_number=${session.invoice_number || assignedInvoiceNumber || '(none)'}`);
 
       // Notify owner + waiters (don't await — fire and forget)
       triggerNotification(req.params.id, 'ORDER_PLACED', {
@@ -4552,6 +4563,20 @@ async function startServer() {
         updateParts.push("final_amount = ?");
         updateParams.push(Number(final_amount));
         updateParams.push(Number(final_amount));
+      }
+      // Final safety net: if SEQUENTIAL is enabled and the session never got an
+      // invoice_number on either order-POST or request-bill, assign one now at
+      // close-time. COALESCE preserves any existing value.
+      const existingSess: any = await db.get(
+        "SELECT invoice_number FROM table_sessions WHERE session_token = ?",
+        [req.params.token]
+      );
+      if (existingSess && !existingSess.invoice_number) {
+        const lateInv = await generateInvoiceNumberIfSequential(db, req.params.id);
+        if (lateInv) {
+          updateParts.push("invoice_number = COALESCE(invoice_number, ?)");
+          updateParams.push(lateInv);
+        }
       }
       updateParams.push(req.params.token);
 
@@ -5275,23 +5300,26 @@ async function startServer() {
           );
           roundNumber = (Number(countRow?.cnt) || 0) + 1;
 
-          // Update session customer info + round_count on first round
-          if (roundNumber === 1) {
-            // Sequential invoice number for the SESSION (assigned on first round only)
-            const sessionInvoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
-            await db.run(
-              `UPDATE table_sessions
-                  SET customer_name = COALESCE(customer_name, ?),
-                      customer_phone = COALESCE(customer_phone, ?),
-                      invoice_number = COALESCE(invoice_number, ?)
-                WHERE id = ?`,
-              [finalCustomerName || null, finalCustomerPhone || null, sessionInvoiceNumber, finalSessionId]
-            );
-          }
+          // Update session customer info + round_count + (lazy) invoice_number
+          // Always run COALESCE so an empty session still gets its invoice
+          // number on the first order (regardless of round_number heuristic).
+          const sessionInvoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
           await db.run(
-            "UPDATE table_sessions SET round_count = ? WHERE id = ?",
-            [roundNumber, finalSessionId]
+            `UPDATE table_sessions
+                SET customer_name  = COALESCE(customer_name, ?),
+                    customer_phone = COALESCE(customer_phone, ?),
+                    invoice_number = COALESCE(invoice_number, ?),
+                    round_count    = ?
+              WHERE id = ?`,
+            [
+              finalCustomerName || null,
+              finalCustomerPhone || null,
+              sessionInvoiceNumber,
+              roundNumber,
+              finalSessionId,
+            ]
           );
+          console.log(`[orders-post] session=${finalSessionId} round=${roundNumber} invoice_number_generated=${sessionInvoiceNumber || '(null)'}`);
         }
       }
 
