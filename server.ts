@@ -5300,46 +5300,10 @@ async function startServer() {
           );
           roundNumber = (Number(countRow?.cnt) || 0) + 1;
 
-          // Update session customer info + round_count + (lazy) invoice_number
-          // Defensively re-create the sequences table inline.
+          // Update session customer info + round_count + (lazy) invoice_number.
+          // Defensively re-create the sequences table inline (idempotent).
           await db.exec(`CREATE TABLE IF NOT EXISTS sequences (name TEXT PRIMARY KEY, current_value INTEGER NOT NULL DEFAULT 0)`).catch(() => {});
-          // Inline sequential-number generation (bypasses helper while we
-          // diagnose). Each step caught individually so we can see exactly
-          // where the helper has been silently failing.
-          let sessionInvoiceNumber: string | null = null;
-          let inlineDiag = 'init';
-          try {
-            inlineDiag = 'reading-restaurants';
-            const r: any = await centralDb.get(
-              `SELECT invoice_numbering_mode, invoice_number_prefix, invoice_yearly_reset FROM restaurants WHERE id = ?`,
-              [req.params.id]
-            );
-            inlineDiag = `r=${r ? 'found' : 'null'}-mode=${r?.invoice_numbering_mode}`;
-            if (r && String(r.invoice_numbering_mode || '').toUpperCase() === 'SEQUENTIAL') {
-              const rawPrefix = String(r.invoice_number_prefix || '').trim();
-              const prefix = (rawPrefix && /^[A-Za-z0-9_\-./]{1,12}$/.test(rawPrefix)) ? rawPrefix : 'INV-';
-              const yearlyReset = Number(r.invoice_yearly_reset || 0) === 1;
-              const yearVal = yearlyReset ? new Date(Date.now() + (5.5 * 60 * 60 * 1000)).getUTCFullYear() : null;
-              const seqName = yearlyReset ? `invoice-${yearVal}` : 'invoice';
-              inlineDiag = `incrementing-${seqName}`;
-              const seqRows = await db.query(
-                `INSERT INTO sequences (name, current_value) VALUES (?, 1)
-                 ON CONFLICT (name) DO UPDATE SET current_value = sequences.current_value + 1
-                 RETURNING current_value`,
-                [seqName]
-              );
-              const n = seqRows && seqRows[0] ? Number(seqRows[0].current_value || 0) : 0;
-              inlineDiag = `got-n=${n}`;
-              if (n > 0) {
-                const padded = String(n).padStart(4, '0');
-                sessionInvoiceNumber = yearVal !== null ? `${prefix}${yearVal}-${padded}` : `${prefix}${padded}`;
-                inlineDiag = `built=${sessionInvoiceNumber}`;
-              }
-            }
-          } catch (invErr: any) {
-            inlineDiag = `error: ${invErr?.message || String(invErr).slice(0,200)}`;
-            console.error(`[orders-post] inline invoice-num failed for ${req.params.id}:`, invErr);
-          }
+          const sessionInvoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
           await db.run(
             `UPDATE table_sessions
                 SET customer_name  = COALESCE(customer_name, ?),
@@ -5355,9 +5319,7 @@ async function startServer() {
               finalSessionId,
             ]
           );
-          console.log(`[orders-post] session=${finalSessionId} round=${roundNumber} invoice_number_generated=${sessionInvoiceNumber || '(null)'} diag=${inlineDiag}`);
-          (req as any)._sessionInvoiceNumber = sessionInvoiceNumber;
-          (req as any)._sessionInvoiceDiag = inlineDiag;
+          console.log(`[orders-post] session=${finalSessionId} round=${roundNumber} invoice_number_generated=${sessionInvoiceNumber || '(null)'}`);
         }
       }
 
@@ -5397,15 +5359,7 @@ async function startServer() {
         orderInvoiceNumber,
       ]);
 
-      res.json({
-        success: true,
-        id, orderId: id,
-        checkout_mode: checkoutMode,
-        kitchen_status: kitchenStatus,
-        invoice_number: orderInvoiceNumber,
-        session_invoice_number: (req as any)._sessionInvoiceNumber || null,
-        _diag: (req as any)._sessionInvoiceDiag || null,
-      });
+      res.json({ success: true, id, orderId: id, checkout_mode: checkoutMode, kitchen_status: kitchenStatus, invoice_number: orderInvoiceNumber });
 
       // ── Notifications (non-blocking) ─────────────────────────────────────
       const itemLabels = (items as any[]).map((i: any) =>
