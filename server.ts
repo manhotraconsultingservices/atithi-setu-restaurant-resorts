@@ -4674,13 +4674,20 @@ async function startServer() {
         });
       }
 
-      // ── 2. ORDER invoices: prepaid + manual (no session_id) ──
+      // ── 2. ORDER invoices: prepaid, manual, AND any orders whose parent
+      // session is missing (defensive — catches orphaned orders if a session
+      // was ever deleted while its orders weren't, or if session_id points
+      // to a non-existent row).
       const standaloneOrders = await db.query(
-        `SELECT *, COALESCE(invoice_status, 'DRAFT') as invoice_status, 'ORDER' as invoice_type
-         FROM orders
-         WHERE (session_id IS NULL OR session_id = '')
-           AND status != 'CANCELLED'
-         ORDER BY created_at DESC`
+        `SELECT o.*, COALESCE(o.invoice_status, 'DRAFT') as invoice_status, 'ORDER' as invoice_type
+         FROM orders o
+         WHERE o.status != 'CANCELLED'
+           AND (
+             o.session_id IS NULL
+             OR o.session_id = ''
+             OR NOT EXISTS (SELECT 1 FROM table_sessions ts WHERE ts.id = o.session_id)
+           )
+         ORDER BY o.created_at DESC`
       );
       standaloneOrders.forEach((o: any) => {
         if (typeof o.items === 'string') { try { o.items = JSON.parse(o.items); } catch { o.items = []; } }
