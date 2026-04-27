@@ -6032,11 +6032,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       if (invoiceStatusFilter === 'UNPAID'  && paidNow)  return false;
                       if (invoiceStatusFilter === 'PRINTED' && (inv.invoice_status !== 'PRINTED' || paidNow)) return false;
                       if (!q) return true;
+                      // SESSION invoices: also match against any contained
+                      // order id, the display_number, the invoice_number,
+                      // and the session_token. This makes it possible to
+                      // search by ORD-… and still find the parent session.
+                      const orderIdsHit = Array.isArray((inv as any).order_ids)
+                        ? (inv as any).order_ids.some((oid: any) => String(oid||'').toLowerCase().includes(q))
+                        : false;
                       return (
                         String(inv.id||'').toLowerCase().includes(q) ||
+                        String((inv as any).session_token||'').toLowerCase().includes(q) ||
+                        String((inv as any).invoice_number||'').toLowerCase().includes(q) ||
+                        String((inv as any).display_number||'').toLowerCase().includes(q) ||
                         (inv.customerName||'').toLowerCase().includes(q) ||
                         (inv.customerPhone||'').includes(q) ||
-                        (inv.tableNumber||'').toLowerCase().includes(q)
+                        (inv.tableNumber||'').toLowerCase().includes(q) ||
+                        orderIdsHit
                       );
                     });
                     // Sort

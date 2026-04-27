@@ -4764,9 +4764,14 @@ async function startServer() {
           session_status:         sess.status,
           round_count:            orders.length,
           items:                  combinedItems,
+          // Order IDs of every round in this session — surfaced so the owner
+          // can search the invoice list by an order id (e.g. "ORD-1777265510243")
+          // and still find the parent SESSION invoice.
+          order_ids:              orders.map((o: any) => o.id),
           // Per-round data for thermal print (label + items)
           rounds:                 orders.map((o: any, idx: number) => ({
             label: orders.length > 1 ? `-- Round ${o.round_number || idx + 1} --` : undefined,
+            order_id: o.id,
             items: (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
               name:  it.name  || '',
               qty:   Number(it.quantity || 1),
@@ -4776,18 +4781,23 @@ async function startServer() {
         });
       }
 
-      // ── 2. ORDER invoices: prepaid, manual, AND any orders whose parent
-      // session is missing (defensive — catches orphaned orders if a session
-      // was ever deleted while its orders weren't, or if session_id points
-      // to a non-existent row).
+      // ── 2. ORDER invoices: every non-cancelled order whose session is NOT
+      // already represented in the SESSION list above. This is the universal
+      // catch-all — no order can ever be invisible regardless of what state
+      // its parent session is in (deleted, missing, exotic status, etc.).
+      // Conditions covered:
+      //   • session_id NULL / empty                → show as ORDER
+      //   • session_id points to non-existent row  → show as ORDER
+      //   • session exists but status not in our visible IN-list → show as ORDER
+      //   • session exists with valid status → already in SESSION list, NOT shown again here
       const standaloneOrders = await db.query(
         `SELECT o.*, COALESCE(o.invoice_status, 'DRAFT') as invoice_status, 'ORDER' as invoice_type
          FROM orders o
          WHERE o.status != 'CANCELLED'
-           AND (
-             o.session_id IS NULL
-             OR o.session_id = ''
-             OR NOT EXISTS (SELECT 1 FROM table_sessions ts WHERE ts.id = o.session_id)
+           AND NOT EXISTS (
+             SELECT 1 FROM table_sessions ts
+              WHERE ts.id = o.session_id
+                AND ts.status IN ('open', 'bill_requested', 'closed')
            )
          ORDER BY o.created_at DESC`
       );
