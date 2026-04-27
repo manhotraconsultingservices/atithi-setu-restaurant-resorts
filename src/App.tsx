@@ -5763,7 +5763,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         </span>
                       </th>
                     ))}
-                    <th className="px-6 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#5A5A40]/5">
@@ -5802,7 +5801,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     const safePage   = Math.min(ordersPage, totalPages);
                     const pageRows   = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
                     if (pageRows.length === 0) return (
-                      <tr><td colSpan={8} className="py-16 text-center text-[#9c8e85] italic">No orders found</td></tr>
+                      <tr><td colSpan={7} className="py-16 text-center text-[#9c8e85] italic">No orders found</td></tr>
                     );
                     return pageRows.map(order => (
                     <tr key={order.id} className={cn("hover:bg-[#faf7f2]/30 transition-colors", (order as any).status === 'CANCELLED' && "opacity-50")}>
@@ -5843,30 +5842,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </span>
                         )}
                       </td>
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex justify-end items-center gap-1.5 flex-wrap">
-                          {/* Print Invoice / Edit Invoice / Mark Paid — intentionally
-                              hidden on the ORDER list. A single invoice can group
-                              multiple orders (postpaid sessions with multiple rounds),
-                              so per-order invoice actions confused owners. All three
-                              actions remain available on the Invoices tab where the
-                              context is correct. */}
-                          {/* Request Feedback */}
-                          {order.paymentStatus === 'PAID' && !order.feedbackRequested && (
-                            <button
-                              onClick={() => requestFeedback(order.id)}
-                              className="bg-[#cc5a16] text-white px-3 py-2 rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-[#a84612] transition-all flex items-center gap-1.5"
-                            >
-                              <Star size={11} /> Feedback
-                            </button>
-                          )}
-                          {order.feedbackRequested && (
-                            <span className="text-[11px] font-bold uppercase tracking-widest text-green-600 flex items-center gap-1">
-                              <CheckCircle2 size={11} /> Sent
-                            </span>
-                          )}
-                        </div>
-                      </td>
+                      {/* Action column intentionally removed — Print Invoice,
+                          Edit Invoice, Mark Paid, and Feedback are all handled
+                          from the Invoices tab. The Order list is read-only
+                          for owners; per-order actions caused confusion when
+                          one invoice spanned multiple orders. */}
                     </tr>
                     ));
                   })()}
