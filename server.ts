@@ -4599,13 +4599,24 @@ async function startServer() {
       }
 
       // ── 1. SESSION invoices (postpaid): one consolidated invoice per session ──
+      // Include any session that has at least one non-cancelled order, regardless
+      // of whether the bill has been formally requested. This eliminates a class
+      // of bugs where the customer's request-bill call silently failed and the
+      // session stayed in 'open', leaving the orders orphaned (visible in the
+      // Orders tab but missing from Invoices). Owners can also manually finalise
+      // a bill that the customer never explicitly requested.
       const sessions = await db.query(
         `SELECT ts.*,
                 COALESCE(ts.invoice_status, 'DRAFT') as invoice_status,
                 t.name as table_name
          FROM table_sessions ts
          LEFT JOIN tables t ON t.id = ts.table_id
-         WHERE ts.status IN ('bill_requested', 'closed')
+         WHERE ts.status IN ('open', 'bill_requested', 'closed')
+           AND EXISTS (
+             SELECT 1 FROM orders o
+              WHERE o.session_id = ts.id
+                AND o.status != 'CANCELLED'
+           )
          ORDER BY ts.opened_at DESC`
       );
 

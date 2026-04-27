@@ -6054,11 +6054,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const isPaid     = isSession
                         ? inv.session_status === 'closed'
                         : (inv.payment_status === 'PAID');
-                      const invStatus  = isPaid ? 'PAID' : ((inv.invoice_status || 'DRAFT') as 'DRAFT'|'PRINTED');
+                      // Sessions that haven't requested the bill yet show as ACTIVE
+                      const isSessionActive = isSession && inv.session_status === 'open';
+                      const invStatus  = isSessionActive
+                        ? 'ACTIVE'
+                        : isPaid ? 'PAID' : ((inv.invoice_status || 'DRAFT') as 'DRAFT'|'PRINTED'|'ACTIVE');
                       const statusCfg: Record<string, { bg: string; text: string; label: string }> = {
                         PAID:    { bg: 'bg-green-100',  text: 'text-green-700',  label: 'PAID'    },
                         DRAFT:   { bg: 'bg-red-100',    text: 'text-red-700',    label: 'UNPAID'  },
                         PRINTED: { bg: 'bg-blue-100',   text: 'text-blue-700',   label: 'PRINTED' },
+                        ACTIVE:  { bg: 'bg-amber-100',  text: 'text-amber-700',  label: 'ACTIVE'  },
                       };
                       const sc = statusCfg[invStatus] || statusCfg.DRAFT;
                       const dt = new Date(inv.createdAt || inv.created_at || Date.now());
