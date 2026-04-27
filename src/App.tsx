@@ -3452,6 +3452,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [odSearchActive, setOdSearchActive]   = useState<number | null>(null);
   // Type-ahead state for the Edit-Invoice modal (separate from the New-Invoice modal)
   const [invEditSearchActive, setInvEditSearchActive] = useState<number | null>(null);
+  // Settings save UX — "Saving…" button + "✓ Saved" banner for 3s
+  const [settingsSaveStatus, setSettingsSaveStatus] = useState<'idle'|'saving'|'saved'|'error'>('idle');
   // ── Invoice Delete Modal State (admin-gated feature) ──────────────────────
   const [deleteInvoiceTarget, setDeleteInvoiceTarget] = useState<any|null>(null);
   const [deleteIdConfirm, setDeleteIdConfirm]         = useState('');
@@ -4481,10 +4483,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const updateRestaurant = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!restaurant) return;
+    setSettingsSaveStatus('saving');
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}`, {
         method: 'PATCH',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
@@ -4508,14 +4511,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // Server returns a clear validation error for an invalid prefix; surface it
         const errBody = await res.json().catch(() => ({}));
         const msg = errBody?.error || "Failed to update settings";
+        setSettingsSaveStatus('error');
         alert(msg);
+        // Reset status after a moment so the button comes back to "Save Settings"
+        setTimeout(() => setSettingsSaveStatus('idle'), 2500);
         throw new Error(msg);
       }
       await syncTables(restaurant.table_count || 0);
       onRestaurantUpdate(restaurant.name);
       fetchRestaurant();
+      setSettingsSaveStatus('saved');
+      // Auto-fade the success banner after 3 seconds
+      setTimeout(() => setSettingsSaveStatus('idle'), 3000);
     } catch (error: any) {
       console.error("Error updating settings:", error.message);
+      // Don't override 'error' state if the !res.ok branch already set it
+      setSettingsSaveStatus(prev => (prev === 'error' ? 'error' : 'idle'));
     }
   };
 
@@ -7479,11 +7490,53 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             </div>
 
+            {/* Success banner — appears for 3 seconds after a successful save */}
+            <AnimatePresence>
+              {settingsSaveStatus === 'saved' && (
+                <motion.div
+                  initial={{ opacity: 0, y: -8, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.25 }}
+                  className="bg-green-50 border-2 border-green-300 rounded-2xl p-4 flex items-center gap-3 shadow-sm"
+                  role="status"
+                >
+                  <div className="w-9 h-9 rounded-full bg-green-500 text-white flex items-center justify-center shrink-0">
+                    <Check size={18} strokeWidth={3} />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-green-700">Settings saved successfully</p>
+                    <p className="text-[11px] text-green-600/80 mt-0.5">Your changes are now live for this restaurant.</p>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <button
               type="submit"
-              className="w-full bg-[#cc5a16] text-white py-4 rounded-2xl font-bold hover:bg-[#a84612] transition-all"
+              disabled={settingsSaveStatus === 'saving'}
+              className={cn(
+                "w-full py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-2",
+                settingsSaveStatus === 'saving'
+                  ? "bg-[#cc5a16]/60 text-white cursor-not-allowed"
+                  : settingsSaveStatus === 'saved'
+                    ? "bg-green-600 text-white shadow-lg shadow-green-600/30"
+                    : "bg-[#cc5a16] text-white hover:bg-[#a84612]"
+              )}
             >
-              Save Settings
+              {settingsSaveStatus === 'saving' ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                  Saving…
+                </>
+              ) : settingsSaveStatus === 'saved' ? (
+                <>
+                  <Check size={18} strokeWidth={3} />
+                  Saved
+                </>
+              ) : (
+                <>Save Settings</>
+              )}
             </button>
           </form>
         </div>
