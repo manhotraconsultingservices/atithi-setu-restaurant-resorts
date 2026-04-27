@@ -4743,6 +4743,17 @@ async function startServer() {
         const effectiveGstPct = sessionUnconfigured && restGstEnabled ? restGstPct : sessGstPctRaw;
         const effectiveApplyGst = sessionUnconfigured && restGstEnabled ? 1 : sessApplyGstRaw;
 
+        // Compute the GST-inclusive total the same way the print template does.
+        // Used when the session is still ACTIVE / hasn't gone through Request
+        // Bill yet, because bill_amount/final_amount are still 0 in that case.
+        const sessDiscount = Number(sess.discount_amount || 0);
+        const sessSvcPct = Number(sess.service_charge_percent || 0);
+        const sessAfterDisc = Math.max(0, rawSubtotal - sessDiscount);
+        const sessSvcAmt = sessAfterDisc * sessSvcPct / 100;
+        const sessTaxable = sessAfterDisc + sessSvcAmt;
+        const sessGstAmt = effectiveApplyGst ? sessTaxable * effectiveGstPct / 100 : 0;
+        const sessComputedTotal = Number((sessTaxable + sessGstAmt).toFixed(2));
+
         sessionInvoices.push({
           id:                     sess.session_token,
           session_db_id:          sess.id,
@@ -4755,10 +4766,14 @@ async function startServer() {
           customer_phone:         sess.customer_phone || '',
           table_number:           sess.table_name || sess.table_id,
           created_at:             sess.opened_at,
-          total_amount:           Number(sess.bill_amount || sess.final_amount || rawSubtotal || 0),
+          // Prefer the stored bill_amount (set on Request Bill) or final_amount
+          // (set on Close). Fall back to the GST-inclusive computed total so
+          // ACTIVE sessions show the correct ₹ in the list — matching the
+          // print template instead of the raw subtotal.
+          total_amount:           Number(sess.bill_amount || sess.final_amount || sessComputedTotal || 0),
           raw_subtotal:           rawSubtotal,
-          discount_amount:        Number(sess.discount_amount || 0),
-          service_charge_percent: Number(sess.service_charge_percent || 0),
+          discount_amount:        sessDiscount,
+          service_charge_percent: sessSvcPct,
           gst_percent:            effectiveGstPct,
           apply_gst:              effectiveApplyGst,
           session_status:         sess.status,
