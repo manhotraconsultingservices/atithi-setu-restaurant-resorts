@@ -4410,15 +4410,22 @@ async function startServer() {
       const { payment_method } = req.body;
       const db = await getTenantDb(req.params.id);
 
+      // Idempotent: accept sessions already in 'bill_requested' too. This
+      // handles double-taps, customer adds-more-items-then-re-requests, and
+      // network retries — any of which used to silently fail with 404 and
+      // leave the session out of the owner's invoice list.
       const session = await db.get(
-        "SELECT * FROM table_sessions WHERE session_token = ? AND status = 'open'",
+        "SELECT * FROM table_sessions WHERE session_token = ? AND status IN ('open','bill_requested')",
         [req.params.token]
       );
-      if (!session) return res.status(404).json({ error: "Open session not found" });
+      if (!session) {
+        console.warn(`[request-bill] Session ${req.params.token} not in open/bill_requested state for ${req.params.id}`);
+        return res.status(404).json({ error: "Active session not found" });
+      }
 
       // Aggregate bill from all orders in this session (subtotal + GST)
       const orderRows = await db.query(
-        "SELECT total_amount, gst_amount FROM orders WHERE session_id = ?",
+        "SELECT total_amount, gst_amount FROM orders WHERE session_id = ? AND status != 'CANCELLED'",
         [session.id]
       );
       const billAmount = orderRows.reduce(
@@ -4429,31 +4436,44 @@ async function startServer() {
       // ── Persist GST fields on the session so the printed invoice can show
       //    the breakdown correctly. Without this, gst_percent stays at the
       //    column default (0) and buildInvoiceHTML recomputes total without
-      //    GST → printed invoice shows subtotal as total. (See bug fix:
-      //    customer-side QR bill request was bypassing the close-session flow
-      //    that owns these fields.)
-      const restaurantSettings: any = await centralDb.get(
-        "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
-        [req.params.id]
-      );
-      const restGstEnabled = Boolean(restaurantSettings?.is_gst_enabled);
-      const restGstPct = Number(restaurantSettings?.gst_percentage || 0);
-      const sessionGstPct = restGstEnabled ? restGstPct : 0;
-      const sessionApplyGst = restGstEnabled ? 1 : 0;
+      //    GST → printed invoice shows subtotal as total.
+      // Defensive: if the central-DB lookup fails, fall back to the existing
+      //  session values so the bill-request always succeeds.
+      let sessionGstPct = Number(session.gst_percent || 0);
+      let sessionApplyGst = Number(session.apply_gst ?? 1);
+      try {
+        const restaurantSettings: any = await centralDb.get(
+          "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
+          [req.params.id]
+        );
+        const restGstEnabled = Boolean(restaurantSettings?.is_gst_enabled);
+        const restGstPct = Number(restaurantSettings?.gst_percentage || 0);
+        // Only override session values if they're still at column defaults
+        // (so an admin's explicit override in close-session flow is preserved).
+        const sessionUnconfigured = sessionGstPct === 0 && sessionApplyGst === 1;
+        if (sessionUnconfigured) {
+          sessionGstPct = restGstEnabled ? restGstPct : 0;
+          sessionApplyGst = restGstEnabled ? 1 : 0;
+        }
+      } catch (settingsErr) {
+        console.warn(`[request-bill] Failed to fetch GST settings for ${req.params.id}; keeping existing session values:`, settingsErr);
+      }
 
       await db.run(
         `UPDATE table_sessions
             SET status = 'bill_requested',
                 bill_amount = ?,
-                bill_requested_at = CURRENT_TIMESTAMP,
-                payment_method = ?,
+                bill_requested_at = COALESCE(bill_requested_at, CURRENT_TIMESTAMP),
+                payment_method = COALESCE(?, payment_method),
                 gst_percent = ?,
                 apply_gst = ?
           WHERE id = ?`,
         [billAmount, payment_method || null, sessionGstPct, sessionApplyGst, session.id]
       );
 
-      // Notify owner + waiters
+      console.log(`[request-bill] OK ${req.params.id}/${req.params.token} → bill_requested, amount=₹${billAmount.toFixed(2)}, gst=${sessionGstPct}%, apply_gst=${sessionApplyGst}`);
+
+      // Notify owner + waiters (don't await — fire and forget)
       triggerNotification(req.params.id, 'ORDER_PLACED', {
         orderId:       session.id,
         tableNumber:   session.table_name || session.table_id,
@@ -4461,11 +4481,11 @@ async function startServer() {
         total:         billAmount,
         customerPhone: session.customer_phone,
         customerEmail: null,
-      }).catch(() => {});
+      }).catch((notifErr) => console.warn('[request-bill] notify failed:', notifErr));
 
       res.json({ success: true, bill_amount: billAmount, session_token: req.params.token });
     } catch (err) {
-      console.error("Request bill error:", err);
+      console.error(`[request-bill] FATAL for ${req.params.id}/${req.params.token}:`, err);
       res.status(500).json({ error: "Failed to request bill" });
     }
   });
@@ -4564,12 +4584,19 @@ async function startServer() {
       // gst_percent is at the column default (0) but GST is actually enabled
       // for the restaurant. Fixes printed-invoice GST line for historical
       // sessions created before the request-bill endpoint was patched.
-      const restSettings: any = await centralDb.get(
-        "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
-        [req.params.id]
-      );
-      const restGstEnabled = Boolean(restSettings?.is_gst_enabled);
-      const restGstPct = Number(restSettings?.gst_percentage || 0);
+      // Defensive: a failure here must NOT prevent the invoice list from rendering.
+      let restGstEnabled = false;
+      let restGstPct = 0;
+      try {
+        const restSettings: any = await centralDb.get(
+          "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
+          [req.params.id]
+        );
+        restGstEnabled = Boolean(restSettings?.is_gst_enabled);
+        restGstPct = Number(restSettings?.gst_percentage || 0);
+      } catch (settingsErr) {
+        console.warn(`[invoices-list] GST settings lookup failed for ${req.params.id}; using defaults:`, settingsErr);
+      }
 
       // ── 1. SESSION invoices (postpaid): one consolidated invoice per session ──
       const sessions = await db.query(
@@ -4653,9 +4680,10 @@ async function startServer() {
         (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
       );
 
+      console.log(`[invoices-list] ${req.params.id} → ${sessionInvoices.length} session + ${standaloneOrders.length} order = ${allInvoices.length} total`);
       res.json(allInvoices);
     } catch (err) {
-      console.error("Failed to fetch invoices:", err);
+      console.error(`[invoices-list] FATAL for ${req.params.id}:`, err);
       res.status(500).json({ error: "Failed to fetch invoices" });
     }
   });
