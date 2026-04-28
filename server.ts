@@ -6826,7 +6826,10 @@ async function startServer() {
   //   • status = 'open'
   //   • opened_at older than 4 hours
   //   • no orders in the last 2 hours
-  // Runs every hour at :15 for fast cleanup.
+  //
+  // Schedule: every day at 04:00 Asia/Kolkata (4 AM IST). Restaurants and
+  // hotels in India are reliably closed at this time so there's no risk
+  // of closing a session while a customer is mid-flow.
   //
   // Safety choices:
   //   • Only sessions in status='open' are closed. status='bill_requested'
@@ -6838,8 +6841,9 @@ async function startServer() {
   //   • The physical table is freed (status = AVAILABLE) so the next guest
   //     gets a fresh session — same behavior as the manual close-session
   //     endpoint.
-  cron.schedule('15 * * * *', async () => {
+  cron.schedule('0 4 * * *', async () => {
     try {
+      console.log('[stale-close] 4 AM IST cron starting — sweeping stale sessions across all tenants');
       const restaurants = await centralDb.query(
         "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'"
       );
@@ -6877,14 +6881,12 @@ async function startServer() {
           console.error(`[stale-close] tenant ${r.id} error:`, tenantErr);
         }
       }
-      if (totalClosed > 0) {
-        console.log(`[stale-close] cron run complete — ${totalClosed} session(s) auto-closed across all tenants`);
-      }
+      console.log(`[stale-close] cron run complete — ${totalClosed} session(s) auto-closed across all tenants`);
     } catch (err) {
       console.error('[stale-close] cron error:', err);
     }
-  });
-  console.log('[stale-close] Stale-session auto-close cron started — hourly at :15');
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[stale-close] Stale-session auto-close cron started — daily at 04:00 IST');
 }
 
 // Helper: send pre-arrival email and record which stage was sent
