@@ -4303,22 +4303,64 @@ async function startServer() {
         return res.json({ ...sess, orders });
       };
 
+      // ─── Stale-session guard (added 2026-04 after Naini-Corbett incident) ────
+      // A session that was never explicitly closed by staff would stay 'open'
+      // forever and be re-used by the next guest who scanned the same QR —
+      // pre-filling that new guest with the old guest's name and printing
+      // wrong KOTs (Order ORD-1777368391773 was reproduced this way: a
+      // 4-day-old session was resumed and the new guest's order printed
+      // 'rahul tamta', the original guest's name).
+      //
+      // A session is considered STALE if BOTH of these are true:
+      //   • opened_at is older than 4 hours, AND
+      //   • no orders have been placed in the last 2 hours.
+      //
+      // Conversely a session is FRESH (eligible for resume) if EITHER:
+      //   • opened_at is within the last 4 hours, OR
+      //   • it has at least one order in the last 2 hours.
+      //
+      // This preserves long-running but actively-used sessions (e.g. a 5-hour
+      // celebration where guests order every 30 minutes) while killing
+      // truly abandoned sessions that staff forgot to close.
+      //
+      // When the resume is refused, the request falls through to step 3
+      // (create brand-new session), which means the new guest gets a clean
+      // session with no stored customer info — they type their own name
+      // once, the same as any first-time scan.
+      const SESSION_FRESH_PREDICATE = `(
+        ts.opened_at > NOW() - INTERVAL '4 hours'
+        OR EXISTS (
+          SELECT 1 FROM orders o
+          WHERE o.session_id = ts.id
+            AND o.created_at > NOW() - INTERVAL '2 hours'
+        )
+      )`;
+
       // 1. Try to resume an active session by stored token (open OR bill_requested)
       //    A customer who re-scans after requesting the bill should still see their session.
+      //    Stale-guarded so a re-used / shared device can't resume someone else's old session.
       if (session_token) {
         const existingByToken = await db.get(
-          "SELECT * FROM table_sessions WHERE session_token = ? AND status IN ('open', 'bill_requested')",
+          `SELECT ts.* FROM table_sessions ts
+           WHERE ts.session_token = ?
+             AND ts.status IN ('open', 'bill_requested')
+             AND ${SESSION_FRESH_PREDICATE}`,
           [session_token]
         );
         if (existingByToken) return returnSession(existingByToken);
       }
 
-      // 2. Find the most-recent OPEN session for this table (fresh scan — no stored token)
+      // 2. Find the most-recent OPEN session for this table (fresh scan — no stored token).
       //    Only resumes 'open' sessions so that a new guest scanning after bill_requested
       //    gets a brand-new session (treated as second guest).
+      //    Stale-guarded — see comment above.
       if (table_id) {
         const existingByTable = await db.get(
-          "SELECT * FROM table_sessions WHERE table_id = ? AND status = 'open' ORDER BY opened_at DESC LIMIT 1",
+          `SELECT ts.* FROM table_sessions ts
+           WHERE ts.table_id = ?
+             AND ts.status = 'open'
+             AND ${SESSION_FRESH_PREDICATE}
+           ORDER BY ts.opened_at DESC LIMIT 1`,
           [table_id]
         );
         if (existingByTable) return returnSession(existingByTable);
@@ -6777,6 +6819,72 @@ async function startServer() {
     }
   });
   console.log('[Prearrival-cron] Pre-arrival upsell cron started — hourly at :30');
+
+  // ─── Stale session auto-close (added 2026-04 after Naini-Corbett incident) ──
+  // Closes any session that should have been closed by staff but was forgotten.
+  // Same staleness predicate as the scan-resume guard:
+  //   • status = 'open'
+  //   • opened_at older than 4 hours
+  //   • no orders in the last 2 hours
+  // Runs every hour at :15 for fast cleanup.
+  //
+  // Safety choices:
+  //   • Only sessions in status='open' are closed. status='bill_requested'
+  //     means the customer explicitly requested billing — the manual close
+  //     flow exists for that. We don't speculate on payment.
+  //   • Orders' payment_status is NOT touched. Staff might have collected
+  //     cash without clicking 'Close' — orders stay PENDING so the owner
+  //     can reconcile in the invoice tab.
+  //   • The physical table is freed (status = AVAILABLE) so the next guest
+  //     gets a fresh session — same behavior as the manual close-session
+  //     endpoint.
+  cron.schedule('15 * * * *', async () => {
+    try {
+      const restaurants = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'"
+      );
+      let totalClosed = 0;
+      for (const r of restaurants) {
+        try {
+          const db = await getTenantDb(r.id);
+          const stale: any[] = await db.query(
+            `SELECT ts.id, ts.table_id
+             FROM table_sessions ts
+             WHERE ts.status = 'open'
+               AND ts.opened_at < NOW() - INTERVAL '4 hours'
+               AND NOT EXISTS (
+                 SELECT 1 FROM orders o
+                 WHERE o.session_id = ts.id
+                   AND o.created_at > NOW() - INTERVAL '2 hours'
+               )`
+          );
+          if (stale.length === 0) continue;
+          for (const s of stale) {
+            await db.run(
+              "UPDATE table_sessions SET status='closed', closed_at=CURRENT_TIMESTAMP WHERE id = ?",
+              [s.id]
+            );
+            if (s.table_id) {
+              await db.run(
+                "UPDATE tables SET status='AVAILABLE' WHERE id = ?",
+                [s.table_id]
+              ).catch(() => {});
+            }
+            totalClosed++;
+          }
+          console.log(`[stale-close] ${r.id}: auto-closed ${stale.length} stale session(s)`);
+        } catch (tenantErr) {
+          console.error(`[stale-close] tenant ${r.id} error:`, tenantErr);
+        }
+      }
+      if (totalClosed > 0) {
+        console.log(`[stale-close] cron run complete — ${totalClosed} session(s) auto-closed across all tenants`);
+      }
+    } catch (err) {
+      console.error('[stale-close] cron error:', err);
+    }
+  });
+  console.log('[stale-close] Stale-session auto-close cron started — hourly at :15');
 }
 
 // Helper: send pre-arrival email and record which stage was sent
