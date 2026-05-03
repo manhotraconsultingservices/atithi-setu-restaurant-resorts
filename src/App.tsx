@@ -7628,15 +7628,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </span>
               <span className="text-orange-200 text-xs font-bold uppercase tracking-widest">⚑ Bill Requested:</span>
               <div className="flex flex-wrap gap-2">
-                {liveTables.filter(t => t.session_status === 'bill_requested').map(t => (
-                  <button
-                    key={t.id}
-                    onClick={() => setViewBillTable({ id: t.id, name: t.name })}
-                    className="px-3 py-1 rounded-full text-[11px] font-bold backdrop-blur-md bg-orange-500/25 text-orange-100 border border-orange-400/50 hover:bg-orange-500/40 transition-all"
-                  >
-                    {t.name}
-                  </button>
-                ))}
+                {liveTables.filter(t => t.session_status === 'bill_requested').map(t => {
+                  // Synthetic Online Order row has no real table_id, so clicking
+                  // it would 404 the BillView. Render as a non-clickable label
+                  // and direct the owner to the Invoices tab for online orders.
+                  if ((t as any).is_online_synthetic) {
+                    return (
+                      <span
+                        key={t.id}
+                        className="px-3 py-1 rounded-full text-[11px] font-bold backdrop-blur-md bg-blue-500/25 text-blue-100 border border-blue-400/50"
+                        title="Online order — open Invoices tab to view & settle"
+                      >
+                        🌐 {t.name}
+                      </span>
+                    );
+                  }
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => setViewBillTable({ id: t.id, name: t.name })}
+                      className="px-3 py-1 rounded-full text-[11px] font-bold backdrop-blur-md bg-orange-500/25 text-orange-100 border border-orange-400/50 hover:bg-orange-500/40 transition-all"
+                    >
+                      {t.name}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -7862,6 +7878,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             return <span className="text-[#6b5d52] text-xs">{t.capacity ?? '—'}</span>;
 
                           case 'waiter':
+                            // Synthetic 'Online Order' row has no real table_id —
+                            // assign-waiter would fail, so just show a dash.
+                            if ((t as any).is_online_synthetic) {
+                              return <span className="text-[#c5b9b2] text-xs">—</span>;
+                            }
                             return (
                               <select
                                 value={t.assigned_waiter_id ?? ''}
@@ -7877,6 +7898,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             );
 
                           case 'actions':
+                            // For the synthetic Online Order row: show only an
+                            // info pill — destructive table actions (status /
+                            // delete / view-bill-by-table) require a real id.
+                            if ((t as any).is_online_synthetic) {
+                              return (
+                                <span
+                                  className="inline-block px-2 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 text-[11px] font-bold uppercase tracking-widest whitespace-nowrap"
+                                  title="Online channel — manage individual orders from the Invoices tab"
+                                >
+                                  🌐 Online
+                                </span>
+                              );
+                            }
                             return (
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 {(['AVAILABLE', 'OCCUPIED', 'NOT_AVAILABLE'] as TableStatus[]).map(st => {

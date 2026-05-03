@@ -4887,6 +4887,13 @@ async function startServer() {
         if (typeof o.items === 'string') { try { o.items = JSON.parse(o.items); } catch { o.items = []; } }
         // display_number — sequential value if present, otherwise legacy "#ABCD1234"
         o.display_number = computeDisplayNumber(o);
+        // GST-inclusive total for the invoice list. Online / prepaid orders
+        // store total_amount = subtotal and gst_amount separately, while
+        // manual invoices store total_amount = grand (gst_amount = 0). Adding
+        // both gives the GST-inclusive total in either case without affecting
+        // the underlying DB column (used by reports/analytics, which read the
+        // raw subtotal directly).
+        o.total_amount = Number(o.total_amount || 0) + Number(o.gst_amount || 0);
       });
 
       // Merge and sort by date descending
@@ -6193,6 +6200,44 @@ async function startServer() {
           order_count:         sess ? (countBySession[sess.id] ?? 0) : 0,
         };
       });
+
+      // ─── Synthetic 'Online Order' row (added 2026-04 per customer report) ──
+      // Online QR scan gives sessions with table_id=NULL — they were
+      // previously invisible in Command & Control because the query above
+      // only returns physical tables. Aggregate any active online sessions
+      // into a single virtual row so the owner can see them at a glance.
+      // Frontend uses `is_online_synthetic` to hide destructive actions
+      // (assign waiter / change status / view bill) since those need a
+      // real table_id.
+      const onlineSessions = activeSessions.filter((s: any) => !s.table_id);
+      if (onlineSessions.length > 0) {
+        const latest = onlineSessions.reduce((acc: any, s: any) =>
+          new Date(s.opened_at || 0).getTime() > new Date(acc.opened_at || 0).getTime() ? s : acc
+        , onlineSessions[0]);
+        const totalRounds = onlineSessions.reduce((sum: number, s: any) => sum + Number(s.round_count || 0), 0);
+        const totalBill   = onlineSessions.reduce((sum: number, s: any) => sum + Number(s.bill_amount || 0), 0);
+        const totalOrders = onlineSessions.reduce((sum: number, s: any) => sum + (countBySession[s.id] || 0), 0);
+        const anyBillRequested = onlineSessions.some((s: any) => s.status === 'bill_requested');
+        live.push({
+          id:                  '__online__',
+          is_online_synthetic: true,
+          name:                onlineSessions.length === 1 ? 'Online Order' : `Online Order (${onlineSessions.length})`,
+          capacity:            null,
+          status:              'OCCUPIED',
+          qr_code_data:        null,
+          assigned_waiter_id:  null,
+          assigned_waiter_name: null,
+          session_id:          latest.id,
+          session_opened_at:   latest.opened_at,
+          customer_name:       onlineSessions.length === 1 ? (latest.customer_name || null) : `${onlineSessions.length} active customers`,
+          customer_phone:      onlineSessions.length === 1 ? latest.customer_phone : null,
+          round_count:         totalRounds,
+          bill_amount:         totalBill,
+          session_status:      anyBillRequested ? 'bill_requested' : (latest.status || 'open'),
+          order_count:         totalOrders,
+        });
+      }
+
       res.json(live);
     } catch (err) {
       console.error("Live tables error:", err);
