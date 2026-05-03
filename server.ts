@@ -5385,11 +5385,33 @@ async function startServer() {
         ? await generateInvoiceNumberIfSequential(db, req.params.id)
         : null;
 
+      // ── Persist gst_percent + apply_gst on the order ──────────────────────
+      // Without this, the Edit Invoice modal reads gst_percent=0 (column
+      // default) and the recomputed grand total drops the GST line — even
+      // though gst_amount IS stored. Look up the restaurant's GST settings
+      // and store them alongside so the modal renders correctly.
+      // Defensive: a failure here must NOT block the order INSERT.
+      let orderGstPercent = 0;
+      let orderApplyGst = 0;
+      try {
+        const restGst: any = await centralDb.get(
+          "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
+          [req.params.id]
+        );
+        if (restGst?.is_gst_enabled) {
+          orderGstPercent = Number(restGst.gst_percentage || 0);
+          orderApplyGst = 1;
+        }
+      } catch (gstErr) {
+        console.warn(`[orders-post] Failed to read GST settings for ${req.params.id}; storing defaults:`, gstErr);
+      }
+
       await db.run(`
         INSERT INTO orders
           (id, table_number, items, total_amount, gst_amount, status, customer_name, customer_phone,
-           customer_email, payment_method, session_id, checkout_mode, round_number, kitchen_status, invoice_number)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           customer_email, payment_method, session_id, checkout_mode, round_number, kitchen_status, invoice_number,
+           gst_percent, apply_gst)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         id,
         finalTableNumber || null,
@@ -5406,6 +5428,8 @@ async function startServer() {
         roundNumber,
         kitchenStatus,
         orderInvoiceNumber,
+        orderGstPercent,
+        orderApplyGst,
       ]);
 
       res.json({ success: true, id, orderId: id, checkout_mode: checkoutMode, kitchen_status: kitchenStatus, invoice_number: orderInvoiceNumber });
@@ -6360,13 +6384,37 @@ async function startServer() {
       let items = order.items;
       if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
       if (!Array.isArray(items)) items = [];
+
+      // Backward-compat fallback: legacy online/prepaid orders were inserted
+      // WITHOUT gst_percent and apply_gst (those columns defaulted to 0/1).
+      // If gst_percent is 0 but the order has a non-zero gst_amount stored,
+      // GST clearly WAS applied — back-fill the percent from restaurant
+      // settings so the Edit modal renders the right grand total.
+      let effectiveGstPercent = Number(order.gst_percent || 0);
+      let effectiveApplyGst   = order.apply_gst === undefined ? 0 : Number(order.apply_gst);
+      const hasGstAmount = Number(order.gst_amount || 0) > 0;
+      if (effectiveGstPercent === 0 && hasGstAmount) {
+        try {
+          const restGst: any = await centralDb.get(
+            "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
+            [req.params.id]
+          );
+          if (restGst?.is_gst_enabled) {
+            effectiveGstPercent = Number(restGst.gst_percentage || 0);
+            effectiveApplyGst   = 1;
+          }
+        } catch (gstErr) {
+          console.warn(`[invoice-get] GST settings lookup failed for ${req.params.id}; using stored values:`, gstErr);
+        }
+      }
+
       res.json({
         ...order,
         items,
         discount_amount: Number(order.discount_amount || 0),
         service_charge_percent: Number(order.service_charge_percent || 0),
-        gst_percent: Number(order.gst_percent || 0),
-        apply_gst: order.apply_gst === undefined ? 0 : Number(order.apply_gst),
+        gst_percent: effectiveGstPercent,
+        apply_gst:   effectiveApplyGst,
         display_number: computeDisplayNumber(order),
       });
     } catch (err) {
