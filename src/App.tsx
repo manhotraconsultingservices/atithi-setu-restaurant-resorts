@@ -9286,7 +9286,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 placeholder="Item name or search menu…"
                                 className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
                               {invEditSearchActive === i && it.name.length > 0 && (() => {
-                                const hits = menu.filter(m => m.available !== false && m.name.toLowerCase().includes(it.name.toLowerCase())).slice(0, 8);
+                                // Match by name OR category — type "beverages" to see all coffees, etc.
+                                const q = it.name.toLowerCase();
+                                const hits = menu.filter(m =>
+                                  m.available !== false && (
+                                    m.name.toLowerCase().includes(q) ||
+                                    String(m.category || '').toLowerCase().includes(q)
+                                  )
+                                ).slice(0, 8);
                                 return hits.length > 0 ? (
                                   <div className="absolute top-full left-0 mt-1 z-[300] w-full bg-white rounded-xl shadow-2xl border border-[#cc5a16]/10 max-h-52 overflow-y-auto">
                                     {hits.map(m => (
@@ -9296,7 +9303,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                           setInvEditSearchActive(null);
                                         }}
                                         className="w-full flex justify-between items-center px-3 py-2 text-sm text-[#3d3128] hover:bg-[#faf7f2] transition-colors first:rounded-t-xl last:rounded-b-xl">
-                                        <span>{m.name}</span>
+                                        <span className="flex flex-col items-start min-w-0">
+                                          <span className="truncate">{m.name}</span>
+                                          {m.category && (
+                                            <span className="text-[10px] text-[#9c8e85] uppercase tracking-wider">{m.category}</span>
+                                          )}
+                                        </span>
                                         <span className="text-xs font-semibold text-[#cc5a16] ml-2 shrink-0">₹{m.price}</span>
                                       </button>
                                     ))}
@@ -9686,7 +9698,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             onBlur={() => setTimeout(() => setOdSearchActive(null), 150)}
                             className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
                           {odSearchActive === i && it.name.length > 0 && (() => {
-                            const hits = menu.filter(m => m.available !== false && m.name.toLowerCase().includes(it.name.toLowerCase())).slice(0, 8);
+                            // Match by name OR category — type "beverages" to see all coffees, etc.
+                            const q = it.name.toLowerCase();
+                            const hits = menu.filter(m =>
+                              m.available !== false && (
+                                m.name.toLowerCase().includes(q) ||
+                                String(m.category || '').toLowerCase().includes(q)
+                              )
+                            ).slice(0, 8);
                             return hits.length > 0 ? (
                               <div className="absolute top-full left-0 mt-1 z-[300] w-full bg-white rounded-xl shadow-2xl border border-[#cc5a16]/10 max-h-52 overflow-y-auto">
                                 {hits.map(m => (
@@ -9696,7 +9715,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                       setOdSearchActive(null);
                                     }}
                                     className="w-full flex justify-between items-center px-3 py-2 text-sm text-[#3d3128] hover:bg-[#faf7f2] transition-colors first:rounded-t-xl last:rounded-b-xl">
-                                    <span>{m.name}</span>
+                                    <span className="flex flex-col items-start min-w-0">
+                                      <span className="truncate">{m.name}</span>
+                                      {m.category && (
+                                        <span className="text-[10px] text-[#9c8e85] uppercase tracking-wider">{m.category}</span>
+                                      )}
+                                    </span>
                                     <span className="text-xs font-semibold text-[#cc5a16] ml-2 shrink-0">₹{m.price}</span>
                                   </button>
                                 ))}
