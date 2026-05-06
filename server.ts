@@ -505,6 +505,20 @@ const isAdmin = (req: AuthRequest, res: Response, next: NextFunction) => {
   next();
 };
 
+// Resolve the target tenant for a request:
+//  • SUPER_ADMIN / CTO may target any tenant via ?restaurantId= (acting-as flow).
+//    This lets the Internal Admin console drive HR ops on every tenant.
+//  • Everyone else operates on their own restaurantId (unchanged).
+function resolveTargetRestaurantId(req: AuthRequest): string | null {
+  const role = req.user?.role;
+  const override = (req.query?.restaurantId as string)
+                || (req.body && (req.body as any).restaurantId);
+  if (override && (role === 'SUPER_ADMIN' || role === 'CTO')) {
+    return String(override);
+  }
+  return req.user?.restaurantId ?? null;
+}
+
 const MAX_TENANTS_IN_MEMORY = 100;
 
 async function triggerNotification(restaurantId: string, eventName: string, data: any) {
@@ -4433,11 +4447,30 @@ async function startServer() {
         if (typeof o.items === 'string') { try { o.items = JSON.parse(o.items); } catch { o.items = []; } }
       });
 
-      // Defaults: if gst_percent not set on session, use restaurant setting
-      // If restaurant has GST disabled, always override to 0 / off regardless of stored session value
+      // Defaults: if gst_percent not set on session, use restaurant setting.
+      // Important: a freshly-opened session has gst_percent stored as 0 (the
+      // column default) — NOT null — so the previous `!= null` check
+      // returned 0 and BillView showed "GST not added". The request-bill
+      // endpoint is what populates gst_percent on the session row; until
+      // that happens, the session's stored values are not authoritative.
+      // Therefore: when status='open' (pre-bill-request), always use the
+      // restaurant defaults. Once the customer requests the bill (status
+      // becomes 'bill_requested'), the stored values are intentional and
+      // we honour them as-is.
       const gstEnabled      = Boolean(restaurant?.is_gst_enabled);
       const defaultGstPct   = gstEnabled ? (Number(restaurant.gst_percentage) || 0) : 0;
       const defaultApplyGst = gstEnabled ? 1 : 0;
+      const isPreBillRequest = String(session.status || '').toLowerCase() === 'open';
+      const finalGstPercent = !gstEnabled
+        ? 0
+        : isPreBillRequest
+          ? defaultGstPct
+          : Number(session.gst_percent || 0);
+      const finalApplyGst = !gstEnabled
+        ? 0
+        : isPreBillRequest
+          ? defaultApplyGst
+          : (session.apply_gst != null ? Number(session.apply_gst) : defaultApplyGst);
 
       res.json({
         session: {
@@ -4445,8 +4478,8 @@ async function startServer() {
           table_display_name: tableRow?.name || session.table_name || session.table_id,
           discount_amount:        Number(session.discount_amount || 0),
           service_charge_percent: Number(session.service_charge_percent || 0),
-          gst_percent:  gstEnabled ? (session.gst_percent != null ? Number(session.gst_percent) : defaultGstPct) : 0,
-          apply_gst:    gstEnabled ? (session.apply_gst != null ? Number(session.apply_gst) : defaultApplyGst) : 0,
+          gst_percent:  finalGstPercent,
+          apply_gst:    finalApplyGst,
           orders,
         },
         restaurant,
@@ -4923,11 +4956,27 @@ async function startServer() {
   });
 
   // Invoice status: update on SESSION invoice
+  // When invoice_status transitions to PRINTED or PAID we also cascade the
+  // status to every order in the session so the Live Kitchen Orders view
+  // (which excludes invoice_status='PRINTED') drops them automatically.
+  // Without this cascade, an owner who clicked Print in the BillView would
+  // see the order keep cluttering Live Kitchen long after billing.
   app.patch("/api/restaurant/:id/sessions/:token/invoice-status", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const { invoice_status } = req.body;
       const db = await getTenantDb(req.params.id);
       await db.run("UPDATE table_sessions SET invoice_status = ? WHERE session_token = ?", [invoice_status, req.params.token]);
+      // Cascade to child orders for terminal-ish states
+      const upper = String(invoice_status || '').toUpperCase();
+      if (upper === 'PRINTED' || upper === 'PAID') {
+        const sess = await db.get("SELECT id FROM table_sessions WHERE session_token = ?", [req.params.token]);
+        if (sess?.id) {
+          await db.run(
+            "UPDATE orders SET invoice_status = ? WHERE session_id = ? AND status != 'CANCELLED'",
+            [upper, sess.id]
+          );
+        }
+      }
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update session invoice status" });
@@ -5960,10 +6009,20 @@ async function startServer() {
     }
   });
 
+  // Roles allowed to manage staff inside a tenant. OWNER + MANAGER are the
+  // tenant-side admins; SUPER_ADMIN / CTO get the same access via ?restaurantId=
+  // for the cross-tenant Admin console.
+  const STAFF_MGMT_ROLES = ['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'];
+
   // Staff: Get Staff
   app.get("/api/owner/staff", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const db = await getTenantDb(req.user!.restaurantId);
+      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+        return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
+      }
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
+      const db = await getTenantDb(targetId);
       const staff = await db.query("SELECT id, login_id, name, role, phone, email, is_active FROM attendance_staff ORDER BY name");
       res.json(staff);
     } catch (err) {
@@ -5974,8 +6033,13 @@ async function startServer() {
   // Staff: Create Staff
   app.post("/api/owner/staff", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+        return res.status(403).json({ error: "Forbidden — staff management requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
+      }
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
       const { name, role, phone, email, loginId, password } = req.body;
-      const db = await getTenantDb(req.user!.restaurantId);
+      const db = await getTenantDb(targetId);
       const id = randomUUID();
 
       if (loginId && password) {
@@ -6005,12 +6069,21 @@ async function startServer() {
   // Staff: Reset Password
   app.post("/api/owner/staff/:id/reset-password", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      if (!STAFF_MGMT_ROLES.includes(req.user?.role ?? '')) {
+        return res.status(403).json({ error: "Forbidden — password reset requires OWNER, MANAGER, SUPER_ADMIN or CTO role" });
+      }
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
       const { newPassword } = req.body;
-      const db = await getTenantDb(req.user!.restaurantId);
+      if (!newPassword || String(newPassword).length < 6) {
+        return res.status(400).json({ error: "Password must be at least 6 characters" });
+      }
+      const db = await getTenantDb(targetId);
       const hashedPassword = await bcrypt.hash(newPassword, 12);
       await db.run("UPDATE attendance_staff SET password = ? WHERE id = ?", [hashedPassword, req.params.id]);
       res.json({ success: true });
     } catch (err) {
+      console.error("Reset staff password error:", err);
       res.status(500).json({ error: "Failed to reset password" });
     }
   });

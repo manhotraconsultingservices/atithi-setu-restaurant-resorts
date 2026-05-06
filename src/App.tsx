@@ -15388,6 +15388,17 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
       footerNote: 'Thank you for dining with us!',
     });
     openThermalPrint(html);
+    // Mark the session (and its child orders, via server cascade) as PRINTED
+    // so the orders leave the Live Kitchen Orders list — owner is done with
+    // them once the invoice has been printed. Fire-and-forget; print is the
+    // primary action and shouldn't be blocked by a slow PATCH.
+    if (session?.session_token) {
+      fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/invoice-status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ invoice_status: 'PRINTED' }),
+      }).catch(() => {});
+    }
   };
 
   const handleCloseSession = async () => {
