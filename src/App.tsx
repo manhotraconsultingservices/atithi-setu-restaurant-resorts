@@ -78,6 +78,55 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // re-saves the role permissions for every restaurant. Owners and managers
 // expect new platform features to appear automatically.
 const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY']);
+
+// ─── CSV helpers — shared by inventory module ─────────────────────────────────
+// downloadCsv / parseCsv used by Ingredients, Suppliers, POs, GRNs sub-views
+// for export + import. Handles quoted fields, embedded commas, escaped quotes.
+
+function csvEscape(v: any): string {
+  const s = v == null ? '' : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadCsv(filename: string, header: string[], rows: any[][]): void {
+  const lines = [header.join(','), ...rows.map(r => r.map(csvEscape).join(','))];
+  const csv = lines.join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });  // BOM for Excel ₹
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = '', inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
+      else inQuote = !inQuote;
+    } else if (c === ',' && !inQuote) { out.push(cur); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out.map(s => s.trim().replace(/^﻿/, ''));
+}
+
+function parseCsv(text: string): { headers: string[]; rows: Record<string, string>[] } {
+  // Strip BOM, split CRLF/LF tolerant
+  const clean = text.replace(/^﻿/, '');
+  const lines = clean.split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (lines.length < 2) return { headers: [], rows: [] };
+  const headers = parseCsvLine(lines[0]).map(h => h.toLowerCase().trim());
+  const rows = lines.slice(1).map(line => {
+    const vals = parseCsvLine(line);
+    const obj: Record<string, string> = {};
+    headers.forEach((h, i) => { obj[h] = (vals[i] ?? '').trim(); });
+    return obj;
+  });
+  return { headers, rows };
+}
 import { cn } from './lib/utils';
 import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
 import {
@@ -3411,6 +3460,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [startingCount, setStartingCount] = useState(false);
   // Recipe builder modal — opened from Menu Management for a specific menu item
   const [recipeBuilderItem, setRecipeBuilderItem] = useState<any | null>(null);
+  // CSV import preview state — shared modal for Ingredients + Suppliers
+  const [invCsvImport, setInvCsvImport] = useState<{
+    entity: 'ingredients' | 'suppliers';
+    rows: any[];   // each row has _selected + _isDuplicate flags
+    importing: boolean;
+  } | null>(null);
 
   // ── Audible + visual alerts for unacknowledged items (Phase 6) ────────────
   // Owner/Manager hears a chime every 4s and sees pulsing cards when:
@@ -4355,6 +4410,177 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (r.ok) setInventoryCounts(await r.json());
     } catch (e) { console.error('fetchInventoryCounts', e); }
   };
+  // ─── Inventory CSV export handlers ────────────────────────────────────────
+  const exportIngredientsCsv = () => {
+    const header = ['name','item_type','category','unit','current_stock_qty','reorder_point','par_level','default_unit_price','gst_percent','sku','notes'];
+    const rows = inventoryIngredients.map((i: any) => [
+      i.name, i.item_type, i.category || '', i.unit,
+      i.current_stock_qty, i.reorder_point, i.par_level,
+      i.default_unit_price ?? '', i.gst_percent ?? 0, i.sku || '', i.notes || '',
+    ]);
+    downloadCsv(`ingredients_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, rows);
+  };
+  const exportIngredientsTemplate = () => {
+    const header = ['name','item_type','category','unit','current_stock_qty','reorder_point','par_level','default_unit_price','gst_percent','sku','notes'];
+    const sample = [
+      ['Paneer','RAW','Dairy','kg',5,1,5,400,5,'',''],
+      ['Chicken (boneless)','RAW','Meat','kg',8,2,12,280,0,'',''],
+      ['Mineral Water 1L','PACKAGED','Beverages','bottle',36,12,48,20,18,'',''],
+    ];
+    downloadCsv('ingredients_template.csv', header, sample);
+  };
+
+  const exportSuppliersCsv = () => {
+    const header = ['name','contact_name','phone','email','address','gst_number','lead_time_days','payment_terms','notes'];
+    const rows = inventorySuppliers.map((s: any) => [
+      s.name, s.contact_name || '', s.phone || '', s.email || '',
+      s.address || '', s.gst_number || '', s.lead_time_days ?? 1,
+      s.payment_terms || '', s.notes || '',
+    ]);
+    downloadCsv(`suppliers_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, rows);
+  };
+  const exportSuppliersTemplate = () => {
+    const header = ['name','contact_name','phone','email','address','gst_number','lead_time_days','payment_terms','notes'];
+    const sample = [
+      ['Hari Dairy','Hari Singh','+91 98765 11001','hari@haridairy.in','Sector 14, Gurgaon','07AAACR1001A1Z1',1,'NET-7',''],
+      ['Mandi Daily','Ram Kumar','+91 98765 11003','','Azadpur Mandi','',1,'COD','Daily morning vegetables'],
+    ];
+    downloadCsv('suppliers_template.csv', header, sample);
+  };
+
+  // PO export — one row per line item with header fields repeated
+  const exportPOsCsv = async () => {
+    const rows: any[][] = [];
+    for (const po of inventoryPOs) {
+      // Fetch line items for each PO
+      const r = await fetch(`/api/inventory/purchase-orders/${po.id}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!r.ok) continue;
+      const detail = await r.json();
+      const items = detail.items || [];
+      if (items.length === 0) {
+        rows.push([po.id, po.supplier_name || '', po.status, po.expected_delivery_date || '', po.raised_at || '', '', '', '', '', '', '', po.notes || '']);
+        continue;
+      }
+      for (const it of items) {
+        rows.push([
+          po.id, po.supplier_name || '', po.status, po.expected_delivery_date || '', po.raised_at || '',
+          it.ingredient_name || '', it.qty_ordered, it.unit, it.unit_price,
+          it.qty_received || 0, it.is_fully_received ? 'Y' : 'N',
+          po.notes || '',
+        ]);
+      }
+    }
+    const header = ['po_id','supplier_name','status','expected_delivery_date','raised_at','ingredient_name','qty_ordered','unit','unit_price','qty_received','fully_received','notes'];
+    downloadCsv(`purchase_orders_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, rows);
+  };
+
+  // GRN export — one row per line item
+  const exportGRNsCsv = async () => {
+    const rows: any[][] = [];
+    for (const g of inventoryGRNs) {
+      const r = await fetch(`/api/inventory/grn/${g.id}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!r.ok) continue;
+      const detail = await r.json();
+      const items = detail.items || [];
+      if (items.length === 0) {
+        rows.push([g.id, g.po_id || '', g.supplier_name || '', g.received_at || '', g.bill_number || '', '', '', '', '', '', '', '', g.notes || '']);
+        continue;
+      }
+      for (const it of items) {
+        rows.push([
+          g.id, g.po_id || '', g.supplier_name || '', g.received_at || '', g.bill_number || '',
+          it.ingredient_name || '', it.qty_received, it.unit, it.unit_price,
+          it.batch_number || '', it.expiry_date || '', it.condition || 'GOOD',
+          g.notes || '',
+        ]);
+      }
+    }
+    const header = ['grn_id','po_id','supplier_name','received_at','bill_number','ingredient_name','qty_received','unit','unit_price','batch_number','expiry_date','condition','notes'];
+    downloadCsv(`goods_receipts_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, rows);
+  };
+
+  // ─── Inventory CSV import handlers ────────────────────────────────────────
+  // Parses + previews. Confirms via the modal — actual POSTs happen on confirm.
+  const handleIngredientsCsvFile = async (file: File) => {
+    const text = await file.text();
+    const { rows } = parseCsv(text);
+    if (rows.length === 0) { alert('No rows found in CSV'); return; }
+    const existingNames = new Set(inventoryIngredients.map((i: any) => String(i.name).toLowerCase()));
+    const previewRows = rows
+      .filter(r => r.name && r.name.trim())
+      .map(r => ({
+        ...r,
+        _isDuplicate: existingNames.has(String(r.name).toLowerCase()),
+        _selected: !existingNames.has(String(r.name).toLowerCase()),
+      }));
+    if (previewRows.length === 0) { alert('No valid rows (need at least a name column)'); return; }
+    setInvCsvImport({ entity: 'ingredients', rows: previewRows, importing: false });
+  };
+  const handleSuppliersCsvFile = async (file: File) => {
+    const text = await file.text();
+    const { rows } = parseCsv(text);
+    if (rows.length === 0) { alert('No rows found in CSV'); return; }
+    const existingNames = new Set(inventorySuppliers.map((s: any) => String(s.name).toLowerCase()));
+    const previewRows = rows
+      .filter(r => r.name && r.name.trim())
+      .map(r => ({
+        ...r,
+        _isDuplicate: existingNames.has(String(r.name).toLowerCase()),
+        _selected: !existingNames.has(String(r.name).toLowerCase()),
+      }));
+    if (previewRows.length === 0) { alert('No valid rows (need at least a name column)'); return; }
+    setInvCsvImport({ entity: 'suppliers', rows: previewRows, importing: false });
+  };
+  const confirmInventoryCsvImport = async () => {
+    if (!invCsvImport) return;
+    const toImport = invCsvImport.rows.filter(r => r._selected && !r._isDuplicate);
+    if (toImport.length === 0) { alert('No items selected'); return; }
+    setInvCsvImport({ ...invCsvImport, importing: true });
+    let ok = 0, failed = 0;
+    for (const r of toImport) {
+      const url = invCsvImport.entity === 'ingredients'
+        ? `/api/restaurant/${restaurantId}/inventory/ingredients`
+        : `/api/restaurant/${restaurantId}/inventory/suppliers`;
+      const body: any = invCsvImport.entity === 'ingredients' ? {
+        name: r.name,
+        item_type: (r.item_type || 'RAW').toUpperCase(),
+        category: r.category || null,
+        unit: (r.unit || 'unit').toLowerCase(),
+        current_stock_qty: Number(r.current_stock_qty || 0),
+        reorder_point: Number(r.reorder_point || 0),
+        par_level: Number(r.par_level || 0),
+        default_unit_price: r.default_unit_price ? Number(r.default_unit_price) : null,
+        gst_percent: Number(r.gst_percent || 0),
+        sku: r.sku || null,
+        notes: r.notes || null,
+      } : {
+        name: r.name,
+        contact_name: r.contact_name || null,
+        phone: r.phone || null,
+        email: r.email || null,
+        address: r.address || null,
+        gst_number: r.gst_number || null,
+        lead_time_days: Number(r.lead_time_days || 1),
+        payment_terms: r.payment_terms || null,
+        notes: r.notes || null,
+      };
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) ok++; else failed++;
+    }
+    setInvCsvImport(null);
+    if (invCsvImport.entity === 'ingredients') fetchInventoryIngredients();
+    else fetchInventorySuppliers();
+    alert(`Import complete — ${ok} added, ${failed} failed`);
+  };
+
   // Coordinated load for the active sub-tab. Always loads ingredients (everything depends on them).
   const fetchInventoryForSubTab = async () => {
     setInventoryLoading(true);
@@ -5694,12 +5920,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   {inventoryIngredients.length} item{inventoryIngredients.length !== 1 ? 's' : ''} ·{' '}
                   {inventoryIngredients.filter((i: any) => Number(i.current_stock_qty) <= Number(i.reorder_point) && Number(i.reorder_point) > 0).length} below reorder
                 </p>
-                <button
-                  onClick={() => setEditingIngredient({})}
-                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
-                >
-                  <Plus size={14} /> Add Ingredient
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button onClick={exportIngredientsTemplate} title="Download CSV template"
+                    className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all">
+                    <Download size={14}/> Template
+                  </button>
+                  <button onClick={exportIngredientsCsv} disabled={inventoryIngredients.length === 0} title="Export all ingredients as CSV"
+                    className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all disabled:opacity-50">
+                    <Download size={14}/> Export CSV
+                  </button>
+                  <label className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all cursor-pointer">
+                    <Upload size={14}/> Import CSV
+                    <input type="file" accept=".csv" className="hidden"
+                      onChange={e => { if (e.target.files?.[0]) handleIngredientsCsvFile(e.target.files[0]); e.target.value=''; }} />
+                  </label>
+                  <button
+                    onClick={() => setEditingIngredient({})}
+                    className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                  >
+                    <Plus size={14} /> Add Ingredient
+                  </button>
+                </div>
               </div>
 
               {inventoryIngredients.length === 0 ? (
@@ -5784,14 +6025,29 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* ── SUPPLIERS sub-view ── */}
           {inventorySubTab === 'SUPPLIERS' && (
             <div className="space-y-4">
-              <div className="flex justify-between items-center">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <p className="text-sm text-[#6b5d52]">{inventorySuppliers.length} supplier{inventorySuppliers.length !== 1 ? 's' : ''}</p>
-                <button
-                  onClick={() => setEditingSupplier({})}
-                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
-                >
-                  <Plus size={14} /> Add Supplier
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button onClick={exportSuppliersTemplate} title="Download CSV template"
+                    className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all">
+                    <Download size={14}/> Template
+                  </button>
+                  <button onClick={exportSuppliersCsv} disabled={inventorySuppliers.length === 0} title="Export all suppliers as CSV"
+                    className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all disabled:opacity-50">
+                    <Download size={14}/> Export CSV
+                  </button>
+                  <label className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all cursor-pointer">
+                    <Upload size={14}/> Import CSV
+                    <input type="file" accept=".csv" className="hidden"
+                      onChange={e => { if (e.target.files?.[0]) handleSuppliersCsvFile(e.target.files[0]); e.target.value=''; }} />
+                  </label>
+                  <button
+                    onClick={() => setEditingSupplier({})}
+                    className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                  >
+                    <Plus size={14} /> Add Supplier
+                  </button>
+                </div>
               </div>
 
               {inventorySuppliers.length === 0 ? (
@@ -5845,16 +6101,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     >{s}</button>
                   ))}
                 </div>
-                <button
-                  onClick={() => {
-                    if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
-                    if (inventoryIngredients.length === 0) { alert('Add at least one ingredient first'); return; }
-                    setCreatingPO(true);
-                  }}
-                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
-                >
-                  <Plus size={14} /> Raise PO
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button onClick={exportPOsCsv} disabled={inventoryPOs.length === 0} title="Export all POs (with line items) as CSV"
+                    className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all disabled:opacity-50">
+                    <Download size={14}/> Export CSV
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
+                      if (inventoryIngredients.length === 0) { alert('Add at least one ingredient first'); return; }
+                      setCreatingPO(true);
+                    }}
+                    className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                  >
+                    <Plus size={14} /> Raise PO
+                  </button>
+                </div>
               </div>
 
               {inventoryPOs.length === 0 ? (
@@ -5960,17 +6222,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* ── GOODS RECEIPTS sub-view ── */}
           {inventorySubTab === 'GOODS_RECEIPTS' && (
             <div className="space-y-4">
-              <div className="flex justify-between items-center">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <p className="text-sm text-[#6b5d52]">{inventoryGRNs.length} receipt{inventoryGRNs.length !== 1 ? 's' : ''}</p>
-                <button
-                  onClick={() => {
-                    if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
-                    setCreatingGRN({});
-                  }}
-                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
-                >
-                  <Plus size={14} /> Record Receipt
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button onClick={exportGRNsCsv} disabled={inventoryGRNs.length === 0} title="Export all GRNs (with line items) as CSV"
+                    className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all disabled:opacity-50">
+                    <Download size={14}/> Export CSV
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
+                      setCreatingGRN({});
+                    }}
+                    className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                  >
+                    <Plus size={14} /> Record Receipt
+                  </button>
+                </div>
               </div>
 
               {inventoryGRNs.length === 0 ? (
@@ -6287,6 +6555,116 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               onUpdated={(refreshed) => setViewingCount(refreshed)}
               onCompleted={() => { setViewingCount(null); fetchInventoryCounts(); fetchInventoryIngredients(); }}
             />
+          )}
+
+          {/* ─── CSV Import Preview Modal — shared for Ingredients + Suppliers ─── */}
+          {invCsvImport && (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                className="bg-white rounded-[32px] shadow-2xl w-full max-w-4xl overflow-hidden my-auto"
+              >
+                <div className="p-6 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
+                  <div>
+                    <h3 className="text-2xl font-bold font-serif">Import {invCsvImport.entity === 'ingredients' ? 'Ingredients' : 'Suppliers'} from CSV</h3>
+                    <p className="text-sm text-[#6b5d52]">
+                      {invCsvImport.rows.filter(r => r._selected && !r._isDuplicate).length} ready ·{' '}
+                      <span className="text-amber-600 font-semibold">{invCsvImport.rows.filter(r => r._isDuplicate).length} duplicates</span>{' '}
+                      ({invCsvImport.rows.length} total in file)
+                    </p>
+                  </div>
+                  <button onClick={() => setInvCsvImport(null)} className="p-2 hover:bg-white rounded-full"><X size={22}/></button>
+                </div>
+                <div className="p-6 max-h-[65vh] overflow-y-auto">
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10 sticky top-0">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest text-[#6b5d52]">
+                            <input
+                              type="checkbox"
+                              checked={invCsvImport.rows.every(r => r._isDuplicate || r._selected)}
+                              onChange={e => setInvCsvImport({
+                                ...invCsvImport,
+                                rows: invCsvImport.rows.map(r => r._isDuplicate ? r : { ...r, _selected: e.target.checked }),
+                              })}
+                            />
+                          </th>
+                          <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest text-[#6b5d52]">Name</th>
+                          {invCsvImport.entity === 'ingredients' ? (
+                            <>
+                              <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest text-[#6b5d52]">Type</th>
+                              <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest text-[#6b5d52]">Unit</th>
+                              <th className="px-3 py-2 text-right text-[10px] uppercase tracking-widest text-[#6b5d52]">Stock</th>
+                              <th className="px-3 py-2 text-right text-[10px] uppercase tracking-widest text-[#6b5d52]">Reorder</th>
+                              <th className="px-3 py-2 text-right text-[10px] uppercase tracking-widest text-[#6b5d52]">₹/unit</th>
+                            </>
+                          ) : (
+                            <>
+                              <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest text-[#6b5d52]">Contact</th>
+                              <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest text-[#6b5d52]">Phone</th>
+                              <th className="px-3 py-2 text-right text-[10px] uppercase tracking-widest text-[#6b5d52]">Lead Days</th>
+                              <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest text-[#6b5d52]">Terms</th>
+                            </>
+                          )}
+                          <th className="px-3 py-2 text-left text-[10px] uppercase tracking-widest text-[#6b5d52]">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#cc5a16]/5">
+                        {invCsvImport.rows.map((r, idx) => (
+                          <tr key={idx} className={cn(r._isDuplicate && 'bg-amber-50/40')}>
+                            <td className="px-3 py-2">
+                              <input
+                                type="checkbox"
+                                disabled={r._isDuplicate}
+                                checked={r._selected}
+                                onChange={e => setInvCsvImport({
+                                  ...invCsvImport,
+                                  rows: invCsvImport.rows.map((x, i) => i === idx ? { ...x, _selected: e.target.checked } : x),
+                                })}
+                              />
+                            </td>
+                            <td className="px-3 py-2 font-semibold">{r.name}</td>
+                            {invCsvImport.entity === 'ingredients' ? (
+                              <>
+                                <td className="px-3 py-2 text-xs">{r.item_type || 'RAW'}</td>
+                                <td className="px-3 py-2 text-xs">{r.unit || 'unit'}</td>
+                                <td className="px-3 py-2 text-right font-mono">{r.current_stock_qty || '0'}</td>
+                                <td className="px-3 py-2 text-right font-mono">{r.reorder_point || '0'}</td>
+                                <td className="px-3 py-2 text-right font-mono">{r.default_unit_price || '—'}</td>
+                              </>
+                            ) : (
+                              <>
+                                <td className="px-3 py-2 text-xs">{r.contact_name || '—'}</td>
+                                <td className="px-3 py-2 text-xs">{r.phone || '—'}</td>
+                                <td className="px-3 py-2 text-right font-mono">{r.lead_time_days || '1'}</td>
+                                <td className="px-3 py-2 text-xs">{r.payment_terms || '—'}</td>
+                              </>
+                            )}
+                            <td className="px-3 py-2">
+                              {r._isDuplicate
+                                ? <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded uppercase">Duplicate</span>
+                                : <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded uppercase">New</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex justify-end gap-2 pt-4">
+                    <button onClick={() => setInvCsvImport(null)} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+                    <button
+                      onClick={confirmInventoryCsvImport}
+                      disabled={invCsvImport.importing || invCsvImport.rows.filter(r => r._selected && !r._isDuplicate).length === 0}
+                      className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60"
+                    >
+                      {invCsvImport.importing ? 'Importing…' : `Import ${invCsvImport.rows.filter(r => r._selected && !r._isDuplicate).length} ${invCsvImport.entity}`}
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
           )}
         </div>
       ) : activeTab === 'BOOKINGS' ? (
