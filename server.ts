@@ -11,6 +11,7 @@ import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNext
 import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, buildNotificationContent } from "./notificationService.ts";
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
+import { generatePOPdf, buildPOEmailBody, type POPdfData } from "./poService.ts";
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
 import { provisionTenantSubdomain, deprovisionTenantSubdomain, cloudflareIsConfigured } from "./cloudflareService.ts";
 import { downloadFromDrive } from "./googleDriveService.ts";
@@ -2875,6 +2876,27 @@ async function startServer() {
     }
   });
 
+  // Bulk recipe export — every recipe row joined with menu_item + ingredient names.
+  // One call instead of 200+ for tenants with large menus.
+  app.get("/api/restaurant/:id/recipes", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT r.menu_item_id, m.name AS menu_item_name, m.category AS menu_item_category,
+                r.ingredient_id, i.name AS ingredient_name, i.category AS ingredient_category, i.unit AS ingredient_unit,
+                r.qty_per_serving, r.unit AS recipe_unit, r.size_variant, r.notes
+           FROM recipes r
+           LEFT JOIN menu m ON m.id = r.menu_item_id
+           LEFT JOIN ingredients i ON i.id = r.ingredient_id
+          ORDER BY m.category, m.name, i.name`
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("Bulk recipes export error:", err);
+      res.status(500).json({ error: "Failed to fetch recipes" });
+    }
+  });
+
   // ═════════════════════════════════════════════════════════════════════════
   // ── Inventory Management — Phase 2: Suppliers + PO + GRN ─────────────────
   // ═════════════════════════════════════════════════════════════════════════
@@ -3197,10 +3219,132 @@ async function startServer() {
         "UPDATE purchase_orders SET status = 'SENT', sent_at = CURRENT_TIMESTAMP WHERE id = ?",
         [req.params.id]
       );
-      // TODO Phase 4: email PO PDF to supplier email if provided
       res.json({ success: true, status: 'SENT' });
     } catch (err) {
       res.status(500).json({ error: "Failed to send PO" });
+    }
+  });
+
+  // ─── PO PDF + Email ──────────────────────────────────────────────────────
+  // Helper: hydrate full PO data (header + items + supplier + restaurant) for
+  // PDF generation. Used by both the download and email endpoints.
+  const hydratePOForPdf = async (db: DbInterface, poId: string, restaurantId: string): Promise<POPdfData | null> => {
+    const po: any = await db.get(
+      `SELECT po.*, s.name AS supplier_name, s.contact_name AS supplier_contact_name,
+              s.phone AS supplier_phone, s.email AS supplier_email,
+              s.address AS supplier_address, s.gst_number AS supplier_gstin,
+              s.lead_time_days AS supplier_lead_time_days,
+              s.payment_terms AS supplier_payment_terms
+         FROM purchase_orders po
+         LEFT JOIN suppliers s ON s.id = po.supplier_id
+        WHERE po.id = ?`,
+      [poId]
+    );
+    if (!po) return null;
+    const items: any[] = await db.query(
+      `SELECT poi.qty_ordered, poi.unit, poi.unit_price,
+              i.name AS ingredient_name, i.gst_percent
+         FROM purchase_order_items poi
+         LEFT JOIN ingredients i ON i.id = poi.ingredient_id
+        WHERE poi.po_id = ?
+        ORDER BY i.name`,
+      [poId]
+    );
+    const restaurant: any = await centralDb.get(
+      `SELECT name, gst_number, upi_id FROM restaurants WHERE id = ?`,
+      [restaurantId]
+    );
+    return {
+      po_id: po.id,
+      status: po.status,
+      raised_at: po.raised_at,
+      expected_delivery_date: po.expected_delivery_date,
+      notes: po.notes,
+      restaurant_name: restaurant?.name || 'Atithi-Setu',
+      restaurant_address: null,
+      restaurant_phone: null,
+      restaurant_email: null,
+      restaurant_gstin: restaurant?.gst_number || null,
+      supplier_name: po.supplier_name || '',
+      supplier_contact_name: po.supplier_contact_name,
+      supplier_phone: po.supplier_phone,
+      supplier_email: po.supplier_email,
+      supplier_address: po.supplier_address,
+      supplier_gstin: po.supplier_gstin,
+      supplier_lead_time_days: po.supplier_lead_time_days,
+      supplier_payment_terms: po.supplier_payment_terms,
+      items: items.map((it: any) => {
+        const qty = Number(it.qty_ordered);
+        const price = Number(it.unit_price);
+        const lineTotal = qty * price;
+        return {
+          ingredient_name: it.ingredient_name || '—',
+          qty_ordered: qty,
+          unit: it.unit,
+          unit_price: price,
+          line_total: lineTotal,
+          gst_percent: Number(it.gst_percent || 0),
+        };
+      }),
+      total_amount: Number(po.total_amount || 0),
+      gst_amount: Number(po.gst_amount || 0),
+      grand_total: Number(po.grand_total || 0),
+    };
+  };
+
+  // Download PO as PDF
+  app.get("/api/inventory/purchase-orders/:id/pdf", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId!);
+      const data = await hydratePOForPdf(db, req.params.id, req.user!.restaurantId!);
+      if (!data) return res.status(404).json({ error: "PO not found" });
+      const pdf = await generatePOPdf(data);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${data.po_id}.pdf"`);
+      res.send(pdf);
+    } catch (err) {
+      console.error("PO PDF error:", err);
+      res.status(500).json({ error: "Failed to generate PDF" });
+    }
+  });
+
+  // Email PO to supplier with PDF attachment
+  // Body: { to?: string, cc?: string, message?: string }   // overrides supplier.email if 'to' is provided
+  app.post("/api/inventory/purchase-orders/:id/email", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId!);
+      const data = await hydratePOForPdf(db, req.params.id, req.user!.restaurantId!);
+      if (!data) return res.status(404).json({ error: "PO not found" });
+
+      const recipient = String(req.body?.to || data.supplier_email || '').trim();
+      if (!recipient) {
+        return res.status(400).json({ error: "No recipient — supplier has no email on file. Provide 'to' in the request body." });
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+        return res.status(400).json({ error: "Invalid email address" });
+      }
+
+      const pdf = await generatePOPdf(data);
+      const { subject, text, html } = buildPOEmailBody(data);
+      const customMsg = String(req.body?.message || '').trim();
+      const finalText = customMsg ? `${customMsg}\n\n${text}` : text;
+      const finalHtml = customMsg
+        ? `<p style="white-space:pre-line;color:#1a1208">${customMsg}</p><hr style="border:none;border-top:1px solid #e5d3c3"/>${html}`
+        : html;
+
+      // Reuse existing sendEmail with attachment via dynamic import (matches
+      // existing notification-service usage pattern)
+      const { sendEmail } = await import('./notificationService.ts');
+      await sendEmail(recipient, subject, finalText, finalHtml, [{
+        filename: `${data.po_id}.pdf`,
+        content: pdf,
+        contentType: 'application/pdf',
+      }]);
+
+      res.json({ success: true, sent_to: recipient });
+    } catch (err: any) {
+      console.error("PO email error:", err);
+      res.status(500).json({ error: "Failed to send PO email", detail: err?.message });
     }
   });
 
@@ -8887,13 +9031,15 @@ async function startServer() {
         "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'"
       );
       let totalAlerts = 0;
+      let totalAutoPOs = 0;
       for (const r of restaurants) {
         try {
           const db = await getTenantDb(r.id);
           // Find ingredients below reorder + their daily forecast for days_of_cover
           const lowRows: any[] = await db.query(
             `SELECT i.id, i.name, i.unit, i.current_stock_qty, i.reorder_point, i.par_level,
-                    i.default_unit_price, COALESCE(f.forecast_qty, 0) AS daily_forecast,
+                    i.default_unit_price, i.gst_percent, i.default_supplier_id,
+                    COALESCE(f.forecast_qty, 0) AS daily_forecast,
                     s.name AS supplier_name, s.phone AS supplier_phone, s.lead_time_days
                FROM ingredients i
                LEFT JOIN consumption_forecasts f
@@ -8903,6 +9049,88 @@ async function startServer() {
                 AND i.reorder_point > 0
                 AND i.current_stock_qty <= i.reorder_point`
           );
+
+          // ── Auto-PO generation ── group low-stock items by default supplier
+          // and create ONE draft PO per supplier covering all their low items.
+          // Skip ingredients already on an open PO (avoid duplicates) or
+          // without a default supplier (owner must raise manually).
+          const supplierGroups: Record<string, any[]> = {};
+          const ingPOMap = new Map<string, string>();  // ing.id → existing po.id (for notification)
+          for (const ing of lowRows) {
+            // Check if this ingredient is already on an open PO
+            const onOrder: any = await db.get(
+              `SELECT po.id FROM purchase_order_items poi
+                 JOIN purchase_orders po ON po.id = poi.po_id
+                WHERE poi.ingredient_id = ?
+                  AND po.status IN ('DRAFT', 'SENT', 'PARTIAL')
+                  AND poi.is_fully_received = 0
+                LIMIT 1`,
+              [ing.id]
+            ).catch(() => null);
+            if (onOrder?.id) {
+              ingPOMap.set(ing.id, onOrder.id);
+              continue;  // already covered by an open PO
+            }
+            if (!ing.default_supplier_id) continue;  // no auto-PO without a default supplier
+            (supplierGroups[ing.default_supplier_id] = supplierGroups[ing.default_supplier_id] || []).push(ing);
+          }
+
+          // Create DRAFT POs per supplier
+          for (const [supplierId, items] of Object.entries(supplierGroups)) {
+            let totalAmount = 0, gstAmount = 0;
+            const lineItems: any[] = [];
+            for (const ing of items) {
+              const qty = Math.max(0, Number(ing.par_level || 0) - Number(ing.current_stock_qty));
+              if (qty <= 0) continue;
+              const price = Number(ing.default_unit_price || 0);
+              const lineSub = qty * price;
+              const lineGst = lineSub * (Number(ing.gst_percent || 0) / 100);
+              totalAmount += lineSub;
+              gstAmount += lineGst;
+              lineItems.push({
+                ingredient_id: ing.id,
+                qty_ordered: qty,
+                unit: ing.unit,
+                unit_price: price,
+              });
+            }
+            if (lineItems.length === 0) continue;
+
+            const seq = await getNextTenantSequence(db, 'po');
+            const poId = `PO-${String(seq).padStart(4, '0')}`;
+            const grandTotal = totalAmount + gstAmount;
+            // Default expected delivery = today + lead_time_days
+            const lt = Number(items[0].lead_time_days || 1);
+            const expectedDate = new Date(Date.now() + lt * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+            await db.run(
+              `INSERT INTO purchase_orders
+                (id, supplier_id, status, expected_delivery_date,
+                 total_amount, gst_amount, grand_total, notes)
+               VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?)`,
+              [
+                poId, supplierId, expectedDate,
+                totalAmount, gstAmount, grandTotal,
+                `Auto-generated from low-stock alert (${lineItems.length} ingredients). Review and Send when ready.`,
+              ]
+            ).catch(() => {});
+            for (const it of lineItems) {
+              await db.run(
+                `INSERT INTO purchase_order_items
+                  (id, po_id, ingredient_id, qty_ordered, unit, unit_price)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [
+                  `POI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+                  poId, it.ingredient_id, it.qty_ordered, it.unit, it.unit_price,
+                ]
+              ).catch(() => {});
+              ingPOMap.set(it.ingredient_id, poId);
+            }
+            totalAutoPOs++;
+            console.log(`[inv-stocklow] ${r.id}: auto-created ${poId} for ${items[0].supplier_name} (${lineItems.length} items, ₹${grandTotal.toFixed(0)})`);
+          }
+
+          // Fire notifications — now with auto-PO id attached if applicable
           for (const ing of lowRows) {
             const daysOfCover = Number(ing.daily_forecast) > 0
               ? Number(ing.current_stock_qty) / Number(ing.daily_forecast)
@@ -8921,6 +9149,7 @@ async function startServer() {
               supplierPhone: ing.supplier_phone,
               leadTimeDays: leadTime,
               suggestedOrderQty: Math.max(0, Number(ing.par_level || 0) - Number(ing.current_stock_qty)),
+              autoPOId: ingPOMap.get(ing.id) || null,  // existing or just-created
             }).catch(() => {});
             totalAlerts++;
           }
@@ -8928,7 +9157,7 @@ async function startServer() {
           console.error(`[inv-stocklow] tenant ${r.id} error:`, tenantErr);
         }
       }
-      console.log(`[inv-stocklow] Done — ${totalAlerts} STOCK_LOW/CRITICAL alerts fired`);
+      console.log(`[inv-stocklow] Done — ${totalAlerts} alerts fired, ${totalAutoPOs} DRAFT POs auto-generated`);
     } catch (err) {
       console.error('[inv-stocklow] cron error:', err);
     }

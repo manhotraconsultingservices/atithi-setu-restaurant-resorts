@@ -180,6 +180,9 @@ export function buildNotificationContent(
       const suggested = data.suggestedOrderQty
         ? `Suggested order: ${Number(data.suggestedOrderQty).toFixed(2)} ${data.unit}`
         : '';
+      const autoPOLine = data.autoPOId
+        ? `📋 DRAFT PO ${data.autoPOId} ready — review and Send to supplier.`
+        : '';
       const icon = isCritical ? '🚨' : '⚠️';
       const title = isCritical ? 'STOCK CRITICAL' : 'Stock Low';
       const subtitle = isCritical
@@ -195,6 +198,7 @@ export function buildNotificationContent(
           `Daily use:     ${Number(data.dailyForecast).toFixed(2)} ${data.unit}/day · ${days}\n` +
           `Supplier:      ${supplierLine}\n` +
           (suggested ? suggested + '\n' : '') +
+          (autoPOLine ? '\n' + autoPOLine + '\n' : '') +
           (isCritical ? '\n⚠️ Order TODAY to avoid stock-out.' : ''),
         html:
           `<h2 style="color:${isCritical ? '#dc2626' : '#d97706'}">${icon} ${title}</h2>` +
@@ -206,6 +210,7 @@ export function buildNotificationContent(
           `<tr><td style="color:#6b5d52">Daily forecast</td><td>${Number(data.dailyForecast).toFixed(2)} ${data.unit}/day · ${days}</td></tr>` +
           `<tr><td style="color:#6b5d52">Supplier</td><td>${supplierLine}</td></tr>` +
           (suggested ? `<tr><td style="color:#6b5d52">Suggested order</td><td><strong>${Number(data.suggestedOrderQty).toFixed(2)} ${data.unit}</strong></td></tr>` : '') +
+          (autoPOLine ? `<tr><td style="color:#6b5d52">Auto-PO</td><td><strong style="color:#0E7490">📋 ${data.autoPOId} ready — review &amp; Send</strong></td></tr>` : '') +
           `</table>` +
           (isCritical ? `<p style="color:#dc2626;font-weight:bold;margin-top:12px">Order TODAY to avoid stock-out.</p>` : ''),
       };

@@ -3469,6 +3469,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Phase 4: forecasting dashboard
   const [inventoryDashboard, setInventoryDashboard] = useState<any | null>(null);
   const [forecastHorizon, setForecastHorizon] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+  // Onboarding wizard — shown on empty inventory or via manual launch
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   // ── Audible + visual alerts for unacknowledged items (Phase 6) ────────────
   // Owner/Manager hears a chime every 4s and sees pulsing cards when:
@@ -5314,6 +5316,106 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     alert(`Import complete: ${imported} added${failed > 0 ? `, ${failed} failed` : ''}.`);
   };
 
+  // ── Recipe CSV Template / Export / Import ────────────────────────────────
+  // Format: one row per (menu_item, ingredient) pair. Multi-line CSVs are
+  // grouped by menu_item_name on import and PUT atomically per item.
+  const handleRecipeTemplateCsv = () => {
+    const header = ['menu_item_name', 'ingredient_name', 'qty_per_serving', 'unit', 'size_variant', 'notes'];
+    const sample = [
+      ['Butter Chicken', 'Chicken (boneless)', 200, 'g', 'BOTH', ''],
+      ['Butter Chicken', 'Cream', 50, 'ml', 'BOTH', ''],
+      ['Butter Chicken', 'Butter', 30, 'g', 'BOTH', ''],
+      ['Butter Chicken', 'Tomato', 100, 'g', 'BOTH', ''],
+      ['Garlic Naan', 'Maida (Refined Flour)', 100, 'g', 'BOTH', ''],
+      ['Garlic Naan', 'Butter', 6, 'g', 'BOTH', ''],
+      ['Garlic Naan', 'Garlic', 5, 'g', 'BOTH', ''],
+    ];
+    downloadCsv('recipes_template.csv', header, sample);
+  };
+  const handleRecipeExportCsv = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/recipes`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!r.ok) { alert('Failed to fetch recipes'); return; }
+      const rows: any[] = await r.json();
+      if (rows.length === 0) { alert('No recipes to export — define some recipes first.'); return; }
+      const header = ['menu_item_name', 'ingredient_name', 'qty_per_serving', 'unit', 'size_variant', 'notes'];
+      const csvRows = rows.map(r => [
+        r.menu_item_name || '',
+        r.ingredient_name || '',
+        r.qty_per_serving,
+        r.recipe_unit || r.ingredient_unit || 'g',
+        r.size_variant || 'BOTH',
+        r.notes || '',
+      ]);
+      downloadCsv(`recipes_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, csvRows);
+    } catch (e) {
+      alert('Recipe export failed: ' + (e as any).message);
+    }
+  };
+  const handleRecipeCsvFile = async (file: File) => {
+    const text = await file.text();
+    const { rows } = parseCsv(text);
+    if (rows.length === 0) { alert('No rows found in CSV'); return; }
+
+    // Group by menu_item_name (case-insensitive)
+    const groups: Record<string, any[]> = {};
+    for (const r of rows) {
+      const key = String(r.menu_item_name || '').trim().toLowerCase();
+      if (!key || !r.ingredient_name) continue;
+      (groups[key] = groups[key] || []).push(r);
+    }
+    const totalGroups = Object.keys(groups).length;
+    if (totalGroups === 0) { alert('No rows with menu_item_name + ingredient_name found.'); return; }
+
+    // Pre-flight ingredient fetch (resolve names → ids)
+    if (inventoryIngredients.length === 0) await fetchInventoryIngredients();
+    const ingByName = new Map<string, any>();
+    inventoryIngredients.forEach((i: any) => ingByName.set(String(i.name).toLowerCase(), i));
+    const menuByName = new Map<string, any>();
+    menu.forEach((m: any) => menuByName.set(String(m.name).toLowerCase(), m));
+
+    if (!confirm(`Import recipes for ${totalGroups} menu item(s)? Existing recipes for these items will be REPLACED.`)) return;
+
+    let saved = 0, skippedMenu = 0, skippedItems = 0, failed = 0;
+    for (const [menuName, lines] of Object.entries(groups)) {
+      const mItem = menuByName.get(menuName);
+      if (!mItem) { skippedMenu++; continue; }
+      const items = lines.map(l => {
+        const ingName = String(l.ingredient_name || '').trim().toLowerCase();
+        const ing = ingByName.get(ingName);
+        if (!ing) { skippedItems++; return null; }
+        const qty = Number(l.qty_per_serving || 0);
+        if (!Number.isFinite(qty) || qty <= 0) return null;
+        const sizeVariant = ['BOTH', 'FULL', 'HALF'].includes(String(l.size_variant || '').toUpperCase())
+          ? String(l.size_variant).toUpperCase() : 'BOTH';
+        return {
+          ingredient_id: ing.id,
+          qty_per_serving: qty,
+          unit: String(l.unit || ing.unit || 'g').toLowerCase(),
+          size_variant: sizeVariant,
+          notes: l.notes || null,
+        };
+      }).filter(Boolean);
+      if (items.length === 0) { failed++; continue; }
+      const r = await fetch(`/api/restaurant/${restaurantId}/menu/${mItem.id}/recipe`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ items }),
+      });
+      if (r.ok) saved++; else failed++;
+    }
+    alert(
+      `Recipe import complete:\n` +
+      `✓ ${saved} menu items got recipes saved\n` +
+      `${skippedMenu > 0 ? `⏭ ${skippedMenu} menu item names not found\n` : ''}` +
+      `${skippedItems > 0 ? `⏭ ${skippedItems} ingredient names not found across rows\n` : ''}` +
+      `${failed > 0 ? `⚠ ${failed} failed\n` : ''}` +
+      `\nTip: ingredient + menu item names must match exactly (case-insensitive).`
+    );
+  };
+
   // ── Gemini AI Image Generation ────────────────────────────────────────────
   const handleGenerateImage = async (item: MenuItem) => {
     setGeneratingImageId(item.id);
@@ -5461,23 +5563,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <h2 className="text-3xl font-bold font-serif">Restaurant Menu</h2>
               <p className="text-sm text-[#6b5d52] mt-0.5">{menu.length} items across {[...new Set(menu.map(m => m.category).filter(Boolean))].length} categories</p>
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <button onClick={handleMenuTemplateCsv} title="Download CSV Template"
-                className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all">
-                <Download size={14}/> Template
-              </button>
-              <button onClick={handleMenuExportCsv} title="Export all items as CSV"
-                className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all">
-                <Download size={14}/> Export CSV
-              </button>
-              <label className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all cursor-pointer">
-                <Upload size={14}/> Import CSV
-                <input type="file" accept=".csv" className="hidden" onChange={e => { if (e.target.files?.[0]) handleCsvFileParse(e.target.files[0]); e.target.value=''; }} />
-              </label>
-              <button onClick={() => setIsAddingItem(true)}
-                className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all">
-                <Plus size={14}/> Add Item
-              </button>
+            <div className="flex flex-col gap-2 items-end">
+              {/* Menu CSV row */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mr-1">Menu CSV:</span>
+                <button onClick={handleMenuTemplateCsv} title="Download Menu CSV Template"
+                  className="px-3 py-2 rounded-xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1 transition-all">
+                  <Download size={13}/> Template
+                </button>
+                <button onClick={handleMenuExportCsv} title="Export all menu items as CSV"
+                  className="px-3 py-2 rounded-xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1 transition-all">
+                  <Download size={13}/> Export
+                </button>
+                <label className="px-3 py-2 rounded-xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1 transition-all cursor-pointer">
+                  <Upload size={13}/> Import
+                  <input type="file" accept=".csv" className="hidden" onChange={e => { if (e.target.files?.[0]) handleCsvFileParse(e.target.files[0]); e.target.value=''; }} />
+                </label>
+                <button onClick={() => setIsAddingItem(true)}
+                  className="bg-[#cc5a16] text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-[#a84612] transition-all">
+                  <Plus size={14}/> Add Item
+                </button>
+              </div>
+              {/* Recipe CSV row — bulk-define ingredient mappings for many menu items at once */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-700 mr-1">🧾 Recipes CSV:</span>
+                <button onClick={handleRecipeTemplateCsv} title="Download Recipe CSV Template"
+                  className="px-3 py-2 rounded-xl text-xs font-bold border border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1 transition-all">
+                  <Download size={13}/> Template
+                </button>
+                <button onClick={handleRecipeExportCsv} title="Export all recipes (one row per ingredient line)"
+                  className="px-3 py-2 rounded-xl text-xs font-bold border border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1 transition-all">
+                  <Download size={13}/> Export
+                </button>
+                <label className="px-3 py-2 rounded-xl text-xs font-bold border border-cyan-200 bg-cyan-50/50 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1 transition-all cursor-pointer">
+                  <Upload size={13}/> Import
+                  <input type="file" accept=".csv" className="hidden" onChange={e => { if (e.target.files?.[0]) handleRecipeCsvFile(e.target.files[0]); e.target.value=''; }} />
+                </label>
+              </div>
             </div>
           </div>
 
@@ -5930,13 +6052,40 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 Ingredients, suppliers, purchase orders & goods receipts
               </p>
             </div>
-            <button
-              onClick={() => fetchInventoryForSubTab()}
-              className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all"
-            >
-              <RefreshCw size={14} className={cn(inventoryLoading && "animate-spin")} /> Refresh
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => setShowOnboarding(true)}
+                className="px-4 py-2.5 rounded-2xl text-xs font-bold bg-cyan-50 border border-cyan-200 text-cyan-700 hover:bg-cyan-100 flex items-center gap-1.5 transition-all"
+                title="Quick-start guided setup"
+              >
+                ✨ Setup Wizard
+              </button>
+              <button
+                onClick={() => fetchInventoryForSubTab()}
+                className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all"
+              >
+                <RefreshCw size={14} className={cn(inventoryLoading && "animate-spin")} /> Refresh
+              </button>
+            </div>
           </div>
+
+          {/* Empty-state CTA — auto-shown when both ingredients + suppliers are empty */}
+          {!inventoryLoading && inventoryIngredients.length === 0 && inventorySuppliers.length === 0 && (
+            <div className="bg-gradient-to-r from-cyan-50 to-[#faf7f2] border border-cyan-200 rounded-3xl p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div className="flex-1">
+                <p className="text-lg font-bold font-serif text-cyan-900">👋 Welcome to Inventory Management</p>
+                <p className="text-sm text-[#6b5d52] mt-1">
+                  Pick from a curated list of common Indian-restaurant ingredients and suppliers to get up and running in 60 seconds.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowOnboarding(true)}
+                className="px-5 py-3 rounded-2xl text-sm font-bold bg-cyan-600 text-white hover:bg-cyan-700 transition-all whitespace-nowrap"
+              >
+                ✨ Start Setup Wizard
+              </button>
+            </div>
+          )}
 
           {/* ── Sub-tab nav ── */}
           <div className="flex gap-1 overflow-x-auto border-b border-[#cc5a16]/10">
@@ -6842,6 +6991,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {viewingPO && (
             <POViewModal
               po={viewingPO}
+              token={token!}
               onClose={() => setViewingPO(null)}
             />
           )}
@@ -6896,6 +7046,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               onClose={() => setViewingCount(null)}
               onUpdated={(refreshed) => setViewingCount(refreshed)}
               onCompleted={() => { setViewingCount(null); fetchInventoryCounts(); fetchInventoryIngredients(); }}
+            />
+          )}
+          {showOnboarding && (
+            <InventoryOnboardingWizard
+              token={token!}
+              restaurantId={restaurantId!}
+              onClose={() => setShowOnboarding(false)}
+              onComplete={() => { setShowOnboarding(false); fetchInventoryForSubTab(); }}
             />
           )}
 
@@ -17566,10 +17724,60 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
 }
 
 // ─── PO view (read-only with line items) ──────────────────────────────────
-function POViewModal({ po, onClose }: { po: any; onClose: () => void }) {
+function POViewModal({ po, token, onClose }: { po: any; token: string; onClose: () => void }) {
+  const [emailingTo, setEmailingTo] = useState<string | null>(null);  // null = closed; email modal flow
+  const [emailRecipient, setEmailRecipient] = useState(po.supplier_email || '');
+  const [emailMessage, setEmailMessage] = useState('');
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailErr, setEmailErr] = useState('');
+  const [emailSent, setEmailSent] = useState(false);
+
+  const downloadPdf = async () => {
+    const r = await fetch(`/api/inventory/purchase-orders/${po.id}/pdf`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!r.ok) { alert('Failed to download PDF'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${po.id}.pdf`;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  };
+
+  const sendEmail = async () => {
+    setEmailErr(''); setEmailSending(true);
+    try {
+      const r = await fetch(`/api/inventory/purchase-orders/${po.id}/email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ to: emailRecipient, message: emailMessage || null }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setEmailErr(d.error || 'Email failed'); }
+      else { setEmailSent(true); setTimeout(() => { setEmailingTo(null); setEmailSent(false); }, 1500); }
+    } catch (e: any) { setEmailErr(e.message); } finally { setEmailSending(false); }
+  };
+
   return (
     <InventoryModalShell title={po.id} subtitle={`${po.supplier_name || ''} · ${po.status}`} onClose={onClose} wide>
       <div className="space-y-4">
+        {/* Action bar */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={downloadPdf} className="px-3 py-2 rounded-xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5">
+            <Download size={14}/> Download PDF
+          </button>
+          <button
+            onClick={() => { setEmailRecipient(po.supplier_email || ''); setEmailingTo('open'); }}
+            className="px-3 py-2 rounded-xl text-xs font-bold bg-[#cc5a16] text-white hover:bg-[#a84612] flex items-center gap-1.5"
+          >
+            <Mail size={14}/> Email Supplier
+          </button>
+          {!po.supplier_email && (
+            <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-1 rounded">⚠ No email on file — you'll be prompted</span>
+          )}
+        </div>
+
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
           <div><p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Status</p><p className="font-bold">{po.status}</p></div>
           <div><p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Expected</p><p>{po.expected_delivery_date || '—'}</p></div>
@@ -17607,6 +17815,52 @@ function POViewModal({ po, onClose }: { po: any; onClose: () => void }) {
         </div>
         {po.notes && <div className="bg-[#faf7f2] rounded-2xl p-3 text-xs text-[#6b5d52]">{po.notes}</div>}
       </div>
+
+      {/* Email confirmation modal — nested inside the PO view */}
+      {emailingTo && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className="p-5 border-b border-[#cc5a16]/10 bg-[#faf7f2]/50 flex justify-between items-center">
+              <div>
+                <h3 className="text-xl font-bold font-serif">Email PO to Supplier</h3>
+                <p className="text-xs text-[#6b5d52]">PDF will be attached automatically</p>
+              </div>
+              <button onClick={() => setEmailingTo(null)} className="p-2 hover:bg-white rounded-full"><X size={20}/></button>
+            </div>
+            <div className="p-5 space-y-4">
+              <FormField label="Recipient Email" required>
+                <input
+                  type="email"
+                  value={emailRecipient}
+                  onChange={e => setEmailRecipient(e.target.value)}
+                  className={inputClass}
+                  placeholder="supplier@example.in"
+                />
+              </FormField>
+              <FormField label="Optional Message" hint="Added to the top of the email body. Leave empty for the default PO summary.">
+                <textarea
+                  value={emailMessage}
+                  onChange={e => setEmailMessage(e.target.value)}
+                  className={cn(inputClass, "min-h-[80px]")}
+                  placeholder="e.g. Please prioritize chicken delivery — running low for the weekend rush"
+                />
+              </FormField>
+              {emailErr && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{emailErr}</p>}
+              {emailSent && <p className="text-emerald-700 text-sm bg-emerald-50 px-3 py-2 rounded-xl">✓ Email sent successfully to {emailRecipient}</p>}
+              <div className="flex justify-end gap-2 pt-2">
+                <button onClick={() => setEmailingTo(null)} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+                <button
+                  onClick={sendEmail}
+                  disabled={emailSending || emailSent || !emailRecipient}
+                  className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60"
+                >
+                  {emailSending ? 'Sending…' : emailSent ? 'Sent ✓' : 'Send Email + PDF'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </InventoryModalShell>
   );
 }
@@ -18232,6 +18486,297 @@ function PhysicalCountModal({ token, count, onClose, onUpdated, onCompleted }: {
         </div>
       </div>
     </InventoryModalShell>
+  );
+}
+
+// ─── InventoryOnboardingWizard — first-run guided setup ───────────────────
+// Detects empty inventory and walks owner through:
+//   1. Pick from a curated list of common Indian-restaurant ingredients
+//   2. Add a few suppliers
+//   3. Review & save
+// All steps are skippable. Owner can come back later via the Inventory tab.
+const COMMON_INGREDIENTS_PRESET: any[] = [
+  // Dairy
+  { name: 'Paneer',                   item_type: 'RAW',      category: 'Dairy',         unit: 'kg', reorder_point: 1,   par_level: 5,  default_unit_price: 400, gst_percent: 5  },
+  { name: 'Curd',                     item_type: 'RAW',      category: 'Dairy',         unit: 'kg', reorder_point: 2,   par_level: 8,  default_unit_price: 80,  gst_percent: 5  },
+  { name: 'Milk',                     item_type: 'RAW',      category: 'Dairy',         unit: 'l',  reorder_point: 5,   par_level: 20, default_unit_price: 65,  gst_percent: 5  },
+  { name: 'Butter',                   item_type: 'RAW',      category: 'Dairy',         unit: 'kg', reorder_point: 1,   par_level: 5,  default_unit_price: 500, gst_percent: 12 },
+  { name: 'Ghee',                     item_type: 'RAW',      category: 'Dairy',         unit: 'l',  reorder_point: 1,   par_level: 5,  default_unit_price: 600, gst_percent: 12 },
+  // Meat
+  { name: 'Chicken (boneless)',       item_type: 'RAW',      category: 'Meat',          unit: 'kg', reorder_point: 2,   par_level: 12, default_unit_price: 280, gst_percent: 0  },
+  { name: 'Mutton',                   item_type: 'RAW',      category: 'Meat',          unit: 'kg', reorder_point: 1,   par_level: 6,  default_unit_price: 650, gst_percent: 0  },
+  { name: 'Eggs',                     item_type: 'RAW',      category: 'Meat',          unit: 'unit', reorder_point: 24,par_level: 96, default_unit_price: 7,   gst_percent: 0  },
+  // Produce
+  { name: 'Onion',                    item_type: 'RAW',      category: 'Produce',       unit: 'kg', reorder_point: 5,   par_level: 25, default_unit_price: 40,  gst_percent: 0  },
+  { name: 'Tomato',                   item_type: 'RAW',      category: 'Produce',       unit: 'kg', reorder_point: 5,   par_level: 20, default_unit_price: 50,  gst_percent: 0  },
+  { name: 'Potato',                   item_type: 'RAW',      category: 'Produce',       unit: 'kg', reorder_point: 5,   par_level: 20, default_unit_price: 35,  gst_percent: 0  },
+  { name: 'Ginger',                   item_type: 'RAW',      category: 'Produce',       unit: 'kg', reorder_point: 1,   par_level: 3,  default_unit_price: 120, gst_percent: 0  },
+  { name: 'Garlic',                   item_type: 'RAW',      category: 'Produce',       unit: 'kg', reorder_point: 1,   par_level: 3,  default_unit_price: 200, gst_percent: 0  },
+  // Grains
+  { name: 'Basmati Rice',             item_type: 'RAW',      category: 'Grains',        unit: 'kg', reorder_point: 5,   par_level: 30, default_unit_price: 120, gst_percent: 5  },
+  { name: 'Wheat Flour',              item_type: 'RAW',      category: 'Grains',        unit: 'kg', reorder_point: 5,   par_level: 25, default_unit_price: 50,  gst_percent: 5  },
+  { name: 'Maida (Refined Flour)',    item_type: 'RAW',      category: 'Grains',        unit: 'kg', reorder_point: 2,   par_level: 12, default_unit_price: 55,  gst_percent: 5  },
+  { name: 'Toor Dal',                 item_type: 'RAW',      category: 'Grains',        unit: 'kg', reorder_point: 2,   par_level: 10, default_unit_price: 150, gst_percent: 5  },
+  // Oils
+  { name: 'Refined Oil',              item_type: 'RAW',      category: 'Oils & Fats',   unit: 'l',  reorder_point: 5,   par_level: 25, default_unit_price: 160, gst_percent: 5  },
+  // Spices
+  { name: 'Salt',                     item_type: 'RAW',      category: 'Spices',        unit: 'kg', reorder_point: 1,   par_level: 5,  default_unit_price: 25,  gst_percent: 0  },
+  { name: 'Garam Masala',             item_type: 'RAW',      category: 'Spices',        unit: 'kg', reorder_point: 0.3, par_level: 2,  default_unit_price: 400, gst_percent: 5  },
+  { name: 'Red Chilli Powder',        item_type: 'RAW',      category: 'Spices',        unit: 'kg', reorder_point: 0.3, par_level: 2,  default_unit_price: 250, gst_percent: 5  },
+  { name: 'Turmeric',                 item_type: 'RAW',      category: 'Spices',        unit: 'kg', reorder_point: 0.3, par_level: 2,  default_unit_price: 200, gst_percent: 5  },
+  // Beverages (packaged)
+  { name: 'Mineral Water 1L',         item_type: 'PACKAGED', category: 'Beverages',     unit: 'bottle', reorder_point: 12, par_level: 48, default_unit_price: 20, gst_percent: 18 },
+];
+
+const COMMON_SUPPLIERS_PRESET = [
+  { name: 'Hari Dairy',           categories: 'Dairy',                          lead_time_days: 1, payment_terms: 'NET-7',  example: 'Paneer · Milk · Cream · Butter · Ghee' },
+  { name: 'Khan Poultry',         categories: 'Meat',                           lead_time_days: 1, payment_terms: 'COD',    example: 'Chicken · Mutton · Eggs' },
+  { name: 'Mandi Daily',          categories: 'Produce',                        lead_time_days: 1, payment_terms: 'COD',    example: 'Onion · Tomato · Potato · Ginger · Garlic' },
+  { name: 'Aggarwal Wholesale',   categories: 'Grains, Oils & Fats, Spices',    lead_time_days: 3, payment_terms: 'NET-15', example: 'Rice · Dal · Oil · Spices' },
+  { name: 'Coca-Cola Distributor',categories: 'Beverages',                      lead_time_days: 7, payment_terms: 'NET-30', example: 'Water · Soft Drinks' },
+];
+
+function InventoryOnboardingWizard({ token, restaurantId, onClose, onComplete }: {
+  token: string; restaurantId: string; onClose: () => void; onComplete: () => void;
+}) {
+  const [step, setStep] = useState<1 | 2 | 3>(1);
+  // Step 1 — ingredients (pre-checked)
+  const [selIngs, setSelIngs] = useState<Set<string>>(new Set(COMMON_INGREDIENTS_PRESET.map(i => i.name)));
+  // Step 2 — suppliers (pre-checked)
+  const [selSups, setSelSups] = useState<Set<string>>(new Set(COMMON_SUPPLIERS_PRESET.map(s => s.name)));
+  const [working, setWorking] = useState(false);
+  const [progress, setProgress] = useState({ ing: 0, sup: 0, total_ing: 0, total_sup: 0 });
+  const [done, setDone] = useState(false);
+
+  const toggleIng = (name: string) => {
+    setSelIngs(prev => { const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n; });
+  };
+  const toggleSup = (name: string) => {
+    setSelSups(prev => { const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n; });
+  };
+
+  const groupedByCategory = COMMON_INGREDIENTS_PRESET.reduce((acc: Record<string, any[]>, ing) => {
+    (acc[ing.category] = acc[ing.category] || []).push(ing);
+    return acc;
+  }, {});
+
+  const finish = async () => {
+    setWorking(true);
+    const ingsToAdd = COMMON_INGREDIENTS_PRESET.filter(i => selIngs.has(i.name));
+    const supsToAdd = COMMON_SUPPLIERS_PRESET.filter(s => selSups.has(s.name));
+    setProgress({ ing: 0, sup: 0, total_ing: ingsToAdd.length, total_sup: supsToAdd.length });
+
+    // 1. Create suppliers first (so we can map ingredient defaults)
+    const supplierMap: Record<string, string> = {};
+    for (let i = 0; i < supsToAdd.length; i++) {
+      const s = supsToAdd[i];
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/suppliers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ name: s.name, lead_time_days: s.lead_time_days, payment_terms: s.payment_terms }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        supplierMap[s.name] = d.id;
+      }
+      setProgress(p => ({ ...p, sup: i + 1 }));
+    }
+
+    // 2. Pick a default supplier per ingredient based on category
+    const findDefaultSupplier = (category: string): string | null => {
+      const sup = COMMON_SUPPLIERS_PRESET.find(s => s.categories.split(',').map(c => c.trim()).includes(category));
+      return sup ? supplierMap[sup.name] || null : null;
+    };
+
+    // 3. Create ingredients
+    for (let i = 0; i < ingsToAdd.length; i++) {
+      const ing = ingsToAdd[i];
+      const defaultSupplierId = findDefaultSupplier(ing.category);
+      await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ ...ing, current_stock_qty: 0, default_supplier_id: defaultSupplierId }),
+      });
+      setProgress(p => ({ ...p, ing: i + 1 }));
+    }
+
+    setDone(true);
+    setTimeout(() => { onComplete(); }, 1200);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        className="bg-white rounded-[32px] shadow-2xl w-full max-w-3xl overflow-hidden my-auto"
+      >
+        {/* Header */}
+        <div className="p-6 border-b border-[#cc5a16]/10 bg-gradient-to-r from-[#cc5a16] to-[#a84612] text-white">
+          <div className="flex justify-between items-start">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-widest opacity-80">Inventory Setup · Step {step} of 3</p>
+              <h3 className="text-2xl font-bold font-serif mt-1">
+                {step === 1 ? 'Pick your common ingredients' : step === 2 ? 'Add your suppliers' : 'Review & save'}
+              </h3>
+              <p className="text-sm opacity-90 mt-1">
+                {step === 1 && 'Curated list for Indian restaurants. Uncheck anything you don\'t use.'}
+                {step === 2 && 'Vendors who deliver your ingredients. We\'ll auto-link them as defaults.'}
+                {step === 3 && 'Final check before we set everything up.'}
+              </p>
+            </div>
+            <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full"><X size={22}/></button>
+          </div>
+          {/* Progress dots */}
+          <div className="flex gap-2 mt-4">
+            {[1, 2, 3].map(s => (
+              <div key={s} className={cn("h-1.5 flex-1 rounded-full transition-all", s <= step ? "bg-white" : "bg-white/20")} />
+            ))}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="p-6 max-h-[60vh] overflow-y-auto">
+          {step === 1 && (
+            <div className="space-y-4">
+              <div className="flex justify-between items-center text-sm">
+                <p className="text-[#6b5d52]">{selIngs.size} of {COMMON_INGREDIENTS_PRESET.length} selected</p>
+                <div className="flex gap-2">
+                  <button onClick={() => setSelIngs(new Set(COMMON_INGREDIENTS_PRESET.map(i => i.name)))} className="text-xs font-bold text-[#cc5a16] hover:underline">Select all</button>
+                  <span className="text-[#9c8e85]">·</span>
+                  <button onClick={() => setSelIngs(new Set())} className="text-xs font-bold text-[#9c8e85] hover:underline">Clear all</button>
+                </div>
+              </div>
+              {Object.entries(groupedByCategory).map(([cat, ings]) => (
+                <div key={cat}>
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">{cat}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {(ings as any[]).map(ing => (
+                      <label key={ing.name} className={cn(
+                        "flex items-center gap-2 px-3 py-2 rounded-xl border cursor-pointer transition-all",
+                        selIngs.has(ing.name) ? 'bg-[#cc5a16]/5 border-[#cc5a16]/40' : 'bg-white border-[#cc5a16]/10 hover:bg-[#faf7f2]'
+                      )}>
+                        <input
+                          type="checkbox"
+                          checked={selIngs.has(ing.name)}
+                          onChange={() => toggleIng(ing.name)}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-bold text-[#1a1208] truncate">{ing.name}</p>
+                          <p className="text-[10px] text-[#9c8e85]">par {ing.par_level} {ing.unit} · ₹{ing.default_unit_price}/{ing.unit}</p>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {step === 2 && (
+            <div className="space-y-3">
+              <div className="flex justify-between items-center text-sm">
+                <p className="text-[#6b5d52]">{selSups.size} of {COMMON_SUPPLIERS_PRESET.length} selected</p>
+              </div>
+              {COMMON_SUPPLIERS_PRESET.map(s => (
+                <label key={s.name} className={cn(
+                  "flex items-start gap-3 px-4 py-3 rounded-xl border cursor-pointer transition-all",
+                  selSups.has(s.name) ? 'bg-[#cc5a16]/5 border-[#cc5a16]/40' : 'bg-white border-[#cc5a16]/10 hover:bg-[#faf7f2]'
+                )}>
+                  <input
+                    type="checkbox"
+                    checked={selSups.has(s.name)}
+                    onChange={() => toggleSup(s.name)}
+                    className="mt-0.5"
+                  />
+                  <div className="flex-1">
+                    <p className="text-sm font-bold text-[#1a1208]">{s.name}</p>
+                    <p className="text-[11px] text-[#6b5d52] mt-0.5">{s.example}</p>
+                    <p className="text-[10px] text-[#9c8e85] mt-1">
+                      Lead time {s.lead_time_days}d · {s.payment_terms} · Categories: {s.categories}
+                    </p>
+                  </div>
+                </label>
+              ))}
+              <p className="text-xs text-[#9c8e85] mt-2">
+                💡 Add contact details (phone, email) later from the Suppliers tab — these are placeholders to start.
+              </p>
+            </div>
+          )}
+
+          {step === 3 && !done && (
+            <div className="space-y-5">
+              <div className="bg-cyan-50 border border-cyan-200 rounded-2xl p-4">
+                <p className="text-sm font-bold text-cyan-700">📦 We're about to create:</p>
+                <ul className="mt-2 space-y-1 text-sm text-[#1a1208]">
+                  <li>• <strong>{selIngs.size}</strong> ingredient{selIngs.size !== 1 ? 's' : ''} with reorder + par levels</li>
+                  <li>• <strong>{selSups.size}</strong> supplier{selSups.size !== 1 ? 's' : ''} with default categories pre-linked</li>
+                </ul>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-sm text-amber-800">
+                <p className="font-bold mb-2">📋 What's next after this wizard:</p>
+                <ol className="space-y-1 text-xs">
+                  <li>1. Open <strong>Menu Management</strong> → click 🧾 <strong>Recipe</strong> on each dish to map ingredients per serving</li>
+                  <li>2. Or use the <strong>Recipes CSV Import</strong> to bulk-define from a spreadsheet</li>
+                  <li>3. Place a customer order — watch ingredient stock auto-decrement</li>
+                  <li>4. The forecast dashboard activates after 2-4 weeks of operations</li>
+                </ol>
+              </div>
+              {working && (
+                <div className="bg-[#faf7f2] rounded-2xl p-4">
+                  <p className="text-sm font-bold mb-2">Setting up…</p>
+                  <p className="text-xs text-[#6b5d52]">Suppliers: {progress.sup}/{progress.total_sup}</p>
+                  <p className="text-xs text-[#6b5d52]">Ingredients: {progress.ing}/{progress.total_ing}</p>
+                  <div className="mt-3 h-2 bg-white rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-[#cc5a16] transition-all"
+                      style={{ width: `${((progress.sup + progress.ing) / Math.max(1, progress.total_sup + progress.total_ing)) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {done && (
+            <div className="text-center py-8">
+              <div className="text-6xl mb-3">🎉</div>
+              <h3 className="text-2xl font-bold font-serif text-emerald-700">Setup complete!</h3>
+              <p className="text-sm text-[#6b5d52] mt-2">
+                Your inventory module is ready. Head to Menu Management to map recipes.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        {!done && (
+          <div className="p-4 border-t border-[#cc5a16]/10 bg-[#faf7f2]/50 flex justify-between items-center">
+            {step > 1 ? (
+              <button onClick={() => setStep((step - 1) as 1 | 2 | 3)} disabled={working}
+                className="px-4 py-2 rounded-xl text-sm font-bold text-[#6b5d52] hover:bg-white">
+                ← Back
+              </button>
+            ) : (
+              <button onClick={onClose} disabled={working} className="px-4 py-2 rounded-xl text-sm font-bold text-[#9c8e85] hover:bg-white">
+                Skip for now
+              </button>
+            )}
+            {step < 3 ? (
+              <button onClick={() => setStep((step + 1) as 1 | 2 | 3)}
+                className="px-6 py-2.5 rounded-xl text-sm font-bold bg-[#cc5a16] text-white hover:bg-[#a84612]">
+                Next →
+              </button>
+            ) : (
+              <button onClick={finish} disabled={working || (selIngs.size === 0 && selSups.size === 0)}
+                className="px-6 py-2.5 rounded-xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60 hover:bg-[#a84612]">
+                {working ? 'Setting up…' : `Set up ${selIngs.size} ingredients & ${selSups.size} suppliers`}
+              </button>
+            )}
+          </div>
+        )}
+      </motion.div>
+    </div>
   );
 }
 
