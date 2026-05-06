@@ -3301,10 +3301,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS'
     | 'ORDERS' | 'INVOICES' | 'ATTENDANCE' | 'NOTIFICATIONS'
     | 'FEEDBACK' | 'SUBSCRIPTION' | 'BOOKINGS' | 'MONITOR'
+    | 'INVENTORY'                                 // inventory module
     | 'ROOMS' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE'  // hospitality Phase 2 & 3
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
   >('MONITOR');
+  // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
+  const [inventorySubTab, setInventorySubTab] = useState<
+    'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS'
+  >('INGREDIENTS');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notificationSettings, setNotificationSettings] = useState<any[]>([]);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -3375,6 +3380,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   } | null>(null);
   const [viewBillTable, setViewBillTable] = useState<{ id: string; name: string } | null>(null);
   const [waiterCalls, setWaiterCalls] = useState<any[]>([]);
+
+  // ── Inventory Module — Phase 1+2 state ───────────────────────────────────
+  const [inventoryIngredients, setInventoryIngredients] = useState<any[]>([]);
+  const [inventorySuppliers, setInventorySuppliers] = useState<any[]>([]);
+  const [inventoryPOs, setInventoryPOs] = useState<any[]>([]);
+  const [inventoryGRNs, setInventoryGRNs] = useState<any[]>([]);
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  // Modal/edit state per sub-tab
+  const [editingIngredient, setEditingIngredient] = useState<any | null>(null);  // null = closed; {} = creating; {id...} = editing existing
+  const [adjustingStock, setAdjustingStock] = useState<any | null>(null);
+  const [editingSupplier, setEditingSupplier] = useState<any | null>(null);
+  const [poFilter, setPOFilter] = useState<'ALL' | 'DRAFT' | 'SENT' | 'PARTIAL' | 'RECEIVED' | 'CANCELLED'>('ALL');
+  const [creatingPO, setCreatingPO] = useState(false);
+  const [viewingPO, setViewingPO] = useState<any | null>(null);
+  const [creatingGRN, setCreatingGRN] = useState<{ poId?: string } | null>(null);
+  const [viewingGRN, setViewingGRN] = useState<any | null>(null);
+  // Recipe builder modal — opened from Menu Management for a specific menu item
+  const [recipeBuilderItem, setRecipeBuilderItem] = useState<any | null>(null);
 
   // ── Audible + visual alerts for unacknowledged items (Phase 6) ────────────
   // Owner/Manager hears a chime every 4s and sees pulsing cards when:
@@ -3597,6 +3620,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'NOTIFICATIONS') fetchNotificationSettings();
     if (activeTab === 'MONITOR') fetchLiveTables();
     if (activeTab === 'INVOICES') fetchInvoices();
+    if (activeTab === 'INVENTORY') fetchInventoryForSubTab();
 
     const interval = setInterval(() => {
       fetchOrders();
@@ -3620,6 +3644,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (clockTick) clearInterval(clockTick);
     };
   }, [restaurantId, activeTab]);
+
+  // Refetch inventory when sub-tab changes
+  useEffect(() => {
+    if (activeTab === 'INVENTORY') fetchInventoryForSubTab();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inventorySubTab, poFilter]);
 
   // ── Invoice helpers ───────────────────────────────────────────────────────
   const openInvoice = async (order: any, mode: 'view' | 'edit' = 'view') => {
@@ -4260,6 +4290,58 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } finally {
       setLiveLoading(false);
     }
+  };
+
+  // ─── Inventory fetchers ───────────────────────────────────────────────────
+  const fetchInventoryIngredients = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (r.ok) setInventoryIngredients(await r.json());
+    } catch (e) { console.error('fetchInventoryIngredients', e); }
+  };
+  const fetchInventorySuppliers = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/suppliers`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (r.ok) setInventorySuppliers(await r.json());
+    } catch (e) { console.error('fetchInventorySuppliers', e); }
+  };
+  const fetchInventoryPOs = async () => {
+    try {
+      const url = poFilter === 'ALL'
+        ? `/api/restaurant/${restaurantId}/inventory/purchase-orders`
+        : `/api/restaurant/${restaurantId}/inventory/purchase-orders?status=${poFilter}`;
+      const r = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+      if (r.ok) setInventoryPOs(await r.json());
+    } catch (e) { console.error('fetchInventoryPOs', e); }
+  };
+  const fetchInventoryGRNs = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/grn`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (r.ok) setInventoryGRNs(await r.json());
+    } catch (e) { console.error('fetchInventoryGRNs', e); }
+  };
+  // Coordinated load for the active sub-tab. Always loads ingredients (everything depends on them).
+  const fetchInventoryForSubTab = async () => {
+    setInventoryLoading(true);
+    try {
+      const promises: Promise<void>[] = [fetchInventoryIngredients()];
+      if (inventorySubTab === 'SUPPLIERS' || inventorySubTab === 'PURCHASE_ORDERS' || inventorySubTab === 'GOODS_RECEIPTS') {
+        promises.push(fetchInventorySuppliers());
+      }
+      if (inventorySubTab === 'PURCHASE_ORDERS' || inventorySubTab === 'GOODS_RECEIPTS') {
+        promises.push(fetchInventoryPOs());
+      }
+      if (inventorySubTab === 'GOODS_RECEIPTS') {
+        promises.push(fetchInventoryGRNs());
+      }
+      await Promise.all(promises);
+    } finally { setInventoryLoading(false); }
   };
 
   const patchLiveOrder = async (id: string, body: Record<string, any>) => {
@@ -4959,7 +5041,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       <div className="md:hidden flex items-center justify-between bg-white border border-[#cc5a16]/10 rounded-2xl px-4 py-3 shadow-sm">
         <span className="text-sm font-bold text-[#1a1208]">
           {({
-            MENU: 'Menu Management', REPORTS: 'Analytics & Reports', QR: 'QR Management',
+            MENU: 'Menu Management', INVENTORY: 'Inventory', REPORTS: 'Analytics & Reports', QR: 'QR Management',
             BOOKINGS: 'Bookings', STAFF: 'Staff Management', ORDERS: 'Orders', INVOICES: 'Invoices',
             ATTENDANCE: 'Attendance', FEEDBACK: 'Feedback',
             SUBSCRIPTION: 'Subscription', NOTIFICATIONS: 'Notifications',
@@ -4981,7 +5063,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       {mobileNavOpen && (
         <div className="md:hidden -mt-3 rounded-2xl bg-white border border-[#cc5a16]/10 shadow-lg overflow-hidden z-40 relative">
           {([
-            ['MONITOR', 'Command & Control'], ['MENU', 'Menu Management'], ['REPORTS', 'Analytics & Reports'],
+            ['MONITOR', 'Command & Control'], ['MENU', 'Menu Management'], ['INVENTORY', 'Inventory'], ['REPORTS', 'Analytics & Reports'],
             ['QR', 'QR Management'], ['BOOKINGS', 'Bookings'],
             ...(isHotelEnabled ? [
               ['ROOMS','Rooms'],
@@ -5233,6 +5315,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <button onClick={() => setEditingItem(item)} className="text-xs font-bold text-[#6b5d52] hover:text-[#cc5a16] flex items-center gap-1 p-1.5 rounded-lg hover:bg-[#cc5a16]/5 transition-all">
                         <Edit3 size={13}/> Edit
                       </button>
+                      <button
+                        onClick={async () => {
+                          // Lazy-fetch ingredients only when builder opens (avoid heavy load on Menu Mgmt)
+                          if (inventoryIngredients.length === 0) await fetchInventoryIngredients();
+                          setRecipeBuilderItem(item);
+                        }}
+                        className="text-xs font-bold text-[#6b5d52] hover:text-[#cc5a16] flex items-center gap-1 p-1.5 rounded-lg hover:bg-[#cc5a16]/5 transition-all"
+                        title="Recipe — define ingredients per serving for inventory tracking"
+                      >
+                        🧾 Recipe
+                      </button>
                       <button onClick={() => handleToggleDailySpecial(item.id, !item.is_daily_special)}
                         className={cn('p-1.5 rounded-lg transition-all', item.is_daily_special ? 'text-yellow-500 bg-yellow-50' : 'text-[#c5b9b2] hover:text-yellow-500 hover:bg-yellow-50')}
                         title={item.is_daily_special ? 'Remove Special' : 'Set as Daily Special'}>
@@ -5285,6 +5378,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             );
           })()}
+
+          {/* ── Recipe Builder Modal (opened from a menu item card) ── */}
+          {recipeBuilderItem && (
+            <RecipeBuilderModal
+              token={token!}
+              restaurantId={restaurantId!}
+              menuItem={recipeBuilderItem}
+              ingredients={inventoryIngredients}
+              onClose={() => setRecipeBuilderItem(null)}
+              onSaved={() => setRecipeBuilderItem(null)}
+            />
+          )}
 
           {/* ── Edit Item Modal ── */}
           {editingItem && (
@@ -5486,6 +5591,453 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               </motion.div>
             </div>
+          )}
+        </div>
+      ) : activeTab === 'INVENTORY' ? (
+        <div className="space-y-5">
+          {/* ── Inventory Header ── */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-3xl font-bold font-serif">Inventory Management</h2>
+              <p className="text-sm text-[#6b5d52] mt-0.5">
+                Ingredients, suppliers, purchase orders & goods receipts
+              </p>
+            </div>
+            <button
+              onClick={() => fetchInventoryForSubTab()}
+              className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all"
+            >
+              <RefreshCw size={14} className={cn(inventoryLoading && "animate-spin")} /> Refresh
+            </button>
+          </div>
+
+          {/* ── Sub-tab nav ── */}
+          <div className="flex gap-1 overflow-x-auto border-b border-[#cc5a16]/10">
+            {([
+              ['INGREDIENTS', 'Ingredients', inventoryIngredients.length],
+              ['SUPPLIERS', 'Suppliers', inventorySuppliers.length],
+              ['PURCHASE_ORDERS', 'Purchase Orders', inventoryPOs.length],
+              ['GOODS_RECEIPTS', 'Goods Receipts', inventoryGRNs.length],
+            ] as [typeof inventorySubTab, string, number][]).map(([id, label, count]) => (
+              <button
+                key={id}
+                onClick={() => setInventorySubTab(id)}
+                className={cn(
+                  "px-5 py-3 text-xs font-bold uppercase tracking-widest whitespace-nowrap border-b-2 transition-all -mb-px",
+                  inventorySubTab === id
+                    ? "border-[#cc5a16] text-[#cc5a16]"
+                    : "border-transparent text-[#9c8e85] hover:text-[#6b5d52]"
+                )}
+              >
+                {label}
+                {count > 0 && (
+                  <span className={cn(
+                    "ml-2 px-1.5 py-0.5 rounded-full text-[10px] font-bold",
+                    inventorySubTab === id ? "bg-[#cc5a16]/15 text-[#cc5a16]" : "bg-[#0d0a07]/5 text-[#9c8e85]"
+                  )}>{count}</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* ── INGREDIENTS sub-view ── */}
+          {inventorySubTab === 'INGREDIENTS' && (
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <p className="text-sm text-[#6b5d52]">
+                  {inventoryIngredients.length} item{inventoryIngredients.length !== 1 ? 's' : ''} ·{' '}
+                  {inventoryIngredients.filter((i: any) => Number(i.current_stock_qty) <= Number(i.reorder_point) && Number(i.reorder_point) > 0).length} below reorder
+                </p>
+                <button
+                  onClick={() => setEditingIngredient({})}
+                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                >
+                  <Plus size={14} /> Add Ingredient
+                </button>
+              </div>
+
+              {inventoryIngredients.length === 0 ? (
+                <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <div className="text-5xl mb-3">📦</div>
+                  <p className="font-medium text-[#1a1208]">No ingredients yet</p>
+                  <p className="text-sm text-[#9c8e85] mt-1">
+                    Add ingredients (paneer, chicken, dal, etc.) to start tracking inventory
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                        <tr>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Name</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Type</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Category</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Stock</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Reorder</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Par</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Last ₹</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#cc5a16]/5">
+                        {inventoryIngredients.map((ing: any) => {
+                          const stock = Number(ing.current_stock_qty || 0);
+                          const reorder = Number(ing.reorder_point || 0);
+                          const isLow = reorder > 0 && stock <= reorder;
+                          return (
+                            <tr key={ing.id} className={cn("hover:bg-[#faf7f2]/30", isLow && "bg-red-50/40")}>
+                              <td className="px-5 py-3">
+                                <p className="font-semibold text-[#1a1208]">{ing.name}</p>
+                                {ing.sku && <p className="text-[10px] text-[#9c8e85] font-mono">{ing.sku}</p>}
+                              </td>
+                              <td className="px-5 py-3">
+                                <span className={cn(
+                                  "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest",
+                                  ing.item_type === 'PACKAGED' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
+                                )}>{ing.item_type}</span>
+                              </td>
+                              <td className="px-5 py-3 text-[#3d3128]">{ing.category || '—'}</td>
+                              <td className="px-5 py-3 text-right font-mono">
+                                <span className={cn("font-bold", isLow && "text-red-600")}>{stock.toLocaleString('en-IN', { maximumFractionDigits: 3 })}</span>
+                                <span className="text-[10px] text-[#9c8e85] ml-1">{ing.unit}</span>
+                                {isLow && <Bell size={11} className="inline ml-1 text-red-500" />}
+                              </td>
+                              <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{reorder || '—'}</td>
+                              <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{Number(ing.par_level || 0) || '—'}</td>
+                              <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{ing.default_unit_price ? `₹${Number(ing.default_unit_price).toFixed(2)}` : '—'}</td>
+                              <td className="px-5 py-3">
+                                <div className="flex gap-1.5">
+                                  <button
+                                    onClick={() => setEditingIngredient(ing)}
+                                    className="p-1.5 rounded-lg hover:bg-[#cc5a16]/5 text-[#6b5d52] hover:text-[#cc5a16]"
+                                    title="Edit"
+                                  >
+                                    <Edit3 size={14} />
+                                  </button>
+                                  <button
+                                    onClick={() => setAdjustingStock(ing)}
+                                    className="px-2 py-1 rounded-lg bg-[#cc5a16]/10 text-[#cc5a16] text-[11px] font-bold hover:bg-[#cc5a16]/20"
+                                    title="Adjust stock manually"
+                                  >
+                                    Adjust
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── SUPPLIERS sub-view ── */}
+          {inventorySubTab === 'SUPPLIERS' && (
+            <div className="space-y-4">
+              <div className="flex justify-between items-center">
+                <p className="text-sm text-[#6b5d52]">{inventorySuppliers.length} supplier{inventorySuppliers.length !== 1 ? 's' : ''}</p>
+                <button
+                  onClick={() => setEditingSupplier({})}
+                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                >
+                  <Plus size={14} /> Add Supplier
+                </button>
+              </div>
+
+              {inventorySuppliers.length === 0 ? (
+                <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <div className="text-5xl mb-3">🚚</div>
+                  <p className="font-medium text-[#1a1208]">No suppliers yet</p>
+                  <p className="text-sm text-[#9c8e85] mt-1">
+                    Add vendors who deliver your ingredients
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {inventorySuppliers.map((s: any) => (
+                    <div key={s.id} className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
+                      <div className="flex justify-between items-start mb-3">
+                        <div>
+                          <p className="font-bold text-[#1a1208]">{s.name}</p>
+                          {s.contact_name && <p className="text-xs text-[#6b5d52]">{s.contact_name}</p>}
+                        </div>
+                        <button onClick={() => setEditingSupplier(s)} className="text-[#9c8e85] hover:text-[#cc5a16]"><Edit3 size={14}/></button>
+                      </div>
+                      <div className="space-y-1 text-xs text-[#6b5d52]">
+                        {s.phone && <p>📞 {s.phone}</p>}
+                        {s.email && <p>✉ {s.email}</p>}
+                        {s.gst_number && <p className="font-mono">GST: {s.gst_number}</p>}
+                        <p className="text-[10px] uppercase tracking-widest mt-2">
+                          Lead time: <span className="font-bold text-[#1a1208]">{s.lead_time_days} day{s.lead_time_days !== 1 ? 's' : ''}</span>
+                          {s.payment_terms && <> · {s.payment_terms}</>}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── PURCHASE ORDERS sub-view ── */}
+          {inventorySubTab === 'PURCHASE_ORDERS' && (
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {(['ALL', 'DRAFT', 'SENT', 'PARTIAL', 'RECEIVED', 'CANCELLED'] as const).map(s => (
+                    <button
+                      key={s}
+                      onClick={() => setPOFilter(s)}
+                      className={cn(
+                        "px-3 py-1.5 rounded-2xl text-[11px] font-bold uppercase tracking-widest border whitespace-nowrap transition-all",
+                        poFilter === s ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'bg-white border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#cc5a16]/5'
+                      )}
+                    >{s}</button>
+                  ))}
+                </div>
+                <button
+                  onClick={() => {
+                    if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
+                    if (inventoryIngredients.length === 0) { alert('Add at least one ingredient first'); return; }
+                    setCreatingPO(true);
+                  }}
+                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                >
+                  <Plus size={14} /> Raise PO
+                </button>
+              </div>
+
+              {inventoryPOs.length === 0 ? (
+                <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <div className="text-5xl mb-3">📋</div>
+                  <p className="font-medium text-[#1a1208]">No purchase orders</p>
+                  <p className="text-sm text-[#9c8e85] mt-1">Raise a PO when you need to restock</p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                        <tr>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">PO #</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Supplier</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Status</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Expected</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Lines</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Total</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#cc5a16]/5">
+                        {inventoryPOs.map((po: any) => {
+                          const statusColor: Record<string, string> = {
+                            DRAFT: 'bg-gray-100 text-gray-700',
+                            SENT: 'bg-blue-100 text-blue-700',
+                            PARTIAL: 'bg-amber-100 text-amber-700',
+                            RECEIVED: 'bg-emerald-100 text-emerald-700',
+                            CANCELLED: 'bg-red-100 text-red-700',
+                          };
+                          return (
+                            <tr key={po.id} className="hover:bg-[#faf7f2]/30">
+                              <td className="px-5 py-3 font-mono font-bold text-[#cc5a16]">{po.id}</td>
+                              <td className="px-5 py-3 text-[#1a1208]">{po.supplier_name || '—'}</td>
+                              <td className="px-5 py-3">
+                                <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest", statusColor[po.status] || statusColor.DRAFT)}>
+                                  {po.status}
+                                </span>
+                              </td>
+                              <td className="px-5 py-3 text-xs text-[#6b5d52]">{po.expected_delivery_date || '—'}</td>
+                              <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{po.line_count}</td>
+                              <td className="px-5 py-3 text-right font-mono font-bold">₹{Number(po.grand_total || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                              <td className="px-5 py-3">
+                                <div className="flex gap-1.5 flex-wrap">
+                                  <button
+                                    onClick={async () => {
+                                      const r = await fetch(`/api/inventory/purchase-orders/${po.id}`, {
+                                        headers: { 'Authorization': `Bearer ${token}` },
+                                      });
+                                      if (r.ok) setViewingPO(await r.json());
+                                    }}
+                                    className="px-2 py-1 rounded-lg text-[11px] font-bold bg-[#0d0a07]/5 text-[#6b5d52] hover:bg-[#0d0a07]/10"
+                                  >
+                                    <Eye size={11} className="inline mr-1" /> View
+                                  </button>
+                                  {po.status === 'DRAFT' && (
+                                    <button
+                                      onClick={async () => {
+                                        if (!confirm(`Send ${po.id} to supplier?`)) return;
+                                        const r = await fetch(`/api/inventory/purchase-orders/${po.id}/send`, {
+                                          method: 'POST',
+                                          headers: { 'Authorization': `Bearer ${token}` },
+                                        });
+                                        if (r.ok) fetchInventoryPOs();
+                                      }}
+                                      className="px-2 py-1 rounded-lg text-[11px] font-bold bg-blue-100 text-blue-700 hover:bg-blue-200"
+                                    >Send</button>
+                                  )}
+                                  {(po.status === 'SENT' || po.status === 'PARTIAL') && (
+                                    <button
+                                      onClick={() => setCreatingGRN({ poId: po.id })}
+                                      className="px-2 py-1 rounded-lg text-[11px] font-bold bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                    >Receive</button>
+                                  )}
+                                  {!['RECEIVED', 'CANCELLED'].includes(po.status) && (
+                                    <button
+                                      onClick={async () => {
+                                        if (!confirm(`Cancel ${po.id}?`)) return;
+                                        const r = await fetch(`/api/inventory/purchase-orders/${po.id}/cancel`, {
+                                          method: 'POST',
+                                          headers: { 'Authorization': `Bearer ${token}` },
+                                        });
+                                        if (r.ok) fetchInventoryPOs();
+                                      }}
+                                      className="px-2 py-1 rounded-lg text-[11px] font-bold text-red-600 hover:bg-red-50"
+                                    >Cancel</button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── GOODS RECEIPTS sub-view ── */}
+          {inventorySubTab === 'GOODS_RECEIPTS' && (
+            <div className="space-y-4">
+              <div className="flex justify-between items-center">
+                <p className="text-sm text-[#6b5d52]">{inventoryGRNs.length} receipt{inventoryGRNs.length !== 1 ? 's' : ''}</p>
+                <button
+                  onClick={() => {
+                    if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
+                    setCreatingGRN({});
+                  }}
+                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                >
+                  <Plus size={14} /> Record Receipt
+                </button>
+              </div>
+
+              {inventoryGRNs.length === 0 ? (
+                <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <div className="text-5xl mb-3">📥</div>
+                  <p className="font-medium text-[#1a1208]">No goods receipts yet</p>
+                  <p className="text-sm text-[#9c8e85] mt-1">Record arrivals to increment stock</p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                      <tr>
+                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">GRN #</th>
+                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Supplier</th>
+                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">PO Linked</th>
+                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Bill #</th>
+                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Received</th>
+                        <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Qty</th>
+                        <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#cc5a16]/5">
+                      {inventoryGRNs.map((g: any) => (
+                        <tr
+                          key={g.id}
+                          onClick={async () => {
+                            const r = await fetch(`/api/inventory/grn/${g.id}`, {
+                              headers: { 'Authorization': `Bearer ${token}` },
+                            });
+                            if (r.ok) setViewingGRN(await r.json());
+                          }}
+                          className="hover:bg-[#faf7f2]/30 cursor-pointer"
+                        >
+                          <td className="px-5 py-3 font-mono font-bold text-[#cc5a16]">{g.id}</td>
+                          <td className="px-5 py-3 text-[#1a1208]">{g.supplier_name || '—'}</td>
+                          <td className="px-5 py-3 font-mono text-xs text-[#6b5d52]">{g.po_id || '—'}</td>
+                          <td className="px-5 py-3 text-xs text-[#6b5d52]">{g.bill_number || '—'}</td>
+                          <td className="px-5 py-3 text-xs text-[#6b5d52]">
+                            {g.received_at ? new Date(g.received_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
+                          </td>
+                          <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{Number(g.total_qty || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                          <td className="px-5 py-3 text-right font-mono font-bold">₹{Number(g.total_amount || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ─── Modals — defined inline so they have closure access to fetchers ─── */}
+          {editingIngredient && (
+            <IngredientEditorModal
+              token={token!}
+              restaurantId={restaurantId!}
+              ingredient={editingIngredient.id ? editingIngredient : null}
+              onClose={() => setEditingIngredient(null)}
+              onSaved={() => { setEditingIngredient(null); fetchInventoryIngredients(); }}
+            />
+          )}
+          {adjustingStock && (
+            <StockAdjustModal
+              token={token!}
+              ingredient={adjustingStock}
+              onClose={() => setAdjustingStock(null)}
+              onSaved={() => { setAdjustingStock(null); fetchInventoryIngredients(); }}
+            />
+          )}
+          {editingSupplier && (
+            <SupplierEditorModal
+              token={token!}
+              restaurantId={restaurantId!}
+              supplier={editingSupplier.id ? editingSupplier : null}
+              onClose={() => setEditingSupplier(null)}
+              onSaved={() => { setEditingSupplier(null); fetchInventorySuppliers(); }}
+            />
+          )}
+          {creatingPO && (
+            <POCreateModal
+              token={token!}
+              restaurantId={restaurantId!}
+              suppliers={inventorySuppliers}
+              ingredients={inventoryIngredients}
+              onClose={() => setCreatingPO(false)}
+              onSaved={() => { setCreatingPO(false); fetchInventoryPOs(); }}
+            />
+          )}
+          {viewingPO && (
+            <POViewModal
+              po={viewingPO}
+              onClose={() => setViewingPO(null)}
+            />
+          )}
+          {creatingGRN && (
+            <GRNCreateModal
+              token={token!}
+              restaurantId={restaurantId!}
+              suppliers={inventorySuppliers}
+              ingredients={inventoryIngredients}
+              poId={creatingGRN.poId}
+              onClose={() => setCreatingGRN(null)}
+              onSaved={() => { setCreatingGRN(null); fetchInventoryGRNs(); fetchInventoryPOs(); fetchInventoryIngredients(); }}
+            />
+          )}
+          {viewingGRN && (
+            <GRNViewModal
+              token={token!}
+              grn={viewingGRN}
+              onClose={() => setViewingGRN(null)}
+              onBillUploaded={() => { fetchInventoryGRNs(); }}
+            />
           )}
         </div>
       ) : activeTab === 'BOOKINGS' ? (
@@ -15603,6 +16155,842 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
         </div>
       )}
     </motion.div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ─── Inventory Module Modals ────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+
+const ALLOWED_UNITS = ['kg', 'g', 'l', 'ml', 'unit', 'bottle', 'piece', 'pack', 'dozen'];
+const INGREDIENT_CATEGORIES = ['Dairy', 'Meat', 'Produce', 'Grains', 'Oils & Fats', 'Spices', 'Beverages', 'Packaged', 'Frozen', 'Other'];
+
+// Generic modal shell — backdrop, centered card, max-h scrollable
+function InventoryModalShell({ title, subtitle, onClose, children, wide = false }: {
+  title: string; subtitle?: string; onClose: () => void; children: React.ReactNode; wide?: boolean;
+}) {
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        className={cn("bg-white rounded-[32px] shadow-2xl w-full overflow-hidden my-auto", wide ? "max-w-4xl" : "max-w-xl")}
+      >
+        <div className="p-6 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
+          <div>
+            <h3 className="text-2xl font-bold font-serif">{title}</h3>
+            {subtitle && <p className="text-sm text-[#6b5d52]">{subtitle}</p>}
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-full transition-colors"><X size={22}/></button>
+        </div>
+        <div className="p-6 max-h-[75vh] overflow-y-auto">{children}</div>
+      </motion.div>
+    </div>
+  );
+}
+
+// Standard styled inputs
+function FormField({ label, children, required, hint }: { label: string; children: React.ReactNode; required?: boolean; hint?: string }) {
+  return (
+    <div className="space-y-1.5">
+      <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-1">
+        {label}{required && <span className="text-red-500 ml-0.5">*</span>}
+      </label>
+      {children}
+      {hint && <p className="text-[10px] text-[#9c8e85] ml-1">{hint}</p>}
+    </div>
+  );
+}
+const inputClass = "w-full px-4 py-3 rounded-2xl border border-[#cc5a16]/15 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20 text-sm";
+
+// ─── Ingredient editor (create + edit) ─────────────────────────────────────
+function IngredientEditorModal({ token, restaurantId, ingredient, onClose, onSaved }: {
+  token: string; restaurantId: string; ingredient: any | null; onClose: () => void; onSaved: () => void;
+}) {
+  const isEdit = !!ingredient?.id;
+  const [form, setForm] = useState({
+    name: ingredient?.name || '',
+    item_type: ingredient?.item_type || 'RAW',
+    category: ingredient?.category || '',
+    unit: ingredient?.unit || 'kg',
+    current_stock_qty: ingredient?.current_stock_qty ?? 0,
+    reorder_point: ingredient?.reorder_point ?? 0,
+    par_level: ingredient?.par_level ?? 0,
+    default_unit_price: ingredient?.default_unit_price ?? '',
+    gst_percent: ingredient?.gst_percent ?? 0,
+    sku: ingredient?.sku || '',
+    notes: ingredient?.notes || '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async () => {
+    if (!form.name.trim() || !form.unit) { setErr('Name and unit are required'); return; }
+    setSaving(true); setErr('');
+    try {
+      const url = isEdit
+        ? `/api/inventory/ingredients/${ingredient.id}`
+        : `/api/restaurant/${restaurantId}/inventory/ingredients`;
+      const r = await fetch(url, {
+        method: isEdit ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          ...form,
+          current_stock_qty: isEdit ? undefined : Number(form.current_stock_qty || 0),  // only set on create
+          reorder_point: Number(form.reorder_point || 0),
+          par_level: Number(form.par_level || 0),
+          default_unit_price: form.default_unit_price === '' ? null : Number(form.default_unit_price),
+          gst_percent: Number(form.gst_percent || 0),
+        }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setErr(d.error || 'Save failed');
+      } else onSaved();
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <InventoryModalShell
+      title={isEdit ? 'Edit Ingredient' : 'Add Ingredient'}
+      subtitle={isEdit ? form.name : 'Add to your stock catalog'}
+      onClose={onClose}
+    >
+      <div className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FormField label="Name" required>
+            <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className={inputClass} placeholder="e.g. Paneer" />
+          </FormField>
+          <FormField label="Type" required>
+            <select value={form.item_type} onChange={e => setForm({ ...form, item_type: e.target.value })} className={inputClass}>
+              <option value="RAW">Raw (recipe ingredient)</option>
+              <option value="PACKAGED">Packaged (sold direct, e.g. water)</option>
+            </select>
+          </FormField>
+          <FormField label="Category">
+            <select value={form.category} onChange={e => setForm({ ...form, category: e.target.value })} className={inputClass}>
+              <option value="">— Select —</option>
+              {INGREDIENT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </FormField>
+          <FormField label="Unit" required>
+            <select value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value })} className={inputClass}>
+              {ALLOWED_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </FormField>
+        </div>
+
+        {!isEdit && (
+          <FormField label="Opening Stock" hint="Qty currently on hand. Logged as audit movement.">
+            <input type="number" min={0} step="0.01" value={form.current_stock_qty} onChange={e => setForm({ ...form, current_stock_qty: e.target.value as any })} className={inputClass} />
+          </FormField>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <FormField label="Reorder Point" hint="Alert below this">
+            <input type="number" min={0} step="0.01" value={form.reorder_point} onChange={e => setForm({ ...form, reorder_point: e.target.value as any })} className={inputClass} />
+          </FormField>
+          <FormField label="Par Level" hint="Ideal stock to maintain">
+            <input type="number" min={0} step="0.01" value={form.par_level} onChange={e => setForm({ ...form, par_level: e.target.value as any })} className={inputClass} />
+          </FormField>
+          <FormField label="Last Purchase ₹" hint="Per unit">
+            <input type="number" min={0} step="0.01" value={form.default_unit_price} onChange={e => setForm({ ...form, default_unit_price: e.target.value as any })} className={inputClass} />
+          </FormField>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FormField label="GST %">
+            <input type="number" min={0} max={28} value={form.gst_percent} onChange={e => setForm({ ...form, gst_percent: e.target.value as any })} className={inputClass} />
+          </FormField>
+          <FormField label="SKU / Barcode">
+            <input value={form.sku} onChange={e => setForm({ ...form, sku: e.target.value })} className={inputClass} />
+          </FormField>
+        </div>
+        <FormField label="Notes">
+          <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} className={cn(inputClass, "min-h-[60px]")} />
+        </FormField>
+
+        {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2]">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white hover:bg-[#a84612] disabled:opacity-60">
+            {saving ? 'Saving…' : (isEdit ? 'Update' : 'Add Ingredient')}
+          </button>
+        </div>
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── Stock adjustment (manual override with audit trail) ──────────────────
+function StockAdjustModal({ token, ingredient, onClose, onSaved }: {
+  token: string; ingredient: any; onClose: () => void; onSaved: () => void;
+}) {
+  const [newQty, setNewQty] = useState(String(ingredient.current_stock_qty ?? 0));
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async () => {
+    setSaving(true); setErr('');
+    try {
+      const r = await fetch(`/api/inventory/ingredients/${ingredient.id}/adjust-stock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ new_qty: Number(newQty), reason: reason || undefined }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setErr(d.error || 'Adjust failed');
+      } else onSaved();
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  const delta = Number(newQty) - Number(ingredient.current_stock_qty || 0);
+
+  return (
+    <InventoryModalShell title="Adjust Stock" subtitle={ingredient.name} onClose={onClose}>
+      <div className="space-y-4">
+        <div className="bg-[#faf7f2] rounded-2xl p-4 text-sm">
+          <p className="text-[#6b5d52]">Current stock</p>
+          <p className="text-2xl font-bold font-mono">{Number(ingredient.current_stock_qty || 0).toLocaleString('en-IN', { maximumFractionDigits: 3 })} {ingredient.unit}</p>
+        </div>
+        <FormField label="New Quantity" required hint={`Delta: ${delta > 0 ? '+' : ''}${delta.toFixed(3)} ${ingredient.unit}`}>
+          <input type="number" min={0} step="0.001" value={newQty} onChange={e => setNewQty(e.target.value)} className={inputClass} />
+        </FormField>
+        <FormField label="Reason" hint="Optional — recorded in the audit log">
+          <input value={reason} onChange={e => setReason(e.target.value)} className={inputClass} placeholder="e.g. Found extra in cold storage" />
+        </FormField>
+        {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">
+            {saving ? 'Saving…' : 'Adjust Stock'}
+          </button>
+        </div>
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── Supplier editor ──────────────────────────────────────────────────────
+function SupplierEditorModal({ token, restaurantId, supplier, onClose, onSaved }: {
+  token: string; restaurantId: string; supplier: any | null; onClose: () => void; onSaved: () => void;
+}) {
+  const isEdit = !!supplier?.id;
+  const [form, setForm] = useState({
+    name: supplier?.name || '',
+    contact_name: supplier?.contact_name || '',
+    phone: supplier?.phone || '',
+    email: supplier?.email || '',
+    address: supplier?.address || '',
+    gst_number: supplier?.gst_number || '',
+    lead_time_days: supplier?.lead_time_days ?? 1,
+    payment_terms: supplier?.payment_terms || '',
+    notes: supplier?.notes || '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async () => {
+    if (!form.name.trim()) { setErr('Name is required'); return; }
+    setSaving(true); setErr('');
+    try {
+      const url = isEdit ? `/api/inventory/suppliers/${supplier.id}` : `/api/restaurant/${restaurantId}/inventory/suppliers`;
+      const r = await fetch(url, {
+        method: isEdit ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ ...form, lead_time_days: Math.max(0, parseInt(String(form.lead_time_days || 1), 10)) }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); setErr(d.error || 'Save failed'); }
+      else onSaved();
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <InventoryModalShell title={isEdit ? 'Edit Supplier' : 'Add Supplier'} subtitle={isEdit ? form.name : 'Add to your vendor directory'} onClose={onClose}>
+      <div className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FormField label="Name" required>
+            <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className={inputClass} placeholder="e.g. Hari Dairy" />
+          </FormField>
+          <FormField label="Contact Person">
+            <input value={form.contact_name} onChange={e => setForm({ ...form, contact_name: e.target.value })} className={inputClass} />
+          </FormField>
+          <FormField label="Phone">
+            <input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} className={inputClass} placeholder="+91 ..." />
+          </FormField>
+          <FormField label="Email">
+            <input value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} className={inputClass} />
+          </FormField>
+        </div>
+        <FormField label="Address">
+          <textarea value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className={cn(inputClass, "min-h-[60px]")} />
+        </FormField>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <FormField label="GST Number">
+            <input value={form.gst_number} onChange={e => setForm({ ...form, gst_number: e.target.value })} className={inputClass} />
+          </FormField>
+          <FormField label="Lead Time (days)" required>
+            <input type="number" min={0} value={form.lead_time_days} onChange={e => setForm({ ...form, lead_time_days: e.target.value as any })} className={inputClass} />
+          </FormField>
+          <FormField label="Payment Terms">
+            <select value={form.payment_terms} onChange={e => setForm({ ...form, payment_terms: e.target.value })} className={inputClass}>
+              <option value="">—</option>
+              <option value="COD">COD</option>
+              <option value="NET-7">NET-7</option>
+              <option value="NET-15">NET-15</option>
+              <option value="NET-30">NET-30</option>
+            </select>
+          </FormField>
+        </div>
+        <FormField label="Notes">
+          <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} className={cn(inputClass, "min-h-[60px]")} />
+        </FormField>
+        {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">
+            {saving ? 'Saving…' : (isEdit ? 'Update' : 'Add Supplier')}
+          </button>
+        </div>
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── PO create modal — multi-line ─────────────────────────────────────────
+function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, onSaved }: {
+  token: string; restaurantId: string; suppliers: any[]; ingredients: any[]; onClose: () => void; onSaved: () => void;
+}) {
+  const [supplierId, setSupplierId] = useState(suppliers[0]?.id || '');
+  const [expectedDate, setExpectedDate] = useState('');
+  const [notes, setNotes] = useState('');
+  const [lines, setLines] = useState<any[]>([{ ingredient_id: '', qty_ordered: 1, unit_price: 0 }]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const updateLine = (idx: number, key: string, value: any) => {
+    setLines(prev => prev.map((l, i) => {
+      if (i !== idx) return l;
+      const next = { ...l, [key]: value };
+      if (key === 'ingredient_id') {
+        const ing = ingredients.find(x => x.id === value);
+        if (ing) {
+          next.unit = ing.unit;
+          if (!next.unit_price) next.unit_price = ing.default_unit_price || 0;
+        }
+      }
+      return next;
+    }));
+  };
+
+  const addLine = () => setLines(prev => [...prev, { ingredient_id: '', qty_ordered: 1, unit_price: 0 }]);
+  const removeLine = (i: number) => setLines(prev => prev.filter((_, idx) => idx !== i));
+
+  const subtotal = lines.reduce((s, l) => s + Number(l.qty_ordered || 0) * Number(l.unit_price || 0), 0);
+  const gstTotal = lines.reduce((s, l) => {
+    const ing = ingredients.find(x => x.id === l.ingredient_id);
+    return s + Number(l.qty_ordered || 0) * Number(l.unit_price || 0) * (Number(ing?.gst_percent || 0) / 100);
+  }, 0);
+
+  const save = async () => {
+    if (!supplierId) { setErr('Pick a supplier'); return; }
+    const validLines = lines.filter(l => l.ingredient_id && Number(l.qty_ordered) > 0);
+    if (validLines.length === 0) { setErr('Add at least one line item'); return; }
+    setSaving(true); setErr('');
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/purchase-orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          supplier_id: supplierId,
+          expected_delivery_date: expectedDate || null,
+          notes: notes || null,
+          items: validLines.map(l => {
+            const ing = ingredients.find(x => x.id === l.ingredient_id);
+            return {
+              ingredient_id: l.ingredient_id,
+              qty_ordered: Number(l.qty_ordered),
+              unit: l.unit || ing?.unit || 'unit',
+              unit_price: Number(l.unit_price),
+            };
+          }),
+        }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); setErr(d.error || 'Save failed'); }
+      else onSaved();
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <InventoryModalShell title="Raise Purchase Order" subtitle="Status will be DRAFT until you Send" onClose={onClose} wide>
+      <div className="space-y-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FormField label="Supplier" required>
+            <select value={supplierId} onChange={e => setSupplierId(e.target.value)} className={inputClass}>
+              <option value="">— Select —</option>
+              {suppliers.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </FormField>
+          <FormField label="Expected Delivery Date">
+            <input type="date" value={expectedDate} onChange={e => setExpectedDate(e.target.value)} className={inputClass} />
+          </FormField>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Line Items</p>
+            <button onClick={addLine} className="text-xs font-bold text-[#cc5a16] hover:underline">+ Add line</button>
+          </div>
+          <div className="space-y-2">
+            {lines.map((l, i) => {
+              const ing = ingredients.find(x => x.id === l.ingredient_id);
+              const lineTotal = Number(l.qty_ordered || 0) * Number(l.unit_price || 0);
+              return (
+                <div key={i} className="bg-[#faf7f2] rounded-2xl p-3 grid grid-cols-12 gap-2 items-end">
+                  <div className="col-span-12 md:col-span-5">
+                    <select value={l.ingredient_id} onChange={e => updateLine(i, 'ingredient_id', e.target.value)} className={inputClass}>
+                      <option value="">Pick ingredient…</option>
+                      {ingredients.map((x: any) => <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>)}
+                    </select>
+                  </div>
+                  <div className="col-span-4 md:col-span-2">
+                    <input type="number" min={0} step="0.001" value={l.qty_ordered} onChange={e => updateLine(i, 'qty_ordered', e.target.value)} className={inputClass} placeholder="Qty" />
+                  </div>
+                  <div className="col-span-4 md:col-span-2">
+                    <input type="number" min={0} step="0.01" value={l.unit_price} onChange={e => updateLine(i, 'unit_price', e.target.value)} className={inputClass} placeholder="₹/unit" />
+                  </div>
+                  <div className="col-span-3 md:col-span-2 text-right font-mono text-sm font-bold">
+                    ₹{lineTotal.toFixed(2)}
+                    {ing?.gst_percent > 0 && <p className="text-[10px] text-[#9c8e85] font-normal">+{ing.gst_percent}% GST</p>}
+                  </div>
+                  <div className="col-span-1">
+                    <button onClick={() => removeLine(i)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg"><Trash2 size={14}/></button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-1.5 text-sm">
+          <div className="flex justify-between"><span className="text-[#6b5d52]">Subtotal</span><span className="font-mono">₹{subtotal.toFixed(2)}</span></div>
+          <div className="flex justify-between"><span className="text-[#6b5d52]">GST</span><span className="font-mono">₹{gstTotal.toFixed(2)}</span></div>
+          <div className="flex justify-between font-bold pt-1.5 border-t border-[#cc5a16]/10"><span>Grand Total</span><span className="font-mono">₹{(subtotal + gstTotal).toFixed(2)}</span></div>
+        </div>
+
+        <FormField label="Notes">
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} className={cn(inputClass, "min-h-[60px]")} />
+        </FormField>
+
+        {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">
+            {saving ? 'Saving…' : 'Create PO (Draft)'}
+          </button>
+        </div>
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── PO view (read-only with line items) ──────────────────────────────────
+function POViewModal({ po, onClose }: { po: any; onClose: () => void }) {
+  return (
+    <InventoryModalShell title={po.id} subtitle={`${po.supplier_name || ''} · ${po.status}`} onClose={onClose} wide>
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+          <div><p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Status</p><p className="font-bold">{po.status}</p></div>
+          <div><p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Expected</p><p>{po.expected_delivery_date || '—'}</p></div>
+          <div><p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Raised</p><p>{po.raised_at ? new Date(po.raised_at).toLocaleDateString('en-IN') : '—'}</p></div>
+          <div><p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Lead Time</p><p>{po.lead_time_days || '—'} days</p></div>
+        </div>
+        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+              <tr>
+                <th className="text-left px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Ingredient</th>
+                <th className="text-right px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Ordered</th>
+                <th className="text-right px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Received</th>
+                <th className="text-right px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">₹/unit</th>
+                <th className="text-right px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Line Total</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#cc5a16]/5">
+              {(po.items || []).map((it: any) => (
+                <tr key={it.id}>
+                  <td className="px-4 py-2">{it.ingredient_name || it.ingredient_id}</td>
+                  <td className="px-4 py-2 text-right font-mono">{Number(it.qty_ordered).toFixed(2)} {it.unit}</td>
+                  <td className="px-4 py-2 text-right font-mono">{Number(it.qty_received || 0).toFixed(2)}{it.is_fully_received ? ' ✓' : ''}</td>
+                  <td className="px-4 py-2 text-right font-mono">₹{Number(it.unit_price).toFixed(2)}</td>
+                  <td className="px-4 py-2 text-right font-mono">₹{(Number(it.qty_ordered) * Number(it.unit_price)).toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-1.5 text-sm">
+          <div className="flex justify-between"><span className="text-[#6b5d52]">Subtotal</span><span className="font-mono">₹{Number(po.total_amount || 0).toFixed(2)}</span></div>
+          <div className="flex justify-between"><span className="text-[#6b5d52]">GST</span><span className="font-mono">₹{Number(po.gst_amount || 0).toFixed(2)}</span></div>
+          <div className="flex justify-between font-bold pt-1.5 border-t border-[#cc5a16]/10"><span>Grand Total</span><span className="font-mono">₹{Number(po.grand_total || 0).toFixed(2)}</span></div>
+        </div>
+        {po.notes && <div className="bg-[#faf7f2] rounded-2xl p-3 text-xs text-[#6b5d52]">{po.notes}</div>}
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── GRN create — link to PO (auto-fills lines) or ad-hoc ─────────────────
+function GRNCreateModal({ token, restaurantId, suppliers, ingredients, poId, onClose, onSaved }: {
+  token: string; restaurantId: string; suppliers: any[]; ingredients: any[]; poId?: string; onClose: () => void; onSaved: () => void;
+}) {
+  const [supplierId, setSupplierId] = useState(suppliers[0]?.id || '');
+  const [billNumber, setBillNumber] = useState('');
+  const [notes, setNotes] = useState('');
+  const [lines, setLines] = useState<any[]>([{ ingredient_id: '', qty_received: 0, unit_price: 0, condition: 'GOOD' }]);
+  const [poInfo, setPOInfo] = useState<any | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  // If linked to a PO, prefill lines from outstanding qty
+  useEffect(() => {
+    if (!poId) return;
+    fetch(`/api/inventory/purchase-orders/${poId}`, { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(po => {
+        setPOInfo(po);
+        setSupplierId(po.supplier_id);
+        setLines((po.items || []).map((it: any) => ({
+          ingredient_id: it.ingredient_id,
+          qty_received: Math.max(0, Number(it.qty_ordered) - Number(it.qty_received || 0)),
+          unit: it.unit,
+          unit_price: it.unit_price,
+          condition: 'GOOD',
+        })));
+      })
+      .catch(() => {});
+  }, [poId, token]);
+
+  const updateLine = (idx: number, key: string, value: any) => {
+    setLines(prev => prev.map((l, i) => i === idx ? { ...l, [key]: value } : l));
+  };
+  const addLine = () => setLines(prev => [...prev, { ingredient_id: '', qty_received: 0, unit_price: 0, condition: 'GOOD' }]);
+  const removeLine = (i: number) => setLines(prev => prev.filter((_, idx) => idx !== i));
+
+  const save = async () => {
+    if (!supplierId && !poId) { setErr('Pick a supplier'); return; }
+    const valid = lines.filter(l => l.ingredient_id && Number(l.qty_received) > 0);
+    if (valid.length === 0) { setErr('Record at least one line'); return; }
+    setSaving(true); setErr('');
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/grn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          po_id: poId || null,
+          supplier_id: supplierId,
+          bill_number: billNumber || null,
+          notes: notes || null,
+          items: valid.map(l => {
+            const ing = ingredients.find(x => x.id === l.ingredient_id);
+            return {
+              ingredient_id: l.ingredient_id,
+              qty_received: Number(l.qty_received),
+              unit: l.unit || ing?.unit || 'unit',
+              unit_price: Number(l.unit_price || 0),
+              batch_number: l.batch_number || null,
+              expiry_date: l.expiry_date || null,
+              condition: l.condition || 'GOOD',
+            };
+          }),
+        }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); setErr(d.error || 'Save failed'); }
+      else onSaved();
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <InventoryModalShell
+      title={poId ? `Receive Against ${poId}` : 'Record Goods Receipt'}
+      subtitle={poInfo?.supplier_name || (poId ? 'Loading PO…' : 'Ad-hoc receipt')}
+      onClose={onClose}
+      wide
+    >
+      <div className="space-y-5">
+        {!poId && (
+          <FormField label="Supplier" required>
+            <select value={supplierId} onChange={e => setSupplierId(e.target.value)} className={inputClass}>
+              <option value="">— Select —</option>
+              {suppliers.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </FormField>
+        )}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FormField label="Bill / Invoice Number">
+            <input value={billNumber} onChange={e => setBillNumber(e.target.value)} className={inputClass} />
+          </FormField>
+          <FormField label="Notes">
+            <input value={notes} onChange={e => setNotes(e.target.value)} className={inputClass} />
+          </FormField>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex justify-between items-center">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Items Received</p>
+            {!poId && <button onClick={addLine} className="text-xs font-bold text-[#cc5a16] hover:underline">+ Add line</button>}
+          </div>
+          <div className="space-y-2">
+            {lines.map((l, i) => {
+              const ing = ingredients.find(x => x.id === l.ingredient_id);
+              return (
+                <div key={i} className="bg-[#faf7f2] rounded-2xl p-3 space-y-2">
+                  <div className="grid grid-cols-12 gap-2 items-end">
+                    <div className="col-span-12 md:col-span-4">
+                      <select value={l.ingredient_id} onChange={e => updateLine(i, 'ingredient_id', e.target.value)} disabled={!!poId} className={inputClass}>
+                        <option value="">Pick ingredient…</option>
+                        {ingredients.map((x: any) => <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>)}
+                      </select>
+                    </div>
+                    <div className="col-span-4 md:col-span-2">
+                      <input type="number" min={0} step="0.001" value={l.qty_received} onChange={e => updateLine(i, 'qty_received', e.target.value)} className={inputClass} placeholder="Qty" />
+                    </div>
+                    <div className="col-span-4 md:col-span-2">
+                      <input type="number" min={0} step="0.01" value={l.unit_price} onChange={e => updateLine(i, 'unit_price', e.target.value)} className={inputClass} placeholder="₹/unit" />
+                    </div>
+                    <div className="col-span-4 md:col-span-2">
+                      <select value={l.condition || 'GOOD'} onChange={e => updateLine(i, 'condition', e.target.value)} className={inputClass}>
+                        <option value="GOOD">Good</option>
+                        <option value="DAMAGED">Damaged</option>
+                        <option value="PARTIAL">Partial</option>
+                      </select>
+                    </div>
+                    {!poId && (
+                      <div className="col-span-12 md:col-span-2 flex justify-end">
+                        <button onClick={() => removeLine(i)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg"><Trash2 size={14}/></button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input value={l.batch_number || ''} onChange={e => updateLine(i, 'batch_number', e.target.value)} className={cn(inputClass, "text-xs")} placeholder="Batch # (optional)" />
+                    <input type="date" value={l.expiry_date || ''} onChange={e => updateLine(i, 'expiry_date', e.target.value)} className={cn(inputClass, "text-xs")} placeholder="Expiry" />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">
+            {saving ? 'Saving…' : 'Record Receipt'}
+          </button>
+        </div>
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── GRN view + bill upload ───────────────────────────────────────────────
+function GRNViewModal({ token, grn, onClose, onBillUploaded }: {
+  token: string; grn: any; onClose: () => void; onBillUploaded: () => void;
+}) {
+  const [billUrl, setBillUrl] = useState(grn.bill_image_url);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+
+  const handleUpload = async (file: File) => {
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('bill', file);
+      const r = await fetch(`/api/inventory/grn/${grn.id}/upload-bill`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: fd,
+      });
+      if (r.ok) {
+        const d = await r.json();
+        setBillUrl(d.bill_image_url);
+        onBillUploaded();
+      }
+    } finally { setUploading(false); }
+  };
+
+  return (
+    <InventoryModalShell title={grn.id} subtitle={`${grn.supplier_name || ''} · ${grn.bill_number ? `Bill #${grn.bill_number}` : 'No bill #'}`} onClose={onClose} wide>
+      <div className="space-y-4">
+        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+              <tr>
+                <th className="text-left px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Ingredient</th>
+                <th className="text-right px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Qty</th>
+                <th className="text-right px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">₹/unit</th>
+                <th className="text-left px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Batch</th>
+                <th className="text-left px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Expiry</th>
+                <th className="text-left px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Cond.</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#cc5a16]/5">
+              {(grn.items || []).map((it: any) => (
+                <tr key={it.id}>
+                  <td className="px-4 py-2">{it.ingredient_name}</td>
+                  <td className="px-4 py-2 text-right font-mono">{Number(it.qty_received).toFixed(2)} {it.unit}</td>
+                  <td className="px-4 py-2 text-right font-mono">₹{Number(it.unit_price).toFixed(2)}</td>
+                  <td className="px-4 py-2 text-xs">{it.batch_number || '—'}</td>
+                  <td className="px-4 py-2 text-xs">{it.expiry_date || '—'}</td>
+                  <td className="px-4 py-2"><span className={cn("px-1.5 py-0.5 rounded text-[10px] font-bold", it.condition === 'GOOD' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700')}>{it.condition}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-2">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Bill Photo</p>
+          {billUrl ? (
+            <img src={billUrl} alt="Bill" className="w-full max-w-md rounded-xl border border-[#cc5a16]/10" />
+          ) : (
+            <p className="text-sm text-[#9c8e85]">No bill photo uploaded</p>
+          )}
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={e => e.target.files?.[0] && handleUpload(e.target.files[0])}
+          />
+          <button
+            onClick={() => fileInput.current?.click()}
+            disabled={uploading}
+            className="px-4 py-2 rounded-xl text-xs font-bold bg-[#cc5a16] text-white disabled:opacity-60"
+          >
+            {uploading ? 'Uploading…' : (billUrl ? 'Replace bill photo' : 'Upload bill photo')}
+          </button>
+        </div>
+        <div className="flex justify-end pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white">Close</button>
+        </div>
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── Recipe Builder — opened from Menu Management for a specific menu item ─
+function RecipeBuilderModal({ token, restaurantId, menuItem, ingredients, onClose, onSaved }: {
+  token: string; restaurantId: string; menuItem: any; ingredients: any[]; onClose: () => void; onSaved: () => void;
+}) {
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/menu/${menuItem.id}/recipe`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    })
+      .then(r => r.ok ? r.json() : [])
+      .then(data => setRows(Array.isArray(data) && data.length > 0
+        ? data.map((d: any) => ({ ingredient_id: d.ingredient_id, qty_per_serving: d.qty_per_serving, unit: d.unit, size_variant: d.size_variant || 'BOTH', notes: d.notes || '' }))
+        : [{ ingredient_id: '', qty_per_serving: 0, unit: 'g', size_variant: 'BOTH', notes: '' }]))
+      .finally(() => setLoading(false));
+  }, [menuItem.id, restaurantId, token]);
+
+  const update = (idx: number, key: string, value: any) => {
+    setRows(prev => prev.map((r, i) => {
+      if (i !== idx) return r;
+      const next = { ...r, [key]: value };
+      if (key === 'ingredient_id') {
+        const ing = ingredients.find(x => x.id === value);
+        if (ing && !next.unit) next.unit = ing.unit;
+      }
+      return next;
+    }));
+  };
+  const addRow = () => setRows(prev => [...prev, { ingredient_id: '', qty_per_serving: 0, unit: 'g', size_variant: 'BOTH', notes: '' }]);
+  const removeRow = (i: number) => setRows(prev => prev.filter((_, idx) => idx !== i));
+
+  const save = async () => {
+    setSaving(true); setErr('');
+    try {
+      const validRows = rows.filter(r => r.ingredient_id && Number(r.qty_per_serving) > 0);
+      const r = await fetch(`/api/restaurant/${restaurantId}/menu/${menuItem.id}/recipe`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          items: validRows.map(r => ({
+            ingredient_id: r.ingredient_id,
+            qty_per_serving: Number(r.qty_per_serving),
+            unit: r.unit,
+            size_variant: r.size_variant,
+            notes: r.notes || null,
+          })),
+        }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); setErr(d.error || 'Save failed'); }
+      else onSaved();
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  if (loading) return (
+    <InventoryModalShell title="Loading recipe…" onClose={onClose}>
+      <div className="text-center py-8 text-[#9c8e85]">Loading…</div>
+    </InventoryModalShell>
+  );
+
+  return (
+    <InventoryModalShell title="Recipe" subtitle={`${menuItem.name} — ingredients consumed per serving`} onClose={onClose} wide>
+      <div className="space-y-4">
+        {ingredients.length === 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-sm text-amber-700">
+            Add ingredients in the Inventory tab first, then come back to build this recipe.
+          </div>
+        )}
+        <div className="space-y-2">
+          {rows.map((r, i) => (
+            <div key={i} className="bg-[#faf7f2] rounded-2xl p-3 grid grid-cols-12 gap-2 items-end">
+              <div className="col-span-12 md:col-span-4">
+                <select value={r.ingredient_id} onChange={e => update(i, 'ingredient_id', e.target.value)} className={inputClass}>
+                  <option value="">Pick ingredient…</option>
+                  {ingredients.filter((x: any) => x.item_type === 'RAW' || x.item_type === 'PACKAGED').map((x: any) => <option key={x.id} value={x.id}>{x.name} ({x.unit})</option>)}
+                </select>
+              </div>
+              <div className="col-span-6 md:col-span-2">
+                <input type="number" min={0} step="0.001" value={r.qty_per_serving} onChange={e => update(i, 'qty_per_serving', e.target.value)} className={inputClass} placeholder="Qty/serving" />
+              </div>
+              <div className="col-span-6 md:col-span-2">
+                <select value={r.unit} onChange={e => update(i, 'unit', e.target.value)} className={inputClass}>
+                  {ALLOWED_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
+              <div className="col-span-6 md:col-span-3">
+                <select value={r.size_variant} onChange={e => update(i, 'size_variant', e.target.value)} className={inputClass}>
+                  <option value="BOTH">Both Half & Full</option>
+                  <option value="FULL">Full only</option>
+                  <option value="HALF">Half only</option>
+                </select>
+              </div>
+              <div className="col-span-6 md:col-span-1 flex justify-end">
+                <button onClick={() => removeRow(i)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg"><Trash2 size={14}/></button>
+              </div>
+            </div>
+          ))}
+          <button onClick={addRow} className="w-full py-2 rounded-2xl border-2 border-dashed border-[#cc5a16]/30 text-xs font-bold text-[#cc5a16] hover:bg-[#cc5a16]/5">+ Add ingredient</button>
+        </div>
+
+        {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">
+            {saving ? 'Saving…' : 'Save Recipe'}
+          </button>
+        </div>
+      </div>
+    </InventoryModalShell>
   );
 }
 
