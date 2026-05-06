@@ -9621,7 +9621,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     m.name.toLowerCase().includes(q) ||
                                     String(m.category || '').toLowerCase().includes(q)
                                   )
-                                ).slice(0, 8);
+                                ).slice(0, 50);
                                 return hits.length > 0 ? (
                                   <div className="absolute top-full left-0 mt-1 z-[300] w-full bg-white rounded-xl shadow-2xl border border-[#cc5a16]/10 max-h-52 overflow-y-auto">
                                     {hits.map(m => (
@@ -10033,7 +10033,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 m.name.toLowerCase().includes(q) ||
                                 String(m.category || '').toLowerCase().includes(q)
                               )
-                            ).slice(0, 8);
+                            ).slice(0, 50);
                             return hits.length > 0 ? (
                               <div className="absolute top-full left-0 mt-1 z-[300] w-full bg-white rounded-xl shadow-2xl border border-[#cc5a16]/10 max-h-52 overflow-y-auto">
                                 {hits.map(m => (
