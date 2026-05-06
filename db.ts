@@ -476,6 +476,15 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'");
   await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'");
 
+  // GST persistence on the ORDER row (separate from table_sessions which has
+  // its own gst_percent/apply_gst). Older tenants only got these via the
+  // manual-invoice / invoice-edit endpoints; freshly provisioned tenants whose
+  // first traffic was a customer order would 500 because /orders POST
+  // INSERTs into these columns. Migrating them here means every tenant has
+  // them from the first request, regardless of which endpoint hit first.
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1");
+
   // Telegram notification support
   await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS telegram_enabled INT DEFAULT 0");
   await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT DEFAULT ''");
