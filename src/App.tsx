@@ -18464,9 +18464,37 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
               <p className="text-[#9c8e85] text-sm mt-1">This table may already be closed or hasn't started yet.</p>
             </div>
           ) : orders.length === 0 ? (
-            <div className="py-20 text-center px-6">
+            <div className="py-12 text-center px-6">
               <p className="text-4xl mb-3">📋</p>
               <p className="text-[#6b5d52] font-medium">Session active — no orders yet</p>
+              <p className="text-[#9c8e85] text-xs mt-2 max-w-sm mx-auto leading-relaxed">
+                The customer may have scanned the QR but left without ordering, or the
+                table was opened by mistake. You can close this empty session to free
+                the table — nothing will be billed.
+              </p>
+              <button
+                onClick={async () => {
+                  if (!session) return;
+                  if (!confirm(`Close empty session on ${table.name}? The table will return to AVAILABLE.`)) return;
+                  setClosing(true);
+                  try {
+                    const res = await fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/close`, {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                      body: JSON.stringify({ payment_method: 'NONE', final_amount: 0 }),
+                    });
+                    if (!res.ok) throw new Error('Close failed');
+                    onClose();
+                  } catch (err) {
+                    setClosing(false);
+                    setFetchErr('Failed to close session — please try again.');
+                  }
+                }}
+                disabled={closing}
+                className="mt-5 px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] disabled:opacity-60 transition-all"
+              >
+                {closing ? 'Closing…' : 'Close Empty Session'}
+              </button>
             </div>
           ) : (
             <div className="px-6 py-5 space-y-6">
