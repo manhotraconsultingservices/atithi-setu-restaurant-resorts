@@ -505,6 +505,234 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT");
   await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT");
 
+  // ── Inventory Management (Phase 1 — 2026-05) ──────────────────────────────
+  // 11 tables for the holistic inventory module. All inside the tenant schema.
+  // Idempotent CREATE TABLE IF NOT EXISTS — safe to run on every getTenantDb().
+  // See plan at C:\Users\Admin\.claude\plans\i-need-to-setup-nifty-hammock.md
+
+  // Master catalog of trackable items: raw ingredients (paneer, chicken, dal)
+  // and packaged goods (water, soda, ice cream).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS ingredients (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      item_type TEXT NOT NULL DEFAULT 'RAW',
+      category TEXT,
+      unit TEXT NOT NULL,
+      current_stock_qty DOUBLE PRECISION DEFAULT 0,
+      reorder_point DOUBLE PRECISION DEFAULT 0,
+      par_level DOUBLE PRECISION DEFAULT 0,
+      default_supplier_id TEXT,
+      default_unit_price DOUBLE PRECISION,
+      gst_percent DOUBLE PRECISION DEFAULT 0,
+      sku TEXT,
+      image_url TEXT,
+      notes TEXT,
+      is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_active ON ingredients (is_active)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_category ON ingredients (category)`);
+
+  // Recipe = which ingredients each menu item consumes per serving.
+  // size_variant lets HALF and FULL plates have different ingredient quantities.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS recipes (
+      id TEXT PRIMARY KEY,
+      menu_item_id TEXT NOT NULL,
+      ingredient_id TEXT NOT NULL,
+      qty_per_serving DOUBLE PRECISION NOT NULL,
+      unit TEXT NOT NULL,
+      size_variant TEXT DEFAULT 'BOTH',
+      notes TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  // Postgres doesn't have IF NOT EXISTS for UNIQUE constraints — use a unique index instead
+  await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_recipes_unique ON recipes (menu_item_id, ingredient_id, size_variant)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_recipes_menu_item ON recipes (menu_item_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_recipes_ingredient ON recipes (ingredient_id)`);
+
+  // Supplier directory — vendor contacts, lead time, payment terms.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS suppliers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      contact_name TEXT,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      gst_number TEXT,
+      lead_time_days INTEGER DEFAULT 1,
+      payment_terms TEXT,
+      notes TEXT,
+      is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_suppliers_active ON suppliers (is_active)`);
+
+  // Purchase Orders — owner raises a PO, tracks status through DRAFT → SENT →
+  // PARTIAL → RECEIVED → CANCELLED. PO ids use getNextTenantSequence('po').
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS purchase_orders (
+      id TEXT PRIMARY KEY,
+      supplier_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'DRAFT',
+      expected_delivery_date DATE,
+      total_amount DOUBLE PRECISION DEFAULT 0,
+      gst_amount DOUBLE PRECISION DEFAULT 0,
+      grand_total DOUBLE PRECISION DEFAULT 0,
+      raised_by_user_id TEXT,
+      raised_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      sent_at TIMESTAMP,
+      notes TEXT
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_po_status ON purchase_orders (status)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_po_supplier ON purchase_orders (supplier_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_po_expected_delivery ON purchase_orders (expected_delivery_date)`);
+
+  // Line items per PO — qty_received tracks partial fulfilment.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS purchase_order_items (
+      id TEXT PRIMARY KEY,
+      po_id TEXT NOT NULL,
+      ingredient_id TEXT NOT NULL,
+      qty_ordered DOUBLE PRECISION NOT NULL,
+      unit TEXT NOT NULL,
+      unit_price DOUBLE PRECISION NOT NULL,
+      qty_received DOUBLE PRECISION DEFAULT 0,
+      is_fully_received INT DEFAULT 0
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_poi_po ON purchase_order_items (po_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_poi_ingredient ON purchase_order_items (ingredient_id)`);
+
+  // Goods Receipt Notes — when stock physically arrives. Increments stock and
+  // links optionally to a PO (or ad-hoc receipt). GRN ids use getNextTenantSequence('grn').
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS goods_receipts (
+      id TEXT PRIMARY KEY,
+      po_id TEXT,
+      supplier_id TEXT NOT NULL,
+      received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      received_by_user_id TEXT,
+      total_amount DOUBLE PRECISION DEFAULT 0,
+      bill_number TEXT,
+      bill_image_url TEXT,
+      notes TEXT
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_grn_po ON goods_receipts (po_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_grn_supplier ON goods_receipts (supplier_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_grn_received_at ON goods_receipts (received_at)`);
+
+  // GRN line items — captures batch / expiry / condition for traceability.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS goods_receipt_items (
+      id TEXT PRIMARY KEY,
+      grn_id TEXT NOT NULL,
+      ingredient_id TEXT NOT NULL,
+      qty_received DOUBLE PRECISION NOT NULL,
+      unit TEXT NOT NULL,
+      unit_price DOUBLE PRECISION NOT NULL,
+      batch_number TEXT,
+      expiry_date DATE,
+      condition TEXT DEFAULT 'GOOD'
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_gri_grn ON goods_receipt_items (grn_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_gri_ingredient ON goods_receipt_items (ingredient_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_gri_expiry ON goods_receipt_items (expiry_date)`);
+
+  // Stock Movements — append-only audit log of every stock change.
+  // Single source of truth for forecasting + reports + variance analysis.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS stock_movements (
+      id TEXT PRIMARY KEY,
+      ingredient_id TEXT NOT NULL,
+      qty_delta DOUBLE PRECISION NOT NULL,
+      unit TEXT NOT NULL,
+      movement_type TEXT NOT NULL,
+      reference_type TEXT,
+      reference_id TEXT,
+      balance_after DOUBLE PRECISION NOT NULL,
+      unit_cost DOUBLE PRECISION,
+      recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      recorded_by_user_id TEXT,
+      notes TEXT
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_stock_movements_ingredient_date ON stock_movements (ingredient_id, recorded_at)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_stock_movements_type ON stock_movements (movement_type)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_stock_movements_reference ON stock_movements (reference_type, reference_id)`);
+
+  // Wastage logs — explicit ledger entries for spoilage / burn / drop / expiry.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS wastage_logs (
+      id TEXT PRIMARY KEY,
+      ingredient_id TEXT NOT NULL,
+      qty DOUBLE PRECISION NOT NULL,
+      unit TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      notes TEXT,
+      logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      logged_by_user_id TEXT
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_wastage_ingredient ON wastage_logs (ingredient_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_wastage_date ON wastage_logs (logged_at)`);
+
+  // Physical counts — periodic stock audits to reconcile expected vs actual.
+  // ID format: COUNT-{seq} via getNextTenantSequence('count').
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS physical_counts (
+      id TEXT PRIMARY KEY,
+      count_date DATE NOT NULL,
+      status TEXT DEFAULT 'IN_PROGRESS',
+      counted_by_user_id TEXT,
+      notes TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      completed_at TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_physical_counts_status ON physical_counts (status)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_physical_counts_date ON physical_counts (count_date)`);
+
+  // Per-ingredient line items for a physical count.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS physical_count_items (
+      id TEXT PRIMARY KEY,
+      count_id TEXT NOT NULL,
+      ingredient_id TEXT NOT NULL,
+      expected_qty DOUBLE PRECISION NOT NULL,
+      actual_qty DOUBLE PRECISION,
+      variance DOUBLE PRECISION,
+      unit TEXT NOT NULL
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_pci_count ON physical_count_items (count_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_pci_ingredient ON physical_count_items (ingredient_id)`);
+
+  // Pre-computed forecast cache, refreshed by nightly cron.
+  // Avoids recomputing on every dashboard load — read straight from this table.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS consumption_forecasts (
+      ingredient_id TEXT NOT NULL,
+      horizon TEXT NOT NULL,
+      forecast_qty DOUBLE PRECISION NOT NULL,
+      computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (ingredient_id, horizon)
+    )
+  `);
+
+  // Idempotency guard for cancellation reversal — prevents double-credit if
+  // the same order is cancelled twice (network retry / owner clicks twice).
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_reverted INT DEFAULT 0");
+
   tenantDbCache.set(schema, db);
   return db;
 }

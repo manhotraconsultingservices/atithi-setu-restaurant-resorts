@@ -2589,6 +2589,282 @@ async function startServer() {
     }
   });
 
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Inventory Management — Phase 1: Ingredients & Recipes ───────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // 11 tenant-DB tables created in db.ts. This phase exposes the catalog
+  // (ingredients) and recipe (menu→ingredient mapping) endpoints. Procurement,
+  // consumption, and dashboard come in subsequent phases.
+
+  // Ingredients: list all (active by default; ?include_inactive=1 for full)
+  app.get("/api/restaurant/:id/inventory/ingredients", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const includeInactive = String(req.query.include_inactive || '') === '1';
+      const where = includeInactive ? '' : 'WHERE is_active = 1';
+      const rows = await db.query(
+        `SELECT * FROM ingredients ${where} ORDER BY category, name`
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("List ingredients error:", err);
+      res.status(500).json({ error: "Failed to fetch ingredients" });
+    }
+  });
+
+  // Ingredients: get one
+  app.get("/api/inventory/ingredients/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const row = await db.get("SELECT * FROM ingredients WHERE id = ?", [req.params.id]);
+      if (!row) return res.status(404).json({ error: "Ingredient not found" });
+      res.json(row);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch ingredient" });
+    }
+  });
+
+  // Ingredients: create
+  app.post("/api/restaurant/:id/inventory/ingredients", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const {
+        name, item_type, category, unit,
+        current_stock_qty, reorder_point, par_level,
+        default_supplier_id, default_unit_price, gst_percent,
+        sku, image_url, notes, is_active,
+      } = req.body;
+
+      if (!name || !unit) {
+        return res.status(400).json({ error: "name and unit are required" });
+      }
+      const allowedTypes = new Set(['RAW', 'PACKAGED']);
+      const allowedUnits = new Set(['kg', 'g', 'l', 'ml', 'unit', 'bottle', 'piece', 'pack', 'dozen']);
+      const safeType = allowedTypes.has(String(item_type || '').toUpperCase()) ? String(item_type).toUpperCase() : 'RAW';
+      const safeUnit = allowedUnits.has(String(unit || '').toLowerCase()) ? String(unit).toLowerCase() : 'unit';
+
+      const db = await getTenantDb(req.params.id);
+      const id = `ING-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+      await db.run(
+        `INSERT INTO ingredients
+          (id, name, item_type, category, unit, current_stock_qty, reorder_point, par_level,
+           default_supplier_id, default_unit_price, gst_percent, sku, image_url, notes, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id, String(name).trim(), safeType, category || null, safeUnit,
+          Number(current_stock_qty || 0),
+          Number(reorder_point || 0),
+          Number(par_level || 0),
+          default_supplier_id || null,
+          default_unit_price != null ? Number(default_unit_price) : null,
+          Number(gst_percent || 0),
+          sku || null, image_url || null, notes || null,
+          is_active === 0 ? 0 : 1,
+        ]
+      );
+
+      // If the user passed an opening stock, log it as a MANUAL movement so
+      // the audit trail starts on the first day, not after the first GRN.
+      const openingStock = Number(current_stock_qty || 0);
+      if (openingStock > 0) {
+        await db.run(
+          `INSERT INTO stock_movements
+            (id, ingredient_id, qty_delta, unit, movement_type, balance_after, recorded_by_user_id, notes)
+           VALUES (?, ?, ?, ?, 'MANUAL', ?, ?, 'Opening stock')`,
+          [
+            `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+            id, openingStock, safeUnit, openingStock, req.user!.id,
+          ]
+        ).catch(() => {});
+      }
+
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error("Create ingredient error:", err);
+      res.status(500).json({ error: "Failed to create ingredient" });
+    }
+  });
+
+  // Ingredients: update
+  app.patch("/api/inventory/ingredients/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const allowed = [
+        'name', 'item_type', 'category', 'unit',
+        'reorder_point', 'par_level',
+        'default_supplier_id', 'default_unit_price', 'gst_percent',
+        'sku', 'image_url', 'notes', 'is_active',
+      ];
+      const updates: string[] = [];
+      const params: any[] = [];
+      for (const k of allowed) {
+        if (req.body[k] !== undefined) {
+          updates.push(`${k} = ?`);
+          params.push(req.body[k]);
+        }
+      }
+      if (updates.length === 0) return res.status(400).json({ error: "Nothing to update" });
+      updates.push("updated_at = CURRENT_TIMESTAMP");
+      params.push(req.params.id);
+      await db.run(`UPDATE ingredients SET ${updates.join(", ")} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Update ingredient error:", err);
+      res.status(500).json({ error: "Failed to update ingredient" });
+    }
+  });
+
+  // Ingredients: soft-delete (sets is_active=0). Hard delete blocked because
+  // recipes / movements / GRN line items reference this row.
+  app.delete("/api/inventory/ingredients/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await db.run("UPDATE ingredients SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.id]);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to deactivate ingredient" });
+    }
+  });
+
+  // Ingredients: bulk stock adjustment (manual override)
+  // Used for ad-hoc corrections. Logs MANUAL movement with a "before/after" note.
+  app.post("/api/inventory/ingredients/:id/adjust-stock", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { new_qty, reason } = req.body;
+      if (new_qty == null || isNaN(Number(new_qty))) {
+        return res.status(400).json({ error: "new_qty (number) is required" });
+      }
+      const db = await getTenantDb(req.user!.restaurantId);
+      const ing: any = await db.get("SELECT * FROM ingredients WHERE id = ?", [req.params.id]);
+      if (!ing) return res.status(404).json({ error: "Ingredient not found" });
+
+      const currentQty = Number(ing.current_stock_qty || 0);
+      const targetQty  = Number(new_qty);
+      const delta      = targetQty - currentQty;
+
+      await db.run(
+        `UPDATE ingredients SET current_stock_qty = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [targetQty, req.params.id]
+      );
+      await db.run(
+        `INSERT INTO stock_movements
+          (id, ingredient_id, qty_delta, unit, movement_type, balance_after, recorded_by_user_id, notes)
+         VALUES (?, ?, ?, ?, 'MANUAL', ?, ?, ?)`,
+        [
+          `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+          req.params.id, delta, ing.unit, targetQty, req.user!.id,
+          reason || `Manual adjustment ${currentQty} → ${targetQty}`,
+        ]
+      );
+      res.json({ success: true, balance: targetQty, delta });
+    } catch (err) {
+      console.error("Adjust stock error:", err);
+      res.status(500).json({ error: "Failed to adjust stock" });
+    }
+  });
+
+  // ─── Recipes — menu_item ↔ ingredient mapping ────────────────────────────
+
+  // Get recipe rows for a menu item. Returns array (may be empty if no recipe yet).
+  app.get("/api/restaurant/:id/menu/:menuItemId/recipe", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT r.*, i.name AS ingredient_name, i.unit AS ingredient_unit, i.current_stock_qty
+           FROM recipes r
+           LEFT JOIN ingredients i ON i.id = r.ingredient_id
+          WHERE r.menu_item_id = ?
+          ORDER BY i.name`,
+        [req.params.menuItemId]
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("Get recipe error:", err);
+      res.status(500).json({ error: "Failed to fetch recipe" });
+    }
+  });
+
+  // Replace ALL recipe rows for a menu item in a single PUT.
+  // Body: { items: [{ ingredient_id, qty_per_serving, unit, size_variant?, notes? }, ...] }
+  // Atomic: existing rows for this menu_item_id are deleted, new rows inserted.
+  // Empty items array clears the recipe.
+  app.put("/api/restaurant/:id/menu/:menuItemId/recipe", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { items } = req.body;
+      if (!Array.isArray(items)) {
+        return res.status(400).json({ error: "items array is required" });
+      }
+      const db = await getTenantDb(req.params.id);
+      const menuItemId = req.params.menuItemId;
+
+      // Verify menu item exists in this tenant before writing recipes
+      const menuItem = await db.get("SELECT id FROM menu WHERE id = ?", [menuItemId]);
+      if (!menuItem) return res.status(404).json({ error: "Menu item not found" });
+
+      // Wipe existing recipe rows for this menu item
+      await db.run("DELETE FROM recipes WHERE menu_item_id = ?", [menuItemId]);
+
+      const allowedSizes = new Set(['FULL', 'HALF', 'BOTH']);
+      let inserted = 0;
+      for (const it of items) {
+        if (!it.ingredient_id || it.qty_per_serving == null) continue;
+        const sizeVariant = allowedSizes.has(String(it.size_variant || 'BOTH').toUpperCase())
+          ? String(it.size_variant || 'BOTH').toUpperCase()
+          : 'BOTH';
+        await db.run(
+          `INSERT INTO recipes (id, menu_item_id, ingredient_id, qty_per_serving, unit, size_variant, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `REC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+            menuItemId,
+            it.ingredient_id,
+            Number(it.qty_per_serving),
+            String(it.unit || 'g').toLowerCase(),
+            sizeVariant,
+            it.notes || null,
+          ]
+        );
+        inserted++;
+      }
+      res.json({ success: true, inserted });
+    } catch (err) {
+      console.error("Save recipe error:", err);
+      res.status(500).json({ error: "Failed to save recipe" });
+    }
+  });
+
+  // Copy recipe from one menu item to another (helper for dishes that share ingredients)
+  app.post("/api/restaurant/:id/menu/:menuItemId/recipe/copy-from/:sourceId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const sourceRows: any[] = await db.query(
+        "SELECT * FROM recipes WHERE menu_item_id = ?",
+        [req.params.sourceId]
+      );
+      if (sourceRows.length === 0) {
+        return res.status(404).json({ error: "Source recipe is empty or doesn't exist" });
+      }
+      // Wipe target then copy
+      await db.run("DELETE FROM recipes WHERE menu_item_id = ?", [req.params.menuItemId]);
+      let copied = 0;
+      for (const r of sourceRows) {
+        await db.run(
+          `INSERT INTO recipes (id, menu_item_id, ingredient_id, qty_per_serving, unit, size_variant, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `REC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+            req.params.menuItemId, r.ingredient_id, r.qty_per_serving, r.unit, r.size_variant, r.notes,
+          ]
+        );
+        copied++;
+      }
+      res.json({ success: true, copied });
+    } catch (err) {
+      console.error("Copy recipe error:", err);
+      res.status(500).json({ error: "Failed to copy recipe" });
+    }
+  });
+
   // ── Import Token: SUPER_ADMIN generates a scoped token for any restaurant ──
   // Allows admins to run menu imports without knowing the owner's password.
   // POST /api/auth/import-token  { loginId, password, restaurantId }
