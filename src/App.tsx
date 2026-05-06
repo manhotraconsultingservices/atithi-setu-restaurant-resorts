@@ -5195,17 +5195,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <h4 className="text-lg font-bold font-serif leading-tight mb-1">{item.name}</h4>
                   <p className="text-xs text-[#6b5d52] mb-4 line-clamp-2 flex-1">{item.description}</p>
 
-                  {/* Prices */}
+                  {/* Prices — defensive: legacy items / partial imports may have
+                      null price_full; fall back to the single `price` column so
+                      the whole Menu Management page doesn't white-screen. */}
                   <div className="flex gap-2 mb-4">
                     {item.price_half ? (
                       <div className="bg-[#faf7f2] px-3 py-1.5 rounded-xl">
                         <span className="text-[11px] text-[#9c8e85] uppercase font-bold block">Half</span>
-                        <span className="text-sm font-bold font-mono">₹{item.price_half.toFixed(2)}</span>
+                        <span className="text-sm font-bold font-mono">₹{Number(item.price_half).toFixed(2)}</span>
                       </div>
                     ) : null}
                     <div className="bg-[#faf7f2] px-3 py-1.5 rounded-xl">
                       <span className="text-[11px] text-[#9c8e85] uppercase font-bold block">Full</span>
-                      <span className="text-sm font-bold font-mono">₹{item.price_full.toFixed(2)}</span>
+                      <span className="text-sm font-bold font-mono">₹{Number(item.price_full ?? (item as any).price ?? 0).toFixed(2)}</span>
                     </div>
                   </div>
 

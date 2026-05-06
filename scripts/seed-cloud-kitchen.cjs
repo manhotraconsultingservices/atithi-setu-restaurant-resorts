@@ -398,6 +398,7 @@ async function seedMenu(token, restaurantId) {
       name            : item.name,
       description     : item.description,
       price           : item.price,
+      price_full      : item.price,         // frontend renders price_full directly; null crashes the page
       category        : item.category,
       dietary_type    : item.dietary_type,
       is_daily_special: 'false',
