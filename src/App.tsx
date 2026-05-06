@@ -70,7 +70,7 @@ import {
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
-import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize, TableSession, LiveTableView, TableStatus } from './types';
+import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize, TableSession, LiveTableView, TableStatus, MenuDisplayMode } from './types';
 import { cn } from './lib/utils';
 import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
 import {
@@ -3201,7 +3201,7 @@ function useColumnConfig(tableId: string, defaults: ColDef[]) {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(next)); } catch {}
   };
 
-  const ordered  = useMemo(() => Object.entries(cfg).sort((a,b) => a[1].order - b[1].order).map(([k]) => k), [cfg]);
+  const ordered  = useMemo(() => (Object.entries(cfg) as [string, ColCfgEntry][]).sort((a,b) => a[1].order - b[1].order).map(([k]) => k), [cfg]);
   const visible  = useMemo(() => ordered.filter(k => cfg[k]?.visible), [ordered, cfg]);
 
   const toggle  = (key: string) => persist({ ...cfg, [key]: { ...cfg[key], visible: !cfg[key].visible } });
@@ -5242,7 +5242,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               dt === 'VEGAN'   ? 'from-blue-100 to-teal-100' :
                                  'from-green-100 to-emerald-100';
 
-            const ItemCard = ({ item }: { item: MenuItem }) => (
+            // FC<> declares the React-special `key` / `ref` props so the inline
+            // <ItemCard key={...} item={...} /> usage passes type-checking.
+            const ItemCard: React.FC<{ item: MenuItem }> = ({ item }) => (
               <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden flex flex-col group hover:shadow-md transition-shadow">
                 {/* Image Area */}
                 <div className="aspect-video relative overflow-hidden">
@@ -11990,7 +11992,7 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restaurantId, roomId]);
 
-  const categories = Array.from(new Set(services.map(s => s.category))).sort();
+  const categories: string[] = (Array.from(new Set(services.map((s: any) => String(s.category || '')))) as string[]).filter(Boolean).sort();
   const filtered = activeCategory === 'ALL' ? services : services.filter(s => s.category === activeCategory);
 
   const submitRequest = async (service: any, note?: string, quantity?: number) => {

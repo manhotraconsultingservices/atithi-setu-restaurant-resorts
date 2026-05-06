@@ -474,12 +474,22 @@ async function seedDefaultServices(tenantDb: DbInterface): Promise<number> {
   return seeded;
 }
 
-// Extended Request Interface for TypeScript
+// Extended Request Interface for TypeScript.
+// Reflects every field that any jwt.sign() site puts into the token, all
+// optional because different code paths sign different shapes:
+//   • new owner-account login → { email, restaurantId, role, userName }
+//   • temp token before restaurant select → { email, userName } (no restaurantId)
+//   • legacy users login → { id, restaurantId, role, userName }
+//   • password-reset / migration → { email } only
+// Code at the call sites already narrows correctly (e.g. `if (req.user!.email)`
+// routes to email-based queries; otherwise falls back to `req.user!.id`).
 interface AuthRequest extends Request {
   user?: {
-    id: string;
-    restaurantId: string;
-    role: string;
+    id?: string;
+    restaurantId?: string;
+    role?: string;
+    email?: string;
+    userName?: string;
   };
 }
 
@@ -3791,14 +3801,18 @@ async function startServer() {
   // ═══════════════════════════════════════════════════════════════════════════
 
   // Helper: enforce that the tenant has hotel enabled before handling request.
-  const ensureHotelEnabled = async (restaurantId: string): Promise<{ ok: true; restaurant: any } | { ok: false; status: number; error: string }> => {
+  // Flat shape (not a discriminated union) so call sites can access status/error
+  // without narrowing — the tsconfig in this project does not enable strict
+  // discriminated-union narrowing across `if (!result.ok)` checks. All fields
+  // are populated on every return; success returns 200/'' for status/error.
+  const ensureHotelEnabled = async (restaurantId: string): Promise<{ ok: boolean; restaurant: any; status: number; error: string }> => {
     const r: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [restaurantId]);
-    if (!r) return { ok: false, status: 404, error: "Restaurant not found" };
+    if (!r) return { ok: false, restaurant: null, status: 404, error: "Restaurant not found" };
     const pt = r.property_type || 'RESTAURANT';
     if (pt !== 'HOTEL' && pt !== 'BOTH') {
-      return { ok: false, status: 403, error: "Hotel module not enabled for this property" };
+      return { ok: false, restaurant: null, status: 403, error: "Hotel module not enabled for this property" };
     }
-    return { ok: true, restaurant: r };
+    return { ok: true, restaurant: r, status: 200, error: '' };
   };
 
   // ─── Enable / toggle the hotel module for a tenant ────────────────────────
