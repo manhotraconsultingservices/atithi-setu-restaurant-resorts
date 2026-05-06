@@ -42,15 +42,10 @@ jobs:
             *)                EMOJI="📢" ;;
           esac
 
-          MSG="${EMOJI} *PR #${PR_NUM} ${ACTION}* — Atithi Setu
-
-Title:  ${PR_TITLE}
-Author: ${AUTHOR}
-Branch: \`${HEAD}\` → \`${BASE}\`
-Files:  ${FILES} changed
-URL:    ${PR_URL}
-
-Review and merge when ready."
+          # Build message as a single shell-string with embedded \n escapes —
+          # avoids breaking out of YAML's literal-block when un-indented lines
+          # appear at column 1.
+          MSG="${EMOJI} *PR #${PR_NUM} ${ACTION}* — Atithi Setu\n\nTitle:  ${PR_TITLE}\nAuthor: ${AUTHOR}\nBranch: \`${HEAD}\` → \`${BASE}\`\nFiles:  ${FILES} changed\nURL:    ${PR_URL}\n\nReview and merge when ready."
 
           curl -s -X POST \
             "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \

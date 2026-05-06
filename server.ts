@@ -2654,6 +2654,22 @@ async function startServer() {
       const safeUnit = allowedUnits.has(String(unit || '').toLowerCase()) ? String(unit).toLowerCase() : 'unit';
 
       const db = await getTenantDb(req.params.id);
+
+      // Reject duplicates by case-insensitive name match. Important to prevent
+      // the Setup Wizard / repeated CSV imports from creating "Butter" twice.
+      // Soft-deleted (is_active=0) entries don't count — owner can re-add.
+      const trimmedName = String(name).trim();
+      const existing: any = await db.get(
+        `SELECT id, is_active FROM ingredients WHERE LOWER(name) = LOWER(?) AND is_active = 1`,
+        [trimmedName]
+      );
+      if (existing) {
+        return res.status(409).json({
+          error: `An ingredient named "${trimmedName}" already exists. Edit that one instead, or rename this.`,
+          existing_id: existing.id,
+        });
+      }
+
       const id = `ING-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
       await db.run(
@@ -2940,6 +2956,20 @@ async function startServer() {
       if (!name) return res.status(400).json({ error: "name is required" });
 
       const db = await getTenantDb(req.params.id);
+
+      // Dedup by case-insensitive name (active suppliers only)
+      const trimmedName = String(name).trim();
+      const existing: any = await db.get(
+        `SELECT id FROM suppliers WHERE LOWER(name) = LOWER(?) AND is_active = 1`,
+        [trimmedName]
+      );
+      if (existing) {
+        return res.status(409).json({
+          error: `A supplier named "${trimmedName}" already exists. Edit that one instead.`,
+          existing_id: existing.id,
+        });
+      }
+
       const id = `SUP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await db.run(
         `INSERT INTO suppliers

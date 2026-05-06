@@ -3471,6 +3471,33 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [forecastHorizon, setForecastHorizon] = useState<'daily' | 'weekly' | 'monthly'>('daily');
   // Onboarding wizard — shown on empty inventory or via manual launch
   const [showOnboarding, setShowOnboarding] = useState(false);
+  // Ingredients table filter + sort state
+  const [ingFilter, setIngFilter] = useState<{
+    search: string;
+    category: string;
+    type: 'ALL' | 'RAW' | 'PACKAGED';
+    status: 'ALL' | 'LOW' | 'OUT' | 'IN_STOCK' | 'DUPLICATES';
+  }>({ search: '', category: 'ALL', type: 'ALL', status: 'ALL' });
+  const [ingSort, setIngSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'name', dir: 'asc' });
+  // Suppliers card-grid search
+  const [supSearch, setSupSearch] = useState('');
+  // PO + GRN + Wastage + Counts table filter/sort state. Date filters use ISO yyyy-mm-dd strings.
+  const [poSearch, setPOSearch] = useState('');
+  const [poDateFrom, setPODateFrom] = useState('');
+  const [poDateTo, setPODateTo] = useState('');
+  const [poSort, setPOSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'raised_at', dir: 'desc' });
+  const [grnSearch, setGRNSearch] = useState('');
+  const [grnDateFrom, setGRNDateFrom] = useState('');
+  const [grnDateTo, setGRNDateTo] = useState('');
+  const [grnSort, setGRNSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'received_at', dir: 'desc' });
+  const [wastageSearch, setWastageSearch] = useState('');
+  const [wastageReason, setWastageReason] = useState<'ALL' | 'SPOILAGE' | 'BURN' | 'DROPPED' | 'EXPIRY' | 'OTHER'>('ALL');
+  const [wastageDateFrom, setWastageDateFrom] = useState('');
+  const [wastageDateTo, setWastageDateTo] = useState('');
+  const [wastageSort, setWastageSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'logged_at', dir: 'desc' });
+  const [countSearch, setCountSearch] = useState('');
+  const [countStatusFilter, setCountStatusFilter] = useState<'ALL' | 'IN_PROGRESS' | 'COMPLETED'>('ALL');
+  const [countSort, setCountSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'count_date', dir: 'desc' });
 
   // ── Audible + visual alerts for unacknowledged items (Phase 6) ────────────
   // Owner/Manager hears a chime every 4s and sees pulsing cards when:
@@ -6264,7 +6291,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                   </div>
 
-                  {/* ── Consumption trend (last 30 days) ── */}
+                  {/* ── Consumption trend (last 30 days) — backend returns only days with data; pad locally to 30 days so empty days show as zero-height bars and the chart always looks like a chart ── */}
                   <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-lg font-bold font-serif">Consumption Trend (30 days)</h3>
@@ -6273,28 +6300,66 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </p>
                     </div>
                     {(() => {
-                      const trend = inventoryDashboard.consumption_trend || [];
-                      if (trend.length === 0) return <div className="text-center py-6 text-sm text-[#9c8e85]">No consumption recorded yet</div>;
-                      const max = Math.max(...trend.map((r: any) => r.cost), 1);
+                      const trendRaw = inventoryDashboard.consumption_trend || [];
+                      // Pad to last 30 calendar days
+                      const byDate: Record<string, any> = {};
+                      trendRaw.forEach((r: any) => { byDate[r.date] = r; });
+                      const padded: any[] = [];
+                      const today = new Date();
+                      for (let i = 29; i >= 0; i--) {
+                        const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+                        const k = d.toISOString().slice(0, 10);
+                        padded.push({ date: k, qty: Number(byDate[k]?.qty || 0), cost: Number(byDate[k]?.cost || 0) });
+                      }
+                      const max = Math.max(...padded.map(r => r.cost), 1);
+                      const nonZero = padded.filter(r => r.cost > 0).length;
+                      if (trendRaw.length === 0) {
+                        return (
+                          <div className="text-center py-12 px-6 bg-[#faf7f2]/40 rounded-2xl">
+                            <p className="text-4xl mb-2">📊</p>
+                            <p className="text-sm font-medium text-[#1a1208]">No consumption data yet</p>
+                            <p className="text-xs text-[#9c8e85] mt-1 max-w-md mx-auto">
+                              Place customer orders with recipes mapped to ingredients — each order will populate this trend automatically.
+                            </p>
+                          </div>
+                        );
+                      }
                       return (
-                        <div className="flex items-end gap-1 h-40">
-                          {trend.map((r: any) => {
-                            const h = (r.cost / max) * 100;
-                            return (
-                              <div key={r.date} className="flex-1 flex flex-col items-center justify-end group" title={`${r.date}: ₹${Math.round(r.cost)} · ${r.qty.toFixed(2)} units`}>
-                                <div className="w-full bg-[#cc5a16] rounded-t hover:bg-[#a84612] transition-colors" style={{ height: `${h}%`, minHeight: '2px' }} />
-                              </div>
-                            );
-                          })}
-                        </div>
+                        <>
+                          {nonZero < 7 && (
+                            <p className="text-[11px] text-amber-700 bg-amber-50 px-3 py-2 rounded-lg mb-3">
+                              ⏳ Only {nonZero} day{nonZero !== 1 ? 's' : ''} of consumption so far. Forecast accuracy improves after ~14-28 days of orders.
+                            </p>
+                          )}
+                          <div className="flex items-end gap-1 h-40 bg-gradient-to-b from-transparent to-[#faf7f2]/30 rounded-lg p-2">
+                            {padded.map((r) => {
+                              const h = (r.cost / max) * 100;
+                              const hasData = r.cost > 0;
+                              return (
+                                <div key={r.date} className="flex-1 flex flex-col items-center justify-end group min-w-[3px]"
+                                  title={`${r.date}: ${hasData ? `₹${Math.round(r.cost)} · ${r.qty.toFixed(2)} units` : 'no consumption'}`}>
+                                  <div
+                                    className={cn(
+                                      "w-full rounded-t transition-all",
+                                      hasData ? "bg-[#cc5a16] hover:bg-[#a84612]" : "bg-[#cc5a16]/10"
+                                    )}
+                                    style={{ height: hasData ? `${Math.max(2, h)}%` : '2px' }}
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
                       );
                     })()}
-                    <div className="flex justify-between text-[10px] text-[#9c8e85] mt-2">
+                    <div className="flex justify-between text-[10px] text-[#9c8e85] mt-2 px-2">
                       {(() => {
-                        const trend = inventoryDashboard.consumption_trend || [];
-                        if (trend.length === 0) return null;
-                        return [trend[0]?.date, trend[Math.floor(trend.length / 2)]?.date, trend[trend.length - 1]?.date].filter(Boolean).map((d: string, i: number) => (
-                          <span key={i}>{d}</span>
+                        const today = new Date();
+                        const fmt = (d: Date) => d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+                        const days30 = new Date(today.getTime() - 29 * 24 * 60 * 60 * 1000);
+                        const days15 = new Date(today.getTime() - 14 * 24 * 60 * 60 * 1000);
+                        return [fmt(days30), fmt(days15), fmt(today)].map((label, i) => (
+                          <span key={i}>{label}</span>
                         ));
                       })()}
                     </div>
@@ -6404,114 +6469,264 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
 
           {/* ── INGREDIENTS sub-view ── */}
-          {inventorySubTab === 'INGREDIENTS' && (
-            <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <p className="text-sm text-[#6b5d52]">
-                  {inventoryIngredients.length} item{inventoryIngredients.length !== 1 ? 's' : ''} ·{' '}
-                  {inventoryIngredients.filter((i: any) => Number(i.current_stock_qty) <= Number(i.reorder_point) && Number(i.reorder_point) > 0).length} below reorder
-                </p>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button onClick={exportIngredientsTemplate} title="Download CSV template"
-                    className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all">
-                    <Download size={14}/> Template
-                  </button>
-                  <button onClick={exportIngredientsCsv} disabled={inventoryIngredients.length === 0} title="Export all ingredients as CSV"
-                    className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all disabled:opacity-50">
-                    <Download size={14}/> Export CSV
-                  </button>
-                  <label className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all cursor-pointer">
-                    <Upload size={14}/> Import CSV
-                    <input type="file" accept=".csv" className="hidden"
-                      onChange={e => { if (e.target.files?.[0]) handleIngredientsCsvFile(e.target.files[0]); e.target.value=''; }} />
-                  </label>
-                  <button
-                    onClick={() => setEditingIngredient({})}
-                    className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
-                  >
-                    <Plus size={14} /> Add Ingredient
-                  </button>
-                </div>
-              </div>
+          {inventorySubTab === 'INGREDIENTS' && (() => {
+            // ── Detect duplicate names (case-insensitive) so we can flag them ──
+            const nameCount: Record<string, number> = {};
+            inventoryIngredients.forEach((i: any) => {
+              const k = String(i.name || '').toLowerCase().trim();
+              nameCount[k] = (nameCount[k] || 0) + 1;
+            });
+            const duplicateCount = Object.values(nameCount).filter(c => c > 1).length;
+            const isDup = (name: string) => (nameCount[String(name || '').toLowerCase().trim()] || 0) > 1;
 
-              {inventoryIngredients.length === 0 ? (
-                <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
-                  <div className="text-5xl mb-3">📦</div>
-                  <p className="font-medium text-[#1a1208]">No ingredients yet</p>
-                  <p className="text-sm text-[#9c8e85] mt-1">
-                    Add ingredients (paneer, chicken, dal, etc.) to start tracking inventory
+            // ── Filter ──
+            const search = ingFilter.search.toLowerCase().trim();
+            let filtered = inventoryIngredients.filter((i: any) => {
+              if (search && !String(i.name).toLowerCase().includes(search) && !String(i.sku || '').toLowerCase().includes(search)) return false;
+              if (ingFilter.category !== 'ALL' && i.category !== ingFilter.category) return false;
+              if (ingFilter.type !== 'ALL' && i.item_type !== ingFilter.type) return false;
+              const stock = Number(i.current_stock_qty || 0);
+              const reorder = Number(i.reorder_point || 0);
+              if (ingFilter.status === 'LOW' && !(reorder > 0 && stock <= reorder)) return false;
+              if (ingFilter.status === 'OUT' && stock > 0) return false;
+              if (ingFilter.status === 'IN_STOCK' && stock <= 0) return false;
+              if (ingFilter.status === 'DUPLICATES' && !isDup(i.name)) return false;
+              return true;
+            });
+
+            // ── Sort ──
+            const sortDir = ingSort.dir === 'desc' ? -1 : 1;
+            filtered = [...filtered].sort((a: any, b: any) => {
+              const valFor = (x: any) => {
+                switch (ingSort.key) {
+                  case 'name':     return String(x.name || '').toLowerCase();
+                  case 'type':     return String(x.item_type || '');
+                  case 'category': return String(x.category || '');
+                  case 'stock':    return Number(x.current_stock_qty || 0);
+                  case 'reorder':  return Number(x.reorder_point || 0);
+                  case 'par':      return Number(x.par_level || 0);
+                  case 'price':    return Number(x.default_unit_price || 0);
+                  default:         return String(x.name || '').toLowerCase();
+                }
+              };
+              const A = valFor(a), B = valFor(b);
+              if (A < B) return -1 * sortDir;
+              if (A > B) return  1 * sortDir;
+              return 0;
+            });
+
+            // Categories present in current data — for dropdown options
+            const cats = Array.from(new Set(inventoryIngredients.map((i: any) => i.category).filter(Boolean))).sort();
+            const lowCount = inventoryIngredients.filter((i: any) => Number(i.current_stock_qty) <= Number(i.reorder_point) && Number(i.reorder_point) > 0).length;
+
+            return (
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <p className="text-sm text-[#6b5d52]">
+                    {inventoryIngredients.length} item{inventoryIngredients.length !== 1 ? 's' : ''} ·{' '}
+                    {lowCount} below reorder
+                    {duplicateCount > 0 && (
+                      <>{' '}·{' '}<span className="text-amber-700 font-bold">{duplicateCount} duplicate name{duplicateCount !== 1 ? 's' : ''} detected</span></>
+                    )}
                   </p>
-                </div>
-              ) : (
-                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
-                        <tr>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Name</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Type</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Category</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Stock</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Reorder</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Par</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Last ₹</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#cc5a16]/5">
-                        {inventoryIngredients.map((ing: any) => {
-                          const stock = Number(ing.current_stock_qty || 0);
-                          const reorder = Number(ing.reorder_point || 0);
-                          const isLow = reorder > 0 && stock <= reorder;
-                          return (
-                            <tr key={ing.id} className={cn("hover:bg-[#faf7f2]/30", isLow && "bg-red-50/40")}>
-                              <td className="px-5 py-3">
-                                <p className="font-semibold text-[#1a1208]">{ing.name}</p>
-                                {ing.sku && <p className="text-[10px] text-[#9c8e85] font-mono">{ing.sku}</p>}
-                              </td>
-                              <td className="px-5 py-3">
-                                <span className={cn(
-                                  "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest",
-                                  ing.item_type === 'PACKAGED' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
-                                )}>{ing.item_type}</span>
-                              </td>
-                              <td className="px-5 py-3 text-[#3d3128]">{ing.category || '—'}</td>
-                              <td className="px-5 py-3 text-right font-mono">
-                                <span className={cn("font-bold", isLow && "text-red-600")}>{stock.toLocaleString('en-IN', { maximumFractionDigits: 3 })}</span>
-                                <span className="text-[10px] text-[#9c8e85] ml-1">{ing.unit}</span>
-                                {isLow && <Bell size={11} className="inline ml-1 text-red-500" />}
-                              </td>
-                              <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{reorder || '—'}</td>
-                              <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{Number(ing.par_level || 0) || '—'}</td>
-                              <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{ing.default_unit_price ? `₹${Number(ing.default_unit_price).toFixed(2)}` : '—'}</td>
-                              <td className="px-5 py-3">
-                                <div className="flex gap-1.5">
-                                  <button
-                                    onClick={() => setEditingIngredient(ing)}
-                                    className="p-1.5 rounded-lg hover:bg-[#cc5a16]/5 text-[#6b5d52] hover:text-[#cc5a16]"
-                                    title="Edit"
-                                  >
-                                    <Edit3 size={14} />
-                                  </button>
-                                  <button
-                                    onClick={() => setAdjustingStock(ing)}
-                                    className="px-2 py-1 rounded-lg bg-[#cc5a16]/10 text-[#cc5a16] text-[11px] font-bold hover:bg-[#cc5a16]/20"
-                                    title="Adjust stock manually"
-                                  >
-                                    Adjust
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button onClick={exportIngredientsTemplate} title="Download CSV template"
+                      className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all">
+                      <Download size={14}/> Template
+                    </button>
+                    <button onClick={exportIngredientsCsv} disabled={inventoryIngredients.length === 0} title="Export all ingredients as CSV"
+                      className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all disabled:opacity-50">
+                      <Download size={14}/> Export CSV
+                    </button>
+                    <label className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all cursor-pointer">
+                      <Upload size={14}/> Import CSV
+                      <input type="file" accept=".csv" className="hidden"
+                        onChange={e => { if (e.target.files?.[0]) handleIngredientsCsvFile(e.target.files[0]); e.target.value=''; }} />
+                    </label>
+                    <button
+                      onClick={() => setEditingIngredient({})}
+                      className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                    >
+                      <Plus size={14} /> Add Ingredient
+                    </button>
                   </div>
                 </div>
-              )}
-            </div>
-          )}
+
+                {/* Filter bar */}
+                {inventoryIngredients.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-3 flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                    <div className="relative flex-1 min-w-[200px]">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85]" />
+                      <input
+                        type="text"
+                        placeholder="Search by name or SKU…"
+                        value={ingFilter.search}
+                        onChange={e => setIngFilter({ ...ingFilter, search: e.target.value })}
+                        className="w-full pl-9 pr-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20"
+                      />
+                    </div>
+                    <select
+                      value={ingFilter.category}
+                      onChange={e => setIngFilter({ ...ingFilter, category: e.target.value })}
+                      className="px-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20"
+                    >
+                      <option value="ALL">All categories</option>
+                      {cats.map((c: any) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                    <select
+                      value={ingFilter.type}
+                      onChange={e => setIngFilter({ ...ingFilter, type: e.target.value as any })}
+                      className="px-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20"
+                    >
+                      <option value="ALL">All types</option>
+                      <option value="RAW">Raw</option>
+                      <option value="PACKAGED">Packaged</option>
+                    </select>
+                    <select
+                      value={ingFilter.status}
+                      onChange={e => setIngFilter({ ...ingFilter, status: e.target.value as any })}
+                      className="px-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20"
+                    >
+                      <option value="ALL">All status</option>
+                      <option value="LOW">Below reorder</option>
+                      <option value="OUT">Out of stock</option>
+                      <option value="IN_STOCK">In stock</option>
+                      {duplicateCount > 0 && <option value="DUPLICATES">⚠ Duplicates only ({duplicateCount})</option>}
+                    </select>
+                    {(ingFilter.search || ingFilter.category !== 'ALL' || ingFilter.type !== 'ALL' || ingFilter.status !== 'ALL') && (
+                      <button
+                        onClick={() => setIngFilter({ search: '', category: 'ALL', type: 'ALL', status: 'ALL' })}
+                        className="px-3 py-2 text-xs font-bold text-[#cc5a16] hover:underline"
+                      >Clear</button>
+                    )}
+                    <span className="text-xs text-[#9c8e85] ml-auto">{filtered.length} of {inventoryIngredients.length}</span>
+                  </div>
+                )}
+
+                {inventoryIngredients.length === 0 ? (
+                  <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
+                    <div className="text-5xl mb-3">📦</div>
+                    <p className="font-medium text-[#1a1208]">No ingredients yet</p>
+                    <p className="text-sm text-[#9c8e85] mt-1">
+                      Add ingredients (paneer, chicken, dal, etc.) to start tracking inventory
+                    </p>
+                  </div>
+                ) : filtered.length === 0 ? (
+                  <div className="text-center py-12 bg-white rounded-3xl border border-[#cc5a16]/10">
+                    <p className="text-sm text-[#9c8e85]">No items match the current filters.</p>
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                          <tr>
+                            {([
+                              ['name', 'Name', 'left'],
+                              ['type', 'Type', 'left'],
+                              ['category', 'Category', 'left'],
+                              ['stock', 'Stock', 'right'],
+                              ['reorder', 'Reorder', 'right'],
+                              ['par', 'Par', 'right'],
+                              ['price', 'Last ₹', 'right'],
+                            ] as [string, string, 'left' | 'right'][]).map(([key, label, align]) => (
+                              <th
+                                key={key}
+                                onClick={() => setIngSort(prev => ({
+                                  key, dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc',
+                                }))}
+                                className={cn(
+                                  "px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] cursor-pointer hover:bg-[#faf7f2] select-none whitespace-nowrap",
+                                  align === 'right' ? 'text-right' : 'text-left'
+                                )}
+                              >
+                                {label}
+                                {ingSort.key === key && (
+                                  <span className="ml-1 text-[#cc5a16]">{ingSort.dir === 'asc' ? '↑' : '↓'}</span>
+                                )}
+                              </th>
+                            ))}
+                            <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#cc5a16]/5">
+                          {filtered.map((ing: any) => {
+                            const stock = Number(ing.current_stock_qty || 0);
+                            const reorder = Number(ing.reorder_point || 0);
+                            const isLow = reorder > 0 && stock <= reorder;
+                            const isDuplicate = isDup(ing.name);
+                            return (
+                              <tr key={ing.id} className={cn("hover:bg-[#faf7f2]/30", isLow && "bg-red-50/40", isDuplicate && !isLow && "bg-amber-50/30")}>
+                                <td className="px-5 py-3">
+                                  <p className="font-semibold text-[#1a1208] flex items-center gap-1.5">
+                                    {ing.name}
+                                    {isDuplicate && (
+                                      <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-700" title="Same-name ingredient appears multiple times">
+                                        DUPLICATE
+                                      </span>
+                                    )}
+                                  </p>
+                                  {ing.sku && <p className="text-[10px] text-[#9c8e85] font-mono">{ing.sku}</p>}
+                                </td>
+                                <td className="px-5 py-3">
+                                  <span className={cn(
+                                    "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest",
+                                    ing.item_type === 'PACKAGED' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
+                                  )}>{ing.item_type}</span>
+                                </td>
+                                <td className="px-5 py-3 text-[#3d3128]">{ing.category || '—'}</td>
+                                <td className="px-5 py-3 text-right font-mono">
+                                  <span className={cn("font-bold", isLow && "text-red-600")}>{stock.toLocaleString('en-IN', { maximumFractionDigits: 3 })}</span>
+                                  <span className="text-[10px] text-[#9c8e85] ml-1">{ing.unit}</span>
+                                  {isLow && <Bell size={11} className="inline ml-1 text-red-500" />}
+                                </td>
+                                <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{reorder || '—'}</td>
+                                <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{Number(ing.par_level || 0) || '—'}</td>
+                                <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{ing.default_unit_price ? `₹${Number(ing.default_unit_price).toFixed(2)}` : '—'}</td>
+                                <td className="px-5 py-3">
+                                  <div className="flex gap-1.5">
+                                    <button
+                                      onClick={() => setEditingIngredient(ing)}
+                                      className="p-1.5 rounded-lg hover:bg-[#cc5a16]/5 text-[#6b5d52] hover:text-[#cc5a16]"
+                                      title="Edit"
+                                    >
+                                      <Edit3 size={14} />
+                                    </button>
+                                    <button
+                                      onClick={() => setAdjustingStock(ing)}
+                                      className="px-2 py-1 rounded-lg bg-[#cc5a16]/10 text-[#cc5a16] text-[11px] font-bold hover:bg-[#cc5a16]/20"
+                                      title="Adjust stock manually"
+                                    >
+                                      Adjust
+                                    </button>
+                                    {isDuplicate && (
+                                      <button
+                                        onClick={async () => {
+                                          if (!confirm(`Soft-delete this duplicate "${ing.name}"? Stock movements remain in audit trail. You can re-add it later.`)) return;
+                                          await fetch(`/api/inventory/ingredients/${ing.id}`, {
+                                            method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` },
+                                          });
+                                          fetchInventoryIngredients();
+                                        }}
+                                        className="px-2 py-1 rounded-lg bg-amber-100 text-amber-700 text-[11px] font-bold hover:bg-amber-200"
+                                        title="Soft-delete this duplicate"
+                                      >
+                                        🗑 Dupe
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* ── SUPPLIERS sub-view ── */}
           {inventorySubTab === 'SUPPLIERS' && (
@@ -6541,6 +6756,29 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               </div>
 
+              {inventorySuppliers.length > 0 && (
+                <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-3 flex items-center gap-2">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85]" />
+                    <input type="text" placeholder="Search by name, contact, phone, email…"
+                      value={supSearch} onChange={e => setSupSearch(e.target.value)}
+                      className="w-full pl-9 pr-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20" />
+                  </div>
+                  {supSearch && (
+                    <button onClick={() => setSupSearch('')} className="px-3 py-2 text-xs font-bold text-[#cc5a16] hover:underline">Clear</button>
+                  )}
+                  <span className="text-xs text-[#9c8e85] ml-auto">
+                    {(() => {
+                      const q = supSearch.toLowerCase().trim();
+                      const matched = q ? inventorySuppliers.filter((s: any) =>
+                        `${s.name} ${s.contact_name || ''} ${s.phone || ''} ${s.email || ''}`.toLowerCase().includes(q)
+                      ).length : inventorySuppliers.length;
+                      return `${matched} of ${inventorySuppliers.length}`;
+                    })()}
+                  </span>
+                </div>
+              )}
+
               {inventorySuppliers.length === 0 ? (
                 <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
                   <div className="text-5xl mb-3">🚚</div>
@@ -6551,7 +6789,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {inventorySuppliers.map((s: any) => (
+                  {inventorySuppliers
+                    .filter((s: any) => {
+                      const q = supSearch.toLowerCase().trim();
+                      if (!q) return true;
+                      return `${s.name} ${s.contact_name || ''} ${s.phone || ''} ${s.email || ''} ${s.gst_number || ''}`.toLowerCase().includes(q);
+                    })
+                    .sort((a: any, b: any) => String(a.name).toLowerCase().localeCompare(String(b.name).toLowerCase()))
+                    .map((s: any) => (
                     <div key={s.id} className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
                       <div className="flex justify-between items-start mb-3">
                         <div>
@@ -6577,7 +6822,40 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
 
           {/* ── PURCHASE ORDERS sub-view ── */}
-          {inventorySubTab === 'PURCHASE_ORDERS' && (
+          {inventorySubTab === 'PURCHASE_ORDERS' && (() => {
+            // Filter: search (PO id, supplier, notes) + date range on raised_at + status pill
+            const search = poSearch.toLowerCase().trim();
+            const filtered = inventoryPOs.filter((po: any) => {
+              if (search) {
+                const hay = `${po.id} ${po.supplier_name || ''} ${po.notes || ''}`.toLowerCase();
+                if (!hay.includes(search)) return false;
+              }
+              if (poDateFrom && po.raised_at) {
+                if (new Date(po.raised_at).toISOString().slice(0, 10) < poDateFrom) return false;
+              }
+              if (poDateTo && po.raised_at) {
+                if (new Date(po.raised_at).toISOString().slice(0, 10) > poDateTo) return false;
+              }
+              return true;
+            });
+            const dir = poSort.dir === 'desc' ? -1 : 1;
+            const sorted = [...filtered].sort((a: any, b: any) => {
+              const v = (x: any) => {
+                switch (poSort.key) {
+                  case 'id':            return x.id;
+                  case 'supplier':      return (x.supplier_name || '').toLowerCase();
+                  case 'status':        return x.status;
+                  case 'expected':      return x.expected_delivery_date || '';
+                  case 'raised_at':     return x.raised_at || '';
+                  case 'lines':         return Number(x.line_count || 0);
+                  case 'total':         return Number(x.grand_total || 0);
+                  default:              return x.raised_at || '';
+                }
+              };
+              const A = v(a), B = v(b);
+              if (A < B) return -1 * dir; if (A > B) return 1 * dir; return 0;
+            });
+            return (
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-2 flex-wrap">
@@ -6610,11 +6888,40 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               </div>
 
+              {/* Filter bar */}
+              {inventoryPOs.length > 0 && (
+                <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-3 flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85]" />
+                    <input type="text" placeholder="Search PO #, supplier, notes…"
+                      value={poSearch} onChange={e => setPOSearch(e.target.value)}
+                      className="w-full pl-9 pr-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20" />
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-[#6b5d52]">
+                    <span>From:</span>
+                    <input type="date" value={poDateFrom} onChange={e => setPODateFrom(e.target.value)}
+                      className="px-2 py-2 bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 text-sm" />
+                    <span>To:</span>
+                    <input type="date" value={poDateTo} onChange={e => setPODateTo(e.target.value)}
+                      className="px-2 py-2 bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 text-sm" />
+                  </div>
+                  {(poSearch || poDateFrom || poDateTo) && (
+                    <button onClick={() => { setPOSearch(''); setPODateFrom(''); setPODateTo(''); }}
+                      className="px-3 py-2 text-xs font-bold text-[#cc5a16] hover:underline">Clear</button>
+                  )}
+                  <span className="text-xs text-[#9c8e85] ml-auto">{sorted.length} of {inventoryPOs.length}</span>
+                </div>
+              )}
+
               {inventoryPOs.length === 0 ? (
                 <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
                   <div className="text-5xl mb-3">📋</div>
                   <p className="font-medium text-[#1a1208]">No purchase orders</p>
                   <p className="text-sm text-[#9c8e85] mt-1">Raise a PO when you need to restock</p>
+                </div>
+              ) : sorted.length === 0 ? (
+                <div className="text-center py-12 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <p className="text-sm text-[#9c8e85]">No POs match the current filters.</p>
                 </div>
               ) : (
                 <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
@@ -6622,17 +6929,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <table className="w-full text-sm">
                       <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
                         <tr>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">PO #</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Supplier</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Status</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Expected</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Lines</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Total</th>
+                          {([
+                            ['id', 'PO #', 'left'],
+                            ['supplier', 'Supplier', 'left'],
+                            ['status', 'Status', 'left'],
+                            ['expected', 'Expected', 'left'],
+                            ['raised_at', 'Raised', 'left'],
+                            ['lines', 'Lines', 'right'],
+                            ['total', 'Total', 'right'],
+                          ] as [string, string, 'left' | 'right'][]).map(([key, label, align]) => (
+                            <th key={key}
+                              onClick={() => setPOSort(prev => ({ key, dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc' }))}
+                              className={cn("px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] cursor-pointer hover:bg-[#faf7f2] select-none whitespace-nowrap", align === 'right' ? 'text-right' : 'text-left')}>
+                              {label}
+                              {poSort.key === key && <span className="ml-1 text-[#cc5a16]">{poSort.dir === 'asc' ? '↑' : '↓'}</span>}
+                            </th>
+                          ))}
                           <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#cc5a16]/5">
-                        {inventoryPOs.map((po: any) => {
+                        {sorted.map((po: any) => {
                           const statusColor: Record<string, string> = {
                             DRAFT: 'bg-gray-100 text-gray-700',
                             SENT: 'bg-blue-100 text-blue-700',
@@ -6650,6 +6967,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 </span>
                               </td>
                               <td className="px-5 py-3 text-xs text-[#6b5d52]">{po.expected_delivery_date || '—'}</td>
+                              <td className="px-5 py-3 text-xs text-[#6b5d52]">
+                                {po.raised_at ? new Date(po.raised_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : '—'}
+                              </td>
                               <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{po.line_count}</td>
                               <td className="px-5 py-3 text-right font-mono font-bold">₹{Number(po.grand_total || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
                               <td className="px-5 py-3">
@@ -6708,10 +7028,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               )}
             </div>
-          )}
+            );
+          })()}
 
           {/* ── GOODS RECEIPTS sub-view ── */}
-          {inventorySubTab === 'GOODS_RECEIPTS' && (
+          {inventorySubTab === 'GOODS_RECEIPTS' && (() => {
+            const search = grnSearch.toLowerCase().trim();
+            const filtered = inventoryGRNs.filter((g: any) => {
+              if (search) {
+                const hay = `${g.id} ${g.po_id || ''} ${g.supplier_name || ''} ${g.bill_number || ''} ${g.notes || ''}`.toLowerCase();
+                if (!hay.includes(search)) return false;
+              }
+              if (grnDateFrom && g.received_at && new Date(g.received_at).toISOString().slice(0, 10) < grnDateFrom) return false;
+              if (grnDateTo && g.received_at && new Date(g.received_at).toISOString().slice(0, 10) > grnDateTo) return false;
+              return true;
+            });
+            const dir = grnSort.dir === 'desc' ? -1 : 1;
+            const sorted = [...filtered].sort((a: any, b: any) => {
+              const v = (x: any) => {
+                switch (grnSort.key) {
+                  case 'id':           return x.id;
+                  case 'supplier':     return (x.supplier_name || '').toLowerCase();
+                  case 'po':           return x.po_id || '';
+                  case 'bill':         return x.bill_number || '';
+                  case 'received_at':  return x.received_at || '';
+                  case 'qty':          return Number(x.total_qty || 0);
+                  case 'total':        return Number(x.total_amount || 0);
+                  default:             return x.received_at || '';
+                }
+              };
+              const A = v(a), B = v(b);
+              if (A < B) return -1 * dir; if (A > B) return 1 * dir; return 0;
+            });
+            return (
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <p className="text-sm text-[#6b5d52]">{inventoryGRNs.length} receipt{inventoryGRNs.length !== 1 ? 's' : ''}</p>
@@ -6732,28 +7081,65 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               </div>
 
+              {inventoryGRNs.length > 0 && (
+                <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-3 flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85]" />
+                    <input type="text" placeholder="Search GRN #, PO, supplier, bill #…"
+                      value={grnSearch} onChange={e => setGRNSearch(e.target.value)}
+                      className="w-full pl-9 pr-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20" />
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-[#6b5d52]">
+                    <span>From:</span>
+                    <input type="date" value={grnDateFrom} onChange={e => setGRNDateFrom(e.target.value)}
+                      className="px-2 py-2 bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 text-sm" />
+                    <span>To:</span>
+                    <input type="date" value={grnDateTo} onChange={e => setGRNDateTo(e.target.value)}
+                      className="px-2 py-2 bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 text-sm" />
+                  </div>
+                  {(grnSearch || grnDateFrom || grnDateTo) && (
+                    <button onClick={() => { setGRNSearch(''); setGRNDateFrom(''); setGRNDateTo(''); }}
+                      className="px-3 py-2 text-xs font-bold text-[#cc5a16] hover:underline">Clear</button>
+                  )}
+                  <span className="text-xs text-[#9c8e85] ml-auto">{sorted.length} of {inventoryGRNs.length}</span>
+                </div>
+              )}
+
               {inventoryGRNs.length === 0 ? (
                 <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
                   <div className="text-5xl mb-3">📥</div>
                   <p className="font-medium text-[#1a1208]">No goods receipts yet</p>
                   <p className="text-sm text-[#9c8e85] mt-1">Record arrivals to increment stock</p>
                 </div>
+              ) : sorted.length === 0 ? (
+                <div className="text-center py-12 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <p className="text-sm text-[#9c8e85]">No receipts match the current filters.</p>
+                </div>
               ) : (
                 <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
                   <table className="w-full text-sm">
                     <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
                       <tr>
-                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">GRN #</th>
-                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Supplier</th>
-                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">PO Linked</th>
-                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Bill #</th>
-                        <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Received</th>
-                        <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Qty</th>
-                        <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Total</th>
+                        {([
+                          ['id', 'GRN #', 'left'],
+                          ['supplier', 'Supplier', 'left'],
+                          ['po', 'PO Linked', 'left'],
+                          ['bill', 'Bill #', 'left'],
+                          ['received_at', 'Received', 'left'],
+                          ['qty', 'Qty', 'right'],
+                          ['total', 'Total', 'right'],
+                        ] as [string, string, 'left' | 'right'][]).map(([key, label, align]) => (
+                          <th key={key}
+                            onClick={() => setGRNSort(prev => ({ key, dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc' }))}
+                            className={cn("px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] cursor-pointer hover:bg-[#faf7f2] select-none whitespace-nowrap", align === 'right' ? 'text-right' : 'text-left')}>
+                            {label}
+                            {grnSort.key === key && <span className="ml-1 text-[#cc5a16]">{grnSort.dir === 'asc' ? '↑' : '↓'}</span>}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#cc5a16]/5">
-                      {inventoryGRNs.map((g: any) => (
+                      {sorted.map((g: any) => (
                         <tr
                           key={g.id}
                           onClick={async () => {
@@ -6780,10 +7166,37 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               )}
             </div>
-          )}
+            );
+          })()}
 
           {/* ── WASTAGE sub-view ── */}
-          {inventorySubTab === 'WASTAGE' && (
+          {inventorySubTab === 'WASTAGE' && (() => {
+            const search = wastageSearch.toLowerCase().trim();
+            const filtered = inventoryWastage.filter((w: any) => {
+              if (search) {
+                const hay = `${w.ingredient_name || ''} ${w.ingredient_category || ''} ${w.notes || ''} ${w.reason || ''}`.toLowerCase();
+                if (!hay.includes(search)) return false;
+              }
+              if (wastageReason !== 'ALL' && w.reason !== wastageReason) return false;
+              if (wastageDateFrom && w.logged_at && new Date(w.logged_at).toISOString().slice(0, 10) < wastageDateFrom) return false;
+              if (wastageDateTo && w.logged_at && new Date(w.logged_at).toISOString().slice(0, 10) > wastageDateTo) return false;
+              return true;
+            });
+            const dir = wastageSort.dir === 'desc' ? -1 : 1;
+            const sorted = [...filtered].sort((a: any, b: any) => {
+              const v = (x: any) => {
+                switch (wastageSort.key) {
+                  case 'logged_at':  return x.logged_at || '';
+                  case 'ingredient': return (x.ingredient_name || '').toLowerCase();
+                  case 'qty':        return Number(x.qty || 0);
+                  case 'reason':     return x.reason || '';
+                  default:           return x.logged_at || '';
+                }
+              };
+              const A = v(a), B = v(b);
+              if (A < B) return -1 * dir; if (A > B) return 1 * dir; return 0;
+            });
+            return (
             <div className="space-y-4">
               <div className="flex justify-between items-center">
                 <p className="text-sm text-[#6b5d52]">
@@ -6800,6 +7213,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </button>
               </div>
 
+              {inventoryWastage.length > 0 && (
+                <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-3 flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85]" />
+                    <input type="text" placeholder="Search ingredient or notes…"
+                      value={wastageSearch} onChange={e => setWastageSearch(e.target.value)}
+                      className="w-full pl-9 pr-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20" />
+                  </div>
+                  <select value={wastageReason} onChange={e => setWastageReason(e.target.value as any)}
+                    className="px-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20">
+                    <option value="ALL">All reasons</option>
+                    <option value="SPOILAGE">Spoilage</option>
+                    <option value="BURN">Burn</option>
+                    <option value="DROPPED">Dropped</option>
+                    <option value="EXPIRY">Expiry</option>
+                    <option value="OTHER">Other</option>
+                  </select>
+                  <div className="flex items-center gap-2 text-xs text-[#6b5d52]">
+                    <span>From:</span>
+                    <input type="date" value={wastageDateFrom} onChange={e => setWastageDateFrom(e.target.value)}
+                      className="px-2 py-2 bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 text-sm" />
+                    <span>To:</span>
+                    <input type="date" value={wastageDateTo} onChange={e => setWastageDateTo(e.target.value)}
+                      className="px-2 py-2 bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 text-sm" />
+                  </div>
+                  {(wastageSearch || wastageReason !== 'ALL' || wastageDateFrom || wastageDateTo) && (
+                    <button onClick={() => { setWastageSearch(''); setWastageReason('ALL'); setWastageDateFrom(''); setWastageDateTo(''); }}
+                      className="px-3 py-2 text-xs font-bold text-[#cc5a16] hover:underline">Clear</button>
+                  )}
+                  <span className="text-xs text-[#9c8e85] ml-auto">{sorted.length} of {inventoryWastage.length}</span>
+                </div>
+              )}
+
               {inventoryWastage.length === 0 ? (
                 <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
                   <div className="text-5xl mb-3">🗑️</div>
@@ -6808,21 +7254,34 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     Log spoilage, burns, drops, and expiry to track losses accurately
                   </p>
                 </div>
+              ) : sorted.length === 0 ? (
+                <div className="text-center py-12 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <p className="text-sm text-[#9c8e85]">No entries match the current filters.</p>
+                </div>
               ) : (
                 <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
                         <tr>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">When</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Ingredient</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Qty</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Reason</th>
+                          {([
+                            ['logged_at', 'When', 'left'],
+                            ['ingredient', 'Ingredient', 'left'],
+                            ['qty', 'Qty', 'right'],
+                            ['reason', 'Reason', 'left'],
+                          ] as [string, string, 'left' | 'right'][]).map(([key, label, align]) => (
+                            <th key={key}
+                              onClick={() => setWastageSort(prev => ({ key, dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc' }))}
+                              className={cn("px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] cursor-pointer hover:bg-[#faf7f2] select-none whitespace-nowrap", align === 'right' ? 'text-right' : 'text-left')}>
+                              {label}
+                              {wastageSort.key === key && <span className="ml-1 text-[#cc5a16]">{wastageSort.dir === 'asc' ? '↑' : '↓'}</span>}
+                            </th>
+                          ))}
                           <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Notes</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#cc5a16]/5">
-                        {inventoryWastage.map((w: any) => {
+                        {sorted.map((w: any) => {
                           const reasonColors: Record<string, string> = {
                             SPOILAGE: 'bg-amber-100 text-amber-700',
                             BURN: 'bg-red-100 text-red-700',
@@ -6861,10 +7320,34 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               )}
             </div>
-          )}
+            );
+          })()}
 
           {/* ── PHYSICAL COUNTS sub-view ── */}
-          {inventorySubTab === 'PHYSICAL_COUNTS' && (
+          {inventorySubTab === 'PHYSICAL_COUNTS' && (() => {
+            const search = countSearch.toLowerCase().trim();
+            const filtered = inventoryCounts.filter((c: any) => {
+              if (search && !`${c.id} ${c.notes || ''}`.toLowerCase().includes(search)) return false;
+              if (countStatusFilter !== 'ALL' && c.status !== countStatusFilter) return false;
+              return true;
+            });
+            const dir = countSort.dir === 'desc' ? -1 : 1;
+            const sorted = [...filtered].sort((a: any, b: any) => {
+              const v = (x: any) => {
+                switch (countSort.key) {
+                  case 'id':         return x.id;
+                  case 'count_date': return x.count_date || '';
+                  case 'status':     return x.status;
+                  case 'lines':      return Number(x.line_count || 0);
+                  case 'counted':    return Number(x.counted_lines || 0);
+                  case 'variance':   return Number(x.total_abs_variance || 0);
+                  default:           return x.count_date || '';
+                }
+              };
+              const A = v(a), B = v(b);
+              if (A < B) return -1 * dir; if (A > B) return 1 * dir; return 0;
+            });
+            return (
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <p className="text-sm text-[#6b5d52]">
@@ -6885,6 +7368,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </button>
               </div>
 
+              {inventoryCounts.length > 0 && (
+                <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-3 flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85]" />
+                    <input type="text" placeholder="Search count ID or notes…"
+                      value={countSearch} onChange={e => setCountSearch(e.target.value)}
+                      className="w-full pl-9 pr-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20" />
+                  </div>
+                  <select value={countStatusFilter} onChange={e => setCountStatusFilter(e.target.value as any)}
+                    className="px-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20">
+                    <option value="ALL">All status</option>
+                    <option value="IN_PROGRESS">In Progress</option>
+                    <option value="COMPLETED">Completed</option>
+                  </select>
+                  {(countSearch || countStatusFilter !== 'ALL') && (
+                    <button onClick={() => { setCountSearch(''); setCountStatusFilter('ALL'); }}
+                      className="px-3 py-2 text-xs font-bold text-[#cc5a16] hover:underline">Clear</button>
+                  )}
+                  <span className="text-xs text-[#9c8e85] ml-auto">{sorted.length} of {inventoryCounts.length}</span>
+                </div>
+              )}
+
               {inventoryCounts.length === 0 ? (
                 <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
                   <div className="text-5xl mb-3">📋</div>
@@ -6893,23 +7398,36 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     Periodic counts reconcile expected vs actual stock — surfaces shrinkage, theft, or measurement drift
                   </p>
                 </div>
+              ) : sorted.length === 0 ? (
+                <div className="text-center py-12 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <p className="text-sm text-[#9c8e85]">No counts match the current filters.</p>
+                </div>
               ) : (
                 <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
                         <tr>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Count #</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Date</th>
-                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Status</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Lines</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Counted</th>
-                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Total Variance</th>
+                          {([
+                            ['id', 'Count #', 'left'],
+                            ['count_date', 'Date', 'left'],
+                            ['status', 'Status', 'left'],
+                            ['lines', 'Lines', 'right'],
+                            ['counted', 'Counted', 'right'],
+                            ['variance', 'Total Variance', 'right'],
+                          ] as [string, string, 'left' | 'right'][]).map(([key, label, align]) => (
+                            <th key={key}
+                              onClick={() => setCountSort(prev => ({ key, dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc' }))}
+                              className={cn("px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] cursor-pointer hover:bg-[#faf7f2] select-none whitespace-nowrap", align === 'right' ? 'text-right' : 'text-left')}>
+                              {label}
+                              {countSort.key === key && <span className="ml-1 text-[#cc5a16]">{countSort.dir === 'asc' ? '↑' : '↓'}</span>}
+                            </th>
+                          ))}
                           <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#cc5a16]/5">
-                        {inventoryCounts.map((c: any) => (
+                        {sorted.map((c: any) => (
                           <tr key={c.id} className="hover:bg-[#faf7f2]/30">
                             <td className="px-5 py-3 font-mono font-bold text-[#cc5a16]">{c.id}</td>
                             <td className="px-5 py-3 text-xs text-[#6b5d52]">{c.count_date}</td>
@@ -6949,7 +7467,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               )}
             </div>
-          )}
+            );
+          })()}
 
           {/* ─── Modals — defined inline so they have closure access to fetchers ─── */}
           {editingIngredient && (
@@ -18562,12 +19081,44 @@ function InventoryOnboardingWizard({ token, restaurantId, onClose, onComplete }:
 
   const finish = async () => {
     setWorking(true);
-    const ingsToAdd = COMMON_INGREDIENTS_PRESET.filter(i => selIngs.has(i.name));
-    const supsToAdd = COMMON_SUPPLIERS_PRESET.filter(s => selSups.has(s.name));
+
+    // ── Idempotency: pre-fetch existing ingredients + suppliers and skip
+    // anything that already exists by case-insensitive name. Without this,
+    // re-running the wizard on a tenant that already has data would create
+    // duplicate rows (e.g. two "Butter" ingredients with different stock).
+    const [existingIngsRes, existingSupsRes] = await Promise.all([
+      fetch(`/api/restaurant/${restaurantId}/inventory/ingredients`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      }),
+      fetch(`/api/restaurant/${restaurantId}/inventory/suppliers`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      }),
+    ]);
+    const existingIngNames = new Set<string>();
+    const existingSupMap: Record<string, string> = {};
+    if (existingIngsRes.ok) {
+      const arr = await existingIngsRes.json();
+      arr.forEach((x: any) => existingIngNames.add(String(x.name).toLowerCase()));
+    }
+    if (existingSupsRes.ok) {
+      const arr = await existingSupsRes.json();
+      arr.forEach((x: any) => { existingSupMap[String(x.name).toLowerCase()] = x.id; });
+    }
+
+    const ingsToAdd = COMMON_INGREDIENTS_PRESET
+      .filter(i => selIngs.has(i.name))
+      .filter(i => !existingIngNames.has(i.name.toLowerCase()));
+    const supsToAdd = COMMON_SUPPLIERS_PRESET
+      .filter(s => selSups.has(s.name))
+      .filter(s => !existingSupMap[s.name.toLowerCase()]);
+
+    const ingsSkipped = COMMON_INGREDIENTS_PRESET.filter(i => selIngs.has(i.name)).length - ingsToAdd.length;
+    const supsSkipped = COMMON_SUPPLIERS_PRESET.filter(s => selSups.has(s.name)).length - supsToAdd.length;
+
     setProgress({ ing: 0, sup: 0, total_ing: ingsToAdd.length, total_sup: supsToAdd.length });
 
-    // 1. Create suppliers first (so we can map ingredient defaults)
-    const supplierMap: Record<string, string> = {};
+    // 1. Create suppliers first (start with existing → preserves ids for ingredient linking)
+    const supplierMap: Record<string, string> = { ...existingSupMap };
     for (let i = 0; i < supsToAdd.length; i++) {
       const s = supsToAdd[i];
       const r = await fetch(`/api/restaurant/${restaurantId}/inventory/suppliers`, {
@@ -18577,7 +19128,7 @@ function InventoryOnboardingWizard({ token, restaurantId, onClose, onComplete }:
       });
       if (r.ok) {
         const d = await r.json();
-        supplierMap[s.name] = d.id;
+        supplierMap[s.name.toLowerCase()] = d.id;
       }
       setProgress(p => ({ ...p, sup: i + 1 }));
     }
@@ -18585,10 +19136,10 @@ function InventoryOnboardingWizard({ token, restaurantId, onClose, onComplete }:
     // 2. Pick a default supplier per ingredient based on category
     const findDefaultSupplier = (category: string): string | null => {
       const sup = COMMON_SUPPLIERS_PRESET.find(s => s.categories.split(',').map(c => c.trim()).includes(category));
-      return sup ? supplierMap[sup.name] || null : null;
+      return sup ? supplierMap[sup.name.toLowerCase()] || null : null;
     };
 
-    // 3. Create ingredients
+    // 3. Create ingredients (already filtered to skip duplicates)
     for (let i = 0; i < ingsToAdd.length; i++) {
       const ing = ingsToAdd[i];
       const defaultSupplierId = findDefaultSupplier(ing.category);
@@ -18601,7 +19152,10 @@ function InventoryOnboardingWizard({ token, restaurantId, onClose, onComplete }:
     }
 
     setDone(true);
-    setTimeout(() => { onComplete(); }, 1200);
+    setTimeout(() => { onComplete(); }, 1500);
+    if (ingsSkipped > 0 || supsSkipped > 0) {
+      console.log(`[wizard] Skipped ${ingsSkipped} duplicate ingredient(s) + ${supsSkipped} duplicate supplier(s)`);
+    }
   };
 
   return (
