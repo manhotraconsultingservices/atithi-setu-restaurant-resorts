@@ -7969,17 +7969,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <span className="text-orange-200 text-xs font-bold uppercase tracking-widest">⚑ Bill Requested:</span>
               <div className="flex flex-wrap gap-2">
                 {liveTables.filter(t => t.session_status === 'bill_requested').map(t => {
-                  // Synthetic Online Order row has no real table_id, so clicking
-                  // it would 404 the BillView. Render as a non-clickable label
-                  // and direct the owner to the Invoices tab for online orders.
+                  // Synthetic Online Order / Cloud Kitchen row has no real
+                  // table_id, so clicking it would 404 the BillView. Render
+                  // as a non-clickable label and direct the owner to the
+                  // Invoices tab.
                   if ((t as any).is_online_synthetic) {
+                    const isCloudKitchen = (t as any).is_cloud_kitchen_synthetic;
                     return (
                       <span
                         key={t.id}
-                        className="px-3 py-1 rounded-full text-[11px] font-bold backdrop-blur-md bg-blue-500/25 text-blue-100 border border-blue-400/50"
-                        title="Online order — open Invoices tab to view & settle"
+                        className={cn(
+                          "px-3 py-1 rounded-full text-[11px] font-bold backdrop-blur-md border",
+                          isCloudKitchen
+                            ? "bg-cyan-500/25 text-cyan-100 border-cyan-400/50"
+                            : "bg-blue-500/25 text-blue-100 border-blue-400/50"
+                        )}
+                        title={isCloudKitchen
+                          ? "Cloud Kitchen order — open Invoices tab to view & settle"
+                          : "Online order — open Invoices tab to view & settle"}
                       >
-                        🌐 {t.name}
+                        {isCloudKitchen ? '🍱' : '🌐'} {t.name}
                       </span>
                     );
                   }
@@ -8238,16 +8247,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             );
 
                           case 'actions':
-                            // For the synthetic Online Order row: show only an
-                            // info pill — destructive table actions (status /
+                            // For the synthetic Online Order / Cloud Kitchen row: show
+                            // only an info pill — destructive table actions (status /
                             // delete / view-bill-by-table) require a real id.
                             if ((t as any).is_online_synthetic) {
+                              const isCloudKitchen = (t as any).is_cloud_kitchen_synthetic;
                               return (
                                 <span
-                                  className="inline-block px-2 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 text-[11px] font-bold uppercase tracking-widest whitespace-nowrap"
-                                  title="Online channel — manage individual orders from the Invoices tab"
+                                  className={cn(
+                                    "inline-block px-2 py-1 rounded-lg border text-[11px] font-bold uppercase tracking-widest whitespace-nowrap",
+                                    isCloudKitchen
+                                      ? "bg-cyan-50 border-cyan-200 text-cyan-700"
+                                      : "bg-blue-50 border-blue-200 text-blue-700"
+                                  )}
+                                  title={isCloudKitchen
+                                    ? "Cloud Kitchen channel — manage individual orders from the Invoices / Live Kitchen tabs"
+                                    : "Online channel — manage individual orders from the Invoices tab"}
                                 >
-                                  🌐 Online
+                                  {isCloudKitchen ? '🍱 Cloud Kitchen' : '🌐 Online'}
                                 </span>
                               );
                             }

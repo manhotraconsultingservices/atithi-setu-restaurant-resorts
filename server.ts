@@ -6442,6 +6442,60 @@ async function startServer() {
         });
       }
 
+      // ─── Synthetic 'Cloud Kitchen' row (added 2026-05) ────────────────────
+      // Cloud-kitchen orders bypass table_sessions entirely — they're
+      // standalone rows in `orders` with session_id=NULL. The query above
+      // only walks table_sessions, so cloud-kitchen orders were invisible in
+      // Command & Control. We surface a dedicated synthetic row here.
+      //
+      // "Active" = order placed but not yet handed to the customer:
+      //   • status != 'CANCELLED'        — not voided
+      //   • kitchen_status NOT IN
+      //     ('delivered','served')       — kitchen still working / awaiting
+      //                                   delivery handoff
+      //
+      // Reuses is_online_synthetic so the existing frontend gating (no
+      // assign-waiter, no bill-modal) applies without further changes.
+      const ckOrders: any[] = await db.query(`
+        SELECT id, customer_name, customer_phone, total_amount, gst_amount,
+               kitchen_status, status, created_at,
+               customer_address_line1, customer_city
+          FROM orders
+         WHERE checkout_mode = 'cloud_kitchen'
+           AND COALESCE(status, '') NOT IN ('CANCELLED')
+           AND COALESCE(kitchen_status, 'queued') NOT IN ('delivered', 'served')
+         ORDER BY created_at DESC
+      `).catch(() => [] as any[]);
+
+      if (ckOrders.length > 0) {
+        const ckLatest    = ckOrders[0];
+        const ckTotalBill = ckOrders.reduce((sum: number, o: any) =>
+          sum + Number(o.total_amount || 0) + Number(o.gst_amount || 0), 0);
+        live.push({
+          id:                       '__cloud_kitchen__',
+          is_online_synthetic:      true,        // shares the existing UI gating
+          is_cloud_kitchen_synthetic: true,      // lets frontend pick a 🍱 label / colour
+          name:                     ckOrders.length === 1
+                                      ? 'Cloud Kitchen'
+                                      : `Cloud Kitchen (${ckOrders.length})`,
+          capacity:                 null,
+          status:                   'OCCUPIED',
+          qr_code_data:             null,
+          assigned_waiter_id:       null,
+          assigned_waiter_name:     null,
+          session_id:               null,
+          session_opened_at:        ckLatest.created_at || null,
+          customer_name:            ckOrders.length === 1
+                                      ? (ckLatest.customer_name || null)
+                                      : `${ckOrders.length} active customers`,
+          customer_phone:           ckOrders.length === 1 ? ckLatest.customer_phone : null,
+          round_count:              ckOrders.length,
+          bill_amount:              ckTotalBill,
+          session_status:           'open',
+          order_count:              ckOrders.length,
+        });
+      }
+
       res.json(live);
     } catch (err) {
       console.error("Live tables error:", err);
