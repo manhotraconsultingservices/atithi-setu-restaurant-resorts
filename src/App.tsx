@@ -3367,6 +3367,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [liveNow, setLiveNow] = useState(Date.now());
   const [liveOrders, setLiveOrders] = useState<Order[]>([]);
   const [liveOrdersExpanded, setLiveOrdersExpanded] = useState(true);
+  // Cloud-kitchen: dedicated panel state, fetched alongside /tables/live
+  const [cloudKitchenOrders, setCloudKitchenOrders] = useState<any[]>([]);
+  const [cloudKitchenSummary, setCloudKitchenSummary] = useState<{
+    total_active: number; pending: number; awaiting_dispatch: number;
+    breached: number; total_revenue: number; sla_minutes: number;
+  } | null>(null);
   const [viewBillTable, setViewBillTable] = useState<{ id: string; name: string } | null>(null);
   const [waiterCalls, setWaiterCalls] = useState<any[]>([]);
 
@@ -4216,11 +4222,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const fetchLiveTables = async () => {
     setLiveLoading(true);
     try {
-      const [tablesRes, ordersRes, callsRes, staffRes] = await Promise.all([
-        fetch(`/api/restaurant/${restaurantId}/tables/live`,   { headers: { 'Authorization': `Bearer ${token}` } }),
-        fetch(`/api/restaurant/${restaurantId}/orders/live`,   { headers: { 'Authorization': `Bearer ${token}` } }),
-        fetch(`/api/restaurant/${restaurantId}/waiter-calls`,  { headers: { 'Authorization': `Bearer ${token}` } }),
-        fetch(`/api/owner/staff`,                              { headers: { 'Authorization': `Bearer ${token}` } }),
+      const [tablesRes, ordersRes, callsRes, staffRes, ckRes] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/tables/live`,        { headers: { 'Authorization': `Bearer ${token}` } }),
+        fetch(`/api/restaurant/${restaurantId}/orders/live`,        { headers: { 'Authorization': `Bearer ${token}` } }),
+        fetch(`/api/restaurant/${restaurantId}/waiter-calls`,       { headers: { 'Authorization': `Bearer ${token}` } }),
+        fetch(`/api/owner/staff`,                                   { headers: { 'Authorization': `Bearer ${token}` } }),
+        fetch(`/api/restaurant/${restaurantId}/cloud-kitchen/active`,{ headers: { 'Authorization': `Bearer ${token}` } }),
       ]);
       if (tablesRes.ok) {
         const data = await tablesRes.json();
@@ -4238,6 +4245,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const staff = await staffRes.json();
         setAllWaiters(staff.filter((s: any) => s.role === 'WAITER').map((s: any) => ({ id: s.id, name: s.name })));
         setAllChefs(staff.filter((s: any) => ['CHEF','OWNER','MANAGER'].includes(s.role)).map((s: any) => ({ id: s.id, name: s.name })));
+      }
+      if (ckRes.ok) {
+        const ckData = await ckRes.json();
+        setCloudKitchenOrders(Array.isArray(ckData?.orders) ? ckData.orders : []);
+        setCloudKitchenSummary(ckData?.summary || null);
+      } else {
+        // Endpoint may not be deployed on older servers — keep state empty so the panel hides.
+        setCloudKitchenOrders([]);
+        setCloudKitchenSummary(null);
       }
     } catch (err) {
       console.error("Failed to fetch live tables", err);
@@ -7971,26 +7987,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <span className="text-orange-200 text-xs font-bold uppercase tracking-widest">⚑ Bill Requested:</span>
               <div className="flex flex-wrap gap-2">
                 {liveTables.filter(t => t.session_status === 'bill_requested').map(t => {
-                  // Synthetic Online Order / Cloud Kitchen row has no real
-                  // table_id, so clicking it would 404 the BillView. Render
-                  // as a non-clickable label and direct the owner to the
-                  // Invoices tab.
+                  // Synthetic Online Order / Cloud Kitchen rows have been removed
+                  // from /tables/live in favour of dedicated panels. Defensively
+                  // keep the is_online_synthetic guard in case the server hasn't
+                  // been redeployed yet — render as a non-clickable label.
                   if ((t as any).is_online_synthetic) {
-                    const isCloudKitchen = (t as any).is_cloud_kitchen_synthetic;
                     return (
                       <span
                         key={t.id}
-                        className={cn(
-                          "px-3 py-1 rounded-full text-[11px] font-bold backdrop-blur-md border",
-                          isCloudKitchen
-                            ? "bg-cyan-500/25 text-cyan-100 border-cyan-400/50"
-                            : "bg-blue-500/25 text-blue-100 border-blue-400/50"
-                        )}
-                        title={isCloudKitchen
-                          ? "Cloud Kitchen order — open Invoices tab to view & settle"
-                          : "Online order — open Invoices tab to view & settle"}
+                        className="px-3 py-1 rounded-full text-[11px] font-bold backdrop-blur-md bg-blue-500/25 text-blue-100 border border-blue-400/50"
+                        title="Online channel — open Invoices tab to view & settle"
                       >
-                        {isCloudKitchen ? '🍱' : '🌐'} {t.name}
+                        🌐 {t.name}
                       </span>
                     );
                   }
@@ -8002,6 +8010,129 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     >
                       {t.name}
                     </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ── CLOUD KITCHEN PANEL ── dedicated, only renders if there are active CK orders ── */}
+          {cloudKitchenOrders.length > 0 && (
+            <div
+              className="backdrop-blur-md bg-white rounded-3xl border border-white/12 overflow-hidden shadow-2xl"
+              style={{ boxShadow: '0 20px 60px rgba(0, 0, 0, 0.35)' }}
+            >
+              {/* Header strip */}
+              <div className="px-5 py-4 bg-gradient-to-r from-cyan-50 to-white border-b border-cyan-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">🍱</span>
+                  <div>
+                    <h3 className="text-lg font-bold text-[#1a1208]">Cloud Kitchen Orders</h3>
+                    <p className="text-[11px] uppercase tracking-widest text-[#6b5d52]">
+                      {cloudKitchenSummary
+                        ? `${cloudKitchenSummary.pending} pending · ${cloudKitchenSummary.awaiting_dispatch} awaiting dispatch${
+                            cloudKitchenSummary.breached > 0 ? ` · ${cloudKitchenSummary.breached} SLA breached` : ''
+                          }`
+                        : `${cloudKitchenOrders.length} active`}
+                    </p>
+                  </div>
+                </div>
+                {cloudKitchenSummary && (
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <div className="px-3 py-1.5 rounded-xl bg-white border border-cyan-200">
+                      <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">In-flight Revenue</p>
+                      <p className="font-mono font-bold text-sm text-[#0E7490]">₹{Math.round(cloudKitchenSummary.total_revenue).toLocaleString('en-IN')}</p>
+                    </div>
+                    {cloudKitchenSummary.breached > 0 && (
+                      <div className="px-3 py-1.5 rounded-xl bg-red-50 border border-red-200">
+                        <p className="text-[10px] uppercase tracking-widest text-red-700">⚠ SLA &gt; {cloudKitchenSummary.sla_minutes} min</p>
+                        <p className="font-mono font-bold text-sm text-red-700">{cloudKitchenSummary.breached} order{cloudKitchenSummary.breached !== 1 ? 's' : ''}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Order list */}
+              <div className="divide-y divide-[#cc5a16]/5 max-h-[500px] overflow-y-auto">
+                {cloudKitchenOrders.map((o: any) => {
+                  const ks = String(o.kitchen_status || 'queued').toLowerCase();
+                  const ksConfig: Record<string, { label: string; bg: string; text: string }> = {
+                    queued:    { label: 'Queued',    bg: 'bg-amber-100',  text: 'text-amber-700' },
+                    accepted:  { label: 'Accepted',  bg: 'bg-blue-100',   text: 'text-blue-700' },
+                    preparing: { label: 'Preparing', bg: 'bg-orange-100', text: 'text-orange-700' },
+                    ready:     { label: 'Ready',     bg: 'bg-emerald-100',text: 'text-emerald-700' },
+                  };
+                  const ksc = ksConfig[ks] || { label: ks, bg: 'bg-gray-100', text: 'text-gray-700' };
+                  const addressFull = [o.address_line1, o.address_line2, o.city, o.pincode]
+                    .filter(Boolean).join(', ');
+
+                  return (
+                    <div
+                      key={o.id}
+                      className={cn(
+                        'px-5 py-4 flex flex-col lg:flex-row lg:items-center gap-3 transition-colors',
+                        o.sla_breached
+                          ? 'bg-red-50/60 hover:bg-red-50'
+                          : 'hover:bg-cyan-50/30'
+                      )}
+                    >
+                      {/* Invoice + customer */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-baseline gap-2 flex-wrap">
+                          <span className="font-mono font-bold text-sm text-[#0E7490]">{o.invoice_number}</span>
+                          <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest', ksc.bg, ksc.text)}>
+                            {ksc.label}
+                          </span>
+                          {o.sla_breached && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest bg-red-100 text-red-700">
+                              ⚠ {o.age_minutes} min
+                            </span>
+                          )}
+                          {!o.sla_breached && o.age_minutes >= 5 && (
+                            <span className="text-[10px] text-[#9c8e85]">{o.age_minutes} min ago</span>
+                          )}
+                        </div>
+                        <p className="font-semibold text-sm text-[#1a1208] mt-0.5 truncate">
+                          {o.customer_name} {o.customer_phone && <span className="text-[#9c8e85] font-normal">· {o.customer_phone}</span>}
+                        </p>
+                        {addressFull && (
+                          <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight flex items-start gap-1">
+                            <MapPin size={11} className="text-[#0E7490] mt-0.5 shrink-0" />
+                            <span className="truncate">{addressFull}{o.landmark ? ` (${o.landmark})` : ''}</span>
+                          </p>
+                        )}
+                        {o.items_summary && (
+                          <p className="text-[11px] text-[#9c8e85] mt-0.5 truncate">🍴 {o.items_summary}</p>
+                        )}
+                      </div>
+
+                      {/* Total + payment */}
+                      <div className="text-right shrink-0">
+                        <p className="font-mono font-bold text-base text-[#1a1208]">₹{Math.round(o.grand_total).toLocaleString('en-IN')}</p>
+                        <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">{o.payment_method}</p>
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {ks !== 'ready' && (
+                          <button
+                            onClick={() => patchLiveOrder(o.id, { status: 'READY', kitchen_status: 'ready' })}
+                            className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition-all whitespace-nowrap"
+                            title="Mark order ready for dispatch"
+                          >
+                            Mark Ready
+                          </button>
+                        )}
+                        <button
+                          onClick={() => patchLiveOrder(o.id, { status: 'DELIVERED', kitchen_status: 'delivered', payment_status: 'PAID' })}
+                          className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-[#cc5a16] text-white hover:bg-[#a84612] transition-all whitespace-nowrap"
+                          title="Mark order delivered (removes from this list)"
+                        >
+                          ✓ Delivered
+                        </button>
+                      </div>
+                    </div>
                   );
                 })}
               </div>

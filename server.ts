@@ -6409,101 +6409,108 @@ async function startServer() {
         };
       });
 
-      // ─── Synthetic 'Online Order' row (added 2026-04 per customer report) ──
-      // Online QR scan gives sessions with table_id=NULL — they were
-      // previously invisible in Command & Control because the query above
-      // only returns physical tables. Aggregate any active online sessions
-      // into a single virtual row so the owner can see them at a glance.
-      // Frontend uses `is_online_synthetic` to hide destructive actions
-      // (assign waiter / change status / view bill) since those need a
-      // real table_id.
-      const onlineSessions = activeSessions.filter((s: any) => !s.table_id);
-      if (onlineSessions.length > 0) {
-        const latest = onlineSessions.reduce((acc: any, s: any) =>
-          new Date(s.opened_at || 0).getTime() > new Date(acc.opened_at || 0).getTime() ? s : acc
-        , onlineSessions[0]);
-        const totalRounds = onlineSessions.reduce((sum: number, s: any) => sum + Number(s.round_count || 0), 0);
-        const totalBill   = onlineSessions.reduce((sum: number, s: any) => sum + Number(s.bill_amount || 0), 0);
-        const totalOrders = onlineSessions.reduce((sum: number, s: any) => sum + (countBySession[s.id] || 0), 0);
-        const anyBillRequested = onlineSessions.some((s: any) => s.status === 'bill_requested');
-        live.push({
-          id:                  '__online__',
-          is_online_synthetic: true,
-          name:                onlineSessions.length === 1 ? 'Online Order' : `Online Order (${onlineSessions.length})`,
-          capacity:            null,
-          status:              'OCCUPIED',
-          qr_code_data:        null,
-          assigned_waiter_id:  null,
-          assigned_waiter_name: null,
-          session_id:          latest.id,
-          session_opened_at:   latest.opened_at,
-          customer_name:       onlineSessions.length === 1 ? (latest.customer_name || null) : `${onlineSessions.length} active customers`,
-          customer_phone:      onlineSessions.length === 1 ? latest.customer_phone : null,
-          round_count:         totalRounds,
-          bill_amount:         totalBill,
-          session_status:      anyBillRequested ? 'bill_requested' : (latest.status || 'open'),
-          order_count:         totalOrders,
-        });
-      }
-
-      // ─── Synthetic 'Cloud Kitchen' row (added 2026-05) ────────────────────
-      // Cloud-kitchen orders bypass table_sessions entirely — they're
-      // standalone rows in `orders` with session_id=NULL. The query above
-      // only walks table_sessions, so cloud-kitchen orders were invisible in
-      // Command & Control. We surface a dedicated synthetic row here.
-      //
-      // "Active" = order placed but not yet handed to the customer:
-      //   • status != 'CANCELLED'        — not voided
-      //   • kitchen_status NOT IN
-      //     ('delivered','served')       — kitchen still working / awaiting
-      //                                   delivery handoff
-      //
-      // Reuses is_online_synthetic so the existing frontend gating (no
-      // assign-waiter, no bill-modal) applies without further changes.
-      const ckOrders: any[] = await db.query(`
-        SELECT id, customer_name, customer_phone, total_amount, gst_amount,
-               kitchen_status, status, created_at,
-               customer_address_line1, customer_city
-          FROM orders
-         WHERE checkout_mode = 'cloud_kitchen'
-           AND COALESCE(status, '') NOT IN ('CANCELLED')
-           AND COALESCE(kitchen_status, 'queued') NOT IN ('delivered', 'served')
-         ORDER BY created_at DESC
-      `).catch(() => [] as any[]);
-
-      if (ckOrders.length > 0) {
-        const ckLatest    = ckOrders[0];
-        const ckTotalBill = ckOrders.reduce((sum: number, o: any) =>
-          sum + Number(o.total_amount || 0) + Number(o.gst_amount || 0), 0);
-        live.push({
-          id:                       '__cloud_kitchen__',
-          is_online_synthetic:      true,        // shares the existing UI gating
-          is_cloud_kitchen_synthetic: true,      // lets frontend pick a 🍱 label / colour
-          name:                     ckOrders.length === 1
-                                      ? 'Cloud Kitchen'
-                                      : `Cloud Kitchen (${ckOrders.length})`,
-          capacity:                 null,
-          status:                   'OCCUPIED',
-          qr_code_data:             null,
-          assigned_waiter_id:       null,
-          assigned_waiter_name:     null,
-          session_id:               null,
-          session_opened_at:        ckLatest.created_at || null,
-          customer_name:            ckOrders.length === 1
-                                      ? (ckLatest.customer_name || null)
-                                      : `${ckOrders.length} active customers`,
-          customer_phone:           ckOrders.length === 1 ? ckLatest.customer_phone : null,
-          round_count:              ckOrders.length,
-          bill_amount:              ckTotalBill,
-          session_status:           'open',
-          order_count:              ckOrders.length,
-        });
-      }
+      // Note: synthetic 'Online Order' and 'Cloud Kitchen' rows used to be
+      // appended here. They've been removed in favour of dedicated panels in
+      // the C&C view — postpaid online sessions surface via the existing
+      // bill-requested banner when action is needed; cloud-kitchen orders
+      // have their own /cloud-kitchen/active endpoint and panel below the
+      // tables grid. The Tables grid is now exclusively for physical tables.
 
       res.json(live);
     } catch (err) {
       console.error("Live tables error:", err);
       res.status(500).json({ error: "Failed to fetch live table data" });
+    }
+  });
+
+  // Cloud Kitchen: Active orders for the dedicated C&C panel
+  // Returns rich per-order detail (customer, structured address, items count,
+  // age in minutes, SLA breach flag). Frontend renders a dedicated panel
+  // separate from the physical-tables grid so cloud-kitchen orders are not
+  // shoehorned into a table-shaped UI where columns like Capacity / Rounds /
+  // Waiter don't apply.
+  //
+  // SLA threshold: 30 min from order creation; rows past this are flagged so
+  // the panel can render them red so the owner notices delivery delays.
+  app.get("/api/restaurant/:id/cloud-kitchen/active", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const SLA_MINUTES = 30;
+      const nowMs = Date.now();
+
+      const rows: any[] = await db.query(`
+        SELECT id, invoice_number, customer_name, customer_phone, customer_email,
+               customer_address_line1, customer_address_line2, customer_city,
+               customer_pincode, customer_landmark,
+               items, total_amount, gst_amount,
+               payment_method, kitchen_status, status, created_at
+          FROM orders
+         WHERE checkout_mode = 'cloud_kitchen'
+           AND COALESCE(status, '') NOT IN ('CANCELLED')
+           AND COALESCE(kitchen_status, 'queued') NOT IN ('delivered', 'served')
+         ORDER BY created_at ASC
+      `).catch(() => [] as any[]);
+
+      let pending = 0;          // queued / accepted / preparing
+      let awaitingDispatch = 0; // ready (cooked, awaiting handoff)
+      let breachedCount = 0;
+      let totalRevenue = 0;
+
+      const orders = rows.map((o: any) => {
+        // Parse items JSON (stored as TEXT)
+        let items: any[] = [];
+        try { items = typeof o.items === 'string' ? JSON.parse(o.items) : (Array.isArray(o.items) ? o.items : []); } catch {}
+
+        const ks = String(o.kitchen_status || 'queued').toLowerCase();
+        if (ks === 'ready') awaitingDispatch++;
+        else                pending++;
+
+        const createdMs = new Date(o.created_at || nowMs).getTime();
+        const ageMin    = Math.max(0, Math.floor((nowMs - createdMs) / 60000));
+        const slaBreached = ageMin > SLA_MINUTES;
+        if (slaBreached) breachedCount++;
+
+        const grand = Number(o.total_amount || 0) + Number(o.gst_amount || 0);
+        totalRevenue += grand;
+
+        return {
+          id:                  o.id,
+          invoice_number:      o.invoice_number || `#${String(o.id || '').slice(-8).toUpperCase()}`,
+          customer_name:       o.customer_name || '—',
+          customer_phone:      o.customer_phone || '',
+          customer_email:      o.customer_email || '',
+          address_line1:       o.customer_address_line1 || '',
+          address_line2:       o.customer_address_line2 || '',
+          city:                o.customer_city || '',
+          pincode:             o.customer_pincode || '',
+          landmark:            o.customer_landmark || '',
+          items_count:         items.length,
+          items_summary:       items.slice(0, 3).map((it: any) => `${it.name || it.item_name || 'Item'} ×${it.quantity ?? 1}`).join(', ') + (items.length > 3 ? ` +${items.length - 3} more` : ''),
+          subtotal:            Number(o.total_amount || 0),
+          gst_amount:          Number(o.gst_amount || 0),
+          grand_total:         grand,
+          payment_method:      o.payment_method || '—',
+          kitchen_status:      ks,
+          age_minutes:         ageMin,
+          sla_breached:        slaBreached,
+          created_at:          o.created_at,
+        };
+      });
+
+      res.json({
+        orders,
+        summary: {
+          total_active:      orders.length,
+          pending,
+          awaiting_dispatch: awaitingDispatch,
+          breached:          breachedCount,
+          total_revenue:     totalRevenue,
+          sla_minutes:       SLA_MINUTES,
+        },
+      });
+    } catch (err) {
+      console.error("Cloud-kitchen active orders error:", err);
+      res.status(500).json({ error: "Failed to fetch cloud-kitchen orders" });
     }
   });
 
