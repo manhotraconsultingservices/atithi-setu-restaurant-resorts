@@ -5292,15 +5292,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                     <div className="space-y-2">
                       <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Category</label>
-                      <input type="text" list="edit-cats-datalist" value={editingItem.category}
-                        onChange={e => setEditingItem({...editingItem, category: e.target.value})}
-                        className="w-full px-6 py-4 rounded-2xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20 font-medium bg-white"
-                        placeholder="Type or select category"/>
-                      <datalist id="edit-cats-datalist">
-                        {['Starters','Mains','Sides','Desserts','Drinks','Breads','Soups','Salads','Snacks','Breakfast',
-                          ...Array.from(new Set(menu.map(m => m.category).filter(Boolean)))
-                        ].filter((v,i,a)=>a.indexOf(v)===i).map(cat => <option key={cat} value={cat}/>)}
-                      </datalist>
+                      {(() => {
+                        const ALL_CATS = Array.from(new Set([
+                          'Starters','Mains','Sides','Desserts','Drinks','Breads','Soups','Salads','Snacks','Breakfast',
+                          ...menu.map(m => m.category).filter(Boolean) as string[],
+                        ])).sort();
+                        const currentCat = editingItem.category || '';
+                        const isCustomCat = currentCat !== '' && !ALL_CATS.includes(currentCat);
+                        return (
+                          <>
+                            <select
+                              className="w-full px-6 py-4 rounded-2xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20 font-medium bg-white appearance-none"
+                              style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b5d52' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 1.25rem center', backgroundSize: '1rem', paddingRight: '3rem' }}
+                              value={isCustomCat ? '__OTHER__' : currentCat}
+                              onChange={e => {
+                                const v = e.target.value;
+                                if (v === '__OTHER__') setEditingItem({ ...editingItem, category: '' });
+                                else setEditingItem({ ...editingItem, category: v });
+                              }}
+                            >
+                              <option value="">— Select category —</option>
+                              {ALL_CATS.map(c => <option key={c} value={c}>{c}</option>)}
+                              <option value="__OTHER__">+ Other (type new)…</option>
+                            </select>
+                            {isCustomCat && (
+                              <input type="text" autoFocus
+                                className="w-full mt-2 px-6 py-4 rounded-2xl border border-[#cc5a16]/10 focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20 font-medium bg-white"
+                                value={currentCat}
+                                onChange={e => setEditingItem({ ...editingItem, category: e.target.value })}
+                                placeholder="New category name"/>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   </div>
                   <div className="space-y-2">
@@ -9136,16 +9160,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                   <div>
                     <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Category *</label>
-                    <input type="text" list="add-cats-datalist" required
-                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                      value={newItem.category}
-                      onChange={e => setNewItem({ ...newItem, category: e.target.value })}
-                      placeholder="Mains, Starters…"/>
-                    <datalist id="add-cats-datalist">
-                      {['Starters','Mains','Sides','Desserts','Drinks','Breads','Soups','Salads','Snacks','Breakfast',
-                        ...Array.from(new Set(menu.map(m => m.category).filter(Boolean)))
-                      ].filter((v,i,a)=>a.indexOf(v)===i).map(cat => <option key={cat} value={cat}/>)}
-                    </datalist>
+                    {(() => {
+                      const ALL_CATS = Array.from(new Set([
+                        'Starters','Mains','Sides','Desserts','Drinks','Breads','Soups','Salads','Snacks','Breakfast',
+                        ...menu.map(m => m.category).filter(Boolean) as string[],
+                      ])).sort();
+                      const currentCat = newItem.category || '';
+                      const isCustomCat = currentCat !== '' && !ALL_CATS.includes(currentCat);
+                      return (
+                        <>
+                          <select required
+                            className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none appearance-none"
+                            style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b5d52' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 1rem center', backgroundSize: '1rem', paddingRight: '2.5rem' }}
+                            value={isCustomCat ? '__OTHER__' : currentCat}
+                            onChange={e => {
+                              const v = e.target.value;
+                              if (v === '__OTHER__') setNewItem({ ...newItem, category: '' });
+                              else setNewItem({ ...newItem, category: v });
+                            }}
+                          >
+                            <option value="">— Select category —</option>
+                            {ALL_CATS.map(c => <option key={c} value={c}>{c}</option>)}
+                            <option value="__OTHER__">+ Other (type new)…</option>
+                          </select>
+                          {isCustomCat && (
+                            <input type="text" required autoFocus
+                              className="w-full mt-2 bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                              value={currentCat}
+                              onChange={e => setNewItem({ ...newItem, category: e.target.value })}
+                              placeholder="New category name"/>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
