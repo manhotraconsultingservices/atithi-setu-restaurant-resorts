@@ -2865,6 +2865,584 @@ async function startServer() {
     }
   });
 
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Inventory Management — Phase 2: Suppliers + PO + GRN ─────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Procurement workflow: maintain supplier directory, raise Purchase Orders,
+  // record Goods Receipts that increment stock + log to stock_movements.
+
+  // ─── Suppliers — vendor directory ────────────────────────────────────────
+
+  app.get("/api/restaurant/:id/inventory/suppliers", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const includeInactive = String(req.query.include_inactive || '') === '1';
+      const where = includeInactive ? '' : 'WHERE is_active = 1';
+      const rows = await db.query(
+        `SELECT * FROM suppliers ${where} ORDER BY name`
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("List suppliers error:", err);
+      res.status(500).json({ error: "Failed to fetch suppliers" });
+    }
+  });
+
+  app.get("/api/inventory/suppliers/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const row = await db.get("SELECT * FROM suppliers WHERE id = ?", [req.params.id]);
+      if (!row) return res.status(404).json({ error: "Supplier not found" });
+      res.json(row);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch supplier" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/inventory/suppliers", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const {
+        name, contact_name, phone, email, address, gst_number,
+        lead_time_days, payment_terms, notes,
+      } = req.body;
+      if (!name) return res.status(400).json({ error: "name is required" });
+
+      const db = await getTenantDb(req.params.id);
+      const id = `SUP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO suppliers
+          (id, name, contact_name, phone, email, address, gst_number,
+           lead_time_days, payment_terms, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id, String(name).trim(),
+          contact_name || null, phone || null, email || null, address || null,
+          gst_number || null,
+          Math.max(0, parseInt(String(lead_time_days || 1), 10)),
+          payment_terms || null, notes || null,
+        ]
+      );
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error("Create supplier error:", err);
+      res.status(500).json({ error: "Failed to create supplier" });
+    }
+  });
+
+  app.patch("/api/inventory/suppliers/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const allowed = [
+        'name', 'contact_name', 'phone', 'email', 'address', 'gst_number',
+        'lead_time_days', 'payment_terms', 'notes', 'is_active',
+      ];
+      const updates: string[] = [];
+      const params: any[] = [];
+      for (const k of allowed) {
+        if (req.body[k] !== undefined) {
+          updates.push(`${k} = ?`);
+          params.push(req.body[k]);
+        }
+      }
+      if (updates.length === 0) return res.status(400).json({ error: "Nothing to update" });
+      params.push(req.params.id);
+      await db.run(`UPDATE suppliers SET ${updates.join(", ")} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Update supplier error:", err);
+      res.status(500).json({ error: "Failed to update supplier" });
+    }
+  });
+
+  // Soft-delete (PO/GRN history references this row)
+  app.delete("/api/inventory/suppliers/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await db.run("UPDATE suppliers SET is_active = 0 WHERE id = ?", [req.params.id]);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to deactivate supplier" });
+    }
+  });
+
+  // ─── Purchase Orders — DRAFT → SENT → PARTIAL → RECEIVED → CANCELLED ─────
+
+  // List POs with optional status filter and supplier-name join
+  app.get("/api/restaurant/:id/inventory/purchase-orders", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const status = String(req.query.status || '').toUpperCase();
+      const allowedStatuses = new Set(['DRAFT', 'SENT', 'PARTIAL', 'RECEIVED', 'CANCELLED']);
+      const filterSql = allowedStatuses.has(status) ? `WHERE po.status = '${status}'` : '';
+
+      const rows = await db.query(
+        `SELECT po.*, s.name AS supplier_name, s.phone AS supplier_phone,
+                COALESCE(SUM(poi.qty_ordered), 0) AS total_qty_ordered,
+                COALESCE(SUM(poi.qty_received), 0) AS total_qty_received,
+                COUNT(poi.id) AS line_count
+           FROM purchase_orders po
+           LEFT JOIN suppliers s ON s.id = po.supplier_id
+           LEFT JOIN purchase_order_items poi ON poi.po_id = po.id
+           ${filterSql}
+          GROUP BY po.id, s.name, s.phone
+          ORDER BY po.raised_at DESC`
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("List POs error:", err);
+      res.status(500).json({ error: "Failed to fetch purchase orders" });
+    }
+  });
+
+  // Get one PO with its line items + ingredient names
+  app.get("/api/inventory/purchase-orders/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const po: any = await db.get(
+        `SELECT po.*, s.name AS supplier_name, s.phone AS supplier_phone,
+                s.email AS supplier_email, s.lead_time_days
+           FROM purchase_orders po
+           LEFT JOIN suppliers s ON s.id = po.supplier_id
+          WHERE po.id = ?`,
+        [req.params.id]
+      );
+      if (!po) return res.status(404).json({ error: "PO not found" });
+
+      const items = await db.query(
+        `SELECT poi.*, i.name AS ingredient_name, i.category AS ingredient_category
+           FROM purchase_order_items poi
+           LEFT JOIN ingredients i ON i.id = poi.ingredient_id
+          WHERE poi.po_id = ?
+          ORDER BY i.name`,
+        [req.params.id]
+      );
+      res.json({ ...po, items });
+    } catch (err) {
+      console.error("Get PO error:", err);
+      res.status(500).json({ error: "Failed to fetch PO" });
+    }
+  });
+
+  // Create a PO (status starts as DRAFT). Body:
+  //   { supplier_id, expected_delivery_date?, notes?,
+  //     items: [{ ingredient_id, qty_ordered, unit, unit_price }, ...] }
+  app.post("/api/restaurant/:id/inventory/purchase-orders", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { supplier_id, expected_delivery_date, notes, items } = req.body;
+      if (!supplier_id) return res.status(400).json({ error: "supplier_id is required" });
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: "items array (with at least 1 line) is required" });
+      }
+
+      const db = await getTenantDb(req.params.id);
+      const supplier: any = await db.get("SELECT id FROM suppliers WHERE id = ?", [supplier_id]);
+      if (!supplier) return res.status(400).json({ error: "Supplier not found" });
+
+      // Compute totals from line items
+      let totalAmount = 0;
+      let gstAmount = 0;
+      const validItems: any[] = [];
+      for (const it of items) {
+        if (!it.ingredient_id || it.qty_ordered == null || it.unit_price == null) continue;
+        const ing: any = await db.get("SELECT id, gst_percent, unit FROM ingredients WHERE id = ?", [it.ingredient_id]);
+        if (!ing) continue;
+        const qty = Math.max(0, Number(it.qty_ordered));
+        const price = Math.max(0, Number(it.unit_price));
+        const gstPct = Number(ing.gst_percent || 0);
+        const lineSubtotal = qty * price;
+        const lineGst = lineSubtotal * (gstPct / 100);
+        totalAmount += lineSubtotal;
+        gstAmount += lineGst;
+        validItems.push({
+          ingredient_id: it.ingredient_id,
+          qty_ordered: qty,
+          unit: String(it.unit || ing.unit || 'unit').toLowerCase(),
+          unit_price: price,
+        });
+      }
+      if (validItems.length === 0) {
+        return res.status(400).json({ error: "No valid line items (need ingredient_id, qty_ordered, unit_price)" });
+      }
+      const grandTotal = totalAmount + gstAmount;
+
+      // Sequential PO ID — atomic counter per tenant (PO-0001, PO-0002, …)
+      const seq = await getNextTenantSequence(db, 'po');
+      const poId = `PO-${String(seq).padStart(4, '0')}`;
+
+      await db.run(
+        `INSERT INTO purchase_orders
+          (id, supplier_id, status, expected_delivery_date,
+           total_amount, gst_amount, grand_total,
+           raised_by_user_id, notes)
+         VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?)`,
+        [
+          poId, supplier_id, expected_delivery_date || null,
+          totalAmount, gstAmount, grandTotal,
+          req.user!.id, notes || null,
+        ]
+      );
+
+      for (const it of validItems) {
+        await db.run(
+          `INSERT INTO purchase_order_items
+            (id, po_id, ingredient_id, qty_ordered, unit, unit_price)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            `POI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+            poId, it.ingredient_id, it.qty_ordered, it.unit, it.unit_price,
+          ]
+        );
+      }
+
+      res.json({ success: true, id: poId, total_amount: totalAmount, gst_amount: gstAmount, grand_total: grandTotal });
+    } catch (err) {
+      console.error("Create PO error:", err);
+      res.status(500).json({ error: "Failed to create PO" });
+    }
+  });
+
+  // Update PO header (only DRAFT POs editable for header fields)
+  app.patch("/api/inventory/purchase-orders/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      if (po.status !== 'DRAFT') {
+        return res.status(409).json({ error: `PO is in status ${po.status}, only DRAFT POs are editable` });
+      }
+      const allowed = ['supplier_id', 'expected_delivery_date', 'notes'];
+      const updates: string[] = [];
+      const params: any[] = [];
+      for (const k of allowed) {
+        if (req.body[k] !== undefined) {
+          updates.push(`${k} = ?`);
+          params.push(req.body[k]);
+        }
+      }
+      if (updates.length === 0) return res.status(400).json({ error: "Nothing to update" });
+      params.push(req.params.id);
+      await db.run(`UPDATE purchase_orders SET ${updates.join(", ")} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Update PO error:", err);
+      res.status(500).json({ error: "Failed to update PO" });
+    }
+  });
+
+  // Replace line items on a DRAFT PO. Recomputes totals.
+  app.put("/api/inventory/purchase-orders/:id/items", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { items } = req.body;
+      if (!Array.isArray(items)) return res.status(400).json({ error: "items array is required" });
+      const db = await getTenantDb(req.user!.restaurantId);
+      const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      if (po.status !== 'DRAFT') {
+        return res.status(409).json({ error: `Can't edit line items on a ${po.status} PO` });
+      }
+
+      await db.run("DELETE FROM purchase_order_items WHERE po_id = ?", [req.params.id]);
+
+      let totalAmount = 0, gstAmount = 0;
+      for (const it of items) {
+        if (!it.ingredient_id || it.qty_ordered == null || it.unit_price == null) continue;
+        const ing: any = await db.get("SELECT gst_percent, unit FROM ingredients WHERE id = ?", [it.ingredient_id]);
+        if (!ing) continue;
+        const qty = Math.max(0, Number(it.qty_ordered));
+        const price = Math.max(0, Number(it.unit_price));
+        totalAmount += qty * price;
+        gstAmount += qty * price * (Number(ing.gst_percent || 0) / 100);
+        await db.run(
+          `INSERT INTO purchase_order_items (id, po_id, ingredient_id, qty_ordered, unit, unit_price)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            `POI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+            req.params.id, it.ingredient_id, qty,
+            String(it.unit || ing.unit || 'unit').toLowerCase(), price,
+          ]
+        );
+      }
+      const grandTotal = totalAmount + gstAmount;
+      await db.run(
+        "UPDATE purchase_orders SET total_amount = ?, gst_amount = ?, grand_total = ? WHERE id = ?",
+        [totalAmount, gstAmount, grandTotal, req.params.id]
+      );
+      res.json({ success: true, total_amount: totalAmount, gst_amount: gstAmount, grand_total: grandTotal });
+    } catch (err) {
+      console.error("Update PO items error:", err);
+      res.status(500).json({ error: "Failed to update PO items" });
+    }
+  });
+
+  // Mark a PO as SENT (DRAFT → SENT). Optionally fires an email to the supplier later.
+  app.post("/api/inventory/purchase-orders/:id/send", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      if (po.status !== 'DRAFT') {
+        return res.status(409).json({ error: `Cannot send a ${po.status} PO` });
+      }
+      await db.run(
+        "UPDATE purchase_orders SET status = 'SENT', sent_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [req.params.id]
+      );
+      // TODO Phase 4: email PO PDF to supplier email if provided
+      res.json({ success: true, status: 'SENT' });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to send PO" });
+    }
+  });
+
+  // Cancel a PO (any non-terminal status → CANCELLED)
+  app.post("/api/inventory/purchase-orders/:id/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      if (['RECEIVED', 'CANCELLED'].includes(po.status)) {
+        return res.status(409).json({ error: `Cannot cancel a ${po.status} PO` });
+      }
+      await db.run("UPDATE purchase_orders SET status = 'CANCELLED' WHERE id = ?", [req.params.id]);
+      res.json({ success: true, status: 'CANCELLED' });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to cancel PO" });
+    }
+  });
+
+  // Hard delete only allowed for DRAFT POs (no GRN linkage yet)
+  app.delete("/api/inventory/purchase-orders/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      if (po.status !== 'DRAFT') {
+        return res.status(409).json({ error: `Cannot delete a ${po.status} PO. Cancel it instead.` });
+      }
+      await db.run("DELETE FROM purchase_order_items WHERE po_id = ?", [req.params.id]);
+      await db.run("DELETE FROM purchase_orders WHERE id = ?", [req.params.id]);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to delete PO" });
+    }
+  });
+
+  // ─── Goods Receipts (GRN) — physical arrival, increments stock ───────────
+
+  app.get("/api/restaurant/:id/inventory/grn", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT g.*, s.name AS supplier_name,
+                COALESCE(SUM(gi.qty_received), 0) AS total_qty,
+                COUNT(gi.id) AS line_count
+           FROM goods_receipts g
+           LEFT JOIN suppliers s ON s.id = g.supplier_id
+           LEFT JOIN goods_receipt_items gi ON gi.grn_id = g.id
+          GROUP BY g.id, s.name
+          ORDER BY g.received_at DESC`
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("List GRN error:", err);
+      res.status(500).json({ error: "Failed to fetch goods receipts" });
+    }
+  });
+
+  app.get("/api/inventory/grn/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const grn: any = await db.get(
+        `SELECT g.*, s.name AS supplier_name, s.phone AS supplier_phone
+           FROM goods_receipts g
+           LEFT JOIN suppliers s ON s.id = g.supplier_id
+          WHERE g.id = ?`,
+        [req.params.id]
+      );
+      if (!grn) return res.status(404).json({ error: "GRN not found" });
+      const items = await db.query(
+        `SELECT gi.*, i.name AS ingredient_name, i.category AS ingredient_category
+           FROM goods_receipt_items gi
+           LEFT JOIN ingredients i ON i.id = gi.ingredient_id
+          WHERE gi.grn_id = ?
+          ORDER BY i.name`,
+        [req.params.id]
+      );
+      res.json({ ...grn, items });
+    } catch (err) {
+      console.error("Get GRN error:", err);
+      res.status(500).json({ error: "Failed to fetch GRN" });
+    }
+  });
+
+  // Create a GRN — the heart of the procurement flow.
+  // Body:
+  //   { po_id?,                              // optional link to a PO
+  //     supplier_id,                         // required (auto-filled from PO)
+  //     bill_number?, notes?,
+  //     items: [{ ingredient_id, qty_received, unit, unit_price,
+  //               batch_number?, expiry_date?, condition? }, …] }
+  //
+  // For each line item this:
+  //   1. Inserts goods_receipt_items
+  //   2. UPDATEs ingredients.current_stock_qty (atomic)
+  //   3. UPDATEs ingredients.default_unit_price (last-known price)
+  //   4. Logs a stock_movements row (movement_type='GRN')
+  //   5. If po_id: UPDATEs purchase_order_items.qty_received and is_fully_received
+  //
+  // After all line items: if linked to a PO, recompute PO status:
+  //   • all items fully_received → 'RECEIVED'
+  //   • any item received → 'PARTIAL'
+  app.post("/api/restaurant/:id/inventory/grn", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { po_id, supplier_id, bill_number, notes, items } = req.body;
+      if (!supplier_id && !po_id) {
+        return res.status(400).json({ error: "supplier_id or po_id is required" });
+      }
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: "items array (with at least 1 line) is required" });
+      }
+
+      const db = await getTenantDb(req.params.id);
+
+      // If po_id is given, derive supplier_id from PO and validate
+      let resolvedSupplierId = supplier_id;
+      let po: any = null;
+      if (po_id) {
+        po = await db.get("SELECT * FROM purchase_orders WHERE id = ?", [po_id]);
+        if (!po) return res.status(404).json({ error: "Linked PO not found" });
+        if (['CANCELLED'].includes(po.status)) {
+          return res.status(409).json({ error: `Cannot receive against a ${po.status} PO` });
+        }
+        resolvedSupplierId = po.supplier_id;
+      }
+
+      // Sequential GRN ID — atomic counter per tenant (GRN-0001, GRN-0002, …)
+      const seq = await getNextTenantSequence(db, 'grn');
+      const grnId = `GRN-${String(seq).padStart(4, '0')}`;
+
+      let totalAmount = 0;
+      const allowedConditions = new Set(['GOOD', 'DAMAGED', 'PARTIAL']);
+
+      // Insert header (totals updated after lines processed)
+      await db.run(
+        `INSERT INTO goods_receipts
+          (id, po_id, supplier_id, received_by_user_id, bill_number, notes)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [grnId, po_id || null, resolvedSupplierId, req.user!.id, bill_number || null, notes || null]
+      );
+
+      // Process each line
+      for (const it of items) {
+        if (!it.ingredient_id || it.qty_received == null) continue;
+        const qty = Math.max(0, Number(it.qty_received));
+        if (qty <= 0) continue;
+        const unitPrice = Math.max(0, Number(it.unit_price || 0));
+
+        const ing: any = await db.get(
+          "SELECT id, unit, current_stock_qty FROM ingredients WHERE id = ?",
+          [it.ingredient_id]
+        );
+        if (!ing) continue;
+
+        const condition = allowedConditions.has(String(it.condition || 'GOOD').toUpperCase())
+          ? String(it.condition).toUpperCase()
+          : 'GOOD';
+        const unit = String(it.unit || ing.unit || 'unit').toLowerCase();
+        const lineTotal = qty * unitPrice;
+        totalAmount += lineTotal;
+
+        // Insert GRN line
+        await db.run(
+          `INSERT INTO goods_receipt_items
+            (id, grn_id, ingredient_id, qty_received, unit, unit_price,
+             batch_number, expiry_date, condition)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `GRI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+            grnId, it.ingredient_id, qty, unit, unitPrice,
+            it.batch_number || null, it.expiry_date || null, condition,
+          ]
+        );
+
+        // Atomic stock increment + return new balance
+        const updated: any[] = await db.query(
+          `UPDATE ingredients
+              SET current_stock_qty = current_stock_qty + ?,
+                  default_unit_price = COALESCE(?, default_unit_price),
+                  updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          RETURNING current_stock_qty`,
+          [qty, unitPrice > 0 ? unitPrice : null, it.ingredient_id]
+        );
+        const newBalance = Number(updated[0]?.current_stock_qty ?? ing.current_stock_qty + qty);
+
+        // Audit log
+        await db.run(
+          `INSERT INTO stock_movements
+            (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id,
+             balance_after, unit_cost, recorded_by_user_id, notes)
+           VALUES (?, ?, ?, ?, 'GRN', 'grn', ?, ?, ?, ?, ?)`,
+          [
+            `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+            it.ingredient_id, qty, unit, grnId,
+            newBalance, unitPrice || null, req.user!.id,
+            condition !== 'GOOD' ? `Received condition: ${condition}` : null,
+          ]
+        );
+
+        // If linked to PO, update qty_received on the matching line
+        if (po_id) {
+          await db.run(
+            `UPDATE purchase_order_items
+                SET qty_received = qty_received + ?,
+                    is_fully_received = CASE
+                      WHEN qty_received + ? >= qty_ordered THEN 1 ELSE 0
+                    END
+              WHERE po_id = ? AND ingredient_id = ?`,
+            [qty, qty, po_id, it.ingredient_id]
+          );
+        }
+      }
+
+      // Update GRN total
+      await db.run("UPDATE goods_receipts SET total_amount = ? WHERE id = ?", [totalAmount, grnId]);
+
+      // If linked to PO, recompute PO status
+      if (po_id) {
+        const poItems: any[] = await db.query(
+          "SELECT is_fully_received FROM purchase_order_items WHERE po_id = ?",
+          [po_id]
+        );
+        const allReceived = poItems.length > 0 && poItems.every((r: any) => r.is_fully_received === 1);
+        const anyReceived = poItems.some((r: any) => r.is_fully_received === 1);
+        const newStatus = allReceived ? 'RECEIVED' : (anyReceived ? 'PARTIAL' : po.status);
+        if (newStatus !== po.status) {
+          await db.run("UPDATE purchase_orders SET status = ? WHERE id = ?", [newStatus, po_id]);
+        }
+      }
+
+      res.json({ success: true, id: grnId, total_amount: totalAmount });
+    } catch (err) {
+      console.error("Create GRN error:", err);
+      res.status(500).json({ error: "Failed to create GRN" });
+    }
+  });
+
+  // Upload bill image for an existing GRN
+  app.post("/api/inventory/grn/:id/upload-bill", authenticate, upload.single('bill'), async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: "No file uploaded (field name: 'bill')" });
+      const db = await getTenantDb(req.user!.restaurantId);
+      const billUrl = `/uploads/${req.file.filename}`;
+      await db.run("UPDATE goods_receipts SET bill_image_url = ? WHERE id = ?", [billUrl, req.params.id]);
+      res.json({ success: true, bill_image_url: billUrl });
+    } catch (err) {
+      console.error("Upload bill error:", err);
+      res.status(500).json({ error: "Failed to upload bill" });
+    }
+  });
+
   // ── Import Token: SUPER_ADMIN generates a scoped token for any restaurant ──
   // Allows admins to run menu imports without knowing the owner's password.
   // POST /api/auth/import-token  { loginId, password, restaurantId }
