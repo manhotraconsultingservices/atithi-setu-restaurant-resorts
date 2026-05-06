@@ -4194,6 +4194,12 @@ async function startServer() {
         : null;
       const alertsVal = alerts_enabled === undefined ? null : (alerts_enabled ? 1 : 0);
 
+      // Validate checkout_mode — only allow known values; default to postpaid.
+      const allowedCheckoutModes = new Set(['postpaid', 'prepaid', 'cloud_kitchen']);
+      const safeCheckoutMode = allowedCheckoutModes.has(String(checkout_mode || '').toLowerCase())
+        ? String(checkout_mode).toLowerCase()
+        : 'postpaid';
+
       // Invoice numbering — validate; only forward to UPDATE when fields provided.
       const allowedInvoiceModes = new Set(['RANDOM', 'SEQUENTIAL']);
       const safeInvoiceMode = invoice_numbering_mode === undefined
@@ -4742,9 +4748,15 @@ async function startServer() {
   // enabled; returns null when the tenant is in RANDOM mode or settings can't be
   // read. Caller writes the returned value into the orders.invoice_number or
   // table_sessions.invoice_number column. Atomic counter via getNextTenantSequence.
+  //
+  // When `forceSequential = true` the caller is asserting that the order MUST get
+  // a sequential number regardless of the tenant's RANDOM/SEQUENTIAL setting —
+  // used for cloud_kitchen orders, which always need a sequential audit number
+  // (delivery / GST / bookkeeping requirements).
   const generateInvoiceNumberIfSequential = async (
     tenantDb: DbInterface,
-    restaurantId: string
+    restaurantId: string,
+    forceSequential: boolean = false
   ): Promise<string | null> => {
     try {
       const r: any = await centralDb.get(
@@ -4754,7 +4766,7 @@ async function startServer() {
       );
       if (!r) return null;
       const mode = String(r.invoice_numbering_mode || 'RANDOM').toUpperCase();
-      if (mode !== 'SEQUENTIAL') return null;
+      if (!forceSequential && mode !== 'SEQUENTIAL') return null;
       const rawPrefix = String(r.invoice_number_prefix || '').trim();
       const prefix = (rawPrefix && INVOICE_PREFIX_RE.test(rawPrefix)) ? rawPrefix : 'INV-';
       const yearlyReset = Number(r.invoice_yearly_reset || 0) === 1;
@@ -5344,6 +5356,12 @@ async function startServer() {
         // Postpaid session fields
         session_token, session_id,
         checkout_mode: bodyCheckoutMode,
+        // Cloud-kitchen / online-delivery: structured customer address fields
+        customer_address_line1, customerAddressLine1,
+        customer_address_line2, customerAddressLine2,
+        customer_city, customerCity,
+        customer_pincode, customerPincode,
+        customer_landmark, customerLandmark,
       } = req.body;
 
       const db = await getTenantDb(req.params.id);
@@ -5359,6 +5377,12 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS eta TEXT");
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT");
       await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT");
+      // Cloud-kitchen / online-delivery: structured address (idempotent)
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line1 TEXT");
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line2 TEXT");
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_city TEXT");
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_pincode TEXT");
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_landmark TEXT");
 
       // Resolve restaurant checkout_mode (body overrides, then DB, then default)
       let checkoutMode = bodyCheckoutMode;
@@ -5376,6 +5400,12 @@ async function startServer() {
       const finalCustomerPhone= customer_phone || customerPhone;
       const finalCustomerEmail= customer_email || customerEmail;
       const finalPaymentMethod= payment_method || paymentMethod;
+      // Cloud-kitchen structured address fields (snake_case wins over camelCase fallback)
+      const finalAddrLine1    = customer_address_line1 || customerAddressLine1 || null;
+      const finalAddrLine2    = customer_address_line2 || customerAddressLine2 || null;
+      const finalCity         = customer_city || customerCity || null;
+      const finalPincode      = customer_pincode || customerPincode || null;
+      const finalLandmark     = customer_landmark || customerLandmark || null;
 
       // ── Resolve session for postpaid ──────────────────────────────────────
       let finalSessionId: string | null = session_id || null;
@@ -5422,16 +5452,29 @@ async function startServer() {
       }
 
       // ── kitchen_status depends on mode ───────────────────────────────────
-      // Prepaid: hold order until payment confirmed; Postpaid: queue immediately
+      // Prepaid:        hold order until payment confirmed.
+      // Postpaid:       queue immediately (paid at table later).
+      // Cloud_kitchen:  auto-finalize — payment captured up-front by the customer
+      //                 in the QR flow, kitchen starts cooking right away.
       const kitchenStatus = checkoutMode === 'prepaid' ? 'held_for_payment' : 'queued';
       const orderStatus   = checkoutMode === 'prepaid' ? 'PENDING' : 'CONFIRMED';
 
-      // Sequential invoice number for the ORDER row — only meaningful for
-      // standalone (non-session) orders since session-based ones are billed
-      // at the session level. We still assign one here so prepaid/standalone
-      // orders get their own invoice_number.
+      // Cloud-kitchen orders are billed immediately on placement — invoice
+      // is auto-generated, no waiter intervention. Mark invoice_status PRINTED
+      // up-front so it shows up on the owner's invoice list and KOT prints.
+      const invoiceStatus = checkoutMode === 'cloud_kitchen' ? 'PRINTED' : 'DRAFT';
+
+      // Sequential invoice number for the ORDER row.
+      //  • Standalone postpaid sessions assign at session level → null here.
+      //  • Cloud_kitchen ALWAYS gets a sequential number (delivery + GST audit
+      //    requirement) regardless of the tenant's RANDOM/SEQUENTIAL setting.
+      //  • Prepaid / manual on-demand follow the tenant setting.
       const orderInvoiceNumber = !finalSessionId
-        ? await generateInvoiceNumberIfSequential(db, req.params.id)
+        ? await generateInvoiceNumberIfSequential(
+            db,
+            req.params.id,
+            checkoutMode === 'cloud_kitchen' /* forceSequential */
+          )
         : null;
 
       // ── Persist gst_percent + apply_gst on the order ──────────────────────
@@ -5459,8 +5502,9 @@ async function startServer() {
         INSERT INTO orders
           (id, table_number, items, total_amount, gst_amount, status, customer_name, customer_phone,
            customer_email, payment_method, session_id, checkout_mode, round_number, kitchen_status, invoice_number,
-           gst_percent, apply_gst)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           gst_percent, apply_gst, invoice_status,
+           customer_address_line1, customer_address_line2, customer_city, customer_pincode, customer_landmark)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         id,
         finalTableNumber || null,
@@ -5479,17 +5523,32 @@ async function startServer() {
         orderInvoiceNumber,
         orderGstPercent,
         orderApplyGst,
+        invoiceStatus,
+        finalAddrLine1,
+        finalAddrLine2,
+        finalCity,
+        finalPincode,
+        finalLandmark,
       ]);
 
-      res.json({ success: true, id, orderId: id, checkout_mode: checkoutMode, kitchen_status: kitchenStatus, invoice_number: orderInvoiceNumber });
+      res.json({
+        success: true,
+        id,
+        orderId: id,
+        checkout_mode: checkoutMode,
+        kitchen_status: kitchenStatus,
+        invoice_number: orderInvoiceNumber,
+        invoice_status: invoiceStatus,
+      });
 
       // ── Notifications (non-blocking) ─────────────────────────────────────
       const itemLabels = (items as any[]).map((i: any) =>
         `${i.name || i.item_name || 'Item'} x${i.quantity ?? 1}`
       );
 
-      // Postpaid → notify owner + waiters immediately (order is in kitchen)
-      // Prepaid  → notify only after payment webhook confirms (handled in /payment endpoint)
+      // Postpaid       → notify owner + waiters immediately (order is in kitchen)
+      // Prepaid        → notify only after payment webhook confirms (handled in /payment endpoint)
+      // Cloud_kitchen  → notify owner immediately with full delivery details (name + structured address)
       if (checkoutMode === 'postpaid') {
         triggerNotification(req.params.id, 'ORDER_PLACED', {
           orderId: id, tableNumber: finalTableNumber,
@@ -5500,6 +5559,47 @@ async function startServer() {
           triggerNotification(req.params.id, 'CUSTOMER_ORDER_CONFIRMATION', {
             orderId: id, items: itemLabels, total: finalTotalAmount,
             customerEmail: finalCustomerEmail, customerPhone: finalCustomerPhone,
+          }).catch(() => {});
+        }
+      } else if (checkoutMode === 'cloud_kitchen') {
+        // Build a single human-readable delivery address from structured parts.
+        const addressParts = [
+          finalAddrLine1, finalAddrLine2, finalCity,
+          finalPincode ? `PIN ${finalPincode}` : null,
+          finalLandmark ? `Landmark: ${finalLandmark}` : null,
+        ].filter(Boolean);
+        const fullAddress = addressParts.join(', ');
+
+        triggerNotification(req.params.id, 'ORDER_PLACED', {
+          orderId: id,
+          invoiceNumber: orderInvoiceNumber,
+          tableNumber: 'Online (Cloud Kitchen)',
+          items: itemLabels,
+          itemsDetailed: items,
+          total: finalTotalAmount,
+          gstAmount: finalGstAmount || 0,
+          paymentMethod: finalPaymentMethod || '—',
+          customerName: finalCustomerName,
+          customerEmail: finalCustomerEmail,
+          customerPhone: finalCustomerPhone,
+          customerAddress: fullAddress,
+          customerAddressLine1: finalAddrLine1,
+          customerAddressLine2: finalAddrLine2,
+          customerCity: finalCity,
+          customerPincode: finalPincode,
+          customerLandmark: finalLandmark,
+          orderType: 'cloud_kitchen',
+        }).catch(() => {});
+
+        if (finalCustomerEmail || finalCustomerPhone) {
+          triggerNotification(req.params.id, 'CUSTOMER_ORDER_CONFIRMATION', {
+            orderId: id,
+            invoiceNumber: orderInvoiceNumber,
+            items: itemLabels,
+            total: finalTotalAmount,
+            customerEmail: finalCustomerEmail,
+            customerPhone: finalCustomerPhone,
+            orderType: 'cloud_kitchen',
           }).catch(() => {});
         }
       }

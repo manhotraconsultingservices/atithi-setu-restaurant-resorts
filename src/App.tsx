@@ -66,6 +66,7 @@ import {
   Bed,
   AlertCircle,
   Globe,
+  Package,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -6381,9 +6382,29 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <td className="px-5 py-4">
                             <p className="font-semibold text-sm text-[#1a1208]">{inv.customerName || '—'}</p>
                             {inv.customerPhone && <p className="text-[11px] text-[#9c8e85]">{inv.customerPhone}</p>}
+                            {/* Cloud-kitchen: show structured delivery address inline so the
+                                owner can dispatch from the invoice list directly. */}
+                            {inv.checkout_mode === 'cloud_kitchen' && (inv.customer_address_line1 || inv.customer_city) && (
+                              <div className="mt-1 text-[10px] text-[#0E7490] leading-tight">
+                                <MapPin size={10} className="inline mr-0.5 -mt-0.5" />
+                                {[
+                                  inv.customer_address_line1,
+                                  inv.customer_address_line2,
+                                  inv.customer_city,
+                                  inv.customer_pincode,
+                                ].filter(Boolean).join(', ')}
+                                {inv.customer_landmark && (
+                                  <div className="text-[#0E7490]/70">Landmark: {inv.customer_landmark}</div>
+                                )}
+                              </div>
+                            )}
                           </td>
                           {/* Table */}
-                          <td className="px-5 py-4 text-sm text-[#3d3128]">{inv.tableNumber || '—'}</td>
+                          <td className="px-5 py-4 text-sm text-[#3d3128]">
+                            {inv.checkout_mode === 'cloud_kitchen'
+                              ? <span className="inline-flex items-center gap-1 text-[#0E7490] text-xs font-bold uppercase tracking-widest"><Package size={11}/> Online</span>
+                              : (inv.tableNumber || '—')}
+                          </td>
                           {/* Date & Time */}
                           <td className="px-5 py-4 text-xs text-[#6b5d52] whitespace-nowrap">
                             <div>{dt.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' })}</div>
@@ -7388,7 +7409,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   How customers pay for their orders
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <button
                   type="button"
                   onClick={() => setRestaurant(prev => prev ? { ...prev, checkout_mode: 'postpaid' } : null)}
@@ -7416,6 +7437,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <CreditCard size={18} className="mb-2 text-[#1a1208]" />
                   <p className="text-xs font-bold text-[#1a1a1a]">Prepaid</p>
                   <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">Payment required before order is sent to kitchen.</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRestaurant(prev => prev ? { ...prev, checkout_mode: 'cloud_kitchen' } : null)}
+                  className={cn(
+                    "p-4 rounded-2xl border-2 text-left transition-all",
+                    restaurant?.checkout_mode === 'cloud_kitchen'
+                      ? "border-[#cc5a16] bg-white shadow-sm"
+                      : "border-transparent bg-white/50"
+                  )}
+                >
+                  <Package size={18} className="mb-2 text-[#1a1208]" />
+                  <p className="text-xs font-bold text-[#1a1a1a]">Cloud Kitchen</p>
+                  <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">Online delivery orders. Customer enters address; auto-invoiced; sent to kitchen instantly.</p>
                 </button>
               </div>
             </div>
@@ -11528,6 +11563,16 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [showInvoice, setShowInvoice] = useState(false);
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
   const [customerInfo, setCustomerInfo] = useState({ name: '', phone: '', email: '' });
+  // Cloud-kitchen / online-delivery: structured customer address
+  const [deliveryAddress, setDeliveryAddress] = useState({
+    line1: '',
+    line2: '',
+    city: '',
+    pincode: '',
+    landmark: '',
+  });
+  // Cloud-kitchen payment-method picker (customer chooses CASH / UPI / CARD)
+  const [cloudKitchenPayMethod, setCloudKitchenPayMethod] = useState<'CASH' | 'UPI' | 'CARD'>('UPI');
   const [tableNumber, setTableNumber] = useState("Online");
   const [tableName, setTableName] = useState("Online Order");
   const [searchQuery, setSearchQuery] = useState('');
@@ -11846,7 +11891,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 
   const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
-  const placeOrder = async (paymentMethod: 'ONLINE' | 'TABLE') => {
+  const placeOrder = async (paymentMethod: 'ONLINE' | 'TABLE' | 'CASH' | 'UPI' | 'CARD') => {
     // Block new orders once bill has been requested (session locked)
     if (session?.status === 'bill_requested') {
       setPlaceOrderError('Your bill has been requested. New orders cannot be added to this session.');
@@ -11865,6 +11910,19 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     setPlaceOrderError('');
 
     const checkoutMode = restaurant?.checkout_mode || 'postpaid';
+
+    // Cloud-kitchen requires structured delivery address (line1, city, pincode are mandatory)
+    if (checkoutMode === 'cloud_kitchen') {
+      if (!deliveryAddress.line1.trim() || !deliveryAddress.city.trim() || !deliveryAddress.pincode.trim()) {
+        setPlaceOrderError("Please provide delivery address (Address Line 1, City and PIN are required).");
+        return;
+      }
+      if (!/^\d{6}$/.test(deliveryAddress.pincode.trim())) {
+        setPlaceOrderError("Please enter a valid 6-digit PIN code.");
+        return;
+      }
+    }
+
     setIsPlacingOrder(true);
 
     try {
@@ -11895,6 +11953,15 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       if (checkoutMode === 'postpaid' && session) {
         orderBody.session_token = session.session_token;
         orderBody.session_id    = session.id;
+      }
+
+      // Attach structured delivery address for cloud_kitchen
+      if (checkoutMode === 'cloud_kitchen') {
+        orderBody.customer_address_line1 = deliveryAddress.line1.trim();
+        orderBody.customer_address_line2 = deliveryAddress.line2.trim() || null;
+        orderBody.customer_city          = deliveryAddress.city.trim();
+        orderBody.customer_pincode       = deliveryAddress.pincode.trim();
+        orderBody.customer_landmark      = deliveryAddress.landmark.trim() || null;
       }
 
       const res = await fetch(`/api/restaurant/${restaurantId}/orders`, {
@@ -11952,6 +12019,18 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
           email: prev.email,
         }));
         setActiveCustomerTab('MY_ORDERS');
+      } else if (checkoutMode === 'cloud_kitchen') {
+        // Cloud kitchen — order is auto-finalized server-side. Show invoice / confirmation
+        // immediately. If the customer chose UPI, surface the QR for them to pay; CASH/CARD
+        // are settled at delivery (cash-on-delivery / card-on-delivery).
+        setOrder(newOrder);
+        localStorage.setItem('last_restaurant_id', restaurantId || '');
+        if (paymentMethod === 'UPI') {
+          setShowUPIModal(true);
+        } else {
+          // CASH / CARD on delivery → straight to invoice / thanks screen
+          setShowInvoice(true);
+        }
       } else {
         // Prepaid — track single order and optionally show UPI
         setOrder(newOrder);
@@ -13129,6 +13208,15 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
               {/* Customer identity — show a read-only chip when the session already
                   has the customer's name (re-scan / second+ order round). Only
                   show the full form for the very first order of a new session. */}
+              {checkoutMode === 'cloud_kitchen' && (
+                <div className="mb-3 bg-[#0E7490]/5 border border-[#0E7490]/20 rounded-2xl px-4 py-3 flex items-start gap-3">
+                  <Package size={18} className="text-[#0E7490] mt-0.5 shrink-0" />
+                  <div>
+                    <p className="text-xs font-bold text-[#0E7490] uppercase tracking-widest">Online Delivery Order</p>
+                    <p className="text-[11px] text-[#0E7490]/80 leading-tight mt-0.5">Please provide your delivery address. The kitchen will start cooking as soon as you confirm.</p>
+                  </div>
+                </div>
+              )}
               {checkoutMode === 'postpaid' && session?.customer_name ? (
                 <div className="flex items-center gap-3 bg-[#faf7f2] rounded-2xl px-4 py-3 mb-8">
                   <div className="w-9 h-9 rounded-full bg-[#cc5a16] text-white flex items-center justify-center font-bold text-sm shrink-0">
@@ -13173,6 +13261,97 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                         onChange={e => setCustomerInfo({ ...customerInfo, email: e.target.value })}
                       />
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Cloud-kitchen: structured delivery address ─────────────────── */}
+              {checkoutMode === 'cloud_kitchen' && (
+                <div className="space-y-4 mb-8">
+                  <div>
+                    <p className="text-sm font-bold text-[#1a1208] mb-3">Delivery Address</p>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Address Line 1 *</label>
+                    <input
+                      required
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                      placeholder="House / Flat number, Street name"
+                      value={deliveryAddress.line1}
+                      onChange={e => setDeliveryAddress({ ...deliveryAddress, line1: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Address Line 2 (Optional)</label>
+                    <input
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                      placeholder="Apartment, suite, area, etc."
+                      value={deliveryAddress.line2}
+                      onChange={e => setDeliveryAddress({ ...deliveryAddress, line2: e.target.value })}
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">City *</label>
+                      <input
+                        required
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        placeholder="City"
+                        value={deliveryAddress.city}
+                        onChange={e => setDeliveryAddress({ ...deliveryAddress, city: e.target.value })}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">PIN Code *</label>
+                      <input
+                        required
+                        type="tel"
+                        inputMode="numeric"
+                        maxLength={6}
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        placeholder="6-digit PIN"
+                        value={deliveryAddress.pincode}
+                        onChange={e => setDeliveryAddress({ ...deliveryAddress, pincode: e.target.value.replace(/[^\d]/g, '') })}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Landmark (Optional)</label>
+                    <input
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                      placeholder="Near park, opposite school, etc."
+                      value={deliveryAddress.landmark}
+                      onChange={e => setDeliveryAddress({ ...deliveryAddress, landmark: e.target.value })}
+                    />
+                  </div>
+
+                  {/* Payment method picker — customer chooses CASH / UPI / CARD */}
+                  <div className="pt-2">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2 block">Payment Method *</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['CASH', 'UPI', 'CARD'] as const).map(method => (
+                        <button
+                          key={method}
+                          type="button"
+                          onClick={() => setCloudKitchenPayMethod(method)}
+                          className={cn(
+                            "py-3 rounded-2xl border-2 font-bold text-xs transition-all",
+                            cloudKitchenPayMethod === method
+                              ? "border-[#cc5a16] bg-[#cc5a16] text-white"
+                              : "border-[#cc5a16]/20 bg-white text-[#1a1208]"
+                          )}
+                        >
+                          {method}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-[#9c8e85] mt-2 leading-tight">
+                      {cloudKitchenPayMethod === 'UPI'
+                        ? 'You will be shown a QR / UPI payment screen after confirming.'
+                        : cloudKitchenPayMethod === 'CASH'
+                          ? 'Pay cash to the delivery person on receipt.'
+                          : 'Pay by card on delivery (POS / mobile reader).'}
+                    </p>
                   </div>
                 </div>
               )}
@@ -13252,6 +13431,19 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                   >
                     {isPlacingOrder ? <RefreshCw size={20} className="animate-spin" /> : <IndianRupee size={20} />}
                     {isPlacingOrder ? 'Placing Order…' : 'Add to Bill'}
+                  </button>
+                ) : checkoutMode === 'cloud_kitchen' ? (
+                  <button
+                    onClick={() => placeOrder(cloudKitchenPayMethod)}
+                    disabled={isPlacingOrder}
+                    className="w-full bg-[#cc5a16] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#a84612] transition-all disabled:opacity-60"
+                  >
+                    {isPlacingOrder ? <RefreshCw size={20} className="animate-spin" /> : <Package size={20} />}
+                    {isPlacingOrder
+                      ? 'Placing Order…'
+                      : cloudKitchenPayMethod === 'UPI'
+                        ? 'Confirm & Pay by UPI'
+                        : `Confirm & Pay by ${cloudKitchenPayMethod} on Delivery`}
                   </button>
                 ) : (
                   <>

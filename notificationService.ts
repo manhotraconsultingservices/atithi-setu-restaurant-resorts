@@ -87,7 +87,70 @@ export function buildNotificationContent(
 
     /* ── Kitchen & Orders ─────────────────────────────────────────────── */
 
-    case 'ORDER_PLACED':
+    case 'ORDER_PLACED': {
+      // Cloud-kitchen orders carry full delivery details — render an enriched
+      // template so the owner can dispatch from the notification alone.
+      const isCloudKitchen = data.orderType === 'cloud_kitchen';
+      const invLine = data.invoiceNumber ? `Invoice: ${data.invoiceNumber}\n` : '';
+      const invHtml = data.invoiceNumber
+        ? `<p>Invoice: <strong>${data.invoiceNumber}</strong></p>` : '';
+
+      // Build itemized list (one line per item) when itemsDetailed is provided.
+      const itemized = Array.isArray(data.itemsDetailed) && data.itemsDetailed.length
+        ? (data.itemsDetailed as any[]).map((i: any) => {
+            const name = i.name || i.item_name || 'Item';
+            const qty  = i.quantity ?? 1;
+            const price = (i.price != null) ? ` — ₹${i.price}` : '';
+            return `• ${name} x${qty}${price}`;
+          }).join('\n')
+        : ((data.items as string[] | undefined)?.join(', ') || '—');
+
+      const itemizedHtml = Array.isArray(data.itemsDetailed) && data.itemsDetailed.length
+        ? `<ul>${(data.itemsDetailed as any[]).map((i: any) => {
+            const name = i.name || i.item_name || 'Item';
+            const qty  = i.quantity ?? 1;
+            const price = (i.price != null) ? ` — ₹${i.price}` : '';
+            return `<li>${name} × ${qty}${price}</li>`;
+          }).join('')}</ul>`
+        : `<p>Items: ${(data.items as string[] | undefined)?.join(', ') || '—'}</p>`;
+
+      if (isCloudKitchen) {
+        const cust = data.customerName || '—';
+        const phone = data.customerPhone || '—';
+        const addr = data.customerAddress || '—';
+        const pay  = data.paymentMethod || '—';
+        const gstLine = (data.gstAmount != null && Number(data.gstAmount) > 0)
+          ? `GST: ₹${data.gstAmount}\n` : '';
+        const gstHtml = (data.gstAmount != null && Number(data.gstAmount) > 0)
+          ? `<p>GST: <strong>₹${data.gstAmount}</strong></p>` : '';
+
+        return {
+          subject: `📦 Online Order ${data.invoiceNumber || `#${data.orderId}`} — ${r}`,
+          text:
+            `📦 *New Online Order (Cloud Kitchen)*\n` +
+            `Order: #${data.orderId}\n` +
+            invLine +
+            `Customer: ${cust}\n` +
+            `Phone: ${phone}\n` +
+            `Address: ${addr}\n` +
+            `Payment: ${pay}\n` +
+            `Items:\n${itemized}\n` +
+            gstLine +
+            `Total: ₹${data.total ?? '—'}`,
+          html:
+            `<h2 style="color:#0E7490">📦 New Online Order (Cloud Kitchen)</h2>` +
+            `<p>Order <strong>#${data.orderId}</strong></p>` +
+            invHtml +
+            `<p>Customer: <strong>${cust}</strong></p>` +
+            `<p>Phone: <strong>${phone}</strong></p>` +
+            `<p>Delivery Address:<br/><strong>${addr}</strong></p>` +
+            `<p>Payment: <strong>${pay}</strong></p>` +
+            itemizedHtml +
+            gstHtml +
+            `<p>Total: <strong>₹${data.total ?? '—'}</strong></p>`,
+        };
+      }
+
       return {
         subject: `🍽️ New Order #${data.orderId} — ${r}`,
         text:
@@ -103,6 +166,7 @@ export function buildNotificationContent(
           `<p>Items: ${(data.items as string[] | undefined)?.join(', ') || '—'}</p>` +
           `<p>Total: <strong>₹${data.total ?? '—'}</strong></p>`,
       };
+    }
 
     case 'ORDER_READY':
       return {

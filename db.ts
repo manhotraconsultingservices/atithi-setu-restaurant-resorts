@@ -443,11 +443,17 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   // Migrations for existing tenant schemas — table monitoring
   await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_waiter_id TEXT");
 
-  // Migrations for existing tenant schemas — orders (prepaid/postpaid)
+  // Migrations for existing tenant schemas — orders (prepaid/postpaid/cloud_kitchen)
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS session_id TEXT");
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_mode TEXT DEFAULT 'postpaid'");
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1");
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS kitchen_status TEXT DEFAULT 'queued'");
+  // Cloud-kitchen / online-delivery: structured customer delivery address
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line1 TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line2 TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_city TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_pincode TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_landmark TEXT");
 
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS default_hours DOUBLE PRECISION DEFAULT 8");
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS login_id TEXT");
