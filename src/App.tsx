@@ -3364,8 +3364,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   >('MONITOR');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
   const [inventorySubTab, setInventorySubTab] = useState<
-    'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS'
-  >('INGREDIENTS');
+    'DASHBOARD' | 'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS'
+  >('DASHBOARD');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notificationSettings, setNotificationSettings] = useState<any[]>([]);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -3466,6 +3466,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     rows: any[];   // each row has _selected + _isDuplicate flags
     importing: boolean;
   } | null>(null);
+  // Phase 4: forecasting dashboard
+  const [inventoryDashboard, setInventoryDashboard] = useState<any | null>(null);
+  const [forecastHorizon, setForecastHorizon] = useState<'daily' | 'weekly' | 'monthly'>('daily');
 
   // ── Audible + visual alerts for unacknowledged items (Phase 6) ────────────
   // Owner/Manager hears a chime every 4s and sees pulsing cards when:
@@ -3718,6 +3721,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'INVENTORY') fetchInventoryForSubTab();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inventorySubTab, poFilter]);
+
+  // Refetch dashboard when horizon toggles (Daily / Weekly / Monthly)
+  useEffect(() => {
+    if (activeTab === 'INVENTORY' && inventorySubTab === 'DASHBOARD') {
+      fetchInventoryDashboard();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forecastHorizon]);
 
   // ── Invoice helpers ───────────────────────────────────────────────────────
   const openInvoice = async (order: any, mode: 'view' | 'edit' = 'view') => {
@@ -4410,6 +4421,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (r.ok) setInventoryCounts(await r.json());
     } catch (e) { console.error('fetchInventoryCounts', e); }
   };
+  const fetchInventoryDashboard = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/dashboard?horizon=${forecastHorizon}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (r.ok) setInventoryDashboard(await r.json());
+    } catch (e) { console.error('fetchInventoryDashboard', e); }
+  };
+  const recomputeForecasts = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/forecast/recompute`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (r.ok) {
+        await fetchInventoryDashboard();
+        alert('Forecasts refreshed');
+      }
+    } catch (e) { console.error('recomputeForecasts', e); }
+  };
   // ─── Inventory CSV export handlers ────────────────────────────────────────
   const exportIngredientsCsv = () => {
     const header = ['name','item_type','category','unit','current_stock_qty','reorder_point','par_level','default_unit_price','gst_percent','sku','notes'];
@@ -4600,6 +4631,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
       if (inventorySubTab === 'PHYSICAL_COUNTS') {
         promises.push(fetchInventoryCounts());
+      }
+      if (inventorySubTab === 'DASHBOARD') {
+        promises.push(fetchInventoryDashboard());
       }
       await Promise.all(promises);
     } finally { setInventoryLoading(false); }
@@ -5884,6 +5918,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* ── Sub-tab nav ── */}
           <div className="flex gap-1 overflow-x-auto border-b border-[#cc5a16]/10">
             {([
+              ['DASHBOARD', 'Dashboard', 0],
               ['INGREDIENTS', 'Ingredients', inventoryIngredients.length],
               ['SUPPLIERS', 'Suppliers', inventorySuppliers.length],
               ['PURCHASE_ORDERS', 'Purchase Orders', inventoryPOs.length],
@@ -5911,6 +5946,290 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </button>
             ))}
           </div>
+
+          {/* ── DASHBOARD sub-view — KPIs · forecast · trend · top consumers · stock status ── */}
+          {inventorySubTab === 'DASHBOARD' && (
+            <div className="space-y-5">
+              {!inventoryDashboard ? (
+                <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <RefreshCw size={32} className="mx-auto mb-3 text-[#9c8e85] animate-spin" />
+                  <p className="text-sm text-[#9c8e85]">Loading dashboard…</p>
+                </div>
+              ) : (
+                <>
+                  {/* ── KPI strip ── */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                    {([
+                      { label: 'Stock Value',     value: '₹' + Math.round(inventoryDashboard.kpis.total_stock_value).toLocaleString('en-IN'), accent: '#0E7490' },
+                      { label: 'Below Reorder',   value: inventoryDashboard.kpis.items_below_reorder, accent: '#dc2626', sub: 'items' },
+                      { label: 'Expiring < 7d',   value: inventoryDashboard.kpis.items_expiring_this_week, accent: '#d97706', sub: 'items' },
+                      { label: 'Wastage 30d',     value: '₹' + Math.round(inventoryDashboard.kpis.wastage_value_30d).toLocaleString('en-IN'), accent: '#b45309' },
+                      { label: 'Food Cost %',     value: inventoryDashboard.kpis.food_cost_pct + '%', accent: inventoryDashboard.kpis.food_cost_pct > 35 ? '#dc2626' : '#10b981' },
+                      { label: 'Pending POs',     value: '₹' + Math.round(inventoryDashboard.kpis.pending_po_value).toLocaleString('en-IN'), accent: '#7c3aed' },
+                    ] as any[]).map((k: any) => (
+                      <div key={k.label} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{k.label}</p>
+                        <p className="text-2xl font-bold font-mono mt-1" style={{ color: k.accent }}>{k.value}</p>
+                        {k.sub && <p className="text-[10px] text-[#9c8e85] uppercase">{k.sub}</p>}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* ── Forecast section with horizon toggle ── */}
+                  <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+                      <div>
+                        <h3 className="text-lg font-bold font-serif">Consumption Forecast</h3>
+                        <p className="text-xs text-[#6b5d52]">Day-of-week aware rolling average · last 28 days · refreshes nightly at 03:00 IST</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="bg-[#faf7f2] rounded-2xl p-1 flex">
+                          {(['daily', 'weekly', 'monthly'] as const).map(h => (
+                            <button
+                              key={h}
+                              onClick={() => setForecastHorizon(h)}
+                              className={cn(
+                                "px-4 py-1.5 rounded-xl text-xs font-bold capitalize transition-all",
+                                forecastHorizon === h ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52] hover:text-[#1a1208]'
+                              )}
+                            >{h}</button>
+                          ))}
+                        </div>
+                        <button onClick={recomputeForecasts} title="Recompute forecasts now" className="px-3 py-2 rounded-xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2]">
+                          <RefreshCw size={14} className="inline mr-1" /> Refresh
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Top 10 forecast bar chart */}
+                    {(() => {
+                      const top10 = [...inventoryDashboard.forecast]
+                        .filter((r: any) => r.forecast_qty > 0)
+                        .sort((a: any, b: any) => b.forecast_qty - a.forecast_qty)
+                        .slice(0, 10);
+                      if (top10.length === 0) return (
+                        <div className="text-center py-8 text-sm text-[#9c8e85]">
+                          No forecast signal yet — place orders for a few days to build the rolling average.
+                        </div>
+                      );
+                      const max = top10[0].forecast_qty;
+                      return (
+                        <div className="space-y-1.5 mb-5">
+                          {top10.map((r: any) => (
+                            <div key={r.ingredient_id} className="flex items-center gap-3 text-xs">
+                              <div className="w-32 truncate text-[#1a1208] font-medium">{r.ingredient_name}</div>
+                              <div className="flex-1 bg-[#faf7f2] rounded-lg h-6 relative overflow-hidden">
+                                <div className="absolute inset-y-0 left-0 bg-[#cc5a16] rounded-lg transition-all" style={{ width: `${(r.forecast_qty / max) * 100}%` }} />
+                                <div className="absolute inset-0 flex items-center px-2 font-mono font-bold text-[#1a1208]" style={{ mixBlendMode: 'difference', color: 'white' }}>
+                                  {Number(r.forecast_qty).toFixed(2)} {r.unit}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Forecast detail table */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Ingredient</th>
+                            <th className="text-right px-3 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Stock</th>
+                            <th className="text-right px-3 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Forecast ({forecastHorizon})</th>
+                            <th className="text-right px-3 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Days Cover</th>
+                            <th className="text-right px-3 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">On Order</th>
+                            <th className="text-right px-3 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Suggest Order</th>
+                            <th className="text-left px-3 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#cc5a16]/5">
+                          {inventoryDashboard.forecast
+                            .filter((r: any) => r.forecast_qty > 0 || r.suggested_order_qty > 0)
+                            .sort((a: any, b: any) => (a.days_of_cover ?? 999) - (b.days_of_cover ?? 999))
+                            .slice(0, 20)
+                            .map((r: any) => {
+                              const dc = r.days_of_cover;
+                              const dcRed = dc != null && dc < 3;
+                              const dcAmber = dc != null && dc >= 3 && dc < 7;
+                              return (
+                                <tr key={r.ingredient_id} className={cn(dcRed && 'bg-red-50/40')}>
+                                  <td className="px-3 py-2">
+                                    <p className="font-semibold text-[#1a1208]">{r.ingredient_name}</p>
+                                    <p className="text-[10px] text-[#9c8e85]">{r.category}</p>
+                                  </td>
+                                  <td className="px-3 py-2 text-right font-mono">{Number(r.current_stock_qty).toFixed(2)} <span className="text-[#9c8e85]">{r.unit}</span></td>
+                                  <td className="px-3 py-2 text-right font-mono text-[#0E7490]">{Number(r.forecast_qty).toFixed(2)}</td>
+                                  <td className="px-3 py-2 text-right font-mono">
+                                    {dc == null ? <span className="text-[#9c8e85]">∞</span> :
+                                      <span className={cn(dcRed && 'text-red-600 font-bold', dcAmber && 'text-amber-700 font-bold')}>
+                                        {dc.toFixed(1)} d {dcRed && '⚠'}
+                                      </span>}
+                                  </td>
+                                  <td className="px-3 py-2 text-right font-mono text-[#9c8e85]">{Number(r.on_order_qty).toFixed(2)}</td>
+                                  <td className="px-3 py-2 text-right font-mono font-bold text-[#cc5a16]">
+                                    {r.suggested_order_qty > 0 ? Number(r.suggested_order_qty).toFixed(2) : '—'}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    {r.suggested_order_qty > 0 && (
+                                      <button
+                                        onClick={() => {
+                                          // Pre-fill PO modal with this ingredient
+                                          if (inventorySuppliers.length === 0) { alert('Add suppliers first'); return; }
+                                          setInventorySubTab('PURCHASE_ORDERS');
+                                          setCreatingPO(true);
+                                        }}
+                                        className="px-2 py-1 rounded-lg text-[10px] font-bold bg-[#cc5a16]/10 text-[#cc5a16] hover:bg-[#cc5a16]/20"
+                                      >Raise PO</button>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* ── Consumption trend (last 30 days) ── */}
+                  <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-bold font-serif">Consumption Trend (30 days)</h3>
+                      <p className="text-xs text-[#6b5d52]">
+                        Total: ₹{Math.round((inventoryDashboard.consumption_trend || []).reduce((s: number, r: any) => s + r.cost, 0)).toLocaleString('en-IN')}
+                      </p>
+                    </div>
+                    {(() => {
+                      const trend = inventoryDashboard.consumption_trend || [];
+                      if (trend.length === 0) return <div className="text-center py-6 text-sm text-[#9c8e85]">No consumption recorded yet</div>;
+                      const max = Math.max(...trend.map((r: any) => r.cost), 1);
+                      return (
+                        <div className="flex items-end gap-1 h-40">
+                          {trend.map((r: any) => {
+                            const h = (r.cost / max) * 100;
+                            return (
+                              <div key={r.date} className="flex-1 flex flex-col items-center justify-end group" title={`${r.date}: ₹${Math.round(r.cost)} · ${r.qty.toFixed(2)} units`}>
+                                <div className="w-full bg-[#cc5a16] rounded-t hover:bg-[#a84612] transition-colors" style={{ height: `${h}%`, minHeight: '2px' }} />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
+                    <div className="flex justify-between text-[10px] text-[#9c8e85] mt-2">
+                      {(() => {
+                        const trend = inventoryDashboard.consumption_trend || [];
+                        if (trend.length === 0) return null;
+                        return [trend[0]?.date, trend[Math.floor(trend.length / 2)]?.date, trend[trend.length - 1]?.date].filter(Boolean).map((d: string, i: number) => (
+                          <span key={i}>{d}</span>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+
+                  {/* ── Top consumers + Wastage breakdown ── */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                    <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
+                      <h3 className="text-lg font-bold font-serif mb-4">Top Consumers (30 days)</h3>
+                      {(inventoryDashboard.top_consumers || []).length === 0 ? (
+                        <p className="text-sm text-[#9c8e85] text-center py-6">No data yet</p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {(() => {
+                            const total = inventoryDashboard.top_consumers.reduce((s: number, r: any) => s + r.total_cost, 0) || 1;
+                            return inventoryDashboard.top_consumers.slice(0, 8).map((r: any) => {
+                              const pct = (r.total_cost / total) * 100;
+                              return (
+                                <div key={r.ingredient_id} className="flex items-center gap-3 text-xs">
+                                  <div className="w-32 truncate font-medium">{r.ingredient_name}</div>
+                                  <div className="flex-1 bg-[#faf7f2] rounded-lg h-5 relative overflow-hidden">
+                                    <div className="absolute inset-y-0 left-0 bg-[#0E7490] rounded-lg" style={{ width: `${pct}%` }} />
+                                  </div>
+                                  <div className="w-20 text-right font-mono font-bold">₹{Math.round(r.total_cost).toLocaleString('en-IN')}</div>
+                                  <div className="w-10 text-right font-mono text-[#9c8e85]">{pct.toFixed(0)}%</div>
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
+                      <h3 className="text-lg font-bold font-serif mb-4">Wastage by Reason (30 days)</h3>
+                      {(inventoryDashboard.wastage_breakdown || []).length === 0 ? (
+                        <p className="text-sm text-[#9c8e85] text-center py-6">No wastage logged in last 30 days</p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {(() => {
+                            const reasonColors: Record<string, string> = { SPOILAGE: '#d97706', BURN: '#dc2626', DROPPED: '#ea580c', EXPIRY: '#7c3aed', OTHER: '#6b7280' };
+                            const total = inventoryDashboard.wastage_breakdown.reduce((s: number, r: any) => s + r.total_value, 0) || 1;
+                            return inventoryDashboard.wastage_breakdown.map((r: any) => {
+                              const pct = (r.total_value / total) * 100;
+                              return (
+                                <div key={r.reason} className="flex items-center gap-3 text-xs">
+                                  <div className="w-24 font-bold uppercase tracking-widest text-[10px]">{r.reason}</div>
+                                  <div className="flex-1 bg-[#faf7f2] rounded-lg h-5 relative overflow-hidden">
+                                    <div className="absolute inset-y-0 left-0 rounded-lg" style={{ width: `${pct}%`, backgroundColor: reasonColors[r.reason] || '#6b7280' }} />
+                                  </div>
+                                  <div className="w-20 text-right font-mono font-bold">₹{Math.round(r.total_value).toLocaleString('en-IN')}</div>
+                                  <div className="w-10 text-right font-mono text-[#9c8e85]">{r.count}×</div>
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* ── Stock status — items needing attention ── */}
+                  {(inventoryDashboard.stock_status || []).length > 0 && (
+                    <div className="bg-red-50/50 rounded-3xl border border-red-200 p-5">
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-lg font-bold font-serif text-red-700">⚠ Items Needing Attention</h3>
+                        <p className="text-xs text-red-700/70">{inventoryDashboard.stock_status.length} item{inventoryDashboard.stock_status.length !== 1 ? 's' : ''} below reorder or under 3 days cover</p>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead className="border-b border-red-200">
+                            <tr>
+                              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-widest text-red-700">Ingredient</th>
+                              <th className="text-right px-3 py-2 text-[10px] uppercase tracking-widest text-red-700">Stock</th>
+                              <th className="text-right px-3 py-2 text-[10px] uppercase tracking-widest text-red-700">Reorder</th>
+                              <th className="text-right px-3 py-2 text-[10px] uppercase tracking-widest text-red-700">Days Cover</th>
+                              <th className="text-left px-3 py-2 text-[10px] uppercase tracking-widest text-red-700">Supplier</th>
+                              <th className="text-right px-3 py-2 text-[10px] uppercase tracking-widest text-red-700">Suggest Order</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-red-100">
+                            {inventoryDashboard.stock_status.map((r: any) => (
+                              <tr key={r.ingredient_id}>
+                                <td className="px-3 py-2 font-bold text-red-700">{r.ingredient_name}</td>
+                                <td className="px-3 py-2 text-right font-mono">{Number(r.current_stock_qty).toFixed(2)} {r.unit}</td>
+                                <td className="px-3 py-2 text-right font-mono">{Number(r.reorder_point).toFixed(2)}</td>
+                                <td className="px-3 py-2 text-right font-mono font-bold text-red-700">
+                                  {r.days_of_cover != null ? `${r.days_of_cover.toFixed(1)} d` : '—'}
+                                </td>
+                                <td className="px-3 py-2 text-xs">
+                                  {r.default_supplier_name || '—'}
+                                  {r.lead_time_days && <span className="text-[#9c8e85]"> · {r.lead_time_days}d lead</span>}
+                                </td>
+                                <td className="px-3 py-2 text-right font-mono font-bold text-[#cc5a16]">
+                                  {r.suggested_order_qty > 0 ? Number(r.suggested_order_qty).toFixed(2) + ' ' + r.unit : '—'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           {/* ── INGREDIENTS sub-view ── */}
           {inventorySubTab === 'INGREDIENTS' && (

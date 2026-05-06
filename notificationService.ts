@@ -168,6 +168,49 @@ export function buildNotificationContent(
       };
     }
 
+    case 'STOCK_LOW':
+    case 'STOCK_CRITICAL': {
+      const isCritical = eventName === 'STOCK_CRITICAL';
+      const days = data.daysOfCover != null
+        ? `${Number(data.daysOfCover).toFixed(1)} days of cover`
+        : 'no recent consumption';
+      const supplierLine = data.supplierName
+        ? `${data.supplierName}${data.supplierPhone ? ' · ' + data.supplierPhone : ''} (lead time ${data.leadTimeDays || '?'} days)`
+        : 'No default supplier set';
+      const suggested = data.suggestedOrderQty
+        ? `Suggested order: ${Number(data.suggestedOrderQty).toFixed(2)} ${data.unit}`
+        : '';
+      const icon = isCritical ? '🚨' : '⚠️';
+      const title = isCritical ? 'STOCK CRITICAL' : 'Stock Low';
+      const subtitle = isCritical
+        ? `Will run out before next reorder arrives (${data.leadTimeDays}d lead time vs ${days})`
+        : `Below reorder point — schedule purchase`;
+      return {
+        subject: `${icon} ${title}: ${data.ingredientName} — ${r}`,
+        text:
+          `${icon} *${title}* — ${r}\n` +
+          `Ingredient: ${data.ingredientName}\n` +
+          `Current stock: ${Number(data.currentStock).toFixed(2)} ${data.unit}\n` +
+          `Reorder point: ${Number(data.reorderPoint).toFixed(2)} ${data.unit}\n` +
+          `Daily use:     ${Number(data.dailyForecast).toFixed(2)} ${data.unit}/day · ${days}\n` +
+          `Supplier:      ${supplierLine}\n` +
+          (suggested ? suggested + '\n' : '') +
+          (isCritical ? '\n⚠️ Order TODAY to avoid stock-out.' : ''),
+        html:
+          `<h2 style="color:${isCritical ? '#dc2626' : '#d97706'}">${icon} ${title}</h2>` +
+          `<p>${subtitle}</p>` +
+          `<table cellpadding="6" style="border-collapse:collapse;font-size:14px;">` +
+          `<tr><td style="color:#6b5d52">Ingredient</td><td><strong>${data.ingredientName}</strong></td></tr>` +
+          `<tr><td style="color:#6b5d52">Current stock</td><td><strong>${Number(data.currentStock).toFixed(2)} ${data.unit}</strong></td></tr>` +
+          `<tr><td style="color:#6b5d52">Reorder point</td><td>${Number(data.reorderPoint).toFixed(2)} ${data.unit}</td></tr>` +
+          `<tr><td style="color:#6b5d52">Daily forecast</td><td>${Number(data.dailyForecast).toFixed(2)} ${data.unit}/day · ${days}</td></tr>` +
+          `<tr><td style="color:#6b5d52">Supplier</td><td>${supplierLine}</td></tr>` +
+          (suggested ? `<tr><td style="color:#6b5d52">Suggested order</td><td><strong>${Number(data.suggestedOrderQty).toFixed(2)} ${data.unit}</strong></td></tr>` : '') +
+          `</table>` +
+          (isCritical ? `<p style="color:#dc2626;font-weight:bold;margin-top:12px">Order TODAY to avoid stock-out.</p>` : ''),
+      };
+    }
+
     case 'ORDER_READY':
       return {
         subject: `✅ Order #${data.orderId} Ready — ${r}`,

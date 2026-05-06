@@ -3837,6 +3837,298 @@ async function startServer() {
     }
   });
 
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Inventory Management — Phase 4: Forecasting + Dashboard ─────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Day-of-week-aware rolling-average forecasts (last 28 days), refreshed
+  // nightly. Owner asks "how much paneer will I burn through next Saturday?"
+  // and we answer using the real last-4-Saturdays consumption, not a flat
+  // 7-day average that under-counts weekends.
+
+  // Compute and persist consumption forecasts for every active ingredient in
+  // a tenant. Idempotent — UPSERTs into consumption_forecasts (PK on
+  // ingredient_id + horizon). Safe to call mid-day for ad-hoc refresh.
+  async function recomputeForecastsForTenant(db: DbInterface): Promise<{ ingredients: number; updated: number }> {
+    const ings: any[] = await db.query(
+      "SELECT id, current_stock_qty, unit FROM ingredients WHERE is_active = 1"
+    );
+
+    let updated = 0;
+    for (const ing of ings) {
+      // Last 28 days of consumption + wastage (all negative deltas count as
+      // "use" toward forecast — we don't distinguish between sold and spoiled
+      // when predicting how fast the pantry empties).
+      const movements: any[] = await db.query(
+        `SELECT qty_delta, recorded_at
+           FROM stock_movements
+          WHERE ingredient_id = ?
+            AND movement_type IN ('CONSUMPTION', 'WASTAGE')
+            AND recorded_at >= NOW() - INTERVAL '28 days'`,
+        [ing.id]
+      ).catch(() => [] as any[]);
+
+      // Sum per calendar date so we have a clean per-day series
+      const byDate: Record<string, number> = {};
+      for (const m of movements) {
+        const date = new Date(m.recorded_at).toISOString().slice(0, 10);
+        byDate[date] = (byDate[date] || 0) + Math.abs(Number(m.qty_delta || 0));
+      }
+
+      // Group days by weekday (0=Sun … 6=Sat)
+      const byWeekday: number[][] = [[], [], [], [], [], [], []];
+      for (const [date, qty] of Object.entries(byDate)) {
+        const wd = new Date(date).getUTCDay();
+        byWeekday[wd].push(qty);
+      }
+      // Average per weekday — weekday with no data → 0 (will pull down forecast)
+      const weekdayAvg = byWeekday.map(arr =>
+        arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0
+      );
+
+      // Forecasts (in IST — avoid host TZ skew)
+      const istNow = new Date(Date.now() + (5.5 * 60 * 60 * 1000));
+      const tomorrowIstWd = new Date(istNow.getTime() + 24 * 60 * 60 * 1000).getUTCDay();
+      const dailyForecast = weekdayAvg[tomorrowIstWd];
+
+      // Weekly = sum of next 7 days' weekday averages
+      let weeklyForecast = 0;
+      for (let i = 1; i <= 7; i++) {
+        const d = new Date(istNow.getTime() + i * 24 * 60 * 60 * 1000);
+        weeklyForecast += weekdayAvg[d.getUTCDay()];
+      }
+      // Monthly = sum of next 30 days
+      let monthlyForecast = 0;
+      for (let i = 1; i <= 30; i++) {
+        const d = new Date(istNow.getTime() + i * 24 * 60 * 60 * 1000);
+        monthlyForecast += weekdayAvg[d.getUTCDay()];
+      }
+
+      // Upsert all three horizons
+      for (const [horizon, qty] of [['daily', dailyForecast], ['weekly', weeklyForecast], ['monthly', monthlyForecast]] as const) {
+        await db.run(
+          `INSERT INTO consumption_forecasts (ingredient_id, horizon, forecast_qty, computed_at)
+           VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT (ingredient_id, horizon) DO UPDATE
+             SET forecast_qty = EXCLUDED.forecast_qty,
+                 computed_at = CURRENT_TIMESTAMP`,
+          [ing.id, horizon, qty]
+        ).catch(() => {});
+      }
+      updated++;
+    }
+    return { ingredients: ings.length, updated };
+  }
+
+  // Manual recompute trigger — for QA, demos, and after a big bulk-import
+  app.post("/api/restaurant/:id/inventory/forecast/recompute", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const r = await recomputeForecastsForTenant(db);
+      res.json({ success: true, ...r });
+    } catch (err) {
+      console.error("Recompute forecast error:", err);
+      res.status(500).json({ error: "Failed to recompute forecasts" });
+    }
+  });
+
+  // ─── Dashboard data endpoint — KPIs + charts + forecast table ────────────
+  // Single endpoint to keep the UI fast. Computes:
+  //  • KPIs: stock value · below-reorder count · expiring this week · wastage
+  //          this month · food-cost % · pending PO value
+  //  • Forecast rows: per-ingredient stock + forecast + days-of-cover +
+  //    suggested order qty (par_level − stock − on_order_qty)
+  //  • Consumption trend: daily aggregates for last 30 days (qty + ₹ value)
+  //  • Top consumers: top 10 by 30-day consumption value
+  //  • Wastage breakdown: by reason, last 30 days
+  //  • Stock status: rows below reorder OR within 3 days of cover
+  app.get("/api/restaurant/:id/inventory/dashboard", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const horizon = String(req.query.horizon || 'daily').toLowerCase();
+      const validHorizon: 'daily' | 'weekly' | 'monthly' =
+        horizon === 'weekly' ? 'weekly' : horizon === 'monthly' ? 'monthly' : 'daily';
+
+      // 1. KPIs
+      // Stock value = sum(current_stock_qty × default_unit_price)
+      const stockValueRow: any = await db.get(
+        `SELECT COALESCE(SUM(current_stock_qty * COALESCE(default_unit_price, 0)), 0) AS v
+           FROM ingredients WHERE is_active = 1`
+      );
+      const belowReorderRow: any = await db.get(
+        `SELECT COUNT(*) AS c FROM ingredients
+          WHERE is_active = 1 AND reorder_point > 0 AND current_stock_qty <= reorder_point`
+      );
+      const expiringRow: any = await db.get(
+        `SELECT COUNT(DISTINCT ingredient_id) AS c FROM goods_receipt_items
+          WHERE expiry_date IS NOT NULL
+            AND expiry_date <= CURRENT_DATE + INTERVAL '7 days'
+            AND expiry_date >= CURRENT_DATE`
+      );
+      const wastageRow: any = await db.get(
+        `SELECT COALESCE(SUM(w.qty * COALESCE(i.default_unit_price, 0)), 0) AS v
+           FROM wastage_logs w
+           LEFT JOIN ingredients i ON i.id = w.ingredient_id
+          WHERE w.logged_at >= NOW() - INTERVAL '30 days'`
+      );
+      const consumedValueRow: any = await db.get(
+        `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS v
+           FROM stock_movements sm
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+          WHERE sm.movement_type = 'CONSUMPTION'
+            AND sm.recorded_at >= DATE_TRUNC('month', CURRENT_DATE)`
+      );
+      const revenueRow: any = await db.get(
+        `SELECT COALESCE(SUM(total_amount), 0) AS v FROM orders
+          WHERE status != 'CANCELLED'
+            AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`
+      );
+      const pendingPORow: any = await db.get(
+        `SELECT COALESCE(SUM(grand_total), 0) AS v FROM purchase_orders
+          WHERE status IN ('SENT', 'PARTIAL')`
+      );
+
+      const foodCostPct = Number(revenueRow.v) > 0
+        ? Math.round((Number(consumedValueRow.v) / Number(revenueRow.v)) * 1000) / 10
+        : 0;
+
+      // 2. Forecast rows for the table
+      // on_order_qty: outstanding qty per ingredient from open POs (must be in
+      // ingredient unit — the qty_ordered is in the user-entered PO unit which
+      // may differ; we'll best-effort by trusting the unit field is the same
+      // as the ingredient's stock unit, which is the common case)
+      const forecastRows: any[] = await db.query(
+        `SELECT i.id, i.name, i.unit, i.current_stock_qty, i.reorder_point, i.par_level,
+                i.default_unit_price, i.default_supplier_id, i.category,
+                COALESCE(f.forecast_qty, 0) AS forecast_qty,
+                COALESCE((
+                  SELECT SUM(poi.qty_ordered - poi.qty_received)
+                    FROM purchase_order_items poi
+                    JOIN purchase_orders po ON po.id = poi.po_id
+                   WHERE poi.ingredient_id = i.id
+                     AND po.status IN ('SENT', 'PARTIAL')
+                     AND poi.is_fully_received = 0
+                ), 0) AS on_order_qty,
+                s.name AS supplier_name, s.lead_time_days
+           FROM ingredients i
+           LEFT JOIN consumption_forecasts f
+             ON f.ingredient_id = i.id AND f.horizon = ?
+           LEFT JOIN suppliers s ON s.id = i.default_supplier_id
+          WHERE i.is_active = 1
+          ORDER BY i.category, i.name`,
+        [validHorizon]
+      );
+
+      // Use daily forecast for days-of-cover (always — even when toggle is W/M)
+      const dailyMap: Record<string, number> = {};
+      const dailyRows: any[] = await db.query(
+        "SELECT ingredient_id, forecast_qty FROM consumption_forecasts WHERE horizon = 'daily'"
+      );
+      dailyRows.forEach((r: any) => { dailyMap[r.ingredient_id] = Number(r.forecast_qty || 0); });
+
+      const forecast = forecastRows.map((r: any) => {
+        const stock = Number(r.current_stock_qty || 0);
+        const dailyF = dailyMap[r.id] || 0;
+        const daysOfCover = dailyF > 0 ? stock / dailyF : null;  // null = ∞ display
+        const par = Number(r.par_level || 0);
+        const onOrder = Number(r.on_order_qty || 0);
+        const suggested = Math.max(0, par - stock - onOrder);
+        return {
+          ingredient_id: r.id,
+          ingredient_name: r.name,
+          category: r.category,
+          unit: r.unit,
+          current_stock_qty: stock,
+          reorder_point: Number(r.reorder_point || 0),
+          par_level: par,
+          forecast_qty: Number(r.forecast_qty || 0),
+          on_order_qty: onOrder,
+          days_of_cover: daysOfCover,
+          suggested_order_qty: suggested,
+          default_supplier_id: r.default_supplier_id,
+          default_supplier_name: r.supplier_name,
+          lead_time_days: r.lead_time_days,
+          last_unit_price: Number(r.default_unit_price || 0),
+        };
+      });
+
+      // 3. Consumption trend — last 30 days, aggregated daily
+      const trendRows: any[] = await db.query(
+        `SELECT DATE_TRUNC('day', sm.recorded_at)::date AS d,
+                SUM(ABS(sm.qty_delta)) AS qty,
+                SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)) AS cost
+           FROM stock_movements sm
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+          WHERE sm.movement_type IN ('CONSUMPTION', 'WASTAGE')
+            AND sm.recorded_at >= NOW() - INTERVAL '30 days'
+          GROUP BY DATE_TRUNC('day', sm.recorded_at)
+          ORDER BY d ASC`
+      );
+
+      // 4. Top consumers (last 30 days by cost)
+      const topConsumers: any[] = await db.query(
+        `SELECT i.id, i.name, i.unit, i.category,
+                SUM(ABS(sm.qty_delta)) AS total_qty,
+                SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)) AS total_cost
+           FROM stock_movements sm
+           JOIN ingredients i ON i.id = sm.ingredient_id
+          WHERE sm.movement_type = 'CONSUMPTION'
+            AND sm.recorded_at >= NOW() - INTERVAL '30 days'
+          GROUP BY i.id, i.name, i.unit, i.category
+          ORDER BY total_cost DESC
+          LIMIT 10`
+      );
+
+      // 5. Wastage breakdown by reason (last 30 days)
+      const wastageBreakdown: any[] = await db.query(
+        `SELECT w.reason,
+                COUNT(*) AS count,
+                SUM(w.qty * COALESCE(i.default_unit_price, 0)) AS total_value
+           FROM wastage_logs w
+           LEFT JOIN ingredients i ON i.id = w.ingredient_id
+          WHERE w.logged_at >= NOW() - INTERVAL '30 days'
+          GROUP BY w.reason
+          ORDER BY total_value DESC`
+      );
+
+      // 6. Stock status — items in trouble (below reorder OR <3 days cover)
+      const stockStatus = forecast
+        .filter(r => r.days_of_cover !== null && (r.days_of_cover < 3 || r.current_stock_qty <= r.reorder_point))
+        .sort((a, b) => (a.days_of_cover || 999) - (b.days_of_cover || 999));
+
+      res.json({
+        kpis: {
+          total_stock_value: Number(stockValueRow.v) || 0,
+          items_below_reorder: Number(belowReorderRow.c) || 0,
+          items_expiring_this_week: Number(expiringRow.c) || 0,
+          wastage_value_30d: Number(wastageRow.v) || 0,
+          food_cost_pct: foodCostPct,
+          pending_po_value: Number(pendingPORow.v) || 0,
+          revenue_this_month: Number(revenueRow.v) || 0,
+          consumed_value_this_month: Number(consumedValueRow.v) || 0,
+        },
+        forecast,
+        consumption_trend: trendRows.map((r: any) => ({
+          date: typeof r.d === 'string' ? r.d : new Date(r.d).toISOString().slice(0, 10),
+          qty: Number(r.qty),
+          cost: Number(r.cost),
+        })),
+        top_consumers: topConsumers.map((r: any) => ({
+          ingredient_id: r.id, ingredient_name: r.name, category: r.category, unit: r.unit,
+          total_qty: Number(r.total_qty), total_cost: Number(r.total_cost),
+        })),
+        wastage_breakdown: wastageBreakdown.map((r: any) => ({
+          reason: r.reason, count: Number(r.count), total_value: Number(r.total_value || 0),
+        })),
+        stock_status: stockStatus,
+        horizon: validHorizon,
+      });
+    } catch (err) {
+      console.error("Inventory dashboard error:", err);
+      res.status(500).json({ error: "Failed to fetch inventory dashboard" });
+    }
+  });
+
+
   // ── Import Token: SUPER_ADMIN generates a scoped token for any restaurant ──
   // Allows admins to run menu imports without knowing the owner's password.
   // POST /api/auth/import-token  { loginId, password, restaurantId }
@@ -8495,6 +8787,93 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[stale-close] Stale-session auto-close cron started — daily at 04:00 IST');
+
+  // ─── Inventory: nightly forecast recompute (03:00 IST) ──────────────────
+  // Walks every active tenant and refreshes their consumption_forecasts
+  // cache. Day-of-week-aware rolling average over the last 28 days.
+  // Per-tenant try/catch so one failure doesn't kill the whole sweep.
+  cron.schedule('0 3 * * *', async () => {
+    try {
+      console.log('[inv-forecast] 03:00 IST — recomputing forecasts across all tenants');
+      const restaurants = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'"
+      );
+      let totalIngredients = 0;
+      for (const r of restaurants) {
+        try {
+          const db = await getTenantDb(r.id);
+          const result = await recomputeForecastsForTenant(db);
+          totalIngredients += result.updated;
+        } catch (tenantErr) {
+          console.error(`[inv-forecast] tenant ${r.id} error:`, tenantErr);
+        }
+      }
+      console.log(`[inv-forecast] Done — ${totalIngredients} ingredient forecasts refreshed across ${restaurants.length} tenants`);
+    } catch (err) {
+      console.error('[inv-forecast] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[inv-forecast] Forecast recompute cron started — daily at 03:00 IST');
+
+  // ─── Inventory: morning stock-low scan (09:00 IST) ──────────────────────
+  // Fires STOCK_LOW notification for ingredients that crossed below their
+  // reorder_point. Limit one alert per ingredient per day to avoid spam.
+  // STOCK_CRITICAL fires when days_of_cover < lead_time_days (will run out
+  // before the next reorder physically arrives).
+  cron.schedule('0 9 * * *', async () => {
+    try {
+      console.log('[inv-stocklow] 09:00 IST — scanning low-stock ingredients across all tenants');
+      const restaurants = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'"
+      );
+      let totalAlerts = 0;
+      for (const r of restaurants) {
+        try {
+          const db = await getTenantDb(r.id);
+          // Find ingredients below reorder + their daily forecast for days_of_cover
+          const lowRows: any[] = await db.query(
+            `SELECT i.id, i.name, i.unit, i.current_stock_qty, i.reorder_point, i.par_level,
+                    i.default_unit_price, COALESCE(f.forecast_qty, 0) AS daily_forecast,
+                    s.name AS supplier_name, s.phone AS supplier_phone, s.lead_time_days
+               FROM ingredients i
+               LEFT JOIN consumption_forecasts f
+                 ON f.ingredient_id = i.id AND f.horizon = 'daily'
+               LEFT JOIN suppliers s ON s.id = i.default_supplier_id
+              WHERE i.is_active = 1
+                AND i.reorder_point > 0
+                AND i.current_stock_qty <= i.reorder_point`
+          );
+          for (const ing of lowRows) {
+            const daysOfCover = Number(ing.daily_forecast) > 0
+              ? Number(ing.current_stock_qty) / Number(ing.daily_forecast)
+              : null;
+            const leadTime = Number(ing.lead_time_days || 0);
+            const isCritical = daysOfCover != null && leadTime > 0 && daysOfCover < leadTime;
+            const eventName = isCritical ? 'STOCK_CRITICAL' : 'STOCK_LOW';
+            triggerNotification(r.id, eventName, {
+              ingredientName: ing.name,
+              currentStock: Number(ing.current_stock_qty),
+              unit: ing.unit,
+              reorderPoint: Number(ing.reorder_point),
+              dailyForecast: Number(ing.daily_forecast),
+              daysOfCover,
+              supplierName: ing.supplier_name,
+              supplierPhone: ing.supplier_phone,
+              leadTimeDays: leadTime,
+              suggestedOrderQty: Math.max(0, Number(ing.par_level || 0) - Number(ing.current_stock_qty)),
+            }).catch(() => {});
+            totalAlerts++;
+          }
+        } catch (tenantErr) {
+          console.error(`[inv-stocklow] tenant ${r.id} error:`, tenantErr);
+        }
+      }
+      console.log(`[inv-stocklow] Done — ${totalAlerts} STOCK_LOW/CRITICAL alerts fired`);
+    } catch (err) {
+      console.error('[inv-stocklow] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[inv-stocklow] Stock-low scan cron started — daily at 09:00 IST');
 }
 
 // Helper: send pre-arrival email and record which stage was sent
