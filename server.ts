@@ -3359,10 +3359,16 @@ async function startServer() {
           ? String(it.condition).toUpperCase()
           : 'GOOD';
         const unit = String(it.unit || ing.unit || 'unit').toLowerCase();
+        // Convert receipt qty to ingredient stock unit (e.g. supplier ships in g, we stock in kg)
+        const stockQty = convertQty(qty, unit, ing.unit);
+        if (stockQty == null) {
+          console.warn(`[grn] Unit mismatch on ${it.ingredient_id}: receipt=${unit} vs stock=${ing.unit}; skipping line`);
+          continue;
+        }
         const lineTotal = qty * unitPrice;
         totalAmount += lineTotal;
 
-        // Insert GRN line
+        // Insert GRN line — keep receipt qty + unit as user entered (for the receipt record)
         await db.run(
           `INSERT INTO goods_receipt_items
             (id, grn_id, ingredient_id, qty_received, unit, unit_price,
@@ -3375,7 +3381,7 @@ async function startServer() {
           ]
         );
 
-        // Atomic stock increment + return new balance
+        // Atomic stock increment using converted qty (in stock unit)
         const updated: any[] = await db.query(
           `UPDATE ingredients
               SET current_stock_qty = current_stock_qty + ?,
@@ -3383,11 +3389,11 @@ async function startServer() {
                   updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
           RETURNING current_stock_qty`,
-          [qty, unitPrice > 0 ? unitPrice : null, it.ingredient_id]
+          [stockQty, unitPrice > 0 ? unitPrice : null, it.ingredient_id]
         );
-        const newBalance = Number(updated[0]?.current_stock_qty ?? ing.current_stock_qty + qty);
+        const newBalance = Number(updated[0]?.current_stock_qty ?? ing.current_stock_qty + stockQty);
 
-        // Audit log
+        // Audit log — store the converted qty in the ingredient's natural unit
         await db.run(
           `INSERT INTO stock_movements
             (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id,
@@ -3395,7 +3401,7 @@ async function startServer() {
            VALUES (?, ?, ?, ?, 'GRN', 'grn', ?, ?, ?, ?, ?)`,
           [
             `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
-            it.ingredient_id, qty, unit, grnId,
+            it.ingredient_id, stockQty, ing.unit, grnId,
             newBalance, unitPrice || null, req.user!.id,
             condition !== 'GOOD' ? `Received condition: ${condition}` : null,
           ]
@@ -3463,6 +3469,29 @@ async function startServer() {
   // Helper: short id for stock_movements / wastage / count rows
   const movId = () => `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
+  // Convert a quantity from one unit to another for the same dimension
+  // (mass: g↔kg, volume: ml↔l, count: unit/bottle/piece/pack/dozen — same).
+  // Returns null when units belong to different dimensions (caller should
+  // skip / log) so we never produce a silently wrong stock movement.
+  // Recipes commonly use grams/millilitres while ingredients are stocked in
+  // kg/l — this fixes the otherwise-catastrophic 1000× over-deduction.
+  function convertQty(qty: number, fromUnit: string, toUnit: string): number | null {
+    const f = String(fromUnit || '').toLowerCase().trim();
+    const t = String(toUnit   || '').toLowerCase().trim();
+    if (!f || !t || f === t) return qty;
+    // Mass
+    if (f === 'g' && t === 'kg') return qty / 1000;
+    if (f === 'kg' && t === 'g') return qty * 1000;
+    // Volume
+    if (f === 'ml' && t === 'l') return qty / 1000;
+    if (f === 'l' && t === 'ml') return qty * 1000;
+    // Count synonyms — treat as same dimension, no conversion
+    const COUNT = new Set(['unit', 'bottle', 'piece', 'pack', 'dozen']);
+    if (COUNT.has(f) && COUNT.has(t)) return qty;
+    // Mismatched dimensions (e.g. g → l) — refuse, return null
+    return null;
+  }
+
   // Auto-deduct ingredients for an order based on its items + recipes.
   // Fire-and-forget from the order POST handler — must NEVER throw to caller.
   // Idempotent: each call performs the deduction once. The caller passes the
@@ -3480,17 +3509,27 @@ async function startServer() {
       if (!Number.isFinite(qty) || qty <= 0) continue;
 
       // Fetch recipe rows applying to this item — both BOTH and the specific size
+      // JOIN with ingredients to get the canonical stock unit so we can convert
+      // recipe units (often g/ml) to stock units (often kg/l) before deducting.
       const recipeRows: any[] = await db.query(
-        `SELECT r.ingredient_id, r.qty_per_serving, r.unit
+        `SELECT r.ingredient_id, r.qty_per_serving, r.unit AS recipe_unit,
+                i.unit AS ingredient_unit, i.name AS ingredient_name
            FROM recipes r
+           JOIN ingredients i ON i.id = r.ingredient_id
           WHERE r.menu_item_id = ?
             AND (r.size_variant = 'BOTH' OR r.size_variant = ?)`,
         [menuItemId, sizeKey === 'HALF' ? 'HALF' : 'FULL']
       ).catch(() => [] as any[]);
 
       for (const r of recipeRows) {
-        const consumed = Number(r.qty_per_serving) * qty;
-        if (!Number.isFinite(consumed) || consumed <= 0) continue;
+        const rawConsumed = Number(r.qty_per_serving) * qty;
+        if (!Number.isFinite(rawConsumed) || rawConsumed <= 0) continue;
+        // Convert from recipe unit (e.g. 'g') to ingredient stock unit (e.g. 'kg')
+        const consumed = convertQty(rawConsumed, r.recipe_unit, r.ingredient_unit);
+        if (consumed == null) {
+          console.warn(`[inventory] Unit mismatch deducting ${r.ingredient_name}: recipe=${r.recipe_unit} vs ingredient=${r.ingredient_unit}; skipping`);
+          continue;
+        }
         // Atomic decrement; RETURNING gives the new balance for the audit row
         const updated: any[] = await db.query(
           `UPDATE ingredients
@@ -3502,8 +3541,9 @@ async function startServer() {
         ).catch(() => [] as any[]);
         if (!updated[0]) continue;
         const balanceAfter = Number(updated[0].current_stock_qty);
-        const unit = String(updated[0].unit || r.unit || 'unit');
-        // Append to audit log
+        const unit = String(updated[0].unit || r.ingredient_unit || 'unit');
+        // Append to audit log — store the converted (stock-unit) qty so the audit
+        // matches the ingredient's natural unit and reversal works correctly.
         await db.run(
           `INSERT INTO stock_movements
             (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after)
@@ -3602,6 +3642,11 @@ async function startServer() {
       const ing: any = await db.get("SELECT id, unit FROM ingredients WHERE id = ?", [ingredient_id]);
       if (!ing) return res.status(404).json({ error: "Ingredient not found" });
       const wUnit = String(unit || ing.unit || 'unit').toLowerCase();
+      // Convert wastage qty (in user's unit) to ingredient stock unit
+      const stockQty = convertQty(wQty, wUnit, ing.unit);
+      if (stockQty == null) {
+        return res.status(400).json({ error: `Unit ${wUnit} can't be converted to ingredient unit ${ing.unit}` });
+      }
 
       const wid = `WAS-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await db.run(
@@ -3610,18 +3655,18 @@ async function startServer() {
         [wid, ingredient_id, wQty, wUnit, safeReason, notes || null, req.user!.id || null]
       );
 
-      // Atomic stock decrement + audit
+      // Atomic stock decrement + audit (using converted qty in stock unit)
       const updated: any[] = await db.query(
         `UPDATE ingredients SET current_stock_qty = current_stock_qty - ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ? RETURNING current_stock_qty`,
-        [wQty, ingredient_id]
+        [stockQty, ingredient_id]
       );
       const balanceAfter = Number(updated[0]?.current_stock_qty || 0);
       await db.run(
         `INSERT INTO stock_movements
           (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, recorded_by_user_id, notes)
          VALUES (?, ?, ?, ?, 'WASTAGE', 'wastage', ?, ?, ?, ?)`,
-        [movId(), ingredient_id, -wQty, wUnit, wid, balanceAfter, req.user!.id || null, `${safeReason}${notes ? ': ' + notes : ''}`]
+        [movId(), ingredient_id, -stockQty, ing.unit, wid, balanceAfter, req.user!.id || null, `${safeReason}${notes ? ': ' + notes : ''}`]
       );
 
       res.json({ success: true, id: wid, balance: balanceAfter });
