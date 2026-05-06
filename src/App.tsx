@@ -3490,6 +3490,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [staffSearch, setStaffSearch]         = useState('');
   const [staffRoleFilter, setStaffRoleFilter] = useState<'ALL'|'CHEF'|'WAITER'|'MANAGER'>('ALL');
   const [staffPage, setStaffPage]             = useState(1);
+  const [editingStaff, setEditingStaff]       = useState<any | null>(null);
+  const [isBulkAddingStaff, setIsBulkAddingStaff] = useState(false);
+  const [bulkRows, setBulkRows] = useState<Array<{name: string; role: UserRole; loginId: string; password: string; phone: string; email: string}>>([
+    { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
+    { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
+    { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
+  ]);
   const [feedbackSearch, setFeedbackSearch]   = useState('');
   const [feedbackMinRating, setFeedbackMinRating] = useState(0);
   const [feedbackSortDir, setFeedbackSortDir] = useState<'asc'|'desc'>('desc');
@@ -3862,6 +3869,74 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       fetchStaff();
     } catch (err) {
       console.error("Failed to remove staff", err);
+    }
+  };
+
+  const toggleStaffActive = async (s: any) => {
+    const next = s.is_active ? 0 : 1;
+    const verb = next ? 'activate' : 'deactivate';
+    if (!confirm(`${verb.charAt(0).toUpperCase() + verb.slice(1)} ${s.name}?`)) return;
+    try {
+      const res = await fetch(`/api/owner/staff/${s.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ is_active: next ? 1 : 0 }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        return alert(d.error || `Failed to ${verb} staff`);
+      }
+      fetchStaff();
+    } catch (err) {
+      console.error('toggleStaffActive failed', err);
+    }
+  };
+
+  const saveStaffEdit = async (id: string, patch: Record<string, unknown>) => {
+    const res = await fetch(`/api/owner/staff/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || 'Save failed');
+    }
+    return res.json();
+  };
+
+  const submitBulkStaff = async () => {
+    const rows = bulkRows
+      .filter(r => r.name.trim() && r.role)
+      .map(r => ({
+        name: r.name.trim(), role: r.role,
+        loginId:  r.loginId.trim()  || null,
+        password: r.password.trim() || null,
+        phone:    r.phone.trim()    || null,
+        email:    r.email.trim()    || null,
+      }));
+    if (rows.length === 0) return alert('Fill at least one row (name + role required)');
+    try {
+      const res = await fetch('/api/owner/staff/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ rows }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return alert(data.error || 'Bulk add failed');
+      const errMsg = (data.errors || []).length
+        ? `\n\nSkipped:\n${data.errors.map((e: any) => `Row ${e.row}: ${e.error}`).join('\n')}`
+        : '';
+      alert(`✓ Added ${data.created_count} staff member${data.created_count !== 1 ? 's' : ''}.${errMsg}`);
+      setIsBulkAddingStaff(false);
+      setBulkRows([
+        { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
+        { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
+        { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
+      ]);
+      fetchStaff();
+    } catch (err) {
+      console.error('Bulk add failed', err);
     }
   };
 
@@ -5007,11 +5082,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
           {/* ── Search + Category filter ── */}
           <div className="flex flex-col sm:flex-row gap-3">
-            <div className="relative flex-1 max-w-sm">
-              <Search size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9c8e85]"/>
+            {/* Search box: explicit width so the long category-pill list can't
+                squeeze it. text-color set explicitly so typed characters are
+                visible against the white background. */}
+            <div className="relative w-full sm:w-72 shrink-0">
+              <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9c8e85]"/>
               <input value={menuSearchTerm} onChange={e => setMenuSearchTerm(e.target.value)}
                 placeholder="Search menu items…"
-                className="w-full pl-10 pr-4 py-2.5 rounded-2xl border border-[#cc5a16]/10 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 bg-white"/>
+                className="w-full pl-11 pr-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-sm text-[#1a1208] placeholder-[#9c8e85] outline-none focus:ring-2 ring-[#cc5a16]/30 focus:border-[#cc5a16]/40 bg-white"/>
             </div>
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1 flex-wrap">
               {(['ALL', ...Array.from(new Set(menu.map(m => m.category).filter(Boolean))).sort()] as string[]).map(cat => (
@@ -5379,14 +5457,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         />
       ) : activeTab === 'STAFF' ? (
         <div className="space-y-6">
-          <div className="flex justify-between items-center">
+          <div className="flex justify-between items-center flex-wrap gap-3">
             <h2 className="text-3xl font-bold font-serif">Staff Management</h2>
-            <button
-              onClick={() => setIsAddingStaff(true)}
-              className="bg-[#cc5a16] text-white px-6 py-3 rounded-full flex items-center gap-2 hover:bg-[#a84612] transition-colors"
-            >
-              <Plus size={20} /> Add New Staff
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setIsBulkAddingStaff(true)}
+                className="bg-white border-2 border-[#cc5a16] text-[#cc5a16] px-5 py-2.5 rounded-full flex items-center gap-2 hover:bg-[#cc5a16]/5 transition-colors font-bold text-sm"
+              >
+                <Plus size={18} /> Bulk Add
+              </button>
+              <button
+                onClick={() => setIsAddingStaff(true)}
+                className="bg-[#cc5a16] text-white px-6 py-3 rounded-full flex items-center gap-2 hover:bg-[#a84612] transition-colors"
+              >
+                <Plus size={20} /> Add New Staff
+              </button>
+            </div>
           </div>
 
           {/* Search + Role filter */}
@@ -5432,14 +5518,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 )}>
                   <div>
                     <h3 className="text-lg font-bold text-[#1a1a1a]">{s.name}</h3>
-                    <span className={cn(
-                      "inline-block text-[11px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full mt-1",
-                      s.role === 'CHEF' ? "bg-orange-200 text-orange-800"
-                      : s.role === 'MANAGER' ? "bg-purple-200 text-purple-800"
-                      : "bg-blue-200 text-blue-800"
-                    )}>
-                      {s.role === 'CHEF' ? '👨‍🍳 Chef' : s.role === 'MANAGER' ? '🧑‍💼 Manager' : '🧑‍🍽️ Waiter'}
-                    </span>
+                    <div className="flex items-center gap-2 mt-1 flex-wrap">
+                      <span className={cn(
+                        "inline-block text-[11px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full",
+                        s.role === 'CHEF' ? "bg-orange-200 text-orange-800"
+                        : s.role === 'MANAGER' ? "bg-purple-200 text-purple-800"
+                        : "bg-blue-200 text-blue-800"
+                      )}>
+                        {s.role === 'CHEF' ? '👨‍🍳 Chef' : s.role === 'MANAGER' ? '🧑‍💼 Manager' : '🧑‍🍽️ Waiter'}
+                      </span>
+                      <span className={cn(
+                        "inline-flex items-center gap-1 text-[11px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full",
+                        s.is_active ? "bg-emerald-100 text-emerald-700" : "bg-zinc-200 text-zinc-600"
+                      )}>
+                        <span className={cn("w-1.5 h-1.5 rounded-full",
+                          s.is_active ? "bg-emerald-500" : "bg-zinc-400"
+                        )}/>
+                        {s.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                    </div>
                   </div>
                   <button onClick={() => removeStaff(s.id)} className="text-red-400 hover:text-red-600 p-1">
                     <Trash2 size={18} />
@@ -5482,7 +5579,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
 
                 {/* Actions */}
-                <div className="px-5 pb-5 flex items-center gap-3">
+                <div className="px-5 pb-5 grid grid-cols-3 gap-2">
+                  <button onClick={() => setEditingStaff(s)}
+                    className="text-[11px] font-bold uppercase tracking-widest text-[#1a1208] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors">
+                    ✎ Edit
+                  </button>
+                  <button onClick={() => toggleStaffActive(s)}
+                    className={cn(
+                      "text-[11px] font-bold uppercase tracking-widest border-2 rounded-xl py-2 transition-colors",
+                      s.is_active
+                        ? "border-zinc-300 text-zinc-700 hover:bg-zinc-50"
+                        : "border-emerald-500 text-emerald-700 bg-emerald-50 hover:bg-emerald-100"
+                    )}>
+                    {s.is_active ? '⏸ Deactivate' : '▶ Activate'}
+                  </button>
                   <button
                     onClick={async () => {
                       const newPass = prompt(`Set new password for ${s.name}:`);
@@ -5498,9 +5608,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         alert(d.error || 'Failed to reset password');
                       }
                     }}
-                    className="flex-1 text-[11px] font-bold uppercase tracking-widest text-[#1a1208] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors"
-                  >
-                    Reset Password
+                    className="text-[11px] font-bold uppercase tracking-widest text-[#1a1208] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors">
+                    🔑 Reset Pwd
                   </button>
                 </div>
               </div>
@@ -5514,6 +5623,178 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </>
             );
           })()}
+
+          {/* Edit Staff Modal */}
+          {editingStaff && (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[100] p-4 overflow-y-auto">
+              <div className="bg-white rounded-3xl shadow-2xl max-w-lg w-full p-6">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-2xl font-bold">Edit Staff — {editingStaff.name}</h3>
+                  <button onClick={() => setEditingStaff(null)} className="text-zinc-400 hover:text-zinc-700 text-xl">✕</button>
+                </div>
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    try {
+                      await saveStaffEdit(editingStaff.id, {
+                        name:     editingStaff.name,
+                        role:     editingStaff.role,
+                        phone:    editingStaff.phone || null,
+                        email:    editingStaff.email || null,
+                        login_id: editingStaff.login_id || null,
+                      });
+                      setEditingStaff(null);
+                      fetchStaff();
+                    } catch (err: any) { alert(err.message); }
+                  }}
+                  className="space-y-3"
+                >
+                  <div>
+                    <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 mb-1 block">Name</label>
+                    <input type="text" required value={editingStaff.name}
+                      onChange={e => setEditingStaff({ ...editingStaff, name: e.target.value })}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 mb-1 block">Role</label>
+                    <select value={editingStaff.role}
+                      onChange={e => setEditingStaff({ ...editingStaff, role: e.target.value })}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none">
+                      <option value="CHEF">👨‍🍳 Chef</option>
+                      <option value="WAITER">🧑‍🍽️ Waiter</option>
+                      <option value="MANAGER">🧑‍💼 Manager</option>
+                      <option value="FRONT_DESK">🛎️ Front Desk</option>
+                      <option value="HOUSEKEEPING">🛏️ Housekeeping</option>
+                      <option value="MAINTENANCE">🔧 Maintenance</option>
+                      <option value="CONCIERGE">🎩 Concierge</option>
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 mb-1 block">Login ID</label>
+                      <input type="text" value={editingStaff.login_id || ''}
+                        onChange={e => setEditingStaff({ ...editingStaff, login_id: e.target.value })}
+                        className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
+                    </div>
+                    <div>
+                      <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 mb-1 block">Phone</label>
+                      <input type="text" value={editingStaff.phone || ''}
+                        onChange={e => setEditingStaff({ ...editingStaff, phone: e.target.value })}
+                        className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[11px] uppercase tracking-widest font-bold text-zinc-500 mb-1 block">Email</label>
+                    <input type="email" value={editingStaff.email || ''}
+                      onChange={e => setEditingStaff({ ...editingStaff, email: e.target.value })}
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
+                  </div>
+                  <div className="flex justify-end gap-2 pt-3">
+                    <button type="button" onClick={() => setEditingStaff(null)}
+                      className="px-5 py-2.5 rounded-xl border-2 border-zinc-200 text-sm font-bold hover:bg-zinc-50">
+                      Cancel
+                    </button>
+                    <button type="submit"
+                      className="px-6 py-2.5 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">
+                      Save Changes
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* Bulk Add Modal */}
+          {isBulkAddingStaff && (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[100] p-4 overflow-y-auto">
+              <div className="bg-white rounded-3xl shadow-2xl max-w-5xl w-full p-6 max-h-[90vh] overflow-y-auto">
+                <div className="flex justify-between items-center mb-4">
+                  <div>
+                    <h3 className="text-2xl font-bold">Bulk Add Staff</h3>
+                    <p className="text-xs text-zinc-500 mt-1">Add up to 50 staff in one go. Name + Role are required; Login ID + Password optional (needed for staff to log in).</p>
+                  </div>
+                  <button onClick={() => setIsBulkAddingStaff(false)} className="text-zinc-400 hover:text-zinc-700 text-xl">✕</button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b-2 border-zinc-100">
+                        {['#','Name *','Role *','Login ID','Password','Phone','Email',''].map(h => (
+                          <th key={h} className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold text-left py-2 px-2">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bulkRows.map((row, i) => (
+                        <tr key={i} className="border-b border-zinc-100">
+                          <td className="px-2 py-2 text-zinc-400 text-xs font-bold">{i + 1}</td>
+                          <td className="px-2 py-2">
+                            <input type="text" value={row.name}
+                              onChange={e => setBulkRows(rs => rs.map((r, j) => j === i ? { ...r, name: e.target.value } : r))}
+                              placeholder="Full name"
+                              className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none" />
+                          </td>
+                          <td className="px-2 py-2">
+                            <select value={row.role}
+                              onChange={e => setBulkRows(rs => rs.map((r, j) => j === i ? { ...r, role: e.target.value as UserRole } : r))}
+                              className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-2 py-1.5 text-xs">
+                              <option value="CHEF">Chef</option>
+                              <option value="WAITER">Waiter</option>
+                              <option value="MANAGER">Manager</option>
+                              <option value="FRONT_DESK">Front Desk</option>
+                              <option value="HOUSEKEEPING">Housekeeping</option>
+                              <option value="MAINTENANCE">Maintenance</option>
+                              <option value="CONCIERGE">Concierge</option>
+                            </select>
+                          </td>
+                          <td className="px-2 py-2">
+                            <input type="text" value={row.loginId} placeholder="optional"
+                              onChange={e => setBulkRows(rs => rs.map((r, j) => j === i ? { ...r, loginId: e.target.value } : r))}
+                              className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-2 py-1.5 text-xs" />
+                          </td>
+                          <td className="px-2 py-2">
+                            <input type="text" value={row.password} placeholder="optional"
+                              onChange={e => setBulkRows(rs => rs.map((r, j) => j === i ? { ...r, password: e.target.value } : r))}
+                              className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-2 py-1.5 text-xs font-mono" />
+                          </td>
+                          <td className="px-2 py-2">
+                            <input type="text" value={row.phone}
+                              onChange={e => setBulkRows(rs => rs.map((r, j) => j === i ? { ...r, phone: e.target.value } : r))}
+                              className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-2 py-1.5 text-xs" />
+                          </td>
+                          <td className="px-2 py-2">
+                            <input type="email" value={row.email}
+                              onChange={e => setBulkRows(rs => rs.map((r, j) => j === i ? { ...r, email: e.target.value } : r))}
+                              className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-2 py-1.5 text-xs" />
+                          </td>
+                          <td className="px-2 py-2">
+                            <button type="button" onClick={() => setBulkRows(rs => rs.filter((_, j) => j !== i))}
+                              className="text-red-500 hover:text-red-700 text-sm" title="Remove row">✕</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-zinc-100">
+                  <button type="button"
+                    onClick={() => setBulkRows(rs => [...rs, { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' }])}
+                    className="px-4 py-2 rounded-xl border-2 border-[#cc5a16]/20 text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5">
+                    + Add Row
+                  </button>
+                  <span className="ml-auto" />
+                  <button type="button" onClick={() => setIsBulkAddingStaff(false)}
+                    className="px-5 py-2 rounded-xl border-2 border-zinc-200 text-sm font-bold hover:bg-zinc-50">
+                    Cancel
+                  </button>
+                  <button type="button" onClick={submitBulkStaff}
+                    className="px-6 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">
+                    Create {bulkRows.filter(r => r.name.trim() && r.role).length || ''} Staff
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {isAddingStaff && (
             <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-[100] p-4 overflow-y-auto">
