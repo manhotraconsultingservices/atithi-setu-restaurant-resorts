@@ -3964,11 +3964,15 @@ async function startServer() {
             AND expiry_date <= CURRENT_DATE + INTERVAL '7 days'
             AND expiry_date >= CURRENT_DATE`
       );
+      // Use stock_movements (always in stock unit) instead of wastage_logs
+      // (which stores qty in the user-entered unit — would cause 1000× over-
+      // count when user logs grams of a kg-stocked ingredient).
       const wastageRow: any = await db.get(
-        `SELECT COALESCE(SUM(w.qty * COALESCE(i.default_unit_price, 0)), 0) AS v
-           FROM wastage_logs w
-           LEFT JOIN ingredients i ON i.id = w.ingredient_id
-          WHERE w.logged_at >= NOW() - INTERVAL '30 days'`
+        `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS v
+           FROM stock_movements sm
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+          WHERE sm.movement_type = 'WASTAGE'
+            AND sm.recorded_at >= NOW() - INTERVAL '30 days'`
       );
       const consumedValueRow: any = await db.get(
         `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS v
@@ -4078,12 +4082,16 @@ async function startServer() {
           LIMIT 10`
       );
 
-      // 5. Wastage breakdown by reason (last 30 days)
+      // 5. Wastage breakdown by reason (last 30 days) — JOIN stock_movements
+      // (always in stock unit) for accurate qty × price computation. The
+      // reason lives on wastage_logs, linked via reference_id on the audit row.
       const wastageBreakdown: any[] = await db.query(
         `SELECT w.reason,
                 COUNT(*) AS count,
-                SUM(w.qty * COALESCE(i.default_unit_price, 0)) AS total_value
+                COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS total_value
            FROM wastage_logs w
+           LEFT JOIN stock_movements sm
+             ON sm.reference_type = 'wastage' AND sm.reference_id = w.id
            LEFT JOIN ingredients i ON i.id = w.ingredient_id
           WHERE w.logged_at >= NOW() - INTERVAL '30 days'
           GROUP BY w.reason
