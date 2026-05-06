@@ -5613,11 +5613,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                   </div>
 
-                  {/* Actions */}
-                  <div className="flex items-center justify-between pt-3 border-t border-[#cc5a16]/10">
-                    <div className="flex items-center gap-1">
-                      <button onClick={() => setEditingItem(item)} className="text-xs font-bold text-[#6b5d52] hover:text-[#cc5a16] flex items-center gap-1 p-1.5 rounded-lg hover:bg-[#cc5a16]/5 transition-all">
-                        <Edit3 size={13}/> Edit
+                  {/* Actions — high-contrast pills so they're easy to scan at a glance */}
+                  <div className="flex items-center justify-between pt-3 border-t border-[#cc5a16]/10 gap-2 flex-wrap">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        onClick={() => setEditingItem(item)}
+                        className="text-[11px] font-bold text-[#1a1208] bg-[#faf7f2] hover:bg-[#cc5a16] hover:text-white border border-[#cc5a16]/20 hover:border-[#cc5a16] flex items-center gap-1 px-2.5 py-1.5 rounded-lg transition-all"
+                        title="Edit menu item"
+                      >
+                        <Edit3 size={12}/> Edit
                       </button>
                       <button
                         onClick={async () => {
@@ -5625,23 +5629,42 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           if (inventoryIngredients.length === 0) await fetchInventoryIngredients();
                           setRecipeBuilderItem(item);
                         }}
-                        className="text-xs font-bold text-[#6b5d52] hover:text-[#cc5a16] flex items-center gap-1 p-1.5 rounded-lg hover:bg-[#cc5a16]/5 transition-all"
+                        className="text-[11px] font-bold text-[#0E7490] bg-cyan-50 hover:bg-cyan-600 hover:text-white border border-cyan-200 hover:border-cyan-600 flex items-center gap-1 px-2.5 py-1.5 rounded-lg transition-all"
                         title="Recipe — define ingredients per serving for inventory tracking"
                       >
                         🧾 Recipe
                       </button>
-                      <button onClick={() => handleToggleDailySpecial(item.id, !item.is_daily_special)}
-                        className={cn('p-1.5 rounded-lg transition-all', item.is_daily_special ? 'text-yellow-500 bg-yellow-50' : 'text-[#c5b9b2] hover:text-yellow-500 hover:bg-yellow-50')}
-                        title={item.is_daily_special ? 'Remove Special' : 'Set as Daily Special'}>
-                        <Star size={14} fill={item.is_daily_special ? 'currentColor' : 'none'}/>
+                      <button
+                        onClick={() => handleToggleDailySpecial(item.id, !item.is_daily_special)}
+                        className={cn(
+                          'p-1.5 rounded-lg border transition-all',
+                          item.is_daily_special
+                            ? 'text-yellow-600 bg-yellow-50 border-yellow-300 hover:bg-yellow-100'
+                            : 'text-[#6b5d52] bg-white border-[#cc5a16]/20 hover:text-yellow-600 hover:bg-yellow-50 hover:border-yellow-300'
+                        )}
+                        title={item.is_daily_special ? 'Remove Daily Special' : 'Mark as Daily Special'}
+                      >
+                        <Star size={14} fill={item.is_daily_special ? 'currentColor' : 'none'} strokeWidth={2.2} />
                       </button>
-                      <button onClick={() => handleDeleteItem(item.id)} className="p-1.5 rounded-lg text-[#c5b9b2] hover:text-red-500 hover:bg-red-50 transition-all">
-                        <Trash2 size={13}/>
+                      <button
+                        onClick={() => handleDeleteItem(item.id)}
+                        className="p-1.5 rounded-lg text-[#6b5d52] bg-white border border-[#cc5a16]/20 hover:text-red-600 hover:bg-red-50 hover:border-red-300 transition-all"
+                        title="Delete item"
+                      >
+                        <Trash2 size={13} strokeWidth={2.2}/>
                       </button>
                     </div>
-                    <button onClick={() => handleToggleAvailability(item.id, !item.available)}
-                      className="flex items-center gap-1.5 text-xs font-bold hover:bg-[#cc5a16]/5 px-2 py-1.5 rounded-lg transition-all">
-                      <div className={cn('w-2 h-2 rounded-full', item.available ? 'bg-green-500' : 'bg-red-400')}/>
+                    <button
+                      onClick={() => handleToggleAvailability(item.id, !item.available)}
+                      className={cn(
+                        'flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg border transition-all',
+                        item.available
+                          ? 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100'
+                          : 'text-red-700 bg-red-50 border-red-200 hover:bg-red-100'
+                      )}
+                      title={item.available ? 'Click to mark out of stock' : 'Click to mark available'}
+                    >
+                      <div className={cn('w-2 h-2 rounded-full', item.available ? 'bg-emerald-600' : 'bg-red-500')}/>
                       {item.available ? 'Available' : 'Out of Stock'}
                     </button>
                   </div>
