@@ -3315,7 +3315,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   >('MONITOR');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
   const [inventorySubTab, setInventorySubTab] = useState<
-    'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS'
+    'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS'
   >('INGREDIENTS');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notificationSettings, setNotificationSettings] = useState<any[]>([]);
@@ -3403,6 +3403,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [viewingPO, setViewingPO] = useState<any | null>(null);
   const [creatingGRN, setCreatingGRN] = useState<{ poId?: string } | null>(null);
   const [viewingGRN, setViewingGRN] = useState<any | null>(null);
+  // Phase 3 — wastage + physical counts
+  const [inventoryWastage, setInventoryWastage] = useState<any[]>([]);
+  const [inventoryCounts, setInventoryCounts] = useState<any[]>([]);
+  const [loggingWastage, setLoggingWastage] = useState(false);
+  const [viewingCount, setViewingCount] = useState<any | null>(null);
+  const [startingCount, setStartingCount] = useState(false);
   // Recipe builder modal — opened from Menu Management for a specific menu item
   const [recipeBuilderItem, setRecipeBuilderItem] = useState<any | null>(null);
 
@@ -4333,6 +4339,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (r.ok) setInventoryGRNs(await r.json());
     } catch (e) { console.error('fetchInventoryGRNs', e); }
   };
+  const fetchInventoryWastage = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/wastage`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (r.ok) setInventoryWastage(await r.json());
+    } catch (e) { console.error('fetchInventoryWastage', e); }
+  };
+  const fetchInventoryCounts = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/counts`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (r.ok) setInventoryCounts(await r.json());
+    } catch (e) { console.error('fetchInventoryCounts', e); }
+  };
   // Coordinated load for the active sub-tab. Always loads ingredients (everything depends on them).
   const fetchInventoryForSubTab = async () => {
     setInventoryLoading(true);
@@ -4346,6 +4368,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
       if (inventorySubTab === 'GOODS_RECEIPTS') {
         promises.push(fetchInventoryGRNs());
+      }
+      if (inventorySubTab === 'WASTAGE') {
+        promises.push(fetchInventoryWastage());
+      }
+      if (inventorySubTab === 'PHYSICAL_COUNTS') {
+        promises.push(fetchInventoryCounts());
       }
       await Promise.all(promises);
     } finally { setInventoryLoading(false); }
@@ -5634,6 +5662,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['SUPPLIERS', 'Suppliers', inventorySuppliers.length],
               ['PURCHASE_ORDERS', 'Purchase Orders', inventoryPOs.length],
               ['GOODS_RECEIPTS', 'Goods Receipts', inventoryGRNs.length],
+              ['WASTAGE', 'Wastage', inventoryWastage.length],
+              ['PHYSICAL_COUNTS', 'Physical Counts', inventoryCounts.length],
             ] as [typeof inventorySubTab, string, number][]).map(([id, label, count]) => (
               <button
                 key={id}
@@ -5993,6 +6023,175 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
 
+          {/* ── WASTAGE sub-view ── */}
+          {inventorySubTab === 'WASTAGE' && (
+            <div className="space-y-4">
+              <div className="flex justify-between items-center">
+                <p className="text-sm text-[#6b5d52]">
+                  {inventoryWastage.length} entr{inventoryWastage.length !== 1 ? 'ies' : 'y'}
+                </p>
+                <button
+                  onClick={() => {
+                    if (inventoryIngredients.length === 0) { alert('Add at least one ingredient first'); return; }
+                    setLoggingWastage(true);
+                  }}
+                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                >
+                  <Plus size={14} /> Log Wastage
+                </button>
+              </div>
+
+              {inventoryWastage.length === 0 ? (
+                <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <div className="text-5xl mb-3">🗑️</div>
+                  <p className="font-medium text-[#1a1208]">No wastage logged yet</p>
+                  <p className="text-sm text-[#9c8e85] mt-1">
+                    Log spoilage, burns, drops, and expiry to track losses accurately
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                        <tr>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">When</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Ingredient</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Qty</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Reason</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Notes</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#cc5a16]/5">
+                        {inventoryWastage.map((w: any) => {
+                          const reasonColors: Record<string, string> = {
+                            SPOILAGE: 'bg-amber-100 text-amber-700',
+                            BURN: 'bg-red-100 text-red-700',
+                            DROPPED: 'bg-orange-100 text-orange-700',
+                            EXPIRY: 'bg-purple-100 text-purple-700',
+                            OTHER: 'bg-gray-100 text-gray-700',
+                          };
+                          return (
+                            <tr key={w.id} className="hover:bg-[#faf7f2]/30">
+                              <td className="px-5 py-3 text-xs text-[#6b5d52] whitespace-nowrap">
+                                {w.logged_at ? new Date(w.logged_at).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '—'}
+                                <div className="text-[10px] text-[#9c8e85]">
+                                  {w.logged_at ? new Date(w.logged_at).toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit' }) : ''}
+                                </div>
+                              </td>
+                              <td className="px-5 py-3">
+                                <p className="font-semibold text-[#1a1208]">{w.ingredient_name || '—'}</p>
+                                {w.ingredient_category && <p className="text-[10px] text-[#9c8e85]">{w.ingredient_category}</p>}
+                              </td>
+                              <td className="px-5 py-3 text-right font-mono text-red-600 font-bold">
+                                −{Number(w.qty || 0).toLocaleString('en-IN', { maximumFractionDigits: 3 })}
+                                <span className="text-[10px] text-[#9c8e85] ml-1">{w.unit}</span>
+                              </td>
+                              <td className="px-5 py-3">
+                                <span className={cn("px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest", reasonColors[w.reason] || reasonColors.OTHER)}>
+                                  {w.reason}
+                                </span>
+                              </td>
+                              <td className="px-5 py-3 text-xs text-[#6b5d52] max-w-[300px] truncate">{w.notes || '—'}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── PHYSICAL COUNTS sub-view ── */}
+          {inventorySubTab === 'PHYSICAL_COUNTS' && (
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <p className="text-sm text-[#6b5d52]">
+                  {inventoryCounts.length} count{inventoryCounts.length !== 1 ? 's' : ''} ·{' '}
+                  {inventoryCounts.filter((c: any) => c.status === 'IN_PROGRESS').length} in progress
+                </p>
+                <button
+                  onClick={() => {
+                    if (inventoryIngredients.length === 0) { alert('Add at least one ingredient first'); return; }
+                    if (inventoryCounts.some((c: any) => c.status === 'IN_PROGRESS')) {
+                      if (!confirm('A count is already in progress. Start a new one anyway?')) return;
+                    }
+                    setStartingCount(true);
+                  }}
+                  className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
+                >
+                  <Plus size={14} /> Start Count
+                </button>
+              </div>
+
+              {inventoryCounts.length === 0 ? (
+                <div className="text-center py-16 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <div className="text-5xl mb-3">📋</div>
+                  <p className="font-medium text-[#1a1208]">No physical counts yet</p>
+                  <p className="text-sm text-[#9c8e85] mt-1">
+                    Periodic counts reconcile expected vs actual stock — surfaces shrinkage, theft, or measurement drift
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                        <tr>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Count #</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Date</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Status</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Lines</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Counted</th>
+                          <th className="text-right px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Total Variance</th>
+                          <th className="text-left px-5 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#cc5a16]/5">
+                        {inventoryCounts.map((c: any) => (
+                          <tr key={c.id} className="hover:bg-[#faf7f2]/30">
+                            <td className="px-5 py-3 font-mono font-bold text-[#cc5a16]">{c.id}</td>
+                            <td className="px-5 py-3 text-xs text-[#6b5d52]">{c.count_date}</td>
+                            <td className="px-5 py-3">
+                              <span className={cn(
+                                "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-widest",
+                                c.status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                              )}>{c.status === 'IN_PROGRESS' ? 'In Progress' : 'Completed'}</span>
+                            </td>
+                            <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{c.line_count}</td>
+                            <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{c.counted_lines}/{c.line_count}</td>
+                            <td className="px-5 py-3 text-right font-mono">
+                              {c.status === 'COMPLETED'
+                                ? <span className={cn("font-bold", Number(c.total_abs_variance || 0) > 0 ? 'text-amber-700' : 'text-emerald-700')}>
+                                    ±{Number(c.total_abs_variance || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                                  </span>
+                                : <span className="text-[#9c8e85]">—</span>}
+                            </td>
+                            <td className="px-5 py-3">
+                              <button
+                                onClick={async () => {
+                                  const r = await fetch(`/api/inventory/counts/${c.id}`, {
+                                    headers: { 'Authorization': `Bearer ${token}` },
+                                  });
+                                  if (r.ok) setViewingCount(await r.json());
+                                }}
+                                className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-[#0d0a07]/5 text-[#6b5d52] hover:bg-[#0d0a07]/10"
+                              >
+                                {c.status === 'IN_PROGRESS' ? 'Continue' : 'View'}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* ─── Modals — defined inline so they have closure access to fetchers ─── */}
           {editingIngredient && (
             <IngredientEditorModal
@@ -6053,6 +6252,40 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               grn={viewingGRN}
               onClose={() => setViewingGRN(null)}
               onBillUploaded={() => { fetchInventoryGRNs(); }}
+            />
+          )}
+          {loggingWastage && (
+            <WastageLogModal
+              token={token!}
+              restaurantId={restaurantId!}
+              ingredients={inventoryIngredients}
+              onClose={() => setLoggingWastage(false)}
+              onSaved={() => { setLoggingWastage(false); fetchInventoryWastage(); fetchInventoryIngredients(); }}
+            />
+          )}
+          {startingCount && (
+            <StartCountModal
+              token={token!}
+              restaurantId={restaurantId!}
+              onClose={() => setStartingCount(false)}
+              onStarted={async (id) => {
+                setStartingCount(false);
+                await fetchInventoryCounts();
+                // Open the just-started count for editing
+                const r = await fetch(`/api/inventory/counts/${id}`, {
+                  headers: { 'Authorization': `Bearer ${token}` },
+                });
+                if (r.ok) setViewingCount(await r.json());
+              }}
+            />
+          )}
+          {viewingCount && (
+            <PhysicalCountModal
+              token={token!}
+              count={viewingCount}
+              onClose={() => setViewingCount(null)}
+              onUpdated={(refreshed) => setViewingCount(refreshed)}
+              onCompleted={() => { setViewingCount(null); fetchInventoryCounts(); fetchInventoryIngredients(); }}
             />
           )}
         </div>
@@ -17004,6 +17237,278 @@ function RecipeBuilderModal({ token, restaurantId, menuItem, ingredients, onClos
           <button onClick={save} disabled={saving} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">
             {saving ? 'Saving…' : 'Save Recipe'}
           </button>
+        </div>
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── Wastage log modal — log spoilage/burn/drop/expiry ────────────────────
+function WastageLogModal({ token, restaurantId, ingredients, onClose, onSaved }: {
+  token: string; restaurantId: string; ingredients: any[]; onClose: () => void; onSaved: () => void;
+}) {
+  const [ingredientId, setIngredientId] = useState(ingredients[0]?.id || '');
+  const [qty, setQty] = useState('');
+  const [reason, setReason] = useState<'SPOILAGE' | 'BURN' | 'DROPPED' | 'EXPIRY' | 'OTHER'>('SPOILAGE');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const ing = ingredients.find(x => x.id === ingredientId);
+
+  const save = async () => {
+    if (!ingredientId) { setErr('Pick an ingredient'); return; }
+    if (!qty || Number(qty) <= 0) { setErr('Qty must be > 0'); return; }
+    setSaving(true); setErr('');
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/wastage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          ingredient_id: ingredientId,
+          qty: Number(qty),
+          unit: ing?.unit || 'unit',
+          reason,
+          notes: notes || null,
+        }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); setErr(d.error || 'Save failed'); }
+      else onSaved();
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <InventoryModalShell title="Log Wastage" subtitle="Spoilage, burns, drops, expiry — keeps audit accurate" onClose={onClose}>
+      <div className="space-y-4">
+        <FormField label="Ingredient" required>
+          <select value={ingredientId} onChange={e => setIngredientId(e.target.value)} className={inputClass}>
+            <option value="">— Select —</option>
+            {ingredients.map((x: any) => (
+              <option key={x.id} value={x.id}>
+                {x.name} — {Number(x.current_stock_qty || 0)} {x.unit} on hand
+              </option>
+            ))}
+          </select>
+        </FormField>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FormField label="Quantity Lost" required hint={ing ? `Will reduce stock by this amount in ${ing.unit}` : undefined}>
+            <input type="number" min={0} step="0.001" value={qty} onChange={e => setQty(e.target.value)} className={inputClass} />
+          </FormField>
+          <FormField label="Reason" required>
+            <select value={reason} onChange={e => setReason(e.target.value as any)} className={inputClass}>
+              <option value="SPOILAGE">Spoilage</option>
+              <option value="BURN">Burn</option>
+              <option value="DROPPED">Dropped</option>
+              <option value="EXPIRY">Expired</option>
+              <option value="OTHER">Other</option>
+            </select>
+          </FormField>
+        </div>
+        <FormField label="Notes" hint="Optional context — saved to audit trail">
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} className={cn(inputClass, "min-h-[60px]")} />
+        </FormField>
+        {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">
+            {saving ? 'Saving…' : 'Log Wastage'}
+          </button>
+        </div>
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── Start a physical count (snapshots all active ingredients) ────────────
+function StartCountModal({ token, restaurantId, onClose, onStarted }: {
+  token: string; restaurantId: string; onClose: () => void; onStarted: (id: string) => void;
+}) {
+  const [countDate, setCountDate] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const start = async () => {
+    setSaving(true); setErr('');
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/inventory/counts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ count_date: countDate, notes: notes || null }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); setErr(d.error || 'Start failed'); }
+      else { const d = await r.json(); onStarted(d.id); }
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <InventoryModalShell
+      title="Start Physical Count"
+      subtitle="Snapshots current stock as expected qty per ingredient — you'll fill in actuals as you walk the kitchen"
+      onClose={onClose}
+    >
+      <div className="space-y-4">
+        <FormField label="Count Date" required>
+          <input type="date" value={countDate} onChange={e => setCountDate(e.target.value)} className={inputClass} />
+        </FormField>
+        <FormField label="Notes" hint="e.g. Weekly Saturday count, Pre-stocktake audit">
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} className={cn(inputClass, "min-h-[60px]")} />
+        </FormField>
+        {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+          <button onClick={start} disabled={saving} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">
+            {saving ? 'Starting…' : 'Start Count'}
+          </button>
+        </div>
+      </div>
+    </InventoryModalShell>
+  );
+}
+
+// ─── Physical count worksheet — fill actuals per ingredient + complete ────
+function PhysicalCountModal({ token, count, onClose, onUpdated, onCompleted }: {
+  token: string; count: any; onClose: () => void;
+  onUpdated: (refreshed: any) => void; onCompleted: () => void;
+}) {
+  const isCompleted = count.status === 'COMPLETED';
+  const [items, setItems] = useState<any[]>(count.items || []);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [completing, setCompleting] = useState(false);
+  const [err, setErr] = useState('');
+
+  // Group items by category for easier walking
+  const byCategory = items.reduce((acc: any, it: any) => {
+    const k = it.ingredient_category || 'Other';
+    (acc[k] = acc[k] || []).push(it);
+    return acc;
+  }, {});
+
+  const updateItem = async (lineId: string, actualQty: string) => {
+    const numQty = actualQty === '' ? null : Number(actualQty);
+    // Optimistic update
+    setItems(prev => prev.map(it => it.id === lineId ? {
+      ...it,
+      actual_qty: numQty,
+      variance: numQty == null ? null : numQty - Number(it.expected_qty || 0),
+    } : it));
+    if (isCompleted) return;
+    setSavingId(lineId);
+    try {
+      await fetch(`/api/inventory/counts/${count.id}/items`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ items: [{ id: lineId, actual_qty: numQty }] }),
+      });
+    } finally { setSavingId(null); }
+  };
+
+  const complete = async () => {
+    if (!confirm(`Complete this count? This will post stock adjustments for every line where the actual differs from expected. ${count.id} will be locked.`)) return;
+    setCompleting(true); setErr('');
+    try {
+      const r = await fetch(`/api/inventory/counts/${count.id}/complete`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); setErr(d.error || 'Complete failed'); }
+      else onCompleted();
+    } catch (e: any) { setErr(e.message); } finally { setCompleting(false); }
+  };
+
+  const totalCounted = items.filter(it => it.actual_qty != null).length;
+  const totalLines = items.length;
+  const totalVariance = items.reduce((s, it) => s + Math.abs(Number(it.variance || 0)), 0);
+
+  return (
+    <InventoryModalShell
+      title={`${count.id} — ${isCompleted ? 'Completed' : 'In Progress'}`}
+      subtitle={`${count.count_date} · ${totalCounted}/${totalLines} counted${isCompleted ? '' : ' (auto-saves)'}`}
+      onClose={onClose}
+      wide
+    >
+      <div className="space-y-4">
+        <div className="grid grid-cols-3 gap-3 text-sm">
+          <div className="bg-[#faf7f2] rounded-2xl p-3">
+            <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Counted</p>
+            <p className="text-xl font-bold font-mono">{totalCounted}/{totalLines}</p>
+          </div>
+          <div className="bg-[#faf7f2] rounded-2xl p-3">
+            <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Total Variance</p>
+            <p className={cn("text-xl font-bold font-mono", totalVariance > 0 && 'text-amber-700')}>±{totalVariance.toFixed(2)}</p>
+          </div>
+          <div className="bg-[#faf7f2] rounded-2xl p-3">
+            <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Status</p>
+            <p className={cn("text-xl font-bold", isCompleted ? 'text-emerald-700' : 'text-amber-700')}>
+              {isCompleted ? 'Completed' : 'In Progress'}
+            </p>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          {Object.entries(byCategory).map(([category, catItems]) => (
+            <div key={category}>
+              <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">{category}</p>
+              <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                    <tr>
+                      <th className="text-left px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Ingredient</th>
+                      <th className="text-right px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Expected</th>
+                      <th className="text-right px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Actual</th>
+                      <th className="text-right px-4 py-2 text-[10px] uppercase tracking-widest text-[#6b5d52]">Variance</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#cc5a16]/5">
+                    {(catItems as any[]).map((it: any) => {
+                      const variance = it.variance == null ? null : Number(it.variance);
+                      return (
+                        <tr key={it.id}>
+                          <td className="px-4 py-2 font-semibold text-[#1a1208]">{it.ingredient_name}</td>
+                          <td className="px-4 py-2 text-right font-mono text-[#6b5d52]">
+                            {Number(it.expected_qty || 0).toLocaleString('en-IN', { maximumFractionDigits: 3 })} {it.unit}
+                          </td>
+                          <td className="px-4 py-2 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              <input
+                                type="number"
+                                min={0}
+                                step="0.001"
+                                disabled={isCompleted}
+                                value={it.actual_qty == null ? '' : String(it.actual_qty)}
+                                onChange={e => updateItem(it.id, e.target.value)}
+                                placeholder="—"
+                                className="w-28 px-3 py-1.5 rounded-lg border border-[#cc5a16]/15 text-sm font-mono text-right focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20 disabled:bg-gray-50 disabled:text-[#9c8e85]"
+                              />
+                              {savingId === it.id && <RefreshCw size={12} className="animate-spin text-[#9c8e85]" />}
+                            </div>
+                          </td>
+                          <td className="px-4 py-2 text-right font-mono">
+                            {variance == null ? <span className="text-[#9c8e85]">—</span>
+                              : variance === 0 ? <span className="text-emerald-700 font-bold">0</span>
+                                : <span className={cn("font-bold", variance < 0 ? 'text-red-600' : 'text-amber-700')}>
+                                    {variance > 0 ? '+' : ''}{variance.toLocaleString('en-IN', { maximumFractionDigits: 3 })}
+                                  </span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">
+            {isCompleted ? 'Close' : 'Save & Close'}
+          </button>
+          {!isCompleted && (
+            <button onClick={complete} disabled={completing || totalCounted === 0} className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-60">
+              {completing ? 'Reconciling…' : `Complete & Reconcile (${totalCounted} lines)`}
+            </button>
+          )}
         </div>
       </div>
     </InventoryModalShell>
