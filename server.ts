@@ -3837,6 +3837,58 @@ async function startServer() {
     }
   });
 
+  // Admin cleanup: delete obviously-corrupted CONSUMPTION audit rows. Used
+  // after the unit-conversion bug was discovered — old rows logged qty_delta
+  // in raw recipe units (g/ml) instead of stock units (kg/l), producing
+  // dashboard food-cost-% > 2000 %. Requires owner auth + an explicit
+  // threshold so this can't be misused to silently rewrite history.
+  // Body: { ingredient_ids?: string[], before_date?: ISO, threshold?: number }
+  app.post("/api/restaurant/:id/inventory/admin/purge-corrupt-movements", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const threshold = Math.max(1, Number(req.body?.threshold || 100));  // |qty_delta| > 100 = absurd for any kg/l ingredient
+      const beforeDate: string | null = req.body?.before_date || null;
+      const ingredientIds: string[] = Array.isArray(req.body?.ingredient_ids) ? req.body.ingredient_ids : [];
+
+      const conditions: string[] = ["movement_type = 'CONSUMPTION'", "ABS(qty_delta) > ?"];
+      const params: any[] = [threshold];
+      if (beforeDate) {
+        conditions.push("recorded_at < ?");
+        params.push(beforeDate);
+      }
+      if (ingredientIds.length > 0) {
+        conditions.push(`ingredient_id = ANY(ARRAY[${ingredientIds.map(() => '?').join(',')}]::text[])`);
+        params.push(...ingredientIds);
+      }
+
+      // Preview first
+      const matched: any[] = await db.query(
+        `SELECT id, ingredient_id, qty_delta, unit, recorded_at
+           FROM stock_movements
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY recorded_at DESC
+          LIMIT 50`,
+        params
+      );
+
+      if (req.body?.dry_run) {
+        return res.json({ would_delete: matched.length, sample: matched.slice(0, 10) });
+      }
+
+      const deleted: any[] = await db.query(
+        `DELETE FROM stock_movements
+          WHERE ${conditions.join(' AND ')}
+          RETURNING id`,
+        params
+      );
+      console.log(`[admin-purge] ${req.params.id} purged ${deleted.length} corrupt CONSUMPTION movements (threshold=${threshold}${beforeDate ? `, before=${beforeDate}` : ''})`);
+      res.json({ success: true, deleted: deleted.length });
+    } catch (err) {
+      console.error("Admin purge error:", err);
+      res.status(500).json({ error: "Failed to purge corrupt movements" });
+    }
+  });
+
   // ═════════════════════════════════════════════════════════════════════════
   // ── Inventory Management — Phase 4: Forecasting + Dashboard ─────────────
   // ═════════════════════════════════════════════════════════════════════════
