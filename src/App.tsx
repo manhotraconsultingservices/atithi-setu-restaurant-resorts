@@ -71,6 +71,13 @@ import {
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
 import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize, TableSession, LiveTableView, TableStatus, MenuDisplayMode } from './types';
+
+// Tab IDs that bypass the per-user allowedTabs permission filter.
+// Used for new tabs added after a tenant's allowedTabs was last saved — without
+// the bypass, those tabs would never appear until a SUPER_ADMIN manually
+// re-saves the role permissions for every restaurant. Owners and managers
+// expect new platform features to appear automatically.
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY']);
 import { cn } from './lib/utils';
 import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
 import {
@@ -5082,6 +5089,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // Respect allowedTabs for all tabs, including hotel tabs.
             // If allowedTabs is null (legacy tenants with no saved role permission),
             // the hotel tab still shows because `!allowedTabs` is true.
+            // ALWAYS_VISIBLE_TABS bypasses the filter — used for new tabs added
+            // after a tenant's allowedTabs was last saved (would otherwise hide
+            // forever until the admin manually re-saves the role permissions).
+            if (ALWAYS_VISIBLE_TABS.has(id)) return true;
             return !allowedTabs || allowedTabs.includes(id);
           }).map(([id, label]) => (
             <button
@@ -5123,6 +5134,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // Hotel tabs are always shown when hotel is enabled — bypass the stored allowedTabs
           // permission list (which predates the hotel module and doesn't include these IDs).
           if (['ROOMS','SERVICES','SERVICE_REQUESTS'].includes(id)) return true;
+          // INVENTORY is similarly always shown — added 2026-05, after tenants' allowedTabs
+          // were last saved. See ALWAYS_VISIBLE_TABS comment above.
+          if (ALWAYS_VISIBLE_TABS.has(id)) return true;
           return !allowedTabs || allowedTabs.includes(id);
         }).map(([id, label]) => (
           <button
@@ -5140,7 +5154,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         ))}
       </div>
 
-      {allowedTabs && !allowedTabs.includes(activeTab) ? (
+      {allowedTabs && !ALWAYS_VISIBLE_TABS.has(activeTab) && !allowedTabs.includes(activeTab) ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <div className="w-16 h-16 rounded-full bg-red-50 flex items-center justify-center">
             <Lock size={28} className="text-red-400" />

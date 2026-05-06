@@ -3453,6 +3453,345 @@ async function startServer() {
     }
   });
 
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Inventory Management — Phase 3: Consumption + Reconciliation ────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // The consumption side. Auto-deduction on order placement, idempotent
+  // reversal on cancellation, explicit wastage logging, and periodic
+  // physical-count reconciliation.
+
+  // Helper: short id for stock_movements / wastage / count rows
+  const movId = () => `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+  // Auto-deduct ingredients for an order based on its items + recipes.
+  // Fire-and-forget from the order POST handler — must NEVER throw to caller.
+  // Idempotent: each call performs the deduction once. The caller passes the
+  // raw items array (already JSON-stringified into the order row).
+  // Items shape: [{ id?: string, name?: string, quantity: number, size?: 'HALF'|'FULL', ... }]
+  async function deductIngredientsForOrder(
+    db: DbInterface, orderId: string, items: any[], _restaurantId: string
+  ): Promise<void> {
+    if (!Array.isArray(items) || items.length === 0) return;
+    for (const it of items) {
+      const menuItemId = it?.id || it?.menu_item_id;
+      if (!menuItemId) continue;
+      const sizeKey = String(it?.size || 'FULL').toUpperCase();
+      const qty = Number(it?.quantity || 1);
+      if (!Number.isFinite(qty) || qty <= 0) continue;
+
+      // Fetch recipe rows applying to this item — both BOTH and the specific size
+      const recipeRows: any[] = await db.query(
+        `SELECT r.ingredient_id, r.qty_per_serving, r.unit
+           FROM recipes r
+          WHERE r.menu_item_id = ?
+            AND (r.size_variant = 'BOTH' OR r.size_variant = ?)`,
+        [menuItemId, sizeKey === 'HALF' ? 'HALF' : 'FULL']
+      ).catch(() => [] as any[]);
+
+      for (const r of recipeRows) {
+        const consumed = Number(r.qty_per_serving) * qty;
+        if (!Number.isFinite(consumed) || consumed <= 0) continue;
+        // Atomic decrement; RETURNING gives the new balance for the audit row
+        const updated: any[] = await db.query(
+          `UPDATE ingredients
+              SET current_stock_qty = current_stock_qty - ?,
+                  updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          RETURNING current_stock_qty, unit`,
+          [consumed, r.ingredient_id]
+        ).catch(() => [] as any[]);
+        if (!updated[0]) continue;
+        const balanceAfter = Number(updated[0].current_stock_qty);
+        const unit = String(updated[0].unit || r.unit || 'unit');
+        // Append to audit log
+        await db.run(
+          `INSERT INTO stock_movements
+            (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after)
+           VALUES (?, ?, ?, ?, 'CONSUMPTION', 'order', ?, ?)`,
+          [movId(), r.ingredient_id, -consumed, unit, orderId, balanceAfter]
+        ).catch(() => {});
+      }
+    }
+  }
+
+  // Reverse a previously-deducted order. Idempotent via orders.inventory_reverted
+  // flag — re-cancelling does nothing. Walks stock_movements (the source of
+  // truth) rather than re-deriving from recipes, because recipes may have
+  // changed since the order was placed.
+  async function revertIngredientsForOrder(
+    db: DbInterface, orderId: string
+  ): Promise<{ reverted: boolean; lines: number }> {
+    // Guard: only revert once per order
+    const order: any = await db.get(
+      `SELECT inventory_reverted FROM orders WHERE id = ?`,
+      [orderId]
+    ).catch(() => null);
+    if (!order) return { reverted: false, lines: 0 };
+    if (Number(order.inventory_reverted || 0) === 1) return { reverted: false, lines: 0 };
+
+    const consumed: any[] = await db.query(
+      `SELECT ingredient_id, qty_delta, unit
+         FROM stock_movements
+        WHERE reference_type = 'order'
+          AND reference_id = ?
+          AND movement_type = 'CONSUMPTION'`,
+      [orderId]
+    ).catch(() => [] as any[]);
+
+    let lines = 0;
+    for (const c of consumed) {
+      const qtyToReturn = -Number(c.qty_delta);  // qty_delta was negative; flip sign
+      if (!Number.isFinite(qtyToReturn) || qtyToReturn <= 0) continue;
+      const updated: any[] = await db.query(
+        `UPDATE ingredients
+            SET current_stock_qty = current_stock_qty + ?,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        RETURNING current_stock_qty`,
+        [qtyToReturn, c.ingredient_id]
+      ).catch(() => [] as any[]);
+      if (!updated[0]) continue;
+      const balanceAfter = Number(updated[0].current_stock_qty);
+      await db.run(
+        `INSERT INTO stock_movements
+          (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, notes)
+         VALUES (?, ?, ?, ?, 'REVERSAL', 'order', ?, ?, 'Order cancellation reversal')`,
+        [movId(), c.ingredient_id, qtyToReturn, c.unit, orderId, balanceAfter]
+      ).catch(() => {});
+      lines++;
+    }
+
+    // Mark reverted so a second cancel doesn't double-credit
+    await db.run("UPDATE orders SET inventory_reverted = 1 WHERE id = ?", [orderId]).catch(() => {});
+    return { reverted: true, lines };
+  }
+
+  // ─── Wastage logs ────────────────────────────────────────────────────────
+
+  app.get("/api/restaurant/:id/inventory/wastage", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT w.*, i.name AS ingredient_name, i.category AS ingredient_category
+           FROM wastage_logs w
+           LEFT JOIN ingredients i ON i.id = w.ingredient_id
+          ORDER BY w.logged_at DESC`
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("List wastage error:", err);
+      res.status(500).json({ error: "Failed to fetch wastage" });
+    }
+  });
+
+  // Log wastage. Atomically: insert the log row, decrement stock, append audit.
+  app.post("/api/restaurant/:id/inventory/wastage", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { ingredient_id, qty, unit, reason, notes } = req.body;
+      if (!ingredient_id || qty == null) {
+        return res.status(400).json({ error: "ingredient_id and qty are required" });
+      }
+      const allowedReasons = new Set(['SPOILAGE', 'BURN', 'DROPPED', 'EXPIRY', 'OTHER']);
+      const safeReason = allowedReasons.has(String(reason || '').toUpperCase())
+        ? String(reason).toUpperCase()
+        : 'OTHER';
+      const wQty = Math.max(0, Number(qty));
+      if (wQty <= 0) return res.status(400).json({ error: "qty must be > 0" });
+
+      const db = await getTenantDb(req.params.id);
+      const ing: any = await db.get("SELECT id, unit FROM ingredients WHERE id = ?", [ingredient_id]);
+      if (!ing) return res.status(404).json({ error: "Ingredient not found" });
+      const wUnit = String(unit || ing.unit || 'unit').toLowerCase();
+
+      const wid = `WAS-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO wastage_logs (id, ingredient_id, qty, unit, reason, notes, logged_by_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [wid, ingredient_id, wQty, wUnit, safeReason, notes || null, req.user!.id || null]
+      );
+
+      // Atomic stock decrement + audit
+      const updated: any[] = await db.query(
+        `UPDATE ingredients SET current_stock_qty = current_stock_qty - ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? RETURNING current_stock_qty`,
+        [wQty, ingredient_id]
+      );
+      const balanceAfter = Number(updated[0]?.current_stock_qty || 0);
+      await db.run(
+        `INSERT INTO stock_movements
+          (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, recorded_by_user_id, notes)
+         VALUES (?, ?, ?, ?, 'WASTAGE', 'wastage', ?, ?, ?, ?)`,
+        [movId(), ingredient_id, -wQty, wUnit, wid, balanceAfter, req.user!.id || null, `${safeReason}${notes ? ': ' + notes : ''}`]
+      );
+
+      res.json({ success: true, id: wid, balance: balanceAfter });
+    } catch (err) {
+      console.error("Create wastage error:", err);
+      res.status(500).json({ error: "Failed to log wastage" });
+    }
+  });
+
+  // ─── Physical Counts — periodic stock-audit reconciliation ───────────────
+
+  app.get("/api/restaurant/:id/inventory/counts", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT pc.*,
+                COUNT(pci.id) AS line_count,
+                COALESCE(SUM(CASE WHEN pci.actual_qty IS NOT NULL THEN 1 ELSE 0 END), 0) AS counted_lines,
+                COALESCE(SUM(ABS(COALESCE(pci.variance, 0))), 0) AS total_abs_variance
+           FROM physical_counts pc
+           LEFT JOIN physical_count_items pci ON pci.count_id = pc.id
+          GROUP BY pc.id
+          ORDER BY pc.created_at DESC`
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("List counts error:", err);
+      res.status(500).json({ error: "Failed to fetch counts" });
+    }
+  });
+
+  app.get("/api/inventory/counts/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId!);
+      const count: any = await db.get("SELECT * FROM physical_counts WHERE id = ?", [req.params.id]);
+      if (!count) return res.status(404).json({ error: "Count not found" });
+      const items = await db.query(
+        `SELECT pci.*, i.name AS ingredient_name, i.category AS ingredient_category
+           FROM physical_count_items pci
+           LEFT JOIN ingredients i ON i.id = pci.ingredient_id
+          WHERE pci.count_id = ?
+          ORDER BY i.category, i.name`,
+        [req.params.id]
+      );
+      res.json({ ...count, items });
+    } catch (err) {
+      console.error("Get count error:", err);
+      res.status(500).json({ error: "Failed to fetch count" });
+    }
+  });
+
+  // Start a new count. Snapshots current ingredient stock as expected_qty per
+  // line — owner then walks the kitchen and fills in actual_qty as they count.
+  app.post("/api/restaurant/:id/inventory/counts", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { count_date, notes } = req.body;
+      const db = await getTenantDb(req.params.id);
+      const seq = await getNextTenantSequence(db, 'count');
+      const countId = `COUNT-${String(seq).padStart(4, '0')}`;
+      const today = (count_date && /^\d{4}-\d{2}-\d{2}$/.test(count_date)) ? count_date : new Date().toISOString().slice(0, 10);
+
+      await db.run(
+        `INSERT INTO physical_counts (id, count_date, status, counted_by_user_id, notes)
+         VALUES (?, ?, 'IN_PROGRESS', ?, ?)`,
+        [countId, today, req.user!.id || null, notes || null]
+      );
+
+      // Snapshot every active ingredient
+      const ingredients: any[] = await db.query(
+        "SELECT id, current_stock_qty, unit FROM ingredients WHERE is_active = 1 ORDER BY name"
+      );
+      for (const ing of ingredients) {
+        await db.run(
+          `INSERT INTO physical_count_items (id, count_id, ingredient_id, expected_qty, actual_qty, unit)
+           VALUES (?, ?, ?, ?, NULL, ?)`,
+          [
+            `PCI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+            countId, ing.id, Number(ing.current_stock_qty || 0), ing.unit,
+          ]
+        );
+      }
+      res.json({ success: true, id: countId, line_count: ingredients.length });
+    } catch (err) {
+      console.error("Start count error:", err);
+      res.status(500).json({ error: "Failed to start count" });
+    }
+  });
+
+  // Update one or more line items during the count.
+  // Body: { items: [{ id, actual_qty }, ...] }
+  app.patch("/api/inventory/counts/:id/items", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { items } = req.body;
+      if (!Array.isArray(items)) return res.status(400).json({ error: "items array required" });
+      const db = await getTenantDb(req.user!.restaurantId!);
+      const count: any = await db.get("SELECT status FROM physical_counts WHERE id = ?", [req.params.id]);
+      if (!count) return res.status(404).json({ error: "Count not found" });
+      if (count.status !== 'IN_PROGRESS') {
+        return res.status(409).json({ error: `Count is ${count.status} — can't edit line items` });
+      }
+      let updated = 0;
+      for (const it of items) {
+        if (!it.id) continue;
+        const actual = it.actual_qty == null ? null : Number(it.actual_qty);
+        // Recompute variance = actual - expected
+        const row: any = await db.get("SELECT expected_qty FROM physical_count_items WHERE id = ?", [it.id]);
+        if (!row) continue;
+        const variance = actual == null ? null : actual - Number(row.expected_qty || 0);
+        await db.run(
+          "UPDATE physical_count_items SET actual_qty = ?, variance = ? WHERE id = ?",
+          [actual, variance, it.id]
+        );
+        updated++;
+      }
+      res.json({ success: true, updated });
+    } catch (err) {
+      console.error("Update count items error:", err);
+      res.status(500).json({ error: "Failed to update count items" });
+    }
+  });
+
+  // Complete the count. Reconciles every line where actual_qty was filled —
+  // for each non-zero variance, posts a COUNT_ADJUSTMENT movement and brings
+  // ingredients.current_stock_qty in line with reality.
+  app.post("/api/inventory/counts/:id/complete", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId!);
+      const count: any = await db.get("SELECT * FROM physical_counts WHERE id = ?", [req.params.id]);
+      if (!count) return res.status(404).json({ error: "Count not found" });
+      if (count.status !== 'IN_PROGRESS') {
+        return res.status(409).json({ error: `Count already ${count.status}` });
+      }
+      const items: any[] = await db.query(
+        `SELECT * FROM physical_count_items WHERE count_id = ? AND actual_qty IS NOT NULL`,
+        [req.params.id]
+      );
+      let reconciled = 0;
+      for (const it of items) {
+        const variance = Number(it.variance || 0);
+        if (variance === 0) continue;  // no adjustment needed
+        // Bring ingredient stock to actual_qty
+        const updated: any[] = await db.query(
+          `UPDATE ingredients SET current_stock_qty = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? RETURNING current_stock_qty`,
+          [Number(it.actual_qty), it.ingredient_id]
+        );
+        const balanceAfter = Number(updated[0]?.current_stock_qty || it.actual_qty);
+        await db.run(
+          `INSERT INTO stock_movements
+            (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, recorded_by_user_id, notes)
+           VALUES (?, ?, ?, ?, 'COUNT_ADJUSTMENT', 'count', ?, ?, ?, ?)`,
+          [
+            movId(), it.ingredient_id, variance, it.unit,
+            req.params.id, balanceAfter, req.user!.id || null,
+            `Reconciled from count ${req.params.id}: expected ${it.expected_qty} → actual ${it.actual_qty}`,
+          ]
+        );
+        reconciled++;
+      }
+      await db.run(
+        "UPDATE physical_counts SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [req.params.id]
+      );
+      res.json({ success: true, reconciled });
+    } catch (err) {
+      console.error("Complete count error:", err);
+      res.status(500).json({ error: "Failed to complete count" });
+    }
+  });
+
   // ── Import Token: SUPER_ADMIN generates a scoped token for any restaurant ──
   // Allows admins to run menu imports without knowing the owner's password.
   // POST /api/auth/import-token  { loginId, password, restaurantId }
@@ -6420,6 +6759,14 @@ async function startServer() {
         invoice_status: invoiceStatus,
       });
 
+      // ── Inventory: auto-deduct ingredients per recipe (non-blocking) ─────
+      // Fire-and-forget — must NEVER fail an order. If recipes don't exist for
+      // an item, that's fine; we silently skip. If the deduction throws, the
+      // order is already INSERTed and the response sent.
+      deductIngredientsForOrder(db, id, items, req.params.id).catch(err => {
+        console.warn(`[inventory] Deduction failed for order ${id}:`, err);
+      });
+
       // ── Notifications (non-blocking) ─────────────────────────────────────
       const itemLabels = (items as any[]).map((i: any) =>
         `${i.name || i.item_name || 'Item'} x${i.quantity ?? 1}`
@@ -6535,6 +6882,16 @@ async function startServer() {
       params.push(req.params.id);
 
       await db.run(query, params);
+
+      // ── Inventory: cancellation reversal (idempotent, non-blocking) ─────
+      // If this PATCH transitioned the order to CANCELLED, restore the stock
+      // that was deducted when the order was originally placed. Guarded by
+      // orders.inventory_reverted so a second cancel is a no-op.
+      if (status && String(status).toUpperCase() === 'CANCELLED') {
+        revertIngredientsForOrder(db, req.params.id).catch(err => {
+          console.warn(`[inventory] Reversal failed for order ${req.params.id}:`, err);
+        });
+      }
 
       // Broadcast ORDER_UPDATE via WebSocket so customers/monitors get live status
       const updatedOrder = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.id]);
