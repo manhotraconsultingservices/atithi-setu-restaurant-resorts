@@ -5398,7 +5398,11 @@ async function startServer() {
         checkoutMode = resto?.checkout_mode || 'postpaid';
       }
 
-      const id = `ORD-${Date.now()}`;
+      // Date.now() is 1-ms granular — N parallel requests in the same ms would
+      // collide on PRIMARY KEY violation (caught us when 5+ cloud-kitchen orders
+      // landed simultaneously, only the first INSERT succeeded). Append a 4-char
+      // random suffix the same way manual invoices already do (server.ts:5008).
+      const id = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
       const finalTableNumber  = table_number || tableNumber;
       const finalTotalAmount  = total_amount || totalAmount;
