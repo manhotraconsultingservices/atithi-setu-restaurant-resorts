@@ -2850,8 +2850,23 @@ async function startServer() {
       const menuItem = await db.get("SELECT id FROM menu WHERE id = ?", [menuItemId]);
       if (!menuItem) return res.status(404).json({ error: "Menu item not found" });
 
-      // Wipe existing recipe rows for this menu item
-      await db.run("DELETE FROM recipes WHERE menu_item_id = ?", [menuItemId]);
+      // Tier-2 recipe versioning: instead of wiping old rows, mark them
+      // superseded by setting effective_to = NOW(). New rows then get
+      // effective_from = NOW(). This way historical orders keep deducting
+      // against the recipe that was active at order time.
+      // ?versioned=1 query param opts in (default for fresh edits); legacy
+      // bulk-import flows can pass ?versioned=0 to keep the old wipe-and-replace.
+      const versioned = String((req.query.versioned ?? '1')) !== '0';
+      if (versioned) {
+        await db.run(
+          `UPDATE recipes
+              SET effective_to = NOW()
+            WHERE menu_item_id = ? AND effective_to IS NULL`,
+          [menuItemId]
+        );
+      } else {
+        await db.run("DELETE FROM recipes WHERE menu_item_id = ?", [menuItemId]);
+      }
 
       const allowedSizes = new Set(['FULL', 'HALF', 'BOTH']);
       let inserted = 0;
@@ -2861,8 +2876,8 @@ async function startServer() {
           ? String(it.size_variant || 'BOTH').toUpperCase()
           : 'BOTH';
         await db.run(
-          `INSERT INTO recipes (id, menu_item_id, ingredient_id, qty_per_serving, unit, size_variant, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO recipes (id, menu_item_id, ingredient_id, qty_per_serving, unit, size_variant, notes, effective_from)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             `REC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
             menuItemId,
@@ -2871,11 +2886,12 @@ async function startServer() {
             String(it.unit || 'g').toLowerCase(),
             sizeVariant,
             it.notes || null,
+            versioned ? new Date() : null,
           ]
         );
         inserted++;
       }
-      res.json({ success: true, inserted });
+      res.json({ success: true, inserted, versioned });
     } catch (err) {
       console.error("Save recipe error:", err);
       res.status(500).json({ error: "Failed to save recipe" });
@@ -5085,19 +5101,134 @@ async function startServer() {
     }
   });
 
-  // ─── Receipt OCR placeholder (Tier-3) ───────────────────────────────────
-  // Placeholder endpoint — accepts a bill image, returns suggested line items.
-  // Real implementation would call Gemini Vision / Tesseract; this stub
-  // returns a clear "feature pending" response so the UI button is wired up.
+  // ─── Receipt OCR via Gemini Vision (Tier-3) ─────────────────────────────
+  // Accepts a bill image, asks Gemini to extract structured line items, then
+  // matches each against the tenant's ingredient catalog by fuzzy name match.
+  // Returns suggestions the frontend can drop into the GRN line-items form.
+  // Falls back gracefully (returns the saved image + manual-entry hint) when
+  // GEMINI_API_KEY isn't configured or the model fails.
   app.post("/api/restaurant/:id/inventory/receipt-ocr", authenticate, upload.single('bill'), async (req: AuthRequest, res: Response) => {
     try {
       if (!req.file) return res.status(400).json({ error: "No bill file uploaded (field: 'bill')" });
-      // TODO: integrate Gemini Vision / Google Cloud Vision here.
-      // For now return a 501 so the frontend can show a "manual entry" fallback.
-      res.status(501).json({
-        error: "Receipt OCR not yet wired to a vision model",
-        bill_image_url: `/uploads/${req.file.filename}`,
-        hint: "The bill image was saved. Use it as a reference and enter line items manually.",
+      const billUrl = `/uploads/${req.file.filename}`;
+      const filePath = path.join(process.cwd(), 'public', 'uploads', req.file.filename);
+
+      const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+      if (!GEMINI_API_KEY || GEMINI_API_KEY === 'MY_GEMINI_API_KEY') {
+        return res.json({
+          success: false,
+          bill_image_url: billUrl,
+          hint: "GEMINI_API_KEY not configured — manual entry required.",
+          suggestions: [],
+        });
+      }
+
+      // Load the image
+      let imageBytes: Buffer;
+      try {
+        imageBytes = fs.readFileSync(filePath);
+      } catch {
+        return res.status(500).json({ error: "Saved bill image could not be read" });
+      }
+      const mimeType = req.file.mimetype || 'image/jpeg';
+
+      // Ask Gemini Vision to extract line items
+      const prompt =
+        "Extract all line items from this supplier bill / invoice / receipt. " +
+        "Return a strict JSON array of objects with these keys: " +
+        "name (string), qty (number), unit (string like kg/g/l/ml/unit/bottle), unit_price (number, ₹), line_total (number). " +
+        "If the bill has a header total, also include a meta key: " +
+        "{ supplier_name, bill_number, bill_date, total_amount }. " +
+        "Wrap the entire response in: ```json\n[ ... ]\n```. No preamble, no commentary.";
+
+      let extracted: any[] = [];
+      let meta: any = null;
+      try {
+        const { GoogleGenAI } = await import('@google/genai');
+        const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+        const visionModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+        let raw: string | null = null;
+        for (const modelName of visionModels) {
+          if (raw) break;
+          try {
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: [{
+                role: 'user',
+                parts: [
+                  { text: prompt },
+                  { inlineData: { mimeType, data: imageBytes.toString('base64') } } as any,
+                ],
+              }] as any,
+            });
+            const parts = (response as any).candidates?.[0]?.content?.parts || [];
+            for (const part of parts) {
+              if (part.text) { raw = part.text; break; }
+            }
+          } catch (modelErr: any) {
+            console.warn(`[ocr] ${modelName} failed: ${(modelErr?.message || '').slice(0, 120)}`);
+          }
+        }
+        if (raw) {
+          // Strip ```json fences if present
+          const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+          const jsonText = jsonMatch ? jsonMatch[1].trim() : raw.trim();
+          const parsed = JSON.parse(jsonText);
+          if (Array.isArray(parsed)) {
+            extracted = parsed;
+          } else if (parsed && Array.isArray(parsed.items)) {
+            extracted = parsed.items;
+            meta = parsed.meta || null;
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[ocr] Vision call failed: ${(err?.message || '').slice(0, 150)}`);
+      }
+
+      // Match each extracted item against the catalog by fuzzy name
+      const db = await getTenantDb(req.params.id);
+      const catalog: any[] = await db.query(
+        "SELECT id, name, unit, default_unit_price FROM ingredients WHERE is_active = 1"
+      );
+      const norm = (s: string) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const suggestions = extracted.map((line: any) => {
+        const lineNorm = norm(line.name);
+        // Score by token overlap
+        let best: any = null, bestScore = 0;
+        for (const ing of catalog) {
+          const ingNorm = norm(ing.name);
+          if (!lineNorm || !ingNorm) continue;
+          const lineTokens = new Set(lineNorm.split(' '));
+          const ingTokens = ingNorm.split(' ');
+          let hits = 0;
+          for (const t of ingTokens) if (lineTokens.has(t)) hits++;
+          const score = hits / Math.max(1, ingTokens.length);
+          if (score > bestScore) { bestScore = score; best = ing; }
+        }
+        return {
+          extracted: {
+            name: line.name,
+            qty: Number(line.qty) || 0,
+            unit: String(line.unit || 'unit').toLowerCase(),
+            unit_price: Number(line.unit_price) || 0,
+            line_total: Number(line.line_total) || 0,
+          },
+          match: best && bestScore >= 0.4 ? {
+            ingredient_id: best.id,
+            ingredient_name: best.name,
+            stock_unit: best.unit,
+            confidence: Math.round(bestScore * 100),
+          } : null,
+        };
+      });
+
+      res.json({
+        success: extracted.length > 0,
+        bill_image_url: billUrl,
+        meta,
+        suggestions,
+        line_count: extracted.length,
+        matched_count: suggestions.filter((s: any) => s.match).length,
       });
     } catch (err) {
       console.error("Receipt OCR error:", err);

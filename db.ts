@@ -745,6 +745,18 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE recipes ADD COLUMN IF NOT EXISTS effective_to TIMESTAMP");
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_recipes_effective ON recipes (menu_item_id, effective_from, effective_to)`);
 
+  // Migrate the old hard unique index to a partial one that only enforces
+  // uniqueness for active rows (effective_to IS NULL). This lets the same
+  // (menu_item_id, ingredient_id, size_variant) appear multiple times across
+  // historical versions while still preventing duplicate active rows.
+  // Drop only if it exists; ignore failures (already migrated, or never present).
+  await db.exec(`DROP INDEX IF EXISTS idx_recipes_unique`).catch(() => {});
+  await db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_recipes_unique_active
+      ON recipes (menu_item_id, ingredient_id, size_variant)
+      WHERE effective_to IS NULL
+  `).catch(() => {});
+
   // Supplier price history — auto-populated on every GRN line so the owner
   // can see how a supplier's price has moved over time (and spot price hikes).
   // One row per (supplier, ingredient, observation_at).
