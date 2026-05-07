@@ -8917,15 +8917,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 {/* Login credentials box */}
                 <div className="mx-5 mt-4 bg-[#1a1a1a] rounded-2xl p-4 space-y-3">
                   <p className="text-[11px] font-bold uppercase tracking-widest text-white/40">Login Credentials</p>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-[11px] text-white/50 mb-0.5">Restaurant ID</p>
-                      <p className="font-mono font-bold text-sm text-white">{restaurantId}</p>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[11px] text-white/50 mb-0.5">Restaurant</p>
+                      <p className="font-bold text-sm text-white truncate" title={restaurantId}>
+                        {restaurant?.name || 'Atithi-Setu'}
+                      </p>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right min-w-0">
                       <p className="text-[11px] text-white/50 mb-0.5">Login ID</p>
                       {s.login_id ? (
-                        <p className="font-mono font-bold text-sm text-emerald-400">{s.login_id}</p>
+                        <p className="font-mono font-bold text-sm text-emerald-400 truncate">{s.login_id}</p>
                       ) : (
                         <p className="text-[11px] italic text-white/30">Not set</p>
                       )}
