@@ -4119,6 +4119,137 @@ async function startServer() {
   // dashboard food-cost-% > 2000 %. Requires owner auth + an explicit
   // threshold so this can't be misused to silently rewrite history.
   // Body: { ingredient_ids?: string[], before_date?: ISO, threshold?: number }
+  // ─── Admin: seed synthetic consumption history ──────────────────────────
+  // For demos / new tenants — generates backdated CONSUMPTION movements over
+  // the last N days with weekday-aware variance and per-ingredient daily rates.
+  // Does NOT touch ingredients.current_stock_qty (current stock stays as-is);
+  // only writes to stock_movements so the forecast cron has signal to chew on.
+  //
+  // Body: {
+  //   days?: 60,                      // window length (default 60)
+  //   ingredients: [{
+  //     id: string,
+  //     daily_rate: number,           // baseline qty consumed per day (in stock unit)
+  //     weekday_factors?: number[],   // length-7 multipliers, [Sun..Sat]
+  //     noise?: number                // ±fraction of daily_rate to add as randomness (default 0.15)
+  //   }],
+  //   wastage_rate?: 0.02,            // fraction of consumption that becomes wastage events
+  //   purge_existing?: false,         // if true, deletes synthetic rows tagged with 'seed' first
+  // }
+  //
+  // Idempotent if purge_existing=true: re-running with the same config replaces.
+  app.post("/api/restaurant/:id/inventory/admin/seed-consumption-history", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const days = Math.max(7, Math.min(120, Number(req.body?.days || 60)));
+      const wastageRate = Math.max(0, Math.min(0.15, Number(req.body?.wastage_rate ?? 0.02)));
+      const ingredients: any[] = Array.isArray(req.body?.ingredients) ? req.body.ingredients : [];
+      if (ingredients.length === 0) return res.status(400).json({ error: "ingredients[] required" });
+
+      // Optional purge of previously-seeded synthetic rows (tagged via reference_type='seed')
+      let purged = 0;
+      if (req.body?.purge_existing) {
+        const del: any[] = await db.query(
+          "DELETE FROM stock_movements WHERE reference_type = 'seed' RETURNING id"
+        );
+        purged = del.length;
+      }
+
+      const reasons = ['SPOILAGE', 'BURN', 'DROPPED', 'EXPIRY'];
+      let consumptionRows = 0, wastageRows = 0;
+
+      for (const ingDef of ingredients) {
+        if (!ingDef.id || !ingDef.daily_rate) continue;
+        const dailyRate = Math.max(0, Number(ingDef.daily_rate));
+        if (dailyRate <= 0) continue;
+        const noise = Math.max(0, Math.min(0.5, Number(ingDef.noise ?? 0.15)));
+        // Default weekday factors: Mon slow, Fri-Sun busy. [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+        const wkFactors: number[] = Array.isArray(ingDef.weekday_factors) && ingDef.weekday_factors.length === 7
+          ? ingDef.weekday_factors.map((n: any) => Math.max(0, Number(n) || 0))
+          : [1.4, 0.7, 0.85, 0.9, 1.0, 1.3, 1.5];
+
+        // Look up the canonical unit for the audit log
+        const ing: any = await db.get("SELECT unit, current_stock_qty FROM ingredients WHERE id = ?", [ingDef.id]);
+        if (!ing) continue;
+        const unit = String(ing.unit || 'unit');
+
+        // Walk back `days` days from yesterday (skip today — could collide with real activity)
+        for (let dayOffset = days; dayOffset >= 1; dayOffset--) {
+          const dayDate = new Date(Date.now() - dayOffset * 86400000);
+          // Spread 2-4 consumption events across business hours (10:00 → 22:30 IST)
+          const eventsToday = 2 + Math.floor(Math.random() * 3);
+          const wd = dayDate.getUTCDay();
+          const factor = wkFactors[wd] ?? 1;
+          const dayTotal = dailyRate * factor * (1 + (Math.random() * 2 - 1) * noise);
+          if (dayTotal <= 0) continue;
+
+          // Distribute the day's consumption across the events with random weights
+          const weights = Array.from({ length: eventsToday }, () => 0.5 + Math.random());
+          const wsum = weights.reduce((a, b) => a + b, 0);
+          for (let e = 0; e < eventsToday; e++) {
+            const qty = (dayTotal * weights[e]) / wsum;
+            if (qty <= 0) continue;
+            // Random business-hour timestamp (10:00–22:30 IST = 04:30–17:00 UTC)
+            const minutesIntoDay = 270 + Math.floor(Math.random() * (1020 - 270));
+            const ts = new Date(dayDate);
+            ts.setUTCHours(0, minutesIntoDay, Math.floor(Math.random() * 60), 0);
+
+            // We don't recompute true balance_after for synthetic rows — leave 0 to
+            // make it visually obvious in the audit log that these are synthetic.
+            // Forecast logic ignores balance_after; only uses qty_delta + recorded_at.
+            await db.run(
+              `INSERT INTO stock_movements
+                 (id, ingredient_id, qty_delta, unit, movement_type,
+                  reference_type, reference_id, balance_after, recorded_at, notes)
+               VALUES (?, ?, ?, ?, 'CONSUMPTION', 'seed', ?, 0, ?, 'Synthetic consumption (admin seed)')`,
+              [
+                `MOV-SEED-${ts.getTime()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+                ingDef.id, -qty, unit, `seed-${dayOffset}d-e${e}`, ts.toISOString(),
+              ]
+            ).catch(() => {});
+            consumptionRows++;
+
+            // Sprinkle wastage at the configured rate
+            if (Math.random() < wastageRate) {
+              const wQty = qty * (0.05 + Math.random() * 0.20);
+              const wId = `WAST-SEED-${ts.getTime()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+              const reason = reasons[Math.floor(Math.random() * reasons.length)];
+              await db.run(
+                `INSERT INTO wastage_logs (id, ingredient_id, qty, unit, reason, notes, logged_at)
+                 VALUES (?, ?, ?, ?, ?, 'Synthetic wastage (admin seed)', ?)`,
+                [wId, ingDef.id, wQty, unit, reason, ts.toISOString()]
+              ).catch(() => {});
+              await db.run(
+                `INSERT INTO stock_movements
+                   (id, ingredient_id, qty_delta, unit, movement_type,
+                    reference_type, reference_id, balance_after, recorded_at, notes)
+                 VALUES (?, ?, ?, ?, 'WASTAGE', 'seed', ?, 0, ?, ?)`,
+                [
+                  `MOV-SEED-W-${ts.getTime()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
+                  ingDef.id, -wQty, unit, wId, ts.toISOString(), `Synthetic wastage: ${reason}`,
+                ]
+              ).catch(() => {});
+              wastageRows++;
+            }
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        days_seeded: days,
+        ingredients_processed: ingredients.length,
+        consumption_rows_inserted: consumptionRows,
+        wastage_rows_inserted: wastageRows,
+        previously_purged: purged,
+        next_step: `POST /api/restaurant/${req.params.id}/inventory/forecast/recompute to populate consumption_forecasts`,
+      });
+    } catch (err) {
+      console.error("Seed consumption history error:", err);
+      res.status(500).json({ error: "Failed to seed consumption history" });
+    }
+  });
+
   app.post("/api/restaurant/:id/inventory/admin/purge-corrupt-movements", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
