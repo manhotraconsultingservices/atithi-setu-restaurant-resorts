@@ -3542,6 +3542,127 @@ function HotelInventoryPanel({ items, onCreate, onDelete }: {
   );
 }
 
+function SmartPoPreviewModal({ groups, submitting, onClose, onConfirm }: {
+  groups: any[];
+  submitting: boolean;
+  onClose: () => void;
+  onConfirm: (selectedGroups: any[]) => void;
+}) {
+  // Local editable copy with selection toggles per group + per item
+  const [state, setState] = useState(() => groups.map(g => ({
+    ...g,
+    _selected: !!g.supplier_id,
+    items: g.items.map((it: any) => ({ ...it, _selected: true })),
+  })));
+  const totalGrandTotal = state.reduce((s, g) => s + (g._selected ? g.items.filter((i: any) => i._selected).reduce((ss: number, i: any) => ss + i.line_total + i.line_total * (i.gst_percent / 100), 0) : 0), 0);
+  const totalSelectedGroups = state.filter(g => g._selected && g.supplier_id && g.items.some((i: any) => i._selected)).length;
+
+  const updateGroup = (idx: number, fn: (g: any) => any) => {
+    setState(s => s.map((g, i) => i === idx ? fn(g) : g));
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl max-w-5xl w-full max-h-[90vh] flex flex-col shadow-2xl">
+        <div className="px-6 py-4 border-b border-[#cc5a16]/10 flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-[#1a1208] flex items-center gap-2"><Zap size={20} className="text-[#cc5a16]" /> Smart PO Preview</h2>
+            <p className="text-xs text-[#9c8e85] mt-0.5">Auto-grouped by default supplier · {state.length} group{state.length !== 1 ? 's' : ''} · {totalSelectedGroups} ready to create</p>
+          </div>
+          <button onClick={onClose} className="text-[#9c8e85] hover:text-[#1a1208]"><X size={20} /></button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
+          {state.map((g, gIdx) => {
+            const selectedItems = g.items.filter((i: any) => i._selected);
+            const groupSubtotal = selectedItems.reduce((s: number, i: any) => s + i.line_total, 0);
+            const groupGst = selectedItems.reduce((s: number, i: any) => s + i.line_total * (i.gst_percent / 100), 0);
+            const noSupplier = !g.supplier_id;
+            return (
+              <div key={gIdx} className={cn(
+                "rounded-2xl border-2 p-4",
+                noSupplier ? "border-amber-300 bg-amber-50/30" :
+                g._selected ? "border-[#cc5a16] bg-[#faf7f2]" : "border-[#cc5a16]/10"
+              )}>
+                <div className="flex items-center gap-3 mb-3">
+                  {!noSupplier && (
+                    <input type="checkbox" checked={g._selected}
+                      onChange={e => updateGroup(gIdx, gg => ({ ...gg, _selected: e.target.checked }))}
+                      className="w-5 h-5 rounded" />
+                  )}
+                  <div className="flex-1">
+                    <p className="font-bold text-[#1a1208]">{g.supplier_name || <span className="text-amber-700">⚠ No default supplier set</span>}</p>
+                    {g.lead_time_days && <p className="text-xs text-[#9c8e85]">Lead time: {g.lead_time_days} day{g.lead_time_days !== 1 ? 's' : ''}</p>}
+                    {noSupplier && <p className="text-xs text-amber-700">Set a default supplier on these ingredients before they can be auto-PO'd.</p>}
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs text-[#9c8e85]">Subtotal · GST</p>
+                    <p className="font-mono font-bold">₹{groupSubtotal.toFixed(0)} · ₹{groupGst.toFixed(0)}</p>
+                    <p className="text-sm font-bold text-[#cc5a16]">Grand: ₹{(groupSubtotal + groupGst).toFixed(0)}</p>
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] border-b border-[#cc5a16]/10">
+                        <th className="px-2 py-1"></th>
+                        <th className="px-2 py-1">Ingredient</th>
+                        <th className="px-2 py-1 text-right">Qty</th>
+                        <th className="px-2 py-1 text-right">Rate</th>
+                        <th className="px-2 py-1 text-right">Line</th>
+                        <th className="px-2 py-1 text-right">GST%</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {g.items.map((it: any, iIdx: number) => (
+                        <tr key={iIdx} className="border-b border-[#cc5a16]/5">
+                          <td className="px-2 py-1">
+                            <input type="checkbox" checked={it._selected}
+                              disabled={noSupplier || !g._selected}
+                              onChange={e => updateGroup(gIdx, gg => ({ ...gg, items: gg.items.map((x: any, j: number) => j === iIdx ? { ...x, _selected: e.target.checked } : x) }))} />
+                          </td>
+                          <td className="px-2 py-1 font-semibold">{it.ingredient_name}</td>
+                          <td className="px-2 py-1 text-right">
+                            <input type="number" min={0} step="0.01" value={it.qty_ordered}
+                              disabled={noSupplier || !g._selected || !it._selected}
+                              onChange={e => updateGroup(gIdx, gg => ({ ...gg, items: gg.items.map((x: any, j: number) => j === iIdx ? { ...x, qty_ordered: Number(e.target.value), line_total: Number(e.target.value) * x.unit_price } : x) }))}
+                              className="w-20 px-2 py-1 rounded-lg border border-[#cc5a16]/15 text-sm font-mono text-right disabled:opacity-50" />
+                            <span className="text-xs text-[#9c8e85] ml-1">{it.unit}</span>
+                          </td>
+                          <td className="px-2 py-1 text-right font-mono">₹{Number(it.unit_price).toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right font-mono font-bold">₹{Number(it.line_total).toFixed(0)}</td>
+                          <td className="px-2 py-1 text-right text-xs">{it.gst_percent}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="px-6 py-4 border-t border-[#cc5a16]/10 flex items-center justify-between gap-3">
+          <div className="text-sm">
+            <span className="text-[#9c8e85]">Total selected:</span>
+            <span className="font-bold text-[#cc5a16] ml-2">₹{totalGrandTotal.toFixed(0)}</span>
+            <span className="text-xs text-[#9c8e85] ml-2">({totalSelectedGroups} draft PO{totalSelectedGroups !== 1 ? 's' : ''})</span>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>
+            <button
+              disabled={submitting || totalSelectedGroups === 0}
+              onClick={() => onConfirm(state.filter(g => g._selected && g.supplier_id).map(g => ({ ...g, items: g.items.filter((i: any) => i._selected) })).filter(g => g.items.length > 0))}
+              className="px-5 py-2.5 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white disabled:opacity-50">
+              {submitting ? 'Creating PO…' : `Create ${totalSelectedGroups} Draft PO${totalSelectedGroups !== 1 ? 's' : ''}`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LocationsPanel({ locations, onCreate, onDelete }: {
   locations: any[]; onCreate: (name: string, kind: string) => void; onDelete: (id: string) => void;
 }) {
@@ -3709,6 +3830,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingSupplier, setEditingSupplier] = useState<any | null>(null);
   const [poFilter, setPOFilter] = useState<'ALL' | 'DRAFT' | 'SENT' | 'PARTIAL' | 'RECEIVED' | 'CANCELLED'>('ALL');
   const [creatingPO, setCreatingPO] = useState(false);
+  // Smart PO multi-supplier preview (Wave 2)
+  const [smartPoPreview, setSmartPoPreview] = useState<any[] | null>(null);
+  const [smartPoSubmitting, setSmartPoSubmitting] = useState(false);
   const [viewingPO, setViewingPO] = useState<any | null>(null);
   const [creatingGRN, setCreatingGRN] = useState<{ poId?: string } | null>(null);
   const [viewingGRN, setViewingGRN] = useState<any | null>(null);
@@ -6520,8 +6644,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               ) : (
                 <>
-                  {/* ── KPI strip ── */}
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                  {/* ── KPI strip — mobile-friendly: 2-col on phone, 3-col tablet, 6-col desktop ── */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-3">
                     {([
                       { label: 'Stock Value',     value: '₹' + Math.round(inventoryDashboard.kpis.total_stock_value).toLocaleString('en-IN'), accent: '#0E7490' },
                       { label: 'Below Reorder',   value: inventoryDashboard.kpis.items_below_reorder, accent: '#dc2626', sub: 'items' },
@@ -6530,10 +6654,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       { label: 'Food Cost %',     value: inventoryDashboard.kpis.food_cost_pct + '%', accent: inventoryDashboard.kpis.food_cost_pct > 35 ? '#dc2626' : '#10b981' },
                       { label: 'Pending POs',     value: '₹' + Math.round(inventoryDashboard.kpis.pending_po_value).toLocaleString('en-IN'), accent: '#7c3aed' },
                     ] as any[]).map((k: any) => (
-                      <div key={k.label} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm">
-                        <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{k.label}</p>
-                        <p className="text-2xl font-bold font-mono mt-1" style={{ color: k.accent }}>{k.value}</p>
-                        {k.sub && <p className="text-[10px] text-[#9c8e85] uppercase">{k.sub}</p>}
+                      <div key={k.label} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-3 sm:p-4 shadow-sm">
+                        <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] truncate">{k.label}</p>
+                        <p className="text-lg sm:text-2xl font-bold font-mono mt-1 whitespace-nowrap overflow-hidden text-ellipsis" style={{ color: k.accent }}>{k.value}</p>
+                        {k.sub && <p className="text-[9px] sm:text-[10px] text-[#9c8e85] uppercase">{k.sub}</p>}
                       </div>
                     ))}
                   </div>
@@ -6860,6 +6984,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
             // ── Sort ──
             const sortDir = ingSort.dir === 'desc' ? -1 : 1;
+            const isManual = ingSort.key === 'manual';
             filtered = [...filtered].sort((a: any, b: any) => {
               const valFor = (x: any) => {
                 switch (ingSort.key) {
@@ -6870,6 +6995,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   case 'reorder':  return Number(x.reorder_point || 0);
                   case 'par':      return Number(x.par_level || 0);
                   case 'price':    return Number(x.default_unit_price || 0);
+                  case 'manual':   return Number(x.display_order ?? 9999);
                   default:         return String(x.name || '').toLowerCase();
                 }
               };
@@ -6878,6 +7004,29 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               if (A > B) return  1 * sortDir;
               return 0;
             });
+
+            // ── Drag-to-reorder helpers (active only when sort = 'manual') ──
+            const moveIngredient = async (idx: number, delta: number) => {
+              const newIdx = idx + delta;
+              if (newIdx < 0 || newIdx >= filtered.length) return;
+              // Build new ordered list — swap idx and newIdx
+              const reordered = [...filtered];
+              [reordered[idx], reordered[newIdx]] = [reordered[newIdx], reordered[idx]];
+              // Optimistic local update
+              setInventoryIngredients(prev => {
+                // Apply the manual order to the global list
+                const orderMap = new Map(reordered.map((it: any, i: number) => [it.id, i + 1]));
+                return prev.map((it: any) => orderMap.has(it.id)
+                  ? { ...it, display_order: orderMap.get(it.id) }
+                  : it
+                );
+              });
+              await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients/reorder`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ ordered_ids: reordered.map((it: any) => it.id) }),
+              }).catch(() => {});
+            };
 
             // Categories present in current data — for dropdown options
             const cats = Array.from(new Set(inventoryIngredients.map((i: any) => i.category).filter(Boolean))).sort();
@@ -6963,6 +7112,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         className="px-3 py-2 text-xs font-bold text-[#cc5a16] hover:underline"
                       >Clear</button>
                     )}
+                    <button
+                      onClick={() => setIngSort(prev => prev.key === 'manual' ? { key: 'name', dir: 'asc' } : { key: 'manual', dir: 'asc' })}
+                      className={cn(
+                        "px-3 py-2 text-xs font-bold rounded-xl border transition-all",
+                        isManual
+                          ? "bg-[#cc5a16] text-white border-[#cc5a16]"
+                          : "bg-white text-[#cc5a16] border-[#cc5a16]/30 hover:bg-[#cc5a16]/5"
+                      )}
+                      title="Toggle manual / drag-to-reorder mode"
+                    >{isManual ? '✓ Reordering' : '⇅ Reorder'}</button>
                     <span className="text-xs text-[#9c8e85] ml-auto">{filtered.length} of {inventoryIngredients.length}</span>
                   </div>
                 )}
@@ -7014,7 +7173,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-[#cc5a16]/5">
-                          {filtered.map((ing: any) => {
+                          {filtered.map((ing: any, idx: number) => {
                             const stock = Number(ing.current_stock_qty || 0);
                             const reorder = Number(ing.reorder_point || 0);
                             const isLow = reorder > 0 && stock <= reorder;
@@ -7049,6 +7208,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 <td className="px-5 py-3 text-right font-mono text-[#6b5d52]">{ing.default_unit_price ? `₹${Number(ing.default_unit_price).toFixed(2)}` : '—'}</td>
                                 <td className="px-5 py-3">
                                   <div className="flex gap-1.5">
+                                    {isManual && (
+                                      <>
+                                        <button
+                                          onClick={() => moveIngredient(idx, -1)}
+                                          disabled={idx === 0}
+                                          className="p-1.5 rounded-lg hover:bg-[#cc5a16]/10 text-[#cc5a16] disabled:opacity-30"
+                                          title="Move up"
+                                        >▲</button>
+                                        <button
+                                          onClick={() => moveIngredient(idx, +1)}
+                                          disabled={idx === filtered.length - 1}
+                                          className="p-1.5 rounded-lg hover:bg-[#cc5a16]/10 text-[#cc5a16] disabled:opacity-30"
+                                          title="Move down"
+                                        >▼</button>
+                                      </>
+                                    )}
                                     <button
                                       onClick={() => setEditingIngredient(ing)}
                                       className="p-1.5 rounded-lg hover:bg-[#cc5a16]/5 text-[#6b5d52] hover:text-[#cc5a16]"
@@ -7238,6 +7413,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <button onClick={exportPOsCsv} disabled={inventoryPOs.length === 0} title="Export all POs (with line items) as CSV"
                     className="px-4 py-2.5 rounded-2xl text-xs font-bold border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#faf7f2] flex items-center gap-1.5 transition-all disabled:opacity-50">
                     <Download size={14}/> Export CSV
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
+                      try {
+                        const res = await fetch(`/api/restaurant/${restaurantId}/inventory/smart-po-preview`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify({}),
+                        });
+                        const data = await res.json();
+                        if (!data.groups || data.groups.length === 0) {
+                          alert('No items below reorder point — nothing to suggest right now.');
+                          return;
+                        }
+                        setSmartPoPreview(data.groups);
+                      } catch (e: any) {
+                        alert(e.message || 'Failed to generate smart PO preview');
+                      }
+                    }}
+                    className="bg-white text-[#cc5a16] border-2 border-[#cc5a16] px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#cc5a16]/5 transition-all"
+                    title="Auto-suggest a multi-supplier PO batch from current low-stock items"
+                  >
+                    <Zap size={14} /> Smart PO
                   </button>
                   <button
                     onClick={() => {
@@ -7869,6 +8068,42 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ingredients={inventoryIngredients}
               onClose={() => setCreatingPO(false)}
               onSaved={() => { setCreatingPO(false); fetchInventoryPOs(); }}
+            />
+          )}
+          {smartPoPreview && (
+            <SmartPoPreviewModal
+              groups={smartPoPreview}
+              submitting={smartPoSubmitting}
+              onClose={() => setSmartPoPreview(null)}
+              onConfirm={async (selectedGroups) => {
+                setSmartPoSubmitting(true);
+                let created = 0, failed = 0;
+                for (const g of selectedGroups) {
+                  if (!g.supplier_id) { failed++; continue; }
+                  try {
+                    await fetch(`/api/restaurant/${restaurantId}/inventory/purchase-orders`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                      body: JSON.stringify({
+                        supplier_id: g.supplier_id,
+                        notes: 'Auto-generated by Smart PO',
+                        items: g.items.map((it: any) => ({
+                          ingredient_id: it.ingredient_id,
+                          qty_ordered: it.qty_ordered,
+                          unit: it.unit,
+                          unit_price: it.unit_price,
+                          gst_percent: it.gst_percent,
+                        })),
+                      }),
+                    });
+                    created++;
+                  } catch { failed++; }
+                }
+                setSmartPoSubmitting(false);
+                setSmartPoPreview(null);
+                fetchInventoryPOs();
+                alert(`Smart PO complete — ${created} draft PO${created !== 1 ? 's' : ''} created${failed ? `, ${failed} failed` : ''}.`);
+              }}
             />
           )}
           {viewingPO && (
@@ -19836,7 +20071,9 @@ function PhysicalCountModal({ token, count, onClose, onUpdated, onCompleted }: {
           {Object.entries(byCategory).map(([category, catItems]) => (
             <div key={category}>
               <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">{category}</p>
-              <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+
+              {/* Desktop / tablet: table layout */}
+              <div className="hidden md:block bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
                     <tr>
@@ -19882,6 +20119,70 @@ function PhysicalCountModal({ token, count, onClose, onUpdated, onCompleted }: {
                     })}
                   </tbody>
                 </table>
+              </div>
+
+              {/* Mobile: stacked cards with big tap targets + ± steppers */}
+              <div className="md:hidden space-y-2">
+                {(catItems as any[]).map((it: any) => {
+                  const variance = it.variance == null ? null : Number(it.variance);
+                  const expected = Number(it.expected_qty || 0);
+                  const actual = it.actual_qty == null ? null : Number(it.actual_qty);
+                  const stepBy = (delta: number) => {
+                    const base = actual == null ? expected : actual;
+                    const next = Math.max(0, Math.round((base + delta) * 1000) / 1000);
+                    updateItem(it.id, String(next));
+                  };
+                  return (
+                    <div key={it.id} className={cn(
+                      "bg-white rounded-2xl border p-3 shadow-sm",
+                      variance == null ? "border-[#cc5a16]/15" :
+                      variance === 0 ? "border-emerald-300 bg-emerald-50/30" :
+                      "border-amber-300 bg-amber-50/30"
+                    )}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-bold text-[#1a1208] truncate">{it.ingredient_name}</p>
+                          <p className="text-[11px] text-[#6b5d52]">
+                            Expected: <span className="font-mono">{expected.toLocaleString('en-IN', { maximumFractionDigits: 3 })} {it.unit}</span>
+                          </p>
+                        </div>
+                        {savingId === it.id && <RefreshCw size={14} className="animate-spin text-[#9c8e85]" />}
+                      </div>
+                      <div className="mt-3 flex items-center gap-2">
+                        <button onClick={() => stepBy(-1)} disabled={isCompleted}
+                          className="w-12 h-12 rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/15 text-2xl font-bold text-[#cc5a16] disabled:opacity-50">−</button>
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          min={0}
+                          step="0.001"
+                          disabled={isCompleted}
+                          value={it.actual_qty == null ? '' : String(it.actual_qty)}
+                          onChange={e => updateItem(it.id, e.target.value)}
+                          placeholder={String(expected)}
+                          className="flex-1 h-12 px-3 rounded-2xl border border-[#cc5a16]/15 text-lg font-mono text-center focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20"
+                        />
+                        <button onClick={() => stepBy(+1)} disabled={isCompleted}
+                          className="w-12 h-12 rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/15 text-2xl font-bold text-[#cc5a16] disabled:opacity-50">+</button>
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {[0.1, 0.5, 1, 5].map(d => (
+                          <button key={d} onClick={() => stepBy(d)} disabled={isCompleted}
+                            className="px-2 py-1 rounded-lg bg-[#cc5a16]/10 text-[#cc5a16] text-[11px] font-bold">+{d}</button>
+                        ))}
+                        <button onClick={() => updateItem(it.id, String(expected))} disabled={isCompleted}
+                          className="ml-auto px-2 py-1 rounded-lg bg-emerald-100 text-emerald-700 text-[11px] font-bold">= Match Expected</button>
+                      </div>
+                      {variance != null && (
+                        <p className={cn("mt-2 text-xs font-mono text-right",
+                          variance === 0 ? 'text-emerald-700' :
+                          variance < 0 ? 'text-red-700' : 'text-amber-700')}>
+                          Δ {variance > 0 ? '+' : ''}{variance.toLocaleString('en-IN', { maximumFractionDigits: 3 })} {it.unit}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ))}
