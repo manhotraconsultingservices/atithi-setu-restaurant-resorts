@@ -3352,6 +3352,242 @@ const MONITOR_COL_DEFAULTS: ColDef[] = [
   { key: 'actions',  label: 'Actions',   visible: true,  sortable: false },
 ];
 
+// ── Tier-2/3 helper components (seasonality, templates, hotel inv, locations) ──
+
+function SeasonalityForm({ ingredients, onCreate }: { ingredients: any[]; onCreate: (p: any) => void }) {
+  const [type, setType] = useState<'WEEKDAY' | 'MONTH' | 'DATE' | 'RANGE'>('WEEKDAY');
+  const [key, setKey] = useState('6');
+  const [multiplier, setMultiplier] = useState('1.5');
+  const [ingredientId, setIngredientId] = useState('');
+  const [label, setLabel] = useState('');
+  const weekdays = [['0', 'Sunday'], ['1', 'Monday'], ['2', 'Tuesday'], ['3', 'Wednesday'], ['4', 'Thursday'], ['5', 'Friday'], ['6', 'Saturday']];
+  const months = [['1', 'January'], ['2', 'February'], ['3', 'March'], ['4', 'April'], ['5', 'May'], ['6', 'June'], ['7', 'July'], ['8', 'August'], ['9', 'September'], ['10', 'October'], ['11', 'November'], ['12', 'December']];
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-6 gap-2 items-end">
+      <div className="md:col-span-2">
+        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Ingredient (optional)</label>
+        <select value={ingredientId} onChange={e => setIngredientId(e.target.value)}
+          className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm">
+          <option value="">All ingredients</option>
+          {ingredients.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+        </select>
+      </div>
+      <div>
+        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Type</label>
+        <select value={type} onChange={e => { setType(e.target.value as any); setKey(e.target.value === 'WEEKDAY' ? '6' : e.target.value === 'MONTH' ? '11' : ''); }}
+          className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm">
+          <option value="WEEKDAY">Weekday</option>
+          <option value="MONTH">Month</option>
+          <option value="DATE">Single Date</option>
+          <option value="RANGE">Date Range</option>
+        </select>
+      </div>
+      <div className="md:col-span-2">
+        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Key</label>
+        {type === 'WEEKDAY' ? (
+          <select value={key} onChange={e => setKey(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm">
+            {weekdays.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+        ) : type === 'MONTH' ? (
+          <select value={key} onChange={e => setKey(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm">
+            {months.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+        ) : type === 'DATE' ? (
+          <input type="date" value={key} onChange={e => setKey(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+        ) : (
+          <input type="text" placeholder="YYYY-MM-DD..YYYY-MM-DD" value={key} onChange={e => setKey(e.target.value)}
+            className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm font-mono" />
+        )}
+      </div>
+      <div>
+        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Multiplier</label>
+        <input type="number" min="0" max="10" step="0.1" value={multiplier} onChange={e => setMultiplier(e.target.value)}
+          className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+      </div>
+      <div className="md:col-span-3">
+        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Label (optional)</label>
+        <input type="text" placeholder="e.g. Diwali bump" value={label} onChange={e => setLabel(e.target.value)}
+          className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+      </div>
+      <div className="md:col-span-3">
+        <button
+          disabled={!key || !multiplier}
+          onClick={() => {
+            onCreate({ ingredient_id: ingredientId || null, type, key, multiplier: Number(multiplier), label: label || null });
+            setLabel('');
+          }}
+          className="w-full px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">
+          Add Factor
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function NotificationTemplateEditor({ templates, onSave }: { templates: any[]; onSave: (event: string, subject: string, body: string, enabled: boolean) => void }) {
+  const KNOWN_EVENTS = [
+    'STOCK_LOW', 'STOCK_CRITICAL', 'PO_DELIVERY_DUE_TODAY', 'PHYSICAL_COUNT_DUE',
+    'ORDER_PLACED', 'ORDER_READY', 'ORDER_DELIVERED', 'BOOKING_CREATED',
+    'GUEST_CHECKED_IN', 'GUEST_CHECKED_OUT', 'BILL_REQUESTED', 'PAYMENT_RECEIVED',
+  ];
+  const map = new Map(templates.map(t => [t.event_type, t]));
+  const [drafts, setDrafts] = useState<Record<string, { subject: string; body: string; enabled: boolean }>>(() => {
+    const o: any = {};
+    KNOWN_EVENTS.forEach(e => {
+      const t = map.get(e);
+      o[e] = { subject: t?.subject_template || '', body: t?.body_template || '', enabled: t ? Number(t.enabled) !== 0 : true };
+    });
+    return o;
+  });
+  return (
+    <div className="space-y-3">
+      {KNOWN_EVENTS.map(ev => {
+        const d = drafts[ev];
+        const isOverridden = !!map.get(ev);
+        return (
+          <div key={ev} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-bold uppercase tracking-wide text-[#1a1208]">{ev}</span>
+                {isOverridden && <span className="text-[10px] bg-[#cc5a16]/10 text-[#cc5a16] px-2 py-0.5 rounded-full uppercase">Custom</span>}
+              </div>
+              <label className="flex items-center gap-2 text-xs">
+                <input type="checkbox" checked={d.enabled} onChange={e => setDrafts(s => ({ ...s, [ev]: { ...s[ev], enabled: e.target.checked } }))} />
+                Enabled
+              </label>
+            </div>
+            <input type="text" placeholder="Subject template (optional)" value={d.subject}
+              onChange={e => setDrafts(s => ({ ...s, [ev]: { ...s[ev], subject: e.target.value } }))}
+              className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm mb-2" />
+            <textarea placeholder="Body template (optional). Use {{variable}} placeholders." value={d.body}
+              onChange={e => setDrafts(s => ({ ...s, [ev]: { ...s[ev], body: e.target.value } }))}
+              rows={3}
+              className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm font-mono" />
+            <div className="mt-2 flex justify-end">
+              <button onClick={() => onSave(ev, d.subject, d.body, d.enabled)}
+                className="px-4 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase">Save</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function HotelInventoryPanel({ items, onCreate, onDelete }: {
+  items: any[]; onCreate: (p: any) => void; onDelete: (id: string) => void;
+}) {
+  const [form, setForm] = useState({ name: '', category: '', unit: 'unit', current_stock_qty: '', par_level: '', reorder_point: '', default_unit_price: '' });
+  return (
+    <div className="space-y-3">
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+        <h3 className="text-sm font-bold mb-3">Add Hotel Inventory Item</h3>
+        <div className="grid grid-cols-1 md:grid-cols-7 gap-2">
+          <input placeholder="Name (e.g. Towels — Large)" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}
+            className="md:col-span-2 px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+          <input placeholder="Category (Linen, Mini-bar…)" value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}
+            className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+          <input placeholder="Unit" value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value })}
+            className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+          <input placeholder="Stock" type="number" value={form.current_stock_qty} onChange={e => setForm({ ...form, current_stock_qty: e.target.value })}
+            className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+          <input placeholder="Par level" type="number" value={form.par_level} onChange={e => setForm({ ...form, par_level: e.target.value })}
+            className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+          <input placeholder="Price ₹" type="number" value={form.default_unit_price} onChange={e => setForm({ ...form, default_unit_price: e.target.value })}
+            className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+        </div>
+        <div className="mt-3 flex justify-end">
+          <button disabled={!form.name}
+            onClick={() => {
+              onCreate({
+                name: form.name, category: form.category || null, unit: form.unit || 'unit',
+                current_stock_qty: Number(form.current_stock_qty || 0),
+                par_level: Number(form.par_level || 0),
+                reorder_point: Number(form.reorder_point || 0),
+                default_unit_price: form.default_unit_price ? Number(form.default_unit_price) : null,
+              });
+              setForm({ name: '', category: '', unit: 'unit', current_stock_qty: '', par_level: '', reorder_point: '', default_unit_price: '' });
+            }}
+            className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">Add Item</button>
+        </div>
+      </div>
+      <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+            <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+              <th className="px-4 py-2">Name</th><th className="px-4 py-2">Category</th>
+              <th className="px-4 py-2 text-right">Stock</th><th className="px-4 py-2 text-right">Par</th>
+              <th className="px-4 py-2 text-right">Price</th><th className="px-4 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.length === 0 ? (
+              <tr><td colSpan={6} className="px-4 py-8 text-center text-[#9c8e85]">No hotel inventory items yet.</td></tr>
+            ) : items.map(it => (
+              <tr key={it.id} className="border-b border-[#cc5a16]/5">
+                <td className="px-4 py-2 font-semibold">{it.name}</td>
+                <td className="px-4 py-2 text-xs">{it.category || '—'}</td>
+                <td className="px-4 py-2 text-right font-mono">{Number(it.current_stock_qty).toFixed(0)} {it.unit}</td>
+                <td className="px-4 py-2 text-right font-mono">{Number(it.par_level).toFixed(0)}</td>
+                <td className="px-4 py-2 text-right font-mono">{it.default_unit_price ? `₹${Number(it.default_unit_price).toFixed(2)}` : '—'}</td>
+                <td className="px-4 py-2 text-right">
+                  <button onClick={() => onDelete(it.id)} className="text-xs text-red-700 hover:underline">Remove</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function LocationsPanel({ locations, onCreate, onDelete }: {
+  locations: any[]; onCreate: (name: string, kind: string) => void; onDelete: (id: string) => void;
+}) {
+  const [name, setName] = useState('');
+  const [kind, setKind] = useState('KITCHEN');
+  return (
+    <div className="space-y-3">
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 flex flex-wrap gap-2 items-end">
+        <div className="flex-1 min-w-[180px]">
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Name</label>
+          <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Walk-in cooler"
+            className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Kind</label>
+          <select value={kind} onChange={e => setKind(e.target.value)}
+            className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm">
+            <option value="KITCHEN">Kitchen</option>
+            <option value="WALKIN">Walk-in / Cold</option>
+            <option value="BAR">Bar</option>
+            <option value="STORE">Dry Store</option>
+            <option value="COMMISSARY">Commissary</option>
+          </select>
+        </div>
+        <button disabled={!name.trim()} onClick={() => { onCreate(name.trim(), kind); setName(''); }}
+          className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">Add Location</button>
+      </div>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        {locations.map(l => (
+          <div key={l.id} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-bold text-[#1a1208]">{l.name}</div>
+                <div className="text-xs text-[#9c8e85] mt-1">{l.kind}{l.is_default ? ' · Default' : ''}</div>
+              </div>
+              {!l.is_default && (
+                <button onClick={() => onDelete(l.id)} className="text-xs text-red-700 hover:underline">Remove</button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
   const [activeTab, setActiveTab] = useState<
     | 'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS'
@@ -3364,8 +3600,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   >('MONITOR');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
   const [inventorySubTab, setInventorySubTab] = useState<
-    'DASHBOARD' | 'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS'
+    'DASHBOARD' | 'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS' | 'INSIGHTS' | 'SETTINGS'
   >('DASHBOARD');
+  // Tier-2/3 insights panel — sub-tab within the INSIGHTS view
+  type InsightsPanel = 'AUDIT' | 'VARIANCE' | 'COGS' | 'PRICES' | 'BATCHES';
+  const [insightsPanel, setInsightsPanel] = useState<InsightsPanel>('AUDIT');
+  const [auditLog, setAuditLog] = useState<any[]>([]);
+  const [auditFilter, setAuditFilter] = useState<{ ingredient_id?: string; type?: string; from?: string; to?: string }>({});
+  const [varianceReport, setVarianceReport] = useState<any | null>(null);
+  const [varianceRange, setVarianceRange] = useState<{ from: string; to: string }>({
+    from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
+    to: new Date().toISOString().slice(0, 10),
+  });
+  const [cogsReport, setCogsReport] = useState<any | null>(null);
+  const [cogsRange, setCogsRange] = useState<{ from: string; to: string }>({
+    from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
+    to: new Date().toISOString().slice(0, 10),
+  });
+  const [supplierPrices, setSupplierPrices] = useState<any[]>([]);
+  const [stockBatches, setStockBatches] = useState<any[]>([]);
+  // Tier-2/3 settings panel — seasonality + notification templates + hotel inv
+  type SettingsPanel = 'SEASONALITY' | 'TEMPLATES' | 'HOTEL_INV' | 'LOCATIONS';
+  const [settingsPanel, setSettingsPanel] = useState<SettingsPanel>('SEASONALITY');
+  const [seasonalityFactors, setSeasonalityFactors] = useState<any[]>([]);
+  const [notifTemplates, setNotifTemplates] = useState<any[]>([]);
+  const [hotelInventory, setHotelInventory] = useState<any[]>([]);
+  const [storageLocations, setStorageLocations] = useState<any[]>([]);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notificationSettings, setNotificationSettings] = useState<any[]>([]);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -4641,6 +4901,94 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     alert(`Import complete — ${ok} added, ${failed} failed`);
   };
 
+  // ── Tier-2/3 Insights + Settings fetchers ──────────────────────────────
+  const fetchAuditLog = async () => {
+    if (!restaurantId) return;
+    try {
+      const params = new URLSearchParams();
+      if (auditFilter.ingredient_id) params.set('ingredient_id', auditFilter.ingredient_id);
+      if (auditFilter.type) params.set('type', auditFilter.type);
+      if (auditFilter.from) params.set('from', auditFilter.from);
+      if (auditFilter.to) params.set('to', auditFilter.to);
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/audit-log?${params}`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      setAuditLog(Array.isArray(data) ? data : []);
+    } catch { setAuditLog([]); }
+  };
+  const fetchVarianceReport = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(
+        `/api/restaurant/${restaurantId}/inventory/variance-report?from=${varianceRange.from}&to=${varianceRange.to}`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      setVarianceReport(await res.json());
+    } catch { setVarianceReport(null); }
+  };
+  const fetchCogsReport = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(
+        `/api/restaurant/${restaurantId}/inventory/cogs-report?from=${cogsRange.from}&to=${cogsRange.to}`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      setCogsReport(await res.json());
+    } catch { setCogsReport(null); }
+  };
+  const fetchSupplierPrices = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/supplier-prices`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      setSupplierPrices(Array.isArray(data) ? data : []);
+    } catch { setSupplierPrices([]); }
+  };
+  const fetchStockBatches = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/batches`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      setStockBatches(Array.isArray(data) ? data : []);
+    } catch { setStockBatches([]); }
+  };
+  const fetchSeasonalityFactors = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/seasonality`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      setSeasonalityFactors(Array.isArray(data) ? data : []);
+    } catch { setSeasonalityFactors([]); }
+  };
+  const fetchNotifTemplates = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/notification-templates`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      setNotifTemplates(Array.isArray(data) ? data : []);
+    } catch { setNotifTemplates([]); }
+  };
+  const fetchHotelInventory = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel-inventory`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      setHotelInventory(Array.isArray(data) ? data : []);
+    } catch { setHotelInventory([]); }
+  };
+  const fetchStorageLocations = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/storage-locations`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      setStorageLocations(Array.isArray(data) ? data : []);
+    } catch { setStorageLocations([]); }
+  };
+
   // Coordinated load for the active sub-tab. Always loads ingredients (everything depends on them).
   const fetchInventoryForSubTab = async () => {
     setInventoryLoading(true);
@@ -4663,6 +5011,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
       if (inventorySubTab === 'DASHBOARD') {
         promises.push(fetchInventoryDashboard());
+      }
+      if (inventorySubTab === 'INSIGHTS') {
+        // Load whichever panel is active first; others lazy-load on click.
+        if (insightsPanel === 'AUDIT') promises.push(fetchAuditLog());
+        if (insightsPanel === 'VARIANCE') promises.push(fetchVarianceReport());
+        if (insightsPanel === 'COGS') promises.push(fetchCogsReport());
+        if (insightsPanel === 'PRICES') promises.push(fetchSupplierPrices());
+        if (insightsPanel === 'BATCHES') promises.push(fetchStockBatches());
+      }
+      if (inventorySubTab === 'SETTINGS') {
+        if (settingsPanel === 'SEASONALITY') promises.push(fetchSeasonalityFactors());
+        if (settingsPanel === 'TEMPLATES') promises.push(fetchNotifTemplates());
+        if (settingsPanel === 'HOTEL_INV') promises.push(fetchHotelInventory());
+        if (settingsPanel === 'LOCATIONS') promises.push(fetchStorageLocations());
       }
       await Promise.all(promises);
     } finally { setInventoryLoading(false); }
@@ -6124,6 +6486,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['GOODS_RECEIPTS', 'Goods Receipts', inventoryGRNs.length],
               ['WASTAGE', 'Wastage', inventoryWastage.length],
               ['PHYSICAL_COUNTS', 'Physical Counts', inventoryCounts.length],
+              ['INSIGHTS', 'Insights', 0],
+              ['SETTINGS', 'Settings', 0],
             ] as [typeof inventorySubTab, string, number][]).map(([id, label, count]) => (
               <button
                 key={id}
@@ -7683,6 +8047,537 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 </div>
               </motion.div>
+            </div>
+          )}
+
+          {/* ── INSIGHTS sub-tab — Audit Log · Variance Report · COGS · Supplier Prices · Stock Batches ── */}
+          {inventorySubTab === 'INSIGHTS' && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2 border-b border-[#cc5a16]/10 pb-2">
+                {([
+                  ['AUDIT', 'Audit Log'],
+                  ['VARIANCE', 'Variance Report'],
+                  ['COGS', 'COGS Report'],
+                  ['PRICES', 'Supplier Prices'],
+                  ['BATCHES', 'Stock Batches (FIFO)'],
+                ] as [InsightsPanel, string][]).map(([id, label]) => (
+                  <button
+                    key={id}
+                    onClick={() => {
+                      setInsightsPanel(id);
+                      if (id === 'AUDIT') fetchAuditLog();
+                      if (id === 'VARIANCE') fetchVarianceReport();
+                      if (id === 'COGS') fetchCogsReport();
+                      if (id === 'PRICES') fetchSupplierPrices();
+                      if (id === 'BATCHES') fetchStockBatches();
+                    }}
+                    className={cn(
+                      "px-4 py-2 rounded-2xl text-xs font-bold uppercase tracking-wider border transition-all",
+                      insightsPanel === id
+                        ? "bg-[#cc5a16] text-white border-[#cc5a16]"
+                        : "bg-white text-[#6b5d52] border-[#cc5a16]/15 hover:bg-[#faf7f2]"
+                    )}
+                  >{label}</button>
+                ))}
+              </div>
+
+              {/* — Audit Log — */}
+              {insightsPanel === 'AUDIT' && (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="p-4 flex flex-wrap gap-3 items-end border-b border-[#cc5a16]/10 bg-[#faf7f2]/50">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Type</label>
+                      <select
+                        value={auditFilter.type || ''}
+                        onChange={e => setAuditFilter({ ...auditFilter, type: e.target.value || undefined })}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm"
+                      >
+                        <option value="">All types</option>
+                        <option value="CONSUMPTION">Consumption</option>
+                        <option value="GRN">Goods Receipt</option>
+                        <option value="WASTAGE">Wastage</option>
+                        <option value="COUNT_ADJUSTMENT">Count Adjustment</option>
+                        <option value="MANUAL_REVERSAL">Reversal</option>
+                        <option value="MANUAL">Manual</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Ingredient</label>
+                      <select
+                        value={auditFilter.ingredient_id || ''}
+                        onChange={e => setAuditFilter({ ...auditFilter, ingredient_id: e.target.value || undefined })}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm min-w-[200px]"
+                      >
+                        <option value="">All ingredients</option>
+                        {inventoryIngredients.map(i => (<option key={i.id} value={i.id}>{i.name}</option>))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">From</label>
+                      <input type="date" value={auditFilter.from || ''}
+                        onChange={e => setAuditFilter({ ...auditFilter, from: e.target.value || undefined })}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">To</label>
+                      <input type="date" value={auditFilter.to || ''}
+                        onChange={e => setAuditFilter({ ...auditFilter, to: e.target.value || undefined })}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <button onClick={fetchAuditLog}
+                      className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase">Apply</button>
+                  </div>
+                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10 sticky top-0">
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                          <th className="px-4 py-2">When</th>
+                          <th className="px-4 py-2">Ingredient</th>
+                          <th className="px-4 py-2">Type</th>
+                          <th className="px-4 py-2 text-right">Δ Qty</th>
+                          <th className="px-4 py-2 text-right">Balance</th>
+                          <th className="px-4 py-2">Reference</th>
+                          <th className="px-4 py-2">Notes</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {auditLog.length === 0 ? (
+                          <tr><td colSpan={7} className="px-4 py-8 text-center text-[#9c8e85]">No movements match the filters.</td></tr>
+                        ) : auditLog.map(m => (
+                          <tr key={m.id} className="border-b border-[#cc5a16]/5">
+                            <td className="px-4 py-2 text-xs whitespace-nowrap">{new Date(m.recorded_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                            <td className="px-4 py-2 font-semibold">{m.ingredient_name || m.ingredient_id}</td>
+                            <td className="px-4 py-2">
+                              <span className={cn(
+                                "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                                m.movement_type === 'GRN' ? "bg-emerald-100 text-emerald-700" :
+                                m.movement_type === 'CONSUMPTION' ? "bg-blue-100 text-blue-700" :
+                                m.movement_type === 'WASTAGE' ? "bg-red-100 text-red-700" :
+                                m.movement_type === 'MANUAL_REVERSAL' ? "bg-amber-100 text-amber-700" :
+                                "bg-gray-100 text-gray-700"
+                              )}>{m.movement_type}</span>
+                            </td>
+                            <td className={cn("px-4 py-2 text-right font-mono", m.qty_delta < 0 ? "text-red-700" : "text-emerald-700")}>
+                              {m.qty_delta > 0 ? '+' : ''}{Number(m.qty_delta).toFixed(3)} {m.unit}
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono">{Number(m.balance_after).toFixed(3)}</td>
+                            <td className="px-4 py-2 text-xs text-[#6b5d52]">
+                              {m.reference_type ? `${m.reference_type}/${m.reference_id || '—'}` : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-xs text-[#9c8e85]">{m.notes || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* — Variance Report — */}
+              {insightsPanel === 'VARIANCE' && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap gap-3 items-end bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">From</label>
+                      <input type="date" value={varianceRange.from} onChange={e => setVarianceRange(r => ({ ...r, from: e.target.value }))}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">To</label>
+                      <input type="date" value={varianceRange.to} onChange={e => setVarianceRange(r => ({ ...r, to: e.target.value }))}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <button onClick={fetchVarianceReport}
+                      className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase">Run Report</button>
+                  </div>
+                  {varianceReport && (
+                    <>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Shrinkage Value</div>
+                          <div className="text-2xl font-bold text-red-700 mt-1">₹{Number(varianceReport.totals?.shrinkage_value || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Surplus Value</div>
+                          <div className="text-2xl font-bold text-emerald-700 mt-1">₹{Number(varianceReport.totals?.surplus_value || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Net Δ</div>
+                          <div className={cn("text-2xl font-bold mt-1", Number(varianceReport.totals?.net_value || 0) < 0 ? "text-red-700" : "text-emerald-700")}>₹{Number(varianceReport.totals?.net_value || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Ingredients</div>
+                          <div className="text-2xl font-bold text-[#1a1208] mt-1">{varianceReport.totals?.ingredients || 0}</div>
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                              <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                                <th className="px-4 py-2">Ingredient</th>
+                                <th className="px-4 py-2">Category</th>
+                                <th className="px-4 py-2 text-right">Variance</th>
+                                <th className="px-4 py-2 text-right">Unit Price</th>
+                                <th className="px-4 py-2 text-right">₹ Impact</th>
+                                <th className="px-4 py-2 text-right">Counts</th>
+                                <th className="px-4 py-2">Last Count</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(varianceReport.rows || []).length === 0 ? (
+                                <tr><td colSpan={7} className="px-4 py-8 text-center text-[#9c8e85]">No completed counts in this range.</td></tr>
+                              ) : varianceReport.rows.map((r: any) => (
+                                <tr key={r.ingredient_id} className="border-b border-[#cc5a16]/5">
+                                  <td className="px-4 py-2 font-semibold">{r.ingredient_name}</td>
+                                  <td className="px-4 py-2 text-xs text-[#6b5d52]">{r.category || '—'}</td>
+                                  <td className={cn("px-4 py-2 text-right font-mono", Number(r.total_variance) < 0 ? "text-red-700" : "text-emerald-700")}>
+                                    {Number(r.total_variance) > 0 ? '+' : ''}{Number(r.total_variance).toFixed(3)} {r.unit}
+                                  </td>
+                                  <td className="px-4 py-2 text-right font-mono">₹{Number(r.unit_price).toFixed(2)}</td>
+                                  <td className={cn("px-4 py-2 text-right font-mono font-bold", Number(r.variance_value) < 0 ? "text-red-700" : "text-emerald-700")}>
+                                    ₹{Math.abs(Number(r.variance_value)).toFixed(0)}
+                                  </td>
+                                  <td className="px-4 py-2 text-right">{r.counts}</td>
+                                  <td className="px-4 py-2 text-xs">{r.last_count_date ? new Date(r.last_count_date).toLocaleDateString('en-IN') : '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* — COGS Report — */}
+              {insightsPanel === 'COGS' && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap gap-3 items-end bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">From</label>
+                      <input type="date" value={cogsRange.from} onChange={e => setCogsRange(r => ({ ...r, from: e.target.value }))}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">To</label>
+                      <input type="date" value={cogsRange.to} onChange={e => setCogsRange(r => ({ ...r, to: e.target.value }))}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <button onClick={fetchCogsReport}
+                      className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase">Run Report</button>
+                  </div>
+                  {cogsReport && (
+                    <>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Revenue</div>
+                          <div className="text-2xl font-bold text-[#1a1208] mt-1">₹{Number(cogsReport.revenue || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">COGS</div>
+                          <div className="text-2xl font-bold text-[#cc5a16] mt-1">₹{Number(cogsReport.cogs || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Gross Margin</div>
+                          <div className="text-2xl font-bold text-emerald-700 mt-1">{cogsReport.gross_margin_pct}%</div>
+                          <div className="text-xs text-[#9c8e85]">₹{Number(cogsReport.gross_margin || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Food Cost %</div>
+                          <div className="text-2xl font-bold text-[#1a1208] mt-1">{cogsReport.food_cost_pct}%</div>
+                          <div className="text-xs text-[#9c8e85]">Wastage {cogsReport.wastage_pct_of_cogs}% of COGS</div>
+                        </div>
+                      </div>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+                          <h3 className="text-sm font-bold text-[#1a1208] mb-3">By Category</h3>
+                          <div className="space-y-2">
+                            {(cogsReport.by_category || []).map((c: any) => (
+                              <div key={c.category} className="flex items-center justify-between text-sm">
+                                <span>{c.category}</span>
+                                <div className="flex items-center gap-2 flex-1 mx-3">
+                                  <div className="flex-1 h-2 bg-[#faf7f2] rounded-full overflow-hidden">
+                                    <div className="h-full bg-[#cc5a16]" style={{ width: `${c.pct}%` }} />
+                                  </div>
+                                  <span className="text-xs font-bold text-[#cc5a16] w-12 text-right">{c.pct}%</span>
+                                </div>
+                                <span className="font-mono text-xs">₹{Number(c.cogs).toFixed(0)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+                          <h3 className="text-sm font-bold text-[#1a1208] mb-3">Top Ingredients (by ₹)</h3>
+                          <div className="overflow-y-auto max-h-[300px]">
+                            <table className="w-full text-xs">
+                              <thead className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                                <tr><th className="text-left px-2 py-1">Ingredient</th><th className="text-right px-2 py-1">Qty</th><th className="text-right px-2 py-1">COGS</th><th className="text-right px-2 py-1">%</th></tr>
+                              </thead>
+                              <tbody>
+                                {(cogsReport.by_ingredient || []).slice(0, 30).map((r: any) => (
+                                  <tr key={r.ingredient_id} className="border-b border-[#cc5a16]/5">
+                                    <td className="px-2 py-1 font-semibold">{r.ingredient_name}</td>
+                                    <td className="px-2 py-1 text-right font-mono">{Number(r.qty).toFixed(2)} {r.unit}</td>
+                                    <td className="px-2 py-1 text-right font-mono">₹{Number(r.cogs).toFixed(0)}</td>
+                                    <td className="px-2 py-1 text-right">{r.pct}%</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* — Supplier Prices — */}
+              {insightsPanel === 'PRICES' && (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10 sticky top-0">
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                          <th className="px-4 py-2">Date</th>
+                          <th className="px-4 py-2">Supplier</th>
+                          <th className="px-4 py-2">Ingredient</th>
+                          <th className="px-4 py-2 text-right">Unit Price</th>
+                          <th className="px-4 py-2 text-right">Qty</th>
+                          <th className="px-4 py-2">Source</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {supplierPrices.length === 0 ? (
+                          <tr><td colSpan={6} className="px-4 py-8 text-center text-[#9c8e85]">No price observations yet. They auto-record on every Goods Receipt.</td></tr>
+                        ) : supplierPrices.map(p => (
+                          <tr key={p.id} className="border-b border-[#cc5a16]/5">
+                            <td className="px-4 py-2 text-xs">{new Date(p.observed_at).toLocaleDateString('en-IN')}</td>
+                            <td className="px-4 py-2 font-semibold">{p.supplier_name || p.supplier_id}</td>
+                            <td className="px-4 py-2">{p.ingredient_name || p.ingredient_id}</td>
+                            <td className="px-4 py-2 text-right font-mono">₹{Number(p.unit_price).toFixed(2)} / {p.unit}</td>
+                            <td className="px-4 py-2 text-right font-mono">{p.qty_purchased == null ? '—' : Number(p.qty_purchased).toFixed(2)}</td>
+                            <td className="px-4 py-2 text-xs text-[#6b5d52]">{p.source_type} {p.source_id ? `(${p.source_id})` : ''}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* — Stock Batches (FIFO) — */}
+              {insightsPanel === 'BATCHES' && (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="px-4 py-3 bg-[#faf7f2]/50 border-b border-[#cc5a16]/10 text-xs text-[#6b5d52]">
+                    Batches are sorted by FIFO consumption order (oldest received first; expiring within 7 days jump the queue).
+                  </div>
+                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10 sticky top-0">
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                          <th className="px-4 py-2">Received</th>
+                          <th className="px-4 py-2">Ingredient</th>
+                          <th className="px-4 py-2">Batch #</th>
+                          <th className="px-4 py-2">Expiry</th>
+                          <th className="px-4 py-2 text-right">Received Qty</th>
+                          <th className="px-4 py-2 text-right">Remaining</th>
+                          <th className="px-4 py-2">Supplier</th>
+                          <th className="px-4 py-2">Condition</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {stockBatches.length === 0 ? (
+                          <tr><td colSpan={8} className="px-4 py-8 text-center text-[#9c8e85]">No active batches. They auto-create on every Goods Receipt.</td></tr>
+                        ) : stockBatches.map(b => {
+                          const isExpiringSoon = b.expiry_date && new Date(b.expiry_date) <= new Date(Date.now() + 7 * 86400000);
+                          return (
+                            <tr key={b.id} className={cn("border-b border-[#cc5a16]/5", isExpiringSoon && "bg-amber-50/40")}>
+                              <td className="px-4 py-2 text-xs">{new Date(b.received_at).toLocaleDateString('en-IN')}</td>
+                              <td className="px-4 py-2 font-semibold">{b.ingredient_name || b.ingredient_id}</td>
+                              <td className="px-4 py-2 text-xs">{b.batch_number || '—'}</td>
+                              <td className={cn("px-4 py-2 text-xs", isExpiringSoon && "font-bold text-amber-700")}>
+                                {b.expiry_date ? new Date(b.expiry_date).toLocaleDateString('en-IN') : '—'}
+                                {isExpiringSoon && ' ⚠️'}
+                              </td>
+                              <td className="px-4 py-2 text-right font-mono">{Number(b.qty_received).toFixed(3)} {b.unit}</td>
+                              <td className="px-4 py-2 text-right font-mono font-bold">{Number(b.remaining_qty).toFixed(3)} {b.unit}</td>
+                              <td className="px-4 py-2 text-xs">{b.supplier_name || '—'}</td>
+                              <td className="px-4 py-2">
+                                <span className={cn(
+                                  "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                                  b.condition === 'GOOD' ? "bg-emerald-100 text-emerald-700" :
+                                  b.condition === 'DAMAGED' ? "bg-red-100 text-red-700" :
+                                  "bg-amber-100 text-amber-700"
+                                )}>{b.condition}</span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── SETTINGS sub-tab — Seasonality · Notification Templates · Hotel Inventory · Storage Locations ── */}
+          {inventorySubTab === 'SETTINGS' && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2 border-b border-[#cc5a16]/10 pb-2">
+                {([
+                  ['SEASONALITY', 'Seasonality (Forecast Bumps)'],
+                  ['TEMPLATES', 'Notification Templates'],
+                  ['HOTEL_INV', 'Hotel Inventory'],
+                  ['LOCATIONS', 'Storage Locations'],
+                ] as [SettingsPanel, string][]).map(([id, label]) => (
+                  <button
+                    key={id}
+                    onClick={() => {
+                      setSettingsPanel(id);
+                      if (id === 'SEASONALITY') fetchSeasonalityFactors();
+                      if (id === 'TEMPLATES') fetchNotifTemplates();
+                      if (id === 'HOTEL_INV') fetchHotelInventory();
+                      if (id === 'LOCATIONS') fetchStorageLocations();
+                    }}
+                    className={cn(
+                      "px-4 py-2 rounded-2xl text-xs font-bold uppercase tracking-wider border transition-all",
+                      settingsPanel === id
+                        ? "bg-[#cc5a16] text-white border-[#cc5a16]"
+                        : "bg-white text-[#6b5d52] border-[#cc5a16]/15 hover:bg-[#faf7f2]"
+                    )}
+                  >{label}</button>
+                ))}
+              </div>
+
+              {/* — Seasonality Factors — */}
+              {settingsPanel === 'SEASONALITY' && (
+                <div className="space-y-3">
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <h3 className="text-sm font-bold mb-3">Add Seasonality Factor</h3>
+                    <p className="text-xs text-[#9c8e85] mb-4">Multipliers are applied to the day-of-week rolling-average forecast. Use 1.5 to boost paneer 50% on Diwali; 0.7 to discount Mondays.</p>
+                    <SeasonalityForm
+                      ingredients={inventoryIngredients}
+                      onCreate={async (payload) => {
+                        await fetch(`/api/restaurant/${restaurantId}/inventory/seasonality`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify(payload),
+                        });
+                        fetchSeasonalityFactors();
+                      }}
+                    />
+                  </div>
+                  <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                          <th className="px-4 py-2">Ingredient</th>
+                          <th className="px-4 py-2">Type</th>
+                          <th className="px-4 py-2">Key</th>
+                          <th className="px-4 py-2 text-right">Multiplier</th>
+                          <th className="px-4 py-2">Label</th>
+                          <th className="px-4 py-2"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {seasonalityFactors.length === 0 ? (
+                          <tr><td colSpan={6} className="px-4 py-8 text-center text-[#9c8e85]">No seasonality factors yet — forecasts use raw weekday averages.</td></tr>
+                        ) : seasonalityFactors.map(f => (
+                          <tr key={f.id} className="border-b border-[#cc5a16]/5">
+                            <td className="px-4 py-2 font-semibold">{f.ingredient_name || <span className="italic text-[#9c8e85]">All ingredients</span>}</td>
+                            <td className="px-4 py-2"><span className="text-[10px] font-bold uppercase bg-[#cc5a16]/10 text-[#cc5a16] px-2 py-0.5 rounded-full">{f.type}</span></td>
+                            <td className="px-4 py-2 font-mono text-xs">{f.key}</td>
+                            <td className="px-4 py-2 text-right font-bold">×{Number(f.multiplier).toFixed(2)}</td>
+                            <td className="px-4 py-2 text-xs">{f.label || '—'}</td>
+                            <td className="px-4 py-2">
+                              <button onClick={async () => {
+                                if (!window.confirm('Delete this seasonality factor?')) return;
+                                await fetch(`/api/inventory/seasonality/${f.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+                                fetchSeasonalityFactors();
+                              }} className="text-xs text-red-700 hover:underline">Remove</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* — Notification Templates — */}
+              {settingsPanel === 'TEMPLATES' && (
+                <div className="space-y-3">
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 text-xs text-[#6b5d52]">
+                    Override the default text for any notification. Use <code className="bg-[#faf7f2] px-1">{`{{variable}}`}</code> placeholders (e.g. <code className="bg-[#faf7f2] px-1">{`{{ingredient}}`}</code>, <code className="bg-[#faf7f2] px-1">{`{{balance}}`}</code>, <code className="bg-[#faf7f2] px-1">{`{{restaurantName}}`}</code>). Leave a row blank to fall back to the built-in template.
+                  </div>
+                  <NotificationTemplateEditor
+                    templates={notifTemplates}
+                    onSave={async (event_type, subject_template, body_template, enabled) => {
+                      await fetch(`/api/restaurant/${restaurantId}/notification-templates/${encodeURIComponent(event_type)}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ subject_template, body_template, enabled }),
+                      });
+                      fetchNotifTemplates();
+                    }}
+                  />
+                </div>
+              )}
+
+              {/* — Hotel Inventory — */}
+              {settingsPanel === 'HOTEL_INV' && (
+                <div className="space-y-3">
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 text-xs text-[#6b5d52]">
+                    Track linens, mini-bar items, amenity restocking. Movements log to the same audit trail as food ingredients.
+                  </div>
+                  <HotelInventoryPanel
+                    items={hotelInventory}
+                    onCreate={async (payload) => {
+                      await fetch(`/api/restaurant/${restaurantId}/hotel-inventory`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                        body: JSON.stringify(payload),
+                      });
+                      fetchHotelInventory();
+                    }}
+                    onDelete={async (id) => {
+                      if (!window.confirm('Remove this hotel inventory item?')) return;
+                      await fetch(`/api/hotel-inventory/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+                      fetchHotelInventory();
+                    }}
+                  />
+                </div>
+              )}
+
+              {/* — Storage Locations — */}
+              {settingsPanel === 'LOCATIONS' && (
+                <div className="space-y-3">
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 text-xs text-[#6b5d52]">
+                    Multi-location stock — split your pantry into kitchen, walk-in cooler, bar storage, etc. Default <strong>Main Storage</strong> location is always present.
+                  </div>
+                  <LocationsPanel
+                    locations={storageLocations}
+                    onCreate={async (name, kind) => {
+                      await fetch(`/api/restaurant/${restaurantId}/storage-locations`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ name, kind }),
+                      });
+                      fetchStorageLocations();
+                    }}
+                    onDelete={async (id) => {
+                      if (id === 'LOC-MAIN') return alert("Can't delete the default Main location.");
+                      if (!window.confirm('Remove this location?')) return;
+                      await fetch(`/api/storage-locations/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+                      fetchStorageLocations();
+                    }}
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>

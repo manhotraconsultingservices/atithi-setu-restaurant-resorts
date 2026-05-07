@@ -733,6 +733,158 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   // the same order is cancelled twice (network retry / owner clicks twice).
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_reverted INT DEFAULT 0");
 
+  // ───────────────────────────────────────────────────────────────────────
+  // Tier-2 / Tier-3 inventory enhancements (2026-05 cycle)
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Recipe versioning — each recipe row is valid for a window. Deduction at
+  // order-time looks up the row whose [effective_from, effective_to) bracket
+  // contains order.created_at. NULL effective_from = "since beginning of time",
+  // NULL effective_to = "still active". Owner-edits supersede the prior row.
+  await db.exec("ALTER TABLE recipes ADD COLUMN IF NOT EXISTS effective_from TIMESTAMP");
+  await db.exec("ALTER TABLE recipes ADD COLUMN IF NOT EXISTS effective_to TIMESTAMP");
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_recipes_effective ON recipes (menu_item_id, effective_from, effective_to)`);
+
+  // Supplier price history — auto-populated on every GRN line so the owner
+  // can see how a supplier's price has moved over time (and spot price hikes).
+  // One row per (supplier, ingredient, observation_at).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS supplier_prices (
+      id TEXT PRIMARY KEY,
+      supplier_id TEXT NOT NULL,
+      ingredient_id TEXT NOT NULL,
+      unit_price DOUBLE PRECISION NOT NULL,
+      unit TEXT NOT NULL,
+      qty_purchased DOUBLE PRECISION,
+      observed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      source_type TEXT NOT NULL DEFAULT 'GRN',
+      source_id TEXT,
+      notes TEXT
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_supplier_prices_supplier_ingredient ON supplier_prices (supplier_id, ingredient_id, observed_at)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_supplier_prices_ingredient ON supplier_prices (ingredient_id, observed_at)`);
+
+  // Stock batches — for FIFO consumption + expiry-aware deduction. Each GRN
+  // line creates a batch; deduction draws from oldest non-expired first.
+  // remaining_qty decremented on each draw; batch with remaining_qty <= 0
+  // is logically retired (not deleted — kept for audit).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS stock_batches (
+      id TEXT PRIMARY KEY,
+      ingredient_id TEXT NOT NULL,
+      grn_id TEXT,
+      grn_item_id TEXT,
+      supplier_id TEXT,
+      received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      expiry_date DATE,
+      batch_number TEXT,
+      qty_received DOUBLE PRECISION NOT NULL,
+      remaining_qty DOUBLE PRECISION NOT NULL,
+      unit TEXT NOT NULL,
+      unit_cost DOUBLE PRECISION,
+      condition TEXT DEFAULT 'GOOD'
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_stock_batches_ingredient_received ON stock_batches (ingredient_id, received_at)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_stock_batches_expiry ON stock_batches (expiry_date)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_stock_batches_remaining ON stock_batches (ingredient_id, remaining_qty)`);
+
+  // Seasonality factors — per-ingredient calendar-aware multipliers applied to
+  // the day-of-week rolling-average forecast. Owner can boost paneer for Diwali,
+  // chicken for Saturday, biryani-rice for monsoon, etc. Lookup is by
+  // (ingredient_id, type, key) where:
+  //   type = 'WEEKDAY'   key = '0'..'6'    (Sunday=0)
+  //   type = 'MONTH'     key = '1'..'12'
+  //   type = 'DATE'      key = 'YYYY-MM-DD' or 'MM-DD' (recurring annual)
+  //   type = 'RANGE'     key = 'YYYY-MM-DD..YYYY-MM-DD'
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS seasonality_factors (
+      id TEXT PRIMARY KEY,
+      ingredient_id TEXT,
+      type TEXT NOT NULL,
+      key TEXT NOT NULL,
+      multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+      label TEXT,
+      is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_seasonality_lookup ON seasonality_factors (ingredient_id, type, key, is_active)`);
+
+  // Storage locations — multi-location stock per tenant (kitchen / walk-in /
+  // bar / commissary). v1 default = single 'MAIN' location auto-created.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS storage_locations (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      kind TEXT DEFAULT 'KITCHEN',
+      is_default INT DEFAULT 0,
+      is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  // Auto-seed a default MAIN location for every tenant on first DB open.
+  await db.run(
+    `INSERT INTO storage_locations (id, name, kind, is_default, is_active)
+     SELECT 'LOC-MAIN', 'Main Storage', 'KITCHEN', 1, 1
+      WHERE NOT EXISTS (SELECT 1 FROM storage_locations WHERE id = 'LOC-MAIN')`
+  ).catch(() => {});
+
+  // Per-location stock — sums to ingredients.current_stock_qty. v1 keeps a
+  // single MAIN row per ingredient; v2 splits across locations with transfer
+  // movements logged in stock_movements.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS ingredient_location_stock (
+      ingredient_id TEXT NOT NULL,
+      location_id TEXT NOT NULL,
+      stock_qty DOUBLE PRECISION DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (ingredient_id, location_id)
+    )
+  `);
+
+  // Hotel-side inventory items (linens, mini-bar, amenity restocking). Tracked
+  // per-room or pool, with par-level alerts. Separate from food ingredients so
+  // restaurant deduction logic stays clean. Movements go through stock_movements
+  // with reference_type='hotel_item'.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS hotel_inventory_items (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      category TEXT,
+      unit TEXT NOT NULL DEFAULT 'unit',
+      current_stock_qty DOUBLE PRECISION DEFAULT 0,
+      par_level DOUBLE PRECISION DEFAULT 0,
+      reorder_point DOUBLE PRECISION DEFAULT 0,
+      default_unit_price DOUBLE PRECISION,
+      sku TEXT,
+      notes TEXT,
+      is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_hotel_items_active ON hotel_inventory_items (is_active)`);
+
+  // Owner-customisable notification templates. Falls back to hard-coded
+  // defaults in notificationService.ts when row absent.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS notification_templates (
+      event_type TEXT PRIMARY KEY,
+      subject_template TEXT,
+      body_template TEXT,
+      enabled INT DEFAULT 1,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Drag-to-reorder support — display_order is honoured by the Ingredients
+  // and Suppliers list endpoints when set; ties broken by name.
+  await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS display_order INTEGER");
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS display_order INTEGER");
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_display_order ON ingredients (display_order)`);
+
   tenantDbCache.set(schema, db);
   return db;
 }

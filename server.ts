@@ -564,7 +564,29 @@ async function triggerNotification(restaurantId: string, eventName: string, data
         setting.recipients.split(',').forEach((r: string) => recipients.push(r.trim()));
       }
 
-      const content = buildNotificationContent(eventName, data);
+      let content = buildNotificationContent(eventName, data);
+      // Owner-customisable template override (Tier-2 / QOL).
+      // If the tenant has a row in notification_templates for this event_type
+      // and it's enabled, substitute its subject/body templates with simple
+      // {{variable}} interpolation against the data object.
+      try {
+        const tmpl: any = await db.get(
+          "SELECT subject_template, body_template, enabled FROM notification_templates WHERE event_type = ?",
+          [eventName]
+        ).catch(() => null);
+        if (tmpl && Number(tmpl.enabled) !== 0) {
+          const interpolate = (s: string) =>
+            String(s).replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, k) => {
+              const v = k.split('.').reduce((acc: any, p: string) => acc == null ? acc : acc[p], data);
+              return v == null ? '' : String(v);
+            });
+          if (tmpl.subject_template) content = { ...content, subject: interpolate(tmpl.subject_template) };
+          if (tmpl.body_template) {
+            const txt = interpolate(tmpl.body_template);
+            content = { ...content, text: txt, html: txt.replace(/\n/g, '<br/>') };
+          }
+        }
+      } catch { /* fall back to default content */ }
       // Deduplicate recipients (same email/phone might appear via role lookup + manual list)
       const uniqueRecipients = [...new Set(recipients.filter(Boolean))];
 
@@ -3581,6 +3603,35 @@ async function startServer() {
           ]
         );
 
+        // Tier-3: supplier price observation — gives the owner a price
+        // history per (supplier, ingredient) for trend reporting.
+        if (unitPrice > 0 && resolvedSupplierId) {
+          await db.run(
+            `INSERT INTO supplier_prices
+              (id, supplier_id, ingredient_id, unit_price, unit, qty_purchased, source_type, source_id)
+             VALUES (?, ?, ?, ?, ?, ?, 'GRN', ?)`,
+            [
+              `SP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+              resolvedSupplierId, it.ingredient_id, unitPrice, unit, qty, grnId,
+            ]
+          ).catch(() => {});
+        }
+
+        // Tier-2: stock batch — tracked in stock unit so FIFO consumption draws
+        // correctly. Each GRN line creates a batch; deduction picks oldest first.
+        await db.run(
+          `INSERT INTO stock_batches
+            (id, ingredient_id, grn_id, supplier_id, expiry_date, batch_number,
+             qty_received, remaining_qty, unit, unit_cost, condition)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `BATCH-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+            it.ingredient_id, grnId, resolvedSupplierId,
+            it.expiry_date || null, it.batch_number || null,
+            stockQty, stockQty, ing.unit, unitPrice || null, condition,
+          ]
+        ).catch(() => {});
+
         // If linked to PO, update qty_received on the matching line
         if (po_id) {
           await db.run(
@@ -3685,13 +3736,22 @@ async function startServer() {
       // Fetch recipe rows applying to this item — both BOTH and the specific size
       // JOIN with ingredients to get the canonical stock unit so we can convert
       // recipe units (often g/ml) to stock units (often kg/l) before deducting.
+      // Tier-2: respect recipe versioning. We pick the row whose effective
+      // window covers NOW(). NULL effective_from = "valid since beginning",
+      // NULL effective_to = "still valid". DISTINCT ON (ingredient_id, size_variant)
+      // returns the most recent row per ingredient that's currently valid.
       const recipeRows: any[] = await db.query(
-        `SELECT r.ingredient_id, r.qty_per_serving, r.unit AS recipe_unit,
+        `SELECT DISTINCT ON (r.ingredient_id, r.size_variant)
+                r.ingredient_id, r.qty_per_serving, r.unit AS recipe_unit,
                 i.unit AS ingredient_unit, i.name AS ingredient_name
            FROM recipes r
            JOIN ingredients i ON i.id = r.ingredient_id
           WHERE r.menu_item_id = ?
-            AND (r.size_variant = 'BOTH' OR r.size_variant = ?)`,
+            AND (r.size_variant = 'BOTH' OR r.size_variant = ?)
+            AND (r.effective_from IS NULL OR r.effective_from <= NOW())
+            AND (r.effective_to   IS NULL OR r.effective_to   >  NOW())
+          ORDER BY r.ingredient_id, r.size_variant,
+                   COALESCE(r.effective_from, r.created_at) DESC`,
         [menuItemId, sizeKey === 'HALF' ? 'HALF' : 'FULL']
       ).catch(() => [] as any[]);
 
@@ -3724,6 +3784,32 @@ async function startServer() {
            VALUES (?, ?, ?, ?, 'CONSUMPTION', 'order', ?, ?)`,
           [movId(), r.ingredient_id, -consumed, unit, orderId, balanceAfter]
         ).catch(() => {});
+
+        // Tier-2: FIFO batch decrement — draw `consumed` qty from oldest
+        // non-empty batches first. Expiring batches (≤7 days) jump the queue
+        // so we burn through them before they spoil. Best-effort: failures
+        // here don't block the order or invalidate the audit row above.
+        try {
+          let toDraw = consumed;
+          const batches: any[] = await db.query(
+            `SELECT id, remaining_qty FROM stock_batches
+              WHERE ingredient_id = ? AND remaining_qty > 0
+              ORDER BY
+                CASE WHEN expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '7 days' THEN 0 ELSE 1 END,
+                COALESCE(expiry_date, '2099-12-31'::date) ASC,
+                received_at ASC`,
+            [r.ingredient_id]
+          ).catch(() => [] as any[]);
+          for (const b of batches) {
+            if (toDraw <= 0) break;
+            const drawn = Math.min(Number(b.remaining_qty), toDraw);
+            await db.run(
+              `UPDATE stock_batches SET remaining_qty = remaining_qty - ? WHERE id = ?`,
+              [drawn, b.id]
+            ).catch(() => {});
+            toDraw -= drawn;
+          }
+        } catch { /* swallow — non-fatal */ }
       }
     }
   }
@@ -4111,22 +4197,54 @@ async function startServer() {
         arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0
       );
 
+      // Tier-2 seasonality factors — multiplicative bumps applied after the
+      // raw weekday average. Loaded once per ingredient; lookup is in-memory.
+      // Factors with NULL ingredient_id apply to all ingredients (e.g. a
+      // restaurant-wide Diwali bump).
+      const factors: any[] = await db.query(
+        `SELECT type, key, multiplier FROM seasonality_factors
+          WHERE is_active = 1
+            AND (ingredient_id = ? OR ingredient_id IS NULL)`,
+        [ing.id]
+      ).catch(() => [] as any[]);
+      const seasonalityFor = (d: Date): number => {
+        const iso = d.toISOString().slice(0, 10);
+        const mmdd = iso.slice(5);
+        const wd = String(d.getUTCDay());
+        const m = String(d.getUTCMonth() + 1);
+        let mult = 1;
+        for (const f of factors) {
+          const t = String(f.type).toUpperCase();
+          const k = String(f.key);
+          let hit = false;
+          if (t === 'WEEKDAY' && k === wd) hit = true;
+          else if (t === 'MONTH' && k === m) hit = true;
+          else if (t === 'DATE' && (k === iso || k === mmdd)) hit = true;
+          else if (t === 'RANGE' && k.includes('..')) {
+            const [lo, hi] = k.split('..');
+            if (iso >= lo && iso <= hi) hit = true;
+          }
+          if (hit) mult *= Number(f.multiplier || 1);
+        }
+        return mult;
+      };
+
       // Forecasts (in IST — avoid host TZ skew)
       const istNow = new Date(Date.now() + (5.5 * 60 * 60 * 1000));
-      const tomorrowIstWd = new Date(istNow.getTime() + 24 * 60 * 60 * 1000).getUTCDay();
-      const dailyForecast = weekdayAvg[tomorrowIstWd];
+      const tomorrowIst = new Date(istNow.getTime() + 24 * 60 * 60 * 1000);
+      const dailyForecast = weekdayAvg[tomorrowIst.getUTCDay()] * seasonalityFor(tomorrowIst);
 
-      // Weekly = sum of next 7 days' weekday averages
+      // Weekly = sum of next 7 days' weekday averages × seasonality factor
       let weeklyForecast = 0;
       for (let i = 1; i <= 7; i++) {
         const d = new Date(istNow.getTime() + i * 24 * 60 * 60 * 1000);
-        weeklyForecast += weekdayAvg[d.getUTCDay()];
+        weeklyForecast += weekdayAvg[d.getUTCDay()] * seasonalityFor(d);
       }
       // Monthly = sum of next 30 days
       let monthlyForecast = 0;
       for (let i = 1; i <= 30; i++) {
         const d = new Date(istNow.getTime() + i * 24 * 60 * 60 * 1000);
-        monthlyForecast += weekdayAvg[d.getUTCDay()];
+        monthlyForecast += weekdayAvg[d.getUTCDay()] * seasonalityFor(d);
       }
 
       // Upsert all three horizons
@@ -4359,6 +4477,652 @@ async function startServer() {
     } catch (err) {
       console.error("Inventory dashboard error:", err);
       res.status(500).json({ error: "Failed to fetch inventory dashboard" });
+    }
+  });
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Inventory Tier-2 / Tier-3 endpoints (2026-05 cycle) ─────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+
+  // ─── Stock Movement Audit Log feed ──────────────────────────────────────
+  // Append-only stream of every stock change. Filterable by ingredient, type,
+  // date range. Joins ingredient name + recorded-by user for display.
+  app.get("/api/restaurant/:id/inventory/audit-log", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { ingredient_id, type, from, to, limit } = req.query as any;
+      const lim = Math.max(1, Math.min(1000, Number(limit) || 200));
+
+      const conds: string[] = [];
+      const params: any[] = [];
+      if (ingredient_id) { conds.push("sm.ingredient_id = ?"); params.push(String(ingredient_id)); }
+      if (type) { conds.push("sm.movement_type = ?"); params.push(String(type).toUpperCase()); }
+      if (from) { conds.push("sm.recorded_at >= ?"); params.push(String(from)); }
+      if (to) { conds.push("sm.recorded_at < ?::timestamp + INTERVAL '1 day'"); params.push(String(to)); }
+      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+      const rows: any[] = await db.query(
+        `SELECT sm.id, sm.ingredient_id, sm.qty_delta, sm.unit, sm.movement_type,
+                sm.reference_type, sm.reference_id, sm.balance_after, sm.unit_cost,
+                sm.recorded_at, sm.recorded_by_user_id, sm.notes,
+                i.name AS ingredient_name, i.category AS ingredient_category
+           FROM stock_movements sm
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+           ${whereSql}
+          ORDER BY sm.recorded_at DESC, sm.id DESC
+          LIMIT ${lim}`,
+        params
+      );
+      res.json(rows.map(r => ({
+        ...r,
+        qty_delta: Number(r.qty_delta),
+        balance_after: Number(r.balance_after),
+        unit_cost: r.unit_cost == null ? null : Number(r.unit_cost),
+      })));
+    } catch (err) {
+      console.error("Audit log error:", err);
+      res.status(500).json({ error: "Failed to fetch audit log" });
+    }
+  });
+
+  // ─── Variance Report ────────────────────────────────────────────────────
+  // Aggregates physical-count variances over a date range. Each completed
+  // count contributes per-ingredient (expected − actual) deltas. We monetise
+  // them at the ingredient's last-known unit price for a shrinkage estimate.
+  app.get("/api/restaurant/:id/inventory/variance-report", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as any;
+      const fromDate = from || '1970-01-01';
+      const toDate = to || '2099-12-31';
+
+      const rows: any[] = await db.query(
+        `SELECT pci.ingredient_id, i.name AS ingredient_name, i.category, i.unit,
+                COALESCE(SUM(pci.variance), 0) AS total_variance,
+                COUNT(*) AS counts,
+                MAX(pc.count_date) AS last_count_date,
+                COALESCE(i.default_unit_price, 0) AS unit_price,
+                COALESCE(SUM(pci.variance) * COALESCE(i.default_unit_price, 0), 0) AS variance_value
+           FROM physical_count_items pci
+           JOIN physical_counts pc ON pc.id = pci.count_id
+           LEFT JOIN ingredients i ON i.id = pci.ingredient_id
+          WHERE pc.status = 'COMPLETED'
+            AND pc.count_date BETWEEN ?::date AND ?::date
+            AND pci.actual_qty IS NOT NULL
+          GROUP BY pci.ingredient_id, i.name, i.category, i.unit, i.default_unit_price
+          ORDER BY ABS(SUM(pci.variance) * COALESCE(i.default_unit_price, 0)) DESC`,
+        [fromDate, toDate]
+      );
+
+      const totalShrinkageValue = rows.reduce((s, r) => s + (Number(r.variance_value) < 0 ? Number(r.variance_value) : 0), 0);
+      const totalSurplusValue = rows.reduce((s, r) => s + (Number(r.variance_value) > 0 ? Number(r.variance_value) : 0), 0);
+
+      res.json({
+        from: fromDate,
+        to: toDate,
+        rows: rows.map(r => ({
+          ingredient_id: r.ingredient_id,
+          ingredient_name: r.ingredient_name,
+          category: r.category,
+          unit: r.unit,
+          total_variance: Number(r.total_variance),
+          counts: Number(r.counts),
+          last_count_date: r.last_count_date,
+          unit_price: Number(r.unit_price),
+          variance_value: Number(r.variance_value),
+        })),
+        totals: {
+          shrinkage_value: Math.abs(totalShrinkageValue),
+          surplus_value: totalSurplusValue,
+          net_value: Number(totalShrinkageValue) + Number(totalSurplusValue),
+          ingredients: rows.length,
+        },
+      });
+    } catch (err) {
+      console.error("Variance report error:", err);
+      res.status(500).json({ error: "Failed to fetch variance report" });
+    }
+  });
+
+  // ─── COGS Report ────────────────────────────────────────────────────────
+  // Cost-of-Goods-Sold over a date range, broken down by ingredient + category.
+  // CONSUMPTION movements monetised at default_unit_price; revenue from orders.
+  app.get("/api/restaurant/:id/inventory/cogs-report", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as any;
+      const fromDate = from || '1970-01-01';
+      const toDate = to || '2099-12-31';
+
+      const ingredientRows: any[] = await db.query(
+        `SELECT i.id, i.name, i.category, i.unit,
+                COALESCE(SUM(ABS(sm.qty_delta)), 0) AS qty,
+                COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS cogs
+           FROM stock_movements sm
+           JOIN ingredients i ON i.id = sm.ingredient_id
+          WHERE sm.movement_type = 'CONSUMPTION'
+            AND sm.recorded_at >= ?::date
+            AND sm.recorded_at < ?::date + INTERVAL '1 day'
+          GROUP BY i.id, i.name, i.category, i.unit
+          ORDER BY cogs DESC`,
+        [fromDate, toDate]
+      );
+      const wastageRows: any[] = await db.query(
+        `SELECT COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS v
+           FROM stock_movements sm
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+          WHERE sm.movement_type = 'WASTAGE'
+            AND sm.recorded_at >= ?::date
+            AND sm.recorded_at < ?::date + INTERVAL '1 day'`,
+        [fromDate, toDate]
+      );
+      const revenueRow: any = await db.get(
+        `SELECT COALESCE(SUM(total_amount), 0) AS v FROM orders
+          WHERE status != 'CANCELLED'
+            AND created_at >= ?::date
+            AND created_at < ?::date + INTERVAL '1 day'`,
+        [fromDate, toDate]
+      );
+
+      const totalCOGS = ingredientRows.reduce((s, r) => s + Number(r.cogs || 0), 0);
+      const totalWastage = Number(wastageRows[0]?.v || 0);
+      const revenue = Number(revenueRow?.v || 0);
+
+      // Group by category
+      const byCategory: Record<string, { category: string; qty: number; cogs: number; pct: number }> = {};
+      ingredientRows.forEach(r => {
+        const cat = r.category || 'Uncategorised';
+        if (!byCategory[cat]) byCategory[cat] = { category: cat, qty: 0, cogs: 0, pct: 0 };
+        byCategory[cat].cogs += Number(r.cogs);
+        byCategory[cat].qty += Number(r.qty);
+      });
+      Object.values(byCategory).forEach(c => {
+        c.pct = totalCOGS > 0 ? Math.round((c.cogs / totalCOGS) * 1000) / 10 : 0;
+      });
+
+      res.json({
+        from: fromDate, to: toDate,
+        revenue,
+        cogs: totalCOGS,
+        wastage_value: totalWastage,
+        gross_margin: revenue - totalCOGS,
+        gross_margin_pct: revenue > 0 ? Math.round(((revenue - totalCOGS) / revenue) * 1000) / 10 : 0,
+        food_cost_pct: revenue > 0 ? Math.round((totalCOGS / revenue) * 1000) / 10 : 0,
+        wastage_pct_of_cogs: totalCOGS > 0 ? Math.round((totalWastage / totalCOGS) * 1000) / 10 : 0,
+        by_ingredient: ingredientRows.map(r => ({
+          ingredient_id: r.id,
+          ingredient_name: r.name,
+          category: r.category,
+          unit: r.unit,
+          qty: Number(r.qty),
+          cogs: Number(r.cogs),
+          pct: totalCOGS > 0 ? Math.round((Number(r.cogs) / totalCOGS) * 1000) / 10 : 0,
+        })),
+        by_category: Object.values(byCategory).sort((a, b) => b.cogs - a.cogs),
+      });
+    } catch (err) {
+      console.error("COGS report error:", err);
+      res.status(500).json({ error: "Failed to fetch COGS report" });
+    }
+  });
+
+  // ─── Supplier Price History ─────────────────────────────────────────────
+  // Returns price observations per (supplier, ingredient) over time.
+  // Supports filtering by supplier_id and/or ingredient_id.
+  app.get("/api/restaurant/:id/inventory/supplier-prices", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { supplier_id, ingredient_id, from, to } = req.query as any;
+      const conds: string[] = [];
+      const params: any[] = [];
+      if (supplier_id) { conds.push("sp.supplier_id = ?"); params.push(String(supplier_id)); }
+      if (ingredient_id) { conds.push("sp.ingredient_id = ?"); params.push(String(ingredient_id)); }
+      if (from) { conds.push("sp.observed_at >= ?"); params.push(String(from)); }
+      if (to) { conds.push("sp.observed_at < ?::date + INTERVAL '1 day'"); params.push(String(to)); }
+      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      const rows: any[] = await db.query(
+        `SELECT sp.*, s.name AS supplier_name, i.name AS ingredient_name, i.unit AS ingredient_unit
+           FROM supplier_prices sp
+           LEFT JOIN suppliers s ON s.id = sp.supplier_id
+           LEFT JOIN ingredients i ON i.id = sp.ingredient_id
+           ${whereSql}
+          ORDER BY sp.observed_at DESC
+          LIMIT 500`,
+        params
+      );
+      res.json(rows.map(r => ({
+        ...r,
+        unit_price: Number(r.unit_price),
+        qty_purchased: r.qty_purchased == null ? null : Number(r.qty_purchased),
+      })));
+    } catch (err) {
+      console.error("Supplier prices error:", err);
+      res.status(500).json({ error: "Failed to fetch supplier prices" });
+    }
+  });
+
+  // Compare current/avg supplier prices for a single ingredient — to spot
+  // who's cheapest right now and which supplier hiked recently.
+  app.get("/api/restaurant/:id/inventory/supplier-prices/compare/:ingredient_id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT sp.supplier_id, s.name AS supplier_name,
+                MAX(sp.observed_at) AS last_observed_at,
+                AVG(sp.unit_price) AS avg_price,
+                MIN(sp.unit_price) AS min_price,
+                MAX(sp.unit_price) AS max_price,
+                COUNT(*) AS observations,
+                (SELECT unit_price FROM supplier_prices sp2
+                  WHERE sp2.supplier_id = sp.supplier_id
+                    AND sp2.ingredient_id = sp.ingredient_id
+                  ORDER BY sp2.observed_at DESC LIMIT 1) AS latest_price
+           FROM supplier_prices sp
+           LEFT JOIN suppliers s ON s.id = sp.supplier_id
+          WHERE sp.ingredient_id = ?
+          GROUP BY sp.supplier_id, sp.ingredient_id, s.name
+          ORDER BY latest_price ASC NULLS LAST`,
+        [req.params.ingredient_id]
+      );
+      res.json(rows.map(r => ({
+        ...r,
+        avg_price: Number(r.avg_price),
+        min_price: Number(r.min_price),
+        max_price: Number(r.max_price),
+        latest_price: r.latest_price == null ? null : Number(r.latest_price),
+        observations: Number(r.observations),
+      })));
+    } catch (err) {
+      console.error("Supplier compare error:", err);
+      res.status(500).json({ error: "Failed to compare supplier prices" });
+    }
+  });
+
+  // ─── Recipe Versioning — history viewer ─────────────────────────────────
+  // Returns all recipe rows for a menu item across time (current + retired).
+  app.get("/api/restaurant/:id/menu/:menuItemId/recipe-history", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT r.*, i.name AS ingredient_name, i.unit AS ingredient_unit
+           FROM recipes r
+           LEFT JOIN ingredients i ON i.id = r.ingredient_id
+          WHERE r.menu_item_id = ?
+          ORDER BY r.ingredient_id, COALESCE(r.effective_from, r.created_at) ASC`,
+        [req.params.menuItemId]
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("Recipe history error:", err);
+      res.status(500).json({ error: "Failed to fetch recipe history" });
+    }
+  });
+
+  // ─── Seasonality Factors CRUD ───────────────────────────────────────────
+  app.get("/api/restaurant/:id/inventory/seasonality", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT sf.*, i.name AS ingredient_name FROM seasonality_factors sf
+           LEFT JOIN ingredients i ON i.id = sf.ingredient_id
+          WHERE sf.is_active = 1
+          ORDER BY sf.type, sf.key, sf.created_at DESC`
+      );
+      res.json(rows.map(r => ({ ...r, multiplier: Number(r.multiplier) })));
+    } catch (err) {
+      console.error("Seasonality fetch error:", err);
+      res.status(500).json({ error: "Failed to fetch seasonality factors" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/inventory/seasonality", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { ingredient_id, type, key, multiplier, label } = req.body;
+      if (!type || !key || multiplier == null) {
+        return res.status(400).json({ error: "type, key, and multiplier are required" });
+      }
+      const allowed = new Set(['WEEKDAY', 'MONTH', 'DATE', 'RANGE']);
+      const t = String(type).toUpperCase();
+      if (!allowed.has(t)) return res.status(400).json({ error: "type must be WEEKDAY | MONTH | DATE | RANGE" });
+      const m = Math.max(0, Math.min(10, Number(multiplier)));
+      const db = await getTenantDb(req.params.id);
+      const id = `SF-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO seasonality_factors (id, ingredient_id, type, key, multiplier, label)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [id, ingredient_id || null, t, String(key), m, label || null]
+      );
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error("Seasonality create error:", err);
+      res.status(500).json({ error: "Failed to create seasonality factor" });
+    }
+  });
+
+  app.delete("/api/inventory/seasonality/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await db.run("UPDATE seasonality_factors SET is_active = 0 WHERE id = ?", [req.params.id]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Seasonality delete error:", err);
+      res.status(500).json({ error: "Failed to delete seasonality factor" });
+    }
+  });
+
+  // ─── Notification Templates CRUD ────────────────────────────────────────
+  app.get("/api/restaurant/:id/notification-templates", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query("SELECT * FROM notification_templates ORDER BY event_type");
+      res.json(rows);
+    } catch (err) {
+      console.error("Templates fetch error:", err);
+      res.status(500).json({ error: "Failed to fetch notification templates" });
+    }
+  });
+
+  app.put("/api/restaurant/:id/notification-templates/:event", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { subject_template, body_template, enabled } = req.body;
+      const db = await getTenantDb(req.params.id);
+      await db.run(
+        `INSERT INTO notification_templates (event_type, subject_template, body_template, enabled, updated_at)
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (event_type) DO UPDATE SET
+           subject_template = EXCLUDED.subject_template,
+           body_template    = EXCLUDED.body_template,
+           enabled          = EXCLUDED.enabled,
+           updated_at       = CURRENT_TIMESTAMP`,
+        [req.params.event, subject_template || null, body_template || null, enabled === false ? 0 : 1]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Template upsert error:", err);
+      res.status(500).json({ error: "Failed to save notification template" });
+    }
+  });
+
+  // ─── Stock Batches (FIFO traceability) ──────────────────────────────────
+  // Returns active batches for an ingredient ordered by FIFO consumption order
+  // (oldest received first, but expiring batches jump the queue).
+  app.get("/api/restaurant/:id/inventory/batches", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { ingredient_id, include_empty } = req.query as any;
+      const conds: string[] = [];
+      const params: any[] = [];
+      if (ingredient_id) { conds.push("sb.ingredient_id = ?"); params.push(String(ingredient_id)); }
+      if (!include_empty) conds.push("sb.remaining_qty > 0");
+      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      const rows: any[] = await db.query(
+        `SELECT sb.*, i.name AS ingredient_name, s.name AS supplier_name
+           FROM stock_batches sb
+           LEFT JOIN ingredients i ON i.id = sb.ingredient_id
+           LEFT JOIN suppliers s ON s.id = sb.supplier_id
+           ${whereSql}
+          ORDER BY
+            CASE WHEN sb.expiry_date IS NOT NULL AND sb.expiry_date <= CURRENT_DATE + INTERVAL '7 days' THEN 0 ELSE 1 END,
+            COALESCE(sb.expiry_date, '2099-12-31'::date) ASC,
+            sb.received_at ASC`,
+        params
+      );
+      res.json(rows.map(r => ({
+        ...r,
+        qty_received: Number(r.qty_received),
+        remaining_qty: Number(r.remaining_qty),
+        unit_cost: r.unit_cost == null ? null : Number(r.unit_cost),
+      })));
+    } catch (err) {
+      console.error("Batches error:", err);
+      res.status(500).json({ error: "Failed to fetch batches" });
+    }
+  });
+
+  // ─── Smart PO Batching — multi-supplier preview ─────────────────────────
+  // Given a list of ingredient_ids with qty needed (or "below par" as default),
+  // groups by default_supplier_id and returns a preview of one PO per supplier.
+  app.post("/api/restaurant/:id/inventory/smart-po-preview", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { ingredient_ids } = req.body as { ingredient_ids?: string[] };
+      let rows: any[];
+      if (Array.isArray(ingredient_ids) && ingredient_ids.length > 0) {
+        const placeholders = ingredient_ids.map(() => '?').join(',');
+        rows = await db.query(
+          `SELECT i.id, i.name, i.unit, i.current_stock_qty, i.par_level, i.reorder_point,
+                  i.default_unit_price, i.default_supplier_id, i.gst_percent,
+                  s.name AS supplier_name, s.lead_time_days
+             FROM ingredients i
+             LEFT JOIN suppliers s ON s.id = i.default_supplier_id
+            WHERE i.is_active = 1 AND i.id IN (${placeholders})`,
+          ingredient_ids
+        );
+      } else {
+        rows = await db.query(
+          `SELECT i.id, i.name, i.unit, i.current_stock_qty, i.par_level, i.reorder_point,
+                  i.default_unit_price, i.default_supplier_id, i.gst_percent,
+                  s.name AS supplier_name, s.lead_time_days
+             FROM ingredients i
+             LEFT JOIN suppliers s ON s.id = i.default_supplier_id
+            WHERE i.is_active = 1
+              AND i.reorder_point > 0
+              AND i.current_stock_qty <= i.reorder_point`
+        );
+      }
+
+      // Group by supplier
+      const groups: Record<string, any> = {};
+      for (const r of rows) {
+        const sid = r.default_supplier_id || '__NO_SUPPLIER__';
+        if (!groups[sid]) {
+          groups[sid] = {
+            supplier_id: sid === '__NO_SUPPLIER__' ? null : sid,
+            supplier_name: r.supplier_name || null,
+            lead_time_days: r.lead_time_days || null,
+            items: [],
+            total_amount: 0,
+            gst_amount: 0,
+            grand_total: 0,
+          };
+        }
+        const par = Number(r.par_level || 0);
+        const stock = Number(r.current_stock_qty || 0);
+        const reorderQty = Math.max(par - stock, Number(r.reorder_point || 0) * 2 - stock);
+        const qty = Math.max(1, Math.round(reorderQty * 100) / 100);
+        const price = Number(r.default_unit_price || 0);
+        const lineTotal = qty * price;
+        const gst = lineTotal * (Number(r.gst_percent || 0) / 100);
+        groups[sid].items.push({
+          ingredient_id: r.id,
+          ingredient_name: r.name,
+          unit: r.unit,
+          qty_ordered: qty,
+          unit_price: price,
+          line_total: lineTotal,
+          gst_percent: Number(r.gst_percent || 0),
+        });
+        groups[sid].total_amount += lineTotal;
+        groups[sid].gst_amount += gst;
+        groups[sid].grand_total += lineTotal + gst;
+      }
+      res.json({ groups: Object.values(groups) });
+    } catch (err) {
+      console.error("Smart PO preview error:", err);
+      res.status(500).json({ error: "Failed to generate smart PO preview" });
+    }
+  });
+
+  // ─── Drag-to-reorder ingredients ────────────────────────────────────────
+  app.post("/api/restaurant/:id/inventory/ingredients/reorder", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { ordered_ids } = req.body as { ordered_ids: string[] };
+      if (!Array.isArray(ordered_ids)) return res.status(400).json({ error: "ordered_ids must be an array" });
+      const db = await getTenantDb(req.params.id);
+      for (let i = 0; i < ordered_ids.length; i++) {
+        await db.run(
+          "UPDATE ingredients SET display_order = ? WHERE id = ?",
+          [i + 1, ordered_ids[i]]
+        );
+      }
+      res.json({ success: true, count: ordered_ids.length });
+    } catch (err) {
+      console.error("Reorder error:", err);
+      res.status(500).json({ error: "Failed to reorder ingredients" });
+    }
+  });
+
+  // ─── Hotel Inventory CRUD (linens, mini-bar, amenity restocking) ────────
+  app.get("/api/restaurant/:id/hotel-inventory", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        "SELECT * FROM hotel_inventory_items WHERE is_active = 1 ORDER BY category NULLS LAST, name"
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("Hotel inventory fetch error:", err);
+      res.status(500).json({ error: "Failed to fetch hotel inventory" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel-inventory", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { name, category, unit, current_stock_qty, par_level, reorder_point, default_unit_price, sku, notes } = req.body;
+      if (!name) return res.status(400).json({ error: "name is required" });
+      const db = await getTenantDb(req.params.id);
+      const id = `HI-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO hotel_inventory_items
+          (id, name, category, unit, current_stock_qty, par_level, reorder_point, default_unit_price, sku, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id, name, category || null, unit || 'unit',
+          Number(current_stock_qty || 0), Number(par_level || 0), Number(reorder_point || 0),
+          default_unit_price != null ? Number(default_unit_price) : null,
+          sku || null, notes || null,
+        ]
+      );
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error("Hotel inventory create error:", err);
+      res.status(500).json({ error: "Failed to create hotel inventory item" });
+    }
+  });
+
+  app.patch("/api/hotel-inventory/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      const allowed = ['name', 'category', 'unit', 'current_stock_qty', 'par_level', 'reorder_point', 'default_unit_price', 'sku', 'notes'];
+      const updates: string[] = [];
+      const params: any[] = [];
+      for (const k of allowed) {
+        if (k in req.body) { updates.push(`${k} = ?`); params.push(req.body[k]); }
+      }
+      if (updates.length === 0) return res.status(400).json({ error: "No fields to update" });
+      updates.push("updated_at = CURRENT_TIMESTAMP");
+      params.push(req.params.id);
+      await db.run(`UPDATE hotel_inventory_items SET ${updates.join(', ')} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Hotel inventory update error:", err);
+      res.status(500).json({ error: "Failed to update hotel inventory item" });
+    }
+  });
+
+  app.delete("/api/hotel-inventory/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.user!.restaurantId);
+      await db.run("UPDATE hotel_inventory_items SET is_active = 0 WHERE id = ?", [req.params.id]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Hotel inventory delete error:", err);
+      res.status(500).json({ error: "Failed to delete hotel inventory item" });
+    }
+  });
+
+  // ─── Storage Locations CRUD (multi-location stock) ──────────────────────
+  app.get("/api/restaurant/:id/storage-locations", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        "SELECT * FROM storage_locations WHERE is_active = 1 ORDER BY is_default DESC, name"
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("Locations fetch error:", err);
+      res.status(500).json({ error: "Failed to fetch storage locations" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/storage-locations", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { name, kind } = req.body;
+      if (!name) return res.status(400).json({ error: "name is required" });
+      const db = await getTenantDb(req.params.id);
+      const id = `LOC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO storage_locations (id, name, kind, is_default, is_active)
+         VALUES (?, ?, ?, 0, 1)`,
+        [id, name, kind || 'KITCHEN']
+      );
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error("Location create error:", err);
+      res.status(500).json({ error: "Failed to create storage location" });
+    }
+  });
+
+  app.delete("/api/storage-locations/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.params.id === 'LOC-MAIN') return res.status(400).json({ error: "Cannot delete the default Main location" });
+      const db = await getTenantDb(req.user!.restaurantId);
+      await db.run("UPDATE storage_locations SET is_active = 0 WHERE id = ?", [req.params.id]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Location delete error:", err);
+      res.status(500).json({ error: "Failed to delete storage location" });
+    }
+  });
+
+  // ─── Receipt OCR placeholder (Tier-3) ───────────────────────────────────
+  // Placeholder endpoint — accepts a bill image, returns suggested line items.
+  // Real implementation would call Gemini Vision / Tesseract; this stub
+  // returns a clear "feature pending" response so the UI button is wired up.
+  app.post("/api/restaurant/:id/inventory/receipt-ocr", authenticate, upload.single('bill'), async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: "No bill file uploaded (field: 'bill')" });
+      // TODO: integrate Gemini Vision / Google Cloud Vision here.
+      // For now return a 501 so the frontend can show a "manual entry" fallback.
+      res.status(501).json({
+        error: "Receipt OCR not yet wired to a vision model",
+        bill_image_url: `/uploads/${req.file.filename}`,
+        hint: "The bill image was saved. Use it as a reference and enter line items manually.",
+      });
+    } catch (err) {
+      console.error("Receipt OCR error:", err);
+      res.status(500).json({ error: "Failed to process receipt" });
+    }
+  });
+
+  // ─── Rider-side stock placeholder (Tier-3) ──────────────────────────────
+  // Returns the rider's current pouch contents (e.g. spare bottles, packaging
+  // they carry). v1 = read-only stub backed by the same ingredient table with
+  // a "pouch" location filter; full implementation comes when rider app launches.
+  app.get("/api/restaurant/:id/rider-stock/:riderId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT ils.*, i.name AS ingredient_name, i.unit
+           FROM ingredient_location_stock ils
+           LEFT JOIN ingredients i ON i.id = ils.ingredient_id
+          WHERE ils.location_id = ?`,
+        [`RIDER-${req.params.riderId}`]
+      ).catch(() => [] as any[]);
+      res.json({ rider_id: req.params.riderId, items: rows });
+    } catch (err) {
+      console.error("Rider stock error:", err);
+      res.status(500).json({ error: "Failed to fetch rider stock" });
     }
   });
 
