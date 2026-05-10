@@ -2629,6 +2629,18 @@ async function startServer() {
         delete updates['price_half'];
       }
 
+      // Phase 2 — flag the row as dirty so the menu-push cron re-publishes it
+      // to delivery platforms next window. Triggered only on changes that
+      // affect platform-visible state.
+      const platformDirtyFields = new Set([
+        'name', 'description', 'price', 'price_full', 'price_half',
+        'category', 'image_url', 'is_available', 'dietary_type',
+      ]);
+      const hasPlatformDirty = Object.keys(updates).some(k => platformDirtyFields.has(k));
+      if (hasPlatformDirty) {
+        updates['sync_dirty'] = 1;
+      }
+
       const keys = Object.keys(updates);
       if (keys.length === 0) return res.status(400).json({ error: "No updates provided" });
 
@@ -2636,7 +2648,7 @@ async function startServer() {
       const params = [...Object.values(updates), req.params.id];
 
       await db.run(`UPDATE menu SET ${setClause} WHERE id = ?`, params);
-      res.json({ success: true });
+      res.json({ success: true, sync_dirty: hasPlatformDirty });
     } catch (err) {
       res.status(500).json({ error: "Failed to update menu item" });
     }
@@ -2650,6 +2662,369 @@ async function startServer() {
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to delete menu item" });
+    }
+  });
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Multi-platform Delivery: Phase 2 — Channel pricing + settings ───────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Owner-controlled per-channel pricing on top of menu.price_full / price_half.
+  // Two layers:
+  //   1. channel_settings.default_markup_percent — applies to every menu item
+  //      on this channel by default (owner sets once per channel).
+  //   2. channel_prices — per-(menu_item, channel) overrides:
+  //        - price_override = absolute INR (NULL when relying on markup)
+  //        - markup_percent = +pct on top of menu.price (NULL when relying on default)
+  //        - is_listed = 0 hides this item from this channel entirely.
+  //
+  // Effective channel price (single helper used by all readers):
+  //   IF cp.is_listed = 0 → not visible
+  //   ELSE IF cp.price_override IS NOT NULL → cp.price_override
+  //   ELSE IF cp.markup_percent IS NOT NULL → menu.price * (1 + cp.markup_percent/100)
+  //   ELSE → menu.price * (1 + cs.default_markup_percent/100)
+
+  // Allowlist of valid channel ids — mirror of ALL_CHANNEL_IDS in integrations/types.ts.
+  const VALID_CHANNELS = new Set(['SWIGGY', 'ZOMATO', 'DUNZO', 'MAGICPIN', 'ONDC', 'URBANPIPER']);
+
+  // ── Channel settings ──
+
+  // List per-channel settings (auto-creates default rows for any channels
+  // missing in the table). Owner sees one card per platform.
+  app.get("/api/restaurant/:id/integrations/channels", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const existing: any[] = await db.query("SELECT * FROM channel_settings");
+      const have = new Set(existing.map((r: any) => r.channel));
+      // Auto-seed any missing channels with defaults so the UI can render every card.
+      for (const ch of VALID_CHANNELS) {
+        if (!have.has(ch)) {
+          await db.run(
+            `INSERT INTO channel_settings (channel, is_active, default_markup_percent, commission_percent, prep_time_minutes, min_margin_floor_percent)
+             VALUES (?, 0, 25, 25, 20, 5)
+             ON CONFLICT (channel) DO NOTHING`,
+            [ch]
+          );
+        }
+      }
+      const rows: any[] = await db.query("SELECT * FROM channel_settings ORDER BY channel");
+      res.json(rows.map(r => ({
+        ...r,
+        is_active: Number(r.is_active) === 1,
+        default_markup_percent: Number(r.default_markup_percent),
+        commission_percent: Number(r.commission_percent),
+        packaging_charge: Number(r.packaging_charge),
+        min_order_amount: Number(r.min_order_amount),
+        min_margin_floor_percent: Number(r.min_margin_floor_percent),
+      })));
+    } catch (err) {
+      console.error("List channels error:", err);
+      res.status(500).json({ error: "Failed to fetch channels" });
+    }
+  });
+
+  // Update channel settings (markup %, commission %, prep time, min-margin floor, etc.)
+  app.put("/api/restaurant/:id/integrations/:channel/settings", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const channel = String(req.params.channel).toUpperCase();
+      if (!VALID_CHANNELS.has(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
+
+      const allowed = [
+        'is_active', 'default_markup_percent', 'commission_percent',
+        'packaging_charge', 'min_order_amount', 'prep_time_minutes',
+        'webhook_url_inbound', 'brand_display_name', 'min_margin_floor_percent',
+      ];
+      const updates: Record<string, any> = {};
+      for (const k of allowed) {
+        if (k in req.body) updates[k] = req.body[k];
+      }
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No updates provided" });
+      }
+
+      // Validate numeric guards
+      if (updates.default_markup_percent != null && (updates.default_markup_percent < 0 || updates.default_markup_percent > 500)) {
+        return res.status(400).json({ error: "default_markup_percent must be in [0, 500]" });
+      }
+      if (updates.commission_percent != null && (updates.commission_percent < 0 || updates.commission_percent > 90)) {
+        return res.status(400).json({ error: "commission_percent must be in [0, 90]" });
+      }
+      if (updates.min_margin_floor_percent != null && (updates.min_margin_floor_percent < 0 || updates.min_margin_floor_percent > 90)) {
+        return res.status(400).json({ error: "min_margin_floor_percent must be in [0, 90]" });
+      }
+
+      // Coerce booleans
+      if ('is_active' in updates) updates.is_active = updates.is_active ? 1 : 0;
+
+      const db = await getTenantDb(req.params.id);
+      // Upsert — first ensure a row exists, then update. Simpler than a complex ON CONFLICT for variable column sets.
+      await db.run(
+        `INSERT INTO channel_settings (channel) VALUES (?) ON CONFLICT (channel) DO NOTHING`,
+        [channel]
+      );
+      const setClause = Object.keys(updates).map(k => `${k} = ?`).join(", ");
+      const params = [...Object.values(updates), channel];
+      await db.run(
+        `UPDATE channel_settings SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE channel = ?`,
+        params
+      );
+
+      // Mark every menu item dirty so the menu-push cron republishes with the new
+      // markup. Cheap — sync_dirty=1 just causes the next 15-min cron to re-push.
+      if ('default_markup_percent' in updates || 'is_active' in updates) {
+        await db.run("UPDATE menu SET sync_dirty = 1");
+      }
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Update channel settings error:", err);
+      res.status(500).json({ error: "Failed to update channel settings" });
+    }
+  });
+
+  // ── Channel prices ──
+
+  // Bulk fetch all channel_prices rows for the tenant (used by Menu UI to
+  // render per-channel pills and by the menu-push cron to compute payloads).
+  app.get("/api/restaurant/:id/menu/channel-prices", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM channel_prices ORDER BY menu_item_id, channel");
+      res.json(rows.map((r: any) => ({
+        ...r,
+        price_override: r.price_override == null ? null : Number(r.price_override),
+        markup_percent: r.markup_percent == null ? null : Number(r.markup_percent),
+        is_listed: Number(r.is_listed) === 1,
+      })));
+    } catch (err) {
+      console.error("Fetch channel prices error:", err);
+      res.status(500).json({ error: "Failed to fetch channel prices" });
+    }
+  });
+
+  // Get one menu item's channel-prices (driver for the Menu modal section).
+  // Returns a row per channel — synthesises an "inherits from default markup"
+  // entry if no channel_prices row exists yet.
+  app.get("/api/restaurant/:id/menu/:itemId/channel-prices", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const item: any = await db.get(
+        "SELECT id, name, price, price_full, price_half FROM menu WHERE id = ?",
+        [req.params.itemId]
+      );
+      if (!item) return res.status(404).json({ error: "Menu item not found" });
+      const basePrice = Number(item.price_full ?? item.price ?? 0);
+
+      const settings: any[] = await db.query("SELECT * FROM channel_settings");
+      const settingsByChannel: Record<string, any> = {};
+      settings.forEach((s: any) => { settingsByChannel[s.channel] = s; });
+
+      const overrides: any[] = await db.query(
+        "SELECT * FROM channel_prices WHERE menu_item_id = ?",
+        [req.params.itemId]
+      );
+      const overrideByChannel: Record<string, any> = {};
+      overrides.forEach((o: any) => { overrideByChannel[o.channel] = o; });
+
+      const result = Array.from(VALID_CHANNELS).map(ch => {
+        const cp = overrideByChannel[ch];
+        const cs = settingsByChannel[ch];
+        const defaultMarkup = Number(cs?.default_markup_percent ?? 25);
+        const isActive = Number(cs?.is_active ?? 0) === 1;
+        const isListed = !cp || Number(cp.is_listed) === 1;
+        const priceOverride = cp?.price_override == null ? null : Number(cp.price_override);
+        const markupPercent = cp?.markup_percent == null ? null : Number(cp.markup_percent);
+        const effectivePrice = priceOverride != null
+          ? priceOverride
+          : markupPercent != null
+            ? Math.round(basePrice * (1 + markupPercent / 100) * 100) / 100
+            : Math.round(basePrice * (1 + defaultMarkup / 100) * 100) / 100;
+        return {
+          channel: ch,
+          channel_active: isActive,
+          base_price: basePrice,
+          default_markup_percent: defaultMarkup,
+          is_listed: isListed,
+          price_override: priceOverride,
+          markup_percent: markupPercent,
+          effective_price: effectivePrice,
+          source: priceOverride != null ? 'OVERRIDE'
+                : markupPercent != null  ? 'PER_ITEM_MARKUP'
+                : 'CHANNEL_DEFAULT_MARKUP',
+        };
+      });
+
+      res.json({ menu_item: item, channels: result });
+    } catch (err) {
+      console.error("Fetch item channel prices error:", err);
+      res.status(500).json({ error: "Failed to fetch channel prices" });
+    }
+  });
+
+  // Upsert one channel-price row for a menu item.
+  // Body: { channel, price_override?, markup_percent?, is_listed? }
+  // Exactly one of (price_override, markup_percent) should be set; passing
+  // both clears markup_percent (override wins). Passing neither falls back
+  // to the channel's default markup.
+  app.put("/api/restaurant/:id/menu/:itemId/channel-prices", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { channel, price_override, markup_percent, is_listed } = req.body;
+      if (!channel || !VALID_CHANNELS.has(String(channel).toUpperCase())) {
+        return res.status(400).json({ error: `channel must be one of ${[...VALID_CHANNELS].join(', ')}` });
+      }
+      const ch = String(channel).toUpperCase();
+
+      const db = await getTenantDb(req.params.id);
+      const item: any = await db.get(
+        "SELECT id, price, price_full FROM menu WHERE id = ?",
+        [req.params.itemId]
+      );
+      if (!item) return res.status(404).json({ error: "Menu item not found" });
+      const basePrice = Number(item.price_full ?? item.price ?? 0);
+
+      // Min-margin floor guard: if the resulting effective_price is below the
+      // configured floor multiplier, refuse to save.
+      const cs: any = await db.get("SELECT * FROM channel_settings WHERE channel = ?", [ch]);
+      const floorPct = Number(cs?.min_margin_floor_percent ?? 0);
+      const effective = price_override != null && price_override !== ''
+        ? Number(price_override)
+        : markup_percent != null && markup_percent !== ''
+          ? basePrice * (1 + Number(markup_percent) / 100)
+          : basePrice * (1 + Number(cs?.default_markup_percent ?? 25) / 100);
+      if (basePrice > 0 && floorPct > 0) {
+        const floorPrice = basePrice * (1 + floorPct / 100);
+        if (effective < floorPrice) {
+          return res.status(422).json({
+            error: `Effective price ₹${effective.toFixed(2)} is below the min-margin floor of ${floorPct}% (₹${floorPrice.toFixed(2)}). Raise the price or lower the floor in channel settings.`,
+            base_price: basePrice,
+            effective_price: effective,
+            floor_percent: floorPct,
+            floor_price: floorPrice,
+          });
+        }
+      }
+
+      // Normalise — exactly one of (override, markup) is non-null at a time.
+      const normOverride = price_override == null || price_override === '' ? null : Number(price_override);
+      const normMarkup   = price_override != null && price_override !== ''
+        ? null
+        : markup_percent == null || markup_percent === ''
+          ? null
+          : Number(markup_percent);
+      const listedFlag   = is_listed === false ? 0 : 1;
+
+      const id = `CP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO channel_prices (id, menu_item_id, channel, price_override, markup_percent, is_listed, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (menu_item_id, channel) DO UPDATE SET
+           price_override = EXCLUDED.price_override,
+           markup_percent = EXCLUDED.markup_percent,
+           is_listed = EXCLUDED.is_listed,
+           updated_at = CURRENT_TIMESTAMP`,
+        [id, req.params.itemId, ch, normOverride, normMarkup, listedFlag]
+      );
+      // Mark the menu row dirty so the next cron pushes it to the platform.
+      await db.run("UPDATE menu SET sync_dirty = 1 WHERE id = ?", [req.params.itemId]);
+
+      res.json({
+        success: true,
+        effective_price: Math.round(effective * 100) / 100,
+        source: normOverride != null ? 'OVERRIDE' : normMarkup != null ? 'PER_ITEM_MARKUP' : 'CHANNEL_DEFAULT_MARKUP',
+      });
+    } catch (err) {
+      console.error("Upsert channel price error:", err);
+      res.status(500).json({ error: "Failed to update channel price" });
+    }
+  });
+
+  // Bulk apply markup to many items at once. Two modes:
+  //   { channel, markup_percent, item_ids?: string[] }    — every item or only a list
+  //   { channel, price_override, item_ids: string[] }     — same absolute price across multiple items (rare; mostly used to zero out / hide a category)
+  // Items already with explicit overrides keep them; this only touches the
+  // markup_percent column (override wins). is_listed is preserved.
+  app.post("/api/restaurant/:id/menu/channel-prices/bulk", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { channel, markup_percent, price_override, item_ids, hide } = req.body;
+      if (!channel || !VALID_CHANNELS.has(String(channel).toUpperCase())) {
+        return res.status(400).json({ error: `channel must be one of ${[...VALID_CHANNELS].join(', ')}` });
+      }
+      const ch = String(channel).toUpperCase();
+      const db = await getTenantDb(req.params.id);
+
+      // Resolve target item ids
+      let targetIds: string[];
+      if (Array.isArray(item_ids) && item_ids.length > 0) {
+        targetIds = item_ids.map(String);
+      } else {
+        const all: any[] = await db.query("SELECT id FROM menu");
+        targetIds = all.map((r: any) => r.id);
+      }
+      if (targetIds.length === 0) return res.json({ success: true, updated: 0 });
+
+      let updated = 0;
+      for (const itemId of targetIds) {
+        const id = `CP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        // For bulk: applying markup_percent CLEARS price_override (markup is the explicit choice).
+        // For "hide" bulk: only flip is_listed = 0; preserve other fields.
+        if (hide === true) {
+          await db.run(
+            `INSERT INTO channel_prices (id, menu_item_id, channel, is_listed, updated_at)
+             VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP)
+             ON CONFLICT (menu_item_id, channel) DO UPDATE SET is_listed = 0, updated_at = CURRENT_TIMESTAMP`,
+            [id, itemId, ch]
+          );
+        } else if (price_override != null && price_override !== '') {
+          await db.run(
+            `INSERT INTO channel_prices (id, menu_item_id, channel, price_override, markup_percent, is_listed, updated_at)
+             VALUES (?, ?, ?, ?, NULL, 1, CURRENT_TIMESTAMP)
+             ON CONFLICT (menu_item_id, channel) DO UPDATE SET
+               price_override = EXCLUDED.price_override,
+               markup_percent = NULL, is_listed = 1, updated_at = CURRENT_TIMESTAMP`,
+            [id, itemId, ch, Number(price_override)]
+          );
+        } else if (markup_percent != null && markup_percent !== '') {
+          await db.run(
+            `INSERT INTO channel_prices (id, menu_item_id, channel, markup_percent, price_override, is_listed, updated_at)
+             VALUES (?, ?, ?, ?, NULL, 1, CURRENT_TIMESTAMP)
+             ON CONFLICT (menu_item_id, channel) DO UPDATE SET
+               markup_percent = EXCLUDED.markup_percent,
+               price_override = NULL, is_listed = 1, updated_at = CURRENT_TIMESTAMP`,
+            [id, itemId, ch, Number(markup_percent)]
+          );
+        } else {
+          // No-op for this item; nothing to apply.
+          continue;
+        }
+        updated++;
+      }
+      // Mark all touched menu rows dirty for the next sync window.
+      if (targetIds.length > 0) {
+        const placeholders = targetIds.map(() => '?').join(',');
+        await db.run(`UPDATE menu SET sync_dirty = 1 WHERE id IN (${placeholders})`, targetIds);
+      }
+
+      res.json({ success: true, updated });
+    } catch (err) {
+      console.error("Bulk channel price error:", err);
+      res.status(500).json({ error: "Failed to bulk update channel prices" });
+    }
+  });
+
+  // Delete a channel-price override (revert the item to the channel default markup).
+  app.delete("/api/restaurant/:id/menu/:itemId/channel-prices/:channel", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const ch = String(req.params.channel).toUpperCase();
+      if (!VALID_CHANNELS.has(ch)) return res.status(400).json({ error: `Unknown channel: ${ch}` });
+      const db = await getTenantDb(req.params.id);
+      await db.run(
+        "DELETE FROM channel_prices WHERE menu_item_id = ? AND channel = ?",
+        [req.params.itemId, ch]
+      );
+      await db.run("UPDATE menu SET sync_dirty = 1 WHERE id = ?", [req.params.itemId]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Delete channel price error:", err);
+      res.status(500).json({ error: "Failed to delete channel price" });
     }
   });
 

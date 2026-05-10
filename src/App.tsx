@@ -3709,6 +3709,250 @@ function LocationsPanel({ locations, onCreate, onDelete }: {
   );
 }
 
+// ─── Phase 2: Channel pricing section inside Menu edit modal ─────────────
+//
+// Renders one row per delivery channel (Swiggy / Zomato / Dunzo / Magicpin /
+// ONDC / UrbanPiper). Each row shows the effective price with a switchable
+// pricing source: channel default markup → per-item markup % → absolute
+// price override. "Hide on this channel" toggle writes is_listed=0.
+//
+// All saves are immediate (PUT per row) — server-side min-margin floor
+// validates and rejects with 422 if the resulting price is below the floor.
+
+const CHANNEL_THEME: Record<string, { color: string; bg: string; label: string }> = {
+  SWIGGY:     { color: '#fc8019', bg: '#fff5eb', label: 'Swiggy' },
+  ZOMATO:     { color: '#cb202d', bg: '#fff0f0', label: 'Zomato' },
+  DUNZO:      { color: '#10b981', bg: '#ecfdf5', label: 'Dunzo' },
+  MAGICPIN:   { color: '#7c3aed', bg: '#f5f3ff', label: 'Magicpin' },
+  ONDC:       { color: '#1e40af', bg: '#eff6ff', label: 'ONDC' },
+  URBANPIPER: { color: '#475569', bg: '#f1f5f9', label: 'UrbanPiper' },
+};
+
+function ChannelPricingSection({
+  restaurantId, token, menuItemId, onError,
+}: {
+  restaurantId: string;
+  token: string;
+  menuItemId: string;
+  onError?: (msg: string) => void;
+}) {
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [savingChannel, setSavingChannel] = useState<string | null>(null);
+  const [editMode, setEditMode] = useState<Record<string, 'DEFAULT' | 'MARKUP' | 'OVERRIDE'>>({});
+  const [drafts, setDrafts] = useState<Record<string, { markup_percent?: string; price_override?: string }>>({});
+
+  const reload = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/menu/${menuItemId}/channel-prices`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = await res.json();
+      setData(j);
+      // Seed edit mode + drafts based on current source
+      const modes: Record<string, any> = {};
+      const ds: Record<string, any> = {};
+      (j.channels || []).forEach((c: any) => {
+        modes[c.channel] = c.source === 'OVERRIDE' ? 'OVERRIDE' : c.source === 'PER_ITEM_MARKUP' ? 'MARKUP' : 'DEFAULT';
+        ds[c.channel] = {
+          markup_percent: c.markup_percent != null ? String(c.markup_percent) : '',
+          price_override: c.price_override != null ? String(c.price_override) : '',
+        };
+      });
+      setEditMode(modes);
+      setDrafts(ds);
+    } catch (err: any) {
+      onError?.(err?.message || 'Failed to load channel prices');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { if (menuItemId) reload(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [menuItemId]);
+
+  const saveRow = async (ch: string) => {
+    setSavingChannel(ch);
+    try {
+      const mode = editMode[ch] || 'DEFAULT';
+      const draft = drafts[ch] || {};
+      let body: any = { channel: ch, is_listed: true };
+      if (mode === 'OVERRIDE') {
+        const v = Number(draft.price_override);
+        if (!Number.isFinite(v) || v <= 0) { onError?.('Override price must be > 0'); setSavingChannel(null); return; }
+        body.price_override = v;
+      } else if (mode === 'MARKUP') {
+        const v = Number(draft.markup_percent);
+        if (!Number.isFinite(v) || v < 0) { onError?.('Markup % must be ≥ 0'); setSavingChannel(null); return; }
+        body.markup_percent = v;
+      } else {
+        // DEFAULT — clear both, fall back to channel default markup
+        body.markup_percent = null;
+        body.price_override = null;
+      }
+      const res = await fetch(`/api/restaurant/${restaurantId}/menu/${menuItemId}/channel-prices`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      await reload();
+    } catch (err: any) {
+      onError?.(err?.message || 'Failed to save');
+    } finally {
+      setSavingChannel(null);
+    }
+  };
+
+  const toggleHidden = async (ch: string, currentlyListed: boolean) => {
+    setSavingChannel(ch);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/menu/${menuItemId}/channel-prices`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ channel: ch, is_listed: !currentlyListed }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      await reload();
+    } catch (err: any) {
+      onError?.(err?.message || 'Failed to toggle visibility');
+    } finally {
+      setSavingChannel(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="p-4 bg-[#faf7f2]/50 rounded-2xl text-sm text-[#9c8e85] text-center">Loading channel prices…</div>
+    );
+  }
+  if (!data) return null;
+
+  const basePrice = Number(data.menu_item?.price_full ?? data.menu_item?.price ?? 0);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <label className="text-xs font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Channel Pricing</label>
+        <span className="text-xs text-[#9c8e85]">Base ₹{basePrice.toFixed(2)} → effective per channel</span>
+      </div>
+      <div className="space-y-2">
+        {data.channels.map((c: any) => {
+          const theme = CHANNEL_THEME[c.channel] || { color: '#6b5d52', bg: '#f3f4f6', label: c.channel };
+          const mode = editMode[c.channel] || 'DEFAULT';
+          const draft = drafts[c.channel] || {};
+          const isSaving = savingChannel === c.channel;
+          const inactive = !c.channel_active;
+          return (
+            <div
+              key={c.channel}
+              className={cn(
+                'flex flex-wrap md:flex-nowrap items-center gap-2 px-3 py-2.5 rounded-xl border',
+                inactive && 'opacity-50',
+              )}
+              style={{ background: theme.bg, borderColor: theme.color + '30' }}
+            >
+              <div className="flex items-center gap-2 min-w-[120px]">
+                <span
+                  className="w-2 h-2 rounded-full"
+                  style={{ background: c.is_listed ? theme.color : '#9ca3af' }}
+                />
+                <span className="text-sm font-bold" style={{ color: theme.color }}>{theme.label}</span>
+                {inactive && <span className="text-[10px] uppercase tracking-wider text-[#9c8e85]">(off)</span>}
+              </div>
+
+              {/* Mode selector */}
+              <select
+                disabled={isSaving || inactive || !c.is_listed}
+                value={mode}
+                onChange={e => setEditMode(prev => ({ ...prev, [c.channel]: e.target.value as any }))}
+                className="text-xs px-2 py-1.5 rounded-lg border border-[#cc5a16]/15 bg-white"
+              >
+                <option value="DEFAULT">Channel default ({c.default_markup_percent}%)</option>
+                <option value="MARKUP">Custom markup %</option>
+                <option value="OVERRIDE">Absolute price ₹</option>
+              </select>
+
+              {/* Mode-specific input */}
+              {mode === 'MARKUP' && (
+                <div className="relative">
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0"
+                    max="500"
+                    disabled={isSaving || inactive || !c.is_listed}
+                    value={draft.markup_percent ?? ''}
+                    onChange={e => setDrafts(prev => ({ ...prev, [c.channel]: { ...prev[c.channel], markup_percent: e.target.value } }))}
+                    className="w-24 pl-3 pr-7 py-1.5 rounded-lg border border-[#cc5a16]/15 bg-white text-sm font-mono"
+                    placeholder="0"
+                  />
+                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[#9c8e85]">%</span>
+                </div>
+              )}
+              {mode === 'OVERRIDE' && (
+                <div className="relative">
+                  <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-[#9c8e85]">₹</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    disabled={isSaving || inactive || !c.is_listed}
+                    value={draft.price_override ?? ''}
+                    onChange={e => setDrafts(prev => ({ ...prev, [c.channel]: { ...prev[c.channel], price_override: e.target.value } }))}
+                    className="w-24 pl-6 pr-2 py-1.5 rounded-lg border border-[#cc5a16]/15 bg-white text-sm font-mono"
+                    placeholder="0.00"
+                  />
+                </div>
+              )}
+
+              {/* Effective price pill */}
+              <span
+                className="text-sm font-bold font-mono px-2.5 py-1 rounded-full"
+                style={{ background: theme.color, color: 'white' }}
+              >
+                ₹{Number(c.effective_price || 0).toFixed(2)}
+              </span>
+
+              {/* Hide / show toggle */}
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => toggleHidden(c.channel, c.is_listed)}
+                className={cn(
+                  'text-[11px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full border',
+                  c.is_listed
+                    ? 'border-red-200 text-red-600 hover:bg-red-50'
+                    : 'border-emerald-200 text-emerald-700 hover:bg-emerald-50',
+                )}
+              >
+                {c.is_listed ? 'Hide' : 'Show'}
+              </button>
+
+              {/* Save */}
+              <button
+                type="button"
+                disabled={isSaving || inactive || !c.is_listed}
+                onClick={() => saveRow(c.channel)}
+                className="text-[11px] font-bold uppercase tracking-wider px-3 py-1 rounded-full bg-[#cc5a16] text-white hover:bg-[#a84612] disabled:opacity-40 ml-auto"
+              >
+                {isSaving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-[11px] text-[#9c8e85] mt-1 px-2">
+        Tip: Channel default applies the per-channel markup % from <strong>Settings → Integrations</strong>.
+        Min-margin floor blocks any price that would put you below cost.
+      </p>
+    </div>
+  );
+}
+
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
   const [activeTab, setActiveTab] = useState<
     | 'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS'
@@ -6473,6 +6717,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </div>
                     </div>
                   </div>
+
+                  {/* Channel pricing — Swiggy / Zomato / Dunzo / Magicpin / ONDC / UrbanPiper */}
+                  <ChannelPricingSection
+                    restaurantId={restaurantId}
+                    token={token}
+                    menuItemId={editingItem.id}
+                    onError={(msg) => alert(msg)}
+                  />
 
                   <div className="pt-4 flex gap-4">
                     <button type="button" onClick={() => { setEditingItem(null); setEditImageFile(null); }}
