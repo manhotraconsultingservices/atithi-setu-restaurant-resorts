@@ -31,9 +31,14 @@ import {
   tryGetAdapter,
 } from "./integrations/registry.ts";
 import { MockAdapter } from "./integrations/adapters/MockAdapter.ts";
+import { UrbanPiperAdapter } from "./integrations/adapters/UrbanPiperAdapter.ts";
+import { ONDCAdapter } from "./integrations/adapters/ONDCAdapter.ts";
+import { SwiggyDirectAdapter } from "./integrations/adapters/SwiggyDirectAdapter.ts";
+import { ZomatoDirectAdapter } from "./integrations/adapters/ZomatoDirectAdapter.ts";
 import type { ChannelId, AdapterContext, NormalizedOrder } from "./integrations/types.ts";
 import { ALL_CHANNEL_IDS } from "./integrations/types.ts";
 import { enqueueSyncJob, processSyncJob, backoffSeconds, type PendingJobRow } from "./integrations/syncWorker.ts";
+import { encryptCredential } from "./integrations/security.ts";
 
 /** Returns a map of { "HH:MI" → bookedCount } for a given date, excluding cancelled bookings. */
 async function getSlotCountMap(db: DbInterface, dateStr: string): Promise<Record<string, number>> {
@@ -640,26 +645,37 @@ async function startServer() {
   }
 
   // ── Bootstrap delivery-platform integration adapters ───────────────────
-  // The MockAdapter (registered as 'URBANPIPER') is always available so E2E
-  // tests can exercise the full pipeline without a real platform. Real
-  // adapters (UrbanPiperAdapter, ONDCAdapter, SwiggyDirectAdapter,
-  // ZomatoDirectAdapter) get registered in subsequent phases.
+  // Phase 5: register all real adapters at boot. Switching platforms is
+  // purely a question of channel_settings.is_active + credentials, never
+  // code. Adapters are pluggable and resolved by channel id at request time.
+  //
+  // MOCK_INTEGRATIONS=1 env flag (dev / CI only) overrides URBANPIPER with
+  // MockAdapter so the test suite can exercise the full pipeline without
+  // hitting UrbanPiper's sandbox. In production this stays unset → real
+  // UrbanPiperAdapter handles URBANPIPER traffic.
   //
   // The webhook endpoints additionally check `isCredentialKeyConfigured()`
   // before accepting traffic — if the master key isn't configured, the
   // routes 503 with a clear "Integration not configured" response rather
   // than silently writing plaintext credentials.
   try {
-    registerAdapter(new MockAdapter());
+    if (process.env.MOCK_INTEGRATIONS === '1') {
+      registerAdapter(new MockAdapter());
+      console.log('[integrations] MOCK_INTEGRATIONS=1 → MockAdapter mounted as URBANPIPER (dev mode)');
+    } else {
+      registerAdapter(new UrbanPiperAdapter());
+    }
+    registerAdapter(new ONDCAdapter());
+    registerAdapter(new SwiggyDirectAdapter());
+    registerAdapter(new ZomatoDirectAdapter());
     if (!isCredentialKeyConfigured()) {
       console.warn(
         '[integrations] ATITHI_CREDENTIAL_KEY env var is not configured. ' +
         'Delivery-platform credential storage will be disabled. ' +
         'Generate one via `openssl rand -base64 32` to enable.'
       );
-    } else {
-      console.log(`[integrations] ${listRegisteredChannels().length} adapter(s) registered: ${listRegisteredChannels().join(', ')}`);
     }
+    console.log(`[integrations] ${listRegisteredChannels().length} adapter(s) registered: ${listRegisteredChannels().join(', ')}`);
   } catch (err) {
     console.error('[integrations] Bootstrap failed:', err);
     // Non-fatal — the rest of the server boots fine without the integration module.
@@ -3022,6 +3038,138 @@ async function startServer() {
   });
 
   // Delete a channel-price override (revert the item to the channel default markup).
+  // ── Phase 5: Credentials encrypted CRUD ────────────────────────────────
+  // Per-tenant + per-channel credentials. AES-256-GCM at rest, master key
+  // from ATITHI_CREDENTIAL_KEY env var. The owner-facing UI never displays
+  // secret material — only metadata (configured / not configured / rotated_at).
+  // PUT replaces the credential bundle for a channel atomically.
+  // POST .../rotate generates a fresh ciphertext for an existing row.
+
+  // GET — list credential metadata for a channel (NEVER returns plaintext)
+  app.get("/api/restaurant/:id/integrations/:channel/credentials", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const channel = String(req.params.channel).toUpperCase();
+      if (!VALID_CHANNELS.has(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT credential_type, metadata, is_active, rotated_at, created_at
+           FROM integration_credentials WHERE channel = ?`,
+        [channel]
+      );
+      res.json({
+        channel,
+        configured: rows.length > 0,
+        credential_types: rows.map(r => ({
+          type: r.credential_type,
+          is_active: Number(r.is_active) === 1,
+          rotated_at: r.rotated_at,
+          created_at: r.created_at,
+          metadata: r.metadata || {},
+        })),
+        key_master_configured: isCredentialKeyConfigured(),
+      });
+    } catch (err) {
+      console.error("Get credentials error:", err);
+      res.status(500).json({ error: "Failed to fetch credentials" });
+    }
+  });
+
+  // PUT — set/replace credentials for a channel
+  // Body: { API_KEY?: string, HMAC_SECRET?: string, STORE_ID?: string, OAUTH_TOKEN?: string, metadata?: object }
+  // Empty string for a key means "delete that credential type".
+  app.put("/api/restaurant/:id/integrations/:channel/credentials", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const channel = String(req.params.channel).toUpperCase();
+      if (!VALID_CHANNELS.has(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
+      if (!isCredentialKeyConfigured()) {
+        return res.status(503).json({ error: 'ATITHI_CREDENTIAL_KEY not configured on the server. Generate via `openssl rand -base64 32` and set the env var before storing credentials.' });
+      }
+      const db = await getTenantDb(req.params.id);
+      const allowedTypes = ['API_KEY', 'OAUTH_TOKEN', 'HMAC_SECRET', 'STORE_ID'];
+      const upserted: string[] = [];
+      const deleted: string[] = [];
+      for (const t of allowedTypes) {
+        const v = req.body?.[t];
+        if (v === undefined) continue;            // not touching this type
+        if (v === '' || v === null) {             // explicit clear
+          await db.run(
+            "DELETE FROM integration_credentials WHERE channel = ? AND credential_type = ?",
+            [channel, t]
+          );
+          deleted.push(t);
+          continue;
+        }
+        const enc = encryptCredential(String(v));
+        const id = `IC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        await db.run(
+          `INSERT INTO integration_credentials (id, channel, credential_type, ciphertext, iv, auth_tag, metadata, is_active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+           ON CONFLICT (channel, credential_type) DO UPDATE SET
+             ciphertext = EXCLUDED.ciphertext,
+             iv = EXCLUDED.iv,
+             auth_tag = EXCLUDED.auth_tag,
+             metadata = EXCLUDED.metadata,
+             rotated_at = CURRENT_TIMESTAMP,
+             is_active = 1`,
+          [id, channel, t, enc.ciphertext, enc.iv, enc.authTag, JSON.stringify(req.body?.metadata || {})]
+        );
+        upserted.push(t);
+      }
+      res.json({ success: true, upserted, deleted });
+    } catch (err) {
+      console.error("PUT credentials error:", err);
+      res.status(500).json({ error: "Failed to save credentials" });
+    }
+  });
+
+  // DELETE — soft-delete (set is_active=0) for a channel's credentials.
+  // Hard-delete still possible via PUT with empty strings.
+  app.delete("/api/restaurant/:id/integrations/:channel/credentials", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const channel = String(req.params.channel).toUpperCase();
+      if (!VALID_CHANNELS.has(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
+      const db = await getTenantDb(req.params.id);
+      await db.run(
+        "UPDATE integration_credentials SET is_active = 0 WHERE channel = ?",
+        [channel]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error("DELETE credentials error:", err);
+      res.status(500).json({ error: "Failed to disable credentials" });
+    }
+  });
+
+  // POST .../test — smoke-test the credentials by calling pushStoreOpenClose(true) then (false).
+  // If the adapter returns OK, the credentials work. If it throws, surface the error to the owner.
+  app.post("/api/restaurant/:id/integrations/:channel/test", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const channel = String(req.params.channel).toUpperCase() as ChannelId;
+      if (!VALID_CHANNELS.has(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
+      const adapter = tryGetAdapter(channel);
+      if (!adapter) return res.status(404).json({ error: `No adapter registered for ${channel}` });
+      const db = await getTenantDb(req.params.id);
+      const ctx = await loadAdapterContext(db, req.params.id, channel);
+      // Open-then-close cycle. If credentials are wrong, the first call throws.
+      try {
+        await adapter.pushStoreOpenClose(true, ctx);
+        // We don't actually want to leave the store open as a side-effect of a smoke test,
+        // so close again immediately. The owner toggles the real state via the UI.
+        await adapter.pushStoreOpenClose(false, ctx);
+        res.json({ success: true, message: `Credentials verified for ${channel} — adapter responded OK to a test cycle.` });
+      } catch (adapterErr: any) {
+        return res.status(502).json({
+          success: false,
+          message: 'Adapter rejected the test call.',
+          detail: String(adapterErr?.message || adapterErr).slice(0, 400),
+        });
+      }
+    } catch (err: any) {
+      console.error("Smoke-test error:", err);
+      res.status(500).json({ error: "Smoke-test failed", detail: err?.message });
+    }
+  });
+
   app.delete("/api/restaurant/:id/menu/:itemId/channel-prices/:channel", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const ch = String(req.params.channel).toUpperCase();
@@ -4190,6 +4338,53 @@ async function startServer() {
       }
 
       res.json({ success: true, id: grnId, total_amount: totalAmount });
+
+      // ── Phase 5: re-enable items on platforms when stock crosses back above 0 ──
+      // Fire-and-forget: identify ingredients whose stock just crossed from
+      // ≤0 to >0 in this GRN, find their menu items, and enqueue
+      // AVAILABILITY_PUSH(true) per active channel. Only checks ingredients
+      // mentioned in this GRN, so cost is bounded.
+      (async () => {
+        try {
+          const ingIds = (items || []).map((it: any) => it?.ingredient_id).filter(Boolean);
+          if (ingIds.length === 0) return;
+          const placeholders = ingIds.map(() => '?').join(',');
+          // After this GRN, ingredients are >0 (we just incremented). The
+          // question is whether they were ≤0 before. We can detect by checking
+          // stock_movements for the most recent prior CONSUMPTION/WASTAGE
+          // balance — but a simpler proxy: just always enqueue re-enable;
+          // it's idempotent on the platform side.
+          const affected: any[] = await db.query(
+            `SELECT DISTINCT m.id, m.name, m.external_ids
+               FROM menu m
+               JOIN recipes rcp ON rcp.menu_item_id = m.id
+              WHERE rcp.ingredient_id IN (${placeholders})
+                AND (rcp.effective_to IS NULL OR rcp.effective_to > NOW())
+                AND m.is_available = 1`,
+            ingIds
+          ).catch(() => [] as any[]);
+          if (affected.length === 0) return;
+          const activeChannels: any[] = await db.query(
+            "SELECT channel FROM channel_settings WHERE is_active = 1"
+          ).catch(() => [] as any[]);
+          for (const cr of activeChannels) {
+            const ch = String(cr.channel) as ChannelId;
+            const pushItems = affected.map((m: any) => {
+              let extIds = m.external_ids;
+              if (typeof extIds === 'string') { try { extIds = JSON.parse(extIds); } catch { extIds = {}; } }
+              return {
+                externalItemId: extIds?.[ch],
+                isAvailable: true,
+              };
+            }).filter((it: any) => it.externalItemId);
+            if (pushItems.length > 0) {
+              await enqueueSyncJob(db, 'AVAILABILITY_PUSH', ch, { items: pushItems });
+            }
+          }
+        } catch (renableErr) {
+          console.warn(`[grn] re-enable hook failed for ${grnId}:`, (renableErr as any)?.message);
+        }
+      })();
     } catch (err) {
       console.error("Create GRN error:", err);
       res.status(500).json({ error: "Failed to create GRN" });
@@ -11330,6 +11525,49 @@ async function startServer() {
               autoPOId: ingPOMap.get(ing.id) || null,  // existing or just-created
             }).catch(() => {});
             totalAlerts++;
+          }
+
+          // ── Phase 5: stock-out auto-disable on every active platform ──
+          // For ingredients that have actually hit zero (not just below
+          // reorder), find every menu item that uses them and enqueue an
+          // AVAILABILITY_PUSH(false) per active channel. Idempotent — even
+          // if already pushed, the platform-side state converges.
+          try {
+            const zeroIngs = lowRows.filter((ig: any) => Number(ig.current_stock_qty) <= 0);
+            if (zeroIngs.length > 0) {
+              const zeroIds = zeroIngs.map((ig: any) => ig.id);
+              const placeholders = zeroIds.map(() => '?').join(',');
+              const affected: any[] = await db.query(
+                `SELECT DISTINCT m.id, m.name, m.external_ids
+                   FROM menu m
+                   JOIN recipes rcp ON rcp.menu_item_id = m.id
+                  WHERE rcp.ingredient_id IN (${placeholders})
+                    AND (rcp.effective_to IS NULL OR rcp.effective_to > NOW())`,
+                zeroIds
+              ).catch(() => [] as any[]);
+              if (affected.length > 0) {
+                const activeChannels: any[] = await db.query(
+                  "SELECT channel FROM channel_settings WHERE is_active = 1"
+                ).catch(() => [] as any[]);
+                for (const cr of activeChannels) {
+                  const ch = String(cr.channel) as ChannelId;
+                  const items = affected.map((m: any) => {
+                    let extIds = m.external_ids;
+                    if (typeof extIds === 'string') { try { extIds = JSON.parse(extIds); } catch { extIds = {}; } }
+                    return {
+                      externalItemId: extIds?.[ch],
+                      isAvailable: false,
+                    };
+                  }).filter((it: any) => it.externalItemId);
+                  if (items.length > 0) {
+                    await enqueueSyncJob(db, 'AVAILABILITY_PUSH', ch, { items });
+                    console.log(`[inv-stocklow] tenant ${r.id}: enqueued AVAILABILITY_PUSH(${items.length} items, false) for ${ch}`);
+                  }
+                }
+              }
+            }
+          } catch (autoDisErr) {
+            console.warn(`[inv-stocklow] tenant ${r.id} stock-out auto-disable error:`, (autoDisErr as any)?.message);
           }
         } catch (tenantErr) {
           console.error(`[inv-stocklow] tenant ${r.id} error:`, tenantErr);

@@ -3960,10 +3960,11 @@ function ChannelPricingSection({
 // min-margin floor. Saves immediately on Apply. Defers to channel-pricing endpoints
 // added in Phase 2. The credentials/webhook-URL form ships in Phase 5.
 function ChannelSettingsCard({
-  channel, onSave,
+  channel, onSave, onConfigure,
 }: {
   channel: any;
   onSave: (patch: any) => Promise<boolean>;
+  onConfigure?: () => void;
 }) {
   const theme = CHANNEL_THEME[channel.channel] || { color: '#6b5d52', bg: '#f3f4f6', label: channel.channel };
   const [draft, setDraft] = useState({
@@ -4087,8 +4088,8 @@ function ChannelSettingsCard({
           </div>
         </div>
 
-        {/* Save button */}
-        <div className="pt-2">
+        {/* Save button + Configure credentials */}
+        <div className="pt-2 space-y-2">
           <button
             onClick={handleSave}
             disabled={!dirty || saving}
@@ -4104,11 +4105,227 @@ function ChannelSettingsCard({
           >
             {saving ? 'Saving…' : saved ? '✓ Saved' : dirty ? 'Apply changes' : 'No changes'}
           </button>
+          {onConfigure && (
+            <button
+              onClick={onConfigure}
+              className="w-full px-4 py-2 rounded-xl text-xs font-bold border transition-all hover:bg-[#faf7f2]"
+              style={{ borderColor: theme.color + '40', color: theme.color }}
+            >
+              🔑 Configure credentials
+            </button>
+          )}
         </div>
 
         <p className="text-[10px] text-[#9c8e85] text-center pt-1">
           Per-item overrides: Menu Management → edit item → Channel Pricing
         </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Phase 5 — Credentials configuration modal ───────────────────────────
+//
+// Opens from the ChannelSettingsCard "Configure credentials" button.
+// Lets the owner enter API_KEY, HMAC_SECRET, STORE_ID per channel.
+// Secrets are sent in the clear over HTTPS to the server which encrypts
+// them with AES-256-GCM (master key = process.env.ATITHI_CREDENTIAL_KEY)
+// before storing in integration_credentials. The UI never displays the
+// secret material after — only metadata (configured / rotated_at).
+//
+// Test button calls POST /integrations/:channel/test which executes a
+// store open+close cycle through the adapter; success = credentials work.
+function ChannelCredentialsModal({
+  channel, restaurantId, token, onClose, onSaved,
+}: {
+  channel: string;
+  restaurantId: string;
+  token: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const theme = CHANNEL_THEME[channel] || { color: '#6b5d52', bg: '#f3f4f6', label: channel };
+  const [meta, setMeta] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [draft, setDraft] = useState({
+    API_KEY: '',
+    HMAC_SECRET: '',
+    STORE_ID: '',
+    OAUTH_TOKEN: '',
+  });
+
+  const reload = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/${channel}/credentials`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setMeta(await res.json());
+      else setMeta(null);
+    } catch { setMeta(null); }
+    setLoading(false);
+  };
+  useEffect(() => { reload(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [channel]);
+
+  const isType = (t: string) => meta?.credential_types?.some((c: any) => c.type === t && c.is_active);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setTestResult(null);
+    try {
+      const body: any = {};
+      // Only include fields the user actually typed in (otherwise empty strings would clear them)
+      if (draft.API_KEY.trim()) body.API_KEY = draft.API_KEY.trim();
+      if (draft.HMAC_SECRET.trim()) body.HMAC_SECRET = draft.HMAC_SECRET.trim();
+      if (draft.STORE_ID.trim()) body.STORE_ID = draft.STORE_ID.trim();
+      if (draft.OAUTH_TOKEN.trim()) body.OAUTH_TOKEN = draft.OAUTH_TOKEN.trim();
+      if (Object.keys(body).length === 0) {
+        setTestResult({ ok: false, message: 'No fields to save — type at least one credential.' });
+        setSaving(false);
+        return;
+      }
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/${channel}/credentials`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTestResult({ ok: false, message: data?.error || `HTTP ${res.status}` });
+        setSaving(false);
+        return;
+      }
+      // Clear plaintext from form state immediately on success
+      setDraft({ API_KEY: '', HMAC_SECRET: '', STORE_ID: '', OAUTH_TOKEN: '' });
+      setTestResult({ ok: true, message: `Saved ${data.upserted?.join(', ') || 'credentials'}.` });
+      await reload();
+      onSaved();
+    } catch (err: any) {
+      setTestResult({ ok: false, message: err?.message || 'Save failed' });
+    }
+    setSaving(false);
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/${channel}/test`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) setTestResult({ ok: true, message: data.message });
+      else setTestResult({ ok: false, message: data?.detail || data?.message || `HTTP ${res.status}` });
+    } catch (err: any) {
+      setTestResult({ ok: false, message: err?.message || 'Test failed' });
+    }
+    setTesting(false);
+  };
+
+  const webhookUrl = `${window.location.origin}/api/integrations/${channel}/webhook/${restaurantId}`;
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-2xl max-w-xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="px-6 py-4 flex items-center justify-between" style={{ background: theme.bg, borderBottom: `2px solid ${theme.color}30` }}>
+          <div>
+            <h3 className="text-xl font-bold" style={{ color: theme.color }}>{theme.label} — Credentials</h3>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Stored encrypted (AES-256-GCM) at rest. Secrets are not displayed back.</p>
+          </div>
+          <button onClick={onClose} className="text-[#6b5d52] hover:text-[#1a1208]"><X size={20}/></button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {!meta?.key_master_configured && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900">
+              <strong>⚠️ ATITHI_CREDENTIAL_KEY not configured on the server.</strong> Generate via
+              <code className="bg-amber-100 px-1 mx-1 rounded">openssl rand -base64 32</code>
+              and add to the deploy environment before saving credentials. Without it, the form will return 503.
+            </div>
+          )}
+
+          {loading ? (
+            <p className="text-sm text-[#9c8e85] text-center py-6">Loading…</p>
+          ) : (
+            <>
+              <div className="bg-[#faf7f2] rounded-2xl p-4 text-xs">
+                <div className="font-bold text-[#1a1208] uppercase tracking-widest mb-2">Inbound Webhook URL</div>
+                <div className="flex items-center gap-2">
+                  <input readOnly value={webhookUrl} className="flex-1 px-3 py-2 rounded-lg border border-[#cc5a16]/15 bg-white font-mono text-xs" />
+                  <button
+                    onClick={() => { navigator.clipboard?.writeText(webhookUrl); }}
+                    className="px-3 py-2 text-xs font-bold rounded-lg bg-[#cc5a16] text-white"
+                  >Copy</button>
+                </div>
+                <p className="text-[#6b5d52] mt-2">Configure this URL in the {theme.label} partner dashboard. Append <code className="bg-[#cc5a16]/10 px-1 rounded">?event=order</code> for order webhooks, <code className="bg-[#cc5a16]/10 px-1 rounded">?event=status</code> for status, <code className="bg-[#cc5a16]/10 px-1 rounded">?event=cancel</code> for cancellations.</p>
+              </div>
+
+              {/* Status pills */}
+              <div className="flex flex-wrap gap-2">
+                {['API_KEY', 'HMAC_SECRET', 'STORE_ID', 'OAUTH_TOKEN'].map(t => (
+                  <span
+                    key={t}
+                    className={cn(
+                      'text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full border',
+                      isType(t) ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'
+                    )}
+                  >
+                    {isType(t) ? '✓' : '○'} {t}
+                  </span>
+                ))}
+              </div>
+
+              {/* Inputs — secrets are write-only */}
+              {[
+                { key: 'API_KEY', label: 'API Key', placeholder: '(secret) — leave blank to keep existing' },
+                { key: 'HMAC_SECRET', label: 'HMAC Secret', placeholder: '(secret) — used to verify inbound webhooks' },
+                { key: 'STORE_ID', label: 'Store / Outlet ID', placeholder: 'Platform-specific id (e.g. UrbanPiper biz_id)' },
+                { key: 'OAUTH_TOKEN', label: 'OAuth Token (if applicable)', placeholder: 'Most platforms use API_KEY only — leave blank' },
+              ].map(({ key, label, placeholder }) => (
+                <div key={key}>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">{label}</label>
+                  <input
+                    type={key === 'STORE_ID' ? 'text' : 'password'}
+                    value={(draft as any)[key]}
+                    onChange={e => setDraft({ ...draft, [key]: e.target.value })}
+                    placeholder={placeholder}
+                    className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm font-mono"
+                  />
+                </div>
+              ))}
+
+              {testResult && (
+                <div className={cn(
+                  'rounded-xl p-3 text-xs',
+                  testResult.ok ? 'bg-emerald-50 border border-emerald-200 text-emerald-900' : 'bg-red-50 border border-red-200 text-red-900'
+                )}>
+                  <strong>{testResult.ok ? '✓' : '✗'}</strong> {testResult.message}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t border-[#cc5a16]/10 flex items-center justify-between gap-3 bg-[#faf7f2]/50">
+          <button
+            onClick={handleTest}
+            disabled={testing || saving || !meta?.configured}
+            className="px-4 py-2 text-sm font-bold rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] hover:bg-[#cc5a16]/5 disabled:opacity-40"
+            title={!meta?.configured ? 'Save credentials first' : 'Run an open+close cycle through the adapter'}
+          >{testing ? 'Testing…' : '🧪 Test connection'}</button>
+          <div className="flex gap-2">
+            <button onClick={onClose} className="px-4 py-2 text-sm font-bold rounded-xl border border-[#cc5a16]/15 text-[#6b5d52]">Close</button>
+            <button
+              onClick={handleSave}
+              disabled={saving || testing}
+              className="px-5 py-2 text-sm font-bold rounded-xl bg-[#cc5a16] text-white hover:bg-[#a84612] disabled:opacity-50"
+            >{saving ? 'Saving…' : 'Save credentials'}</button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -4133,6 +4350,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [deliverySubTab, setDeliverySubTab] = useState<
     'CHANNELS' | 'LIVE_ORDERS'
   >('CHANNELS');
+  // Credentials modal — channel id when open, null when closed
+  const [credentialsModalChannel, setCredentialsModalChannel] = useState<string | null>(null);
   // State backing the DELIVERY tab
   const [deliveryChannels, setDeliveryChannels] = useState<any[]>([]);
   const [deliveryOrders, setDeliveryOrders] = useState<any[]>([]);
@@ -9378,17 +9597,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         if (!r.ok) alert(r.error);
                         return r.ok;
                       }}
+                      onConfigure={() => setCredentialsModalChannel(c.channel)}
                     />
                   </div>
                 ))}
               </div>
 
-              <div className="bg-amber-50/50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-900">
-                <strong>📍 Setup roadmap:</strong> Phase 5 will add the credentials &amp; webhook-URL
-                input form per channel. Until then, configure markups here and use them via the
-                Channel Pricing section in Menu Management. The webhook endpoint
-                <code className="bg-amber-100 px-1 rounded">/api/integrations/:channel/webhook/{restaurantId}</code>
-                is live and ready once the platform onboarding (or UrbanPiper aggregator) lands.
+              <div className="bg-emerald-50/50 border border-emerald-200 rounded-2xl p-4 text-xs text-emerald-900">
+                <strong>✅ Credentials are live:</strong> click <em>Configure credentials</em> on any
+                channel card to enter API keys, HMAC secrets, and store ids.  All values are encrypted
+                at rest with AES-256-GCM.  After saving, use <em>Test connection</em> to verify the
+                adapter can reach the platform with those credentials.
+                <br/><br/>
+                The inbound webhook URL <code className="bg-emerald-100 px-1 rounded">/api/integrations/:channel/webhook/{restaurantId}</code>
+                is shown in the credentials modal — copy it into the platform partner dashboard.
               </div>
             </div>
           )}
@@ -9530,6 +9752,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               </div>
             </div>
+          )}
+
+          {/* Credentials modal — opens from any channel card */}
+          {credentialsModalChannel && (
+            <ChannelCredentialsModal
+              channel={credentialsModalChannel}
+              restaurantId={restaurantId}
+              token={token}
+              onClose={() => setCredentialsModalChannel(null)}
+              onSaved={() => fetchDeliveryChannels()}
+            />
           )}
         </div>
       ) : activeTab === 'BOOKINGS' ? (
