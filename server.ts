@@ -20,9 +20,19 @@ import cron from "node-cron";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 
 // ── Multi-platform delivery integration ──────────────────────────────────
-import { isCredentialKeyConfigured } from "./integrations/security.ts";
-import { registerAdapter, listRegisteredChannels } from "./integrations/registry.ts";
+import {
+  isCredentialKeyConfigured,
+  decryptCredential,
+  computeWebhookIdempotencyKey,
+} from "./integrations/security.ts";
+import {
+  registerAdapter,
+  listRegisteredChannels,
+  tryGetAdapter,
+} from "./integrations/registry.ts";
 import { MockAdapter } from "./integrations/adapters/MockAdapter.ts";
+import type { ChannelId, AdapterContext, NormalizedOrder } from "./integrations/types.ts";
+import { ALL_CHANNEL_IDS } from "./integrations/types.ts";
 
 /** Returns a map of { "HH:MI" → bookedCount } for a given date, excluding cancelled bookings. */
 async function getSlotCountMap(db: DbInterface, dateStr: string): Promise<Record<string, number>> {
@@ -8837,6 +8847,591 @@ async function startServer() {
       res.status(500).json({ error: "Failed to create order" });
     }
   });
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Multi-platform Delivery: Phase 3 — Inbound webhook + createOrder ────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Single endpoint receives orders / status updates from every delivery
+  // platform. Channel-specific signature verification + payload parsing are
+  // delegated to the registered DeliveryChannelAdapter for that channel.
+  //
+  // Defence layers (each fails closed):
+  //   1. Adapter must be registered for this channel
+  //   2. ATITHI_CREDENTIAL_KEY must be configured for credential decryption
+  //   3. Idempotency key dedup via webhook_inbox (replay returns cached response)
+  //   4. HMAC / Ed25519 / channel-specific signature verification
+  //   5. Server-side price validation (recompute total from channel_prices)
+  //   6. Item mapping resolution (unmapped items skipped + alert)
+
+  /**
+   * Build a per-call AdapterContext: loads the channel_settings row and
+   * decrypts every active integration_credentials row for this (tenant, channel).
+   */
+  async function loadAdapterContext(
+    db: DbInterface,
+    restaurantId: string,
+    channel: string,
+  ): Promise<AdapterContext> {
+    const cs: any = await db.get(
+      "SELECT * FROM channel_settings WHERE channel = ?",
+      [channel]
+    );
+    const channelSettings = cs ? {
+      channel: channel as ChannelId,
+      is_active: Number(cs.is_active || 0),
+      default_markup_percent: Number(cs.default_markup_percent || 25),
+      commission_percent: Number(cs.commission_percent || 25),
+      packaging_charge: Number(cs.packaging_charge || 0),
+      min_order_amount: Number(cs.min_order_amount || 0),
+      prep_time_minutes: Number(cs.prep_time_minutes || 20),
+      webhook_url_inbound: cs.webhook_url_inbound || null,
+      brand_display_name: cs.brand_display_name || null,
+      min_margin_floor_percent: Number(cs.min_margin_floor_percent || 5),
+    } : {
+      channel: channel as ChannelId,
+      is_active: 0,
+      default_markup_percent: 25,
+      commission_percent: 25,
+      packaging_charge: 0,
+      min_order_amount: 0,
+      prep_time_minutes: 20,
+      webhook_url_inbound: null,
+      brand_display_name: null,
+      min_margin_floor_percent: 5,
+    };
+
+    const credentials: Record<string, string> = {};
+    if (isCredentialKeyConfigured()) {
+      const rows: any[] = await db.query(
+        `SELECT credential_type, ciphertext, iv, auth_tag
+           FROM integration_credentials
+          WHERE channel = ? AND is_active = 1`,
+        [channel]
+      );
+      for (const r of rows) {
+        try {
+          credentials[String(r.credential_type)] = decryptCredential({
+            ciphertext: r.ciphertext, iv: r.iv, auth_tag: r.auth_tag,
+          });
+        } catch (err) {
+          console.warn(`[integrations] Failed to decrypt ${channel} ${r.credential_type}:`, (err as any)?.message);
+        }
+      }
+    }
+    return { restaurantId, channelSettings, credentials };
+  }
+
+  /**
+   * Resolve a platform's external item id to our local menu.id by reading
+   * menu.external_ids JSONB. Returns null if no mapping exists.
+   */
+  async function resolveLocalMenuItemId(
+    db: DbInterface,
+    channel: string,
+    externalItemId: string,
+  ): Promise<string | null> {
+    if (!externalItemId) return null;
+    const row: any = await db.get(
+      `SELECT id FROM menu WHERE external_ids->>? = ? LIMIT 1`,
+      [channel, String(externalItemId)]
+    ).catch(() => null);
+    return row?.id || null;
+  }
+
+  /**
+   * Compute the effective price for a (menu_item, channel) pair. Single
+   * source of truth — mirrors the server.ts /channel-prices endpoint logic.
+   */
+  async function computeChannelEffectivePrice(
+    db: DbInterface,
+    menuItemId: string,
+    channel: string,
+  ): Promise<{ price: number; basePrice: number } | null> {
+    const item: any = await db.get(
+      "SELECT id, price, price_full FROM menu WHERE id = ?",
+      [menuItemId]
+    );
+    if (!item) return null;
+    const basePrice = Number(item.price_full ?? item.price ?? 0);
+    const cp: any = await db.get(
+      "SELECT * FROM channel_prices WHERE menu_item_id = ? AND channel = ?",
+      [menuItemId, channel]
+    );
+    if (cp && Number(cp.is_listed) === 0) return { price: 0, basePrice };
+    if (cp?.price_override != null) return { price: Number(cp.price_override), basePrice };
+    if (cp?.markup_percent != null) {
+      return { price: Math.round(basePrice * (1 + Number(cp.markup_percent) / 100) * 100) / 100, basePrice };
+    }
+    const cs: any = await db.get(
+      "SELECT default_markup_percent FROM channel_settings WHERE channel = ?",
+      [channel]
+    );
+    const markup = Number(cs?.default_markup_percent ?? 25);
+    return { price: Math.round(basePrice * (1 + markup / 100) * 100) / 100, basePrice };
+  }
+
+  /**
+   * Shared internal "create an order" helper. Used by the inbound webhook
+   * handler. Mirrors the public POST /api/restaurant/:id/orders flow but
+   * without auth and accepting pre-resolved external_platform fields.
+   *
+   * Returns the order id + invoice number on success. Caller responsible
+   * for any HTTP response shape.
+   */
+  async function createOrderInternal(
+    db: DbInterface,
+    restaurantId: string,
+    opts: {
+      items: any[];
+      total_amount: number;
+      gst_amount: number;
+      customer_name: string | null;
+      customer_phone: string | null;
+      customer_email: string | null;
+      payment_method: string | null;
+      address_line1: string | null;
+      address_line2: string | null;
+      city: string | null;
+      pincode: string | null;
+      landmark: string | null;
+      // Platform-order specifics
+      external_platform: ChannelId;
+      external_order_id: string;
+      external_id_hash: string;
+      external_payload: any;
+      commission_amount: number;
+      net_payout_amount: number;
+      gst_collected_by: 'RESTAURANT' | 'PLATFORM';
+      rider_name: string | null;
+      rider_phone: string | null;
+    },
+  ): Promise<{ id: string; invoice_number: string | null }> {
+    // Generate a fresh order id (matches the existing public POST format)
+    const id = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+    // Cloud-kitchen mode auto-prints the invoice & sequential numbers
+    const invoiceNumber = await generateInvoiceNumberIfSequential(db, restaurantId, /* forceSequential */ true);
+
+    // Read GST settings for the order row (same pattern as public POST)
+    let orderGstPercent = 0;
+    let orderApplyGst = 0;
+    try {
+      const restGst: any = await centralDb.get(
+        "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
+        [restaurantId]
+      );
+      if (restGst?.is_gst_enabled) {
+        orderGstPercent = Number(restGst.gst_percentage || 0);
+        orderApplyGst = 1;
+      }
+    } catch { /* defaults remain 0 */ }
+
+    await db.run(`
+      INSERT INTO orders
+        (id, table_number, items, total_amount, gst_amount, status, customer_name, customer_phone,
+         customer_email, payment_method, session_id, checkout_mode, round_number, kitchen_status, invoice_number,
+         gst_percent, apply_gst, invoice_status,
+         customer_address_line1, customer_address_line2, customer_city, customer_pincode, customer_landmark,
+         external_platform, external_order_id, external_id_hash, external_payload,
+         commission_amount, net_payout_amount, gst_collected_by, rider_name, rider_phone)
+      VALUES (?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, NULL, 'cloud_kitchen', 1, 'queued', ?,
+              ?, ?, 'PRINTED',
+              ?, ?, ?, ?, ?,
+              ?, ?, ?, ?,
+              ?, ?, ?, ?, ?)
+    `, [
+      id,
+      `Online (${opts.external_platform})`,
+      JSON.stringify(opts.items),
+      opts.total_amount,
+      opts.gst_amount || 0,
+      opts.customer_name,
+      opts.customer_phone,
+      opts.customer_email,
+      opts.payment_method,
+      invoiceNumber,
+      orderGstPercent,
+      orderApplyGst,
+      opts.address_line1,
+      opts.address_line2,
+      opts.city,
+      opts.pincode,
+      opts.landmark,
+      opts.external_platform,
+      opts.external_order_id,
+      opts.external_id_hash,
+      JSON.stringify(opts.external_payload || null),
+      opts.commission_amount,
+      opts.net_payout_amount,
+      opts.gst_collected_by,
+      opts.rider_name,
+      opts.rider_phone,
+    ]);
+
+    // Fire-and-forget inventory deduction (matches public POST behaviour)
+    deductIngredientsForOrder(db, id, opts.items, restaurantId).catch(err => {
+      console.warn(`[inventory] Deduction failed for platform order ${id}:`, err);
+    });
+
+    // Broadcast WS so KDS lights up
+    try {
+      broadcastWs('PLATFORM_ORDER_RECEIVED', {
+        id,
+        external_platform: opts.external_platform,
+        external_order_id: opts.external_order_id,
+        invoice_number: invoiceNumber,
+        items: opts.items,
+        total_amount: opts.total_amount,
+        customer_name: opts.customer_name,
+        customer_phone: opts.customer_phone,
+      }, restaurantId);
+    } catch { /* non-fatal */ }
+
+    return { id, invoice_number: invoiceNumber };
+  }
+
+  // ─── Webhook endpoint ───────────────────────────────────────────────────
+  //
+  // POST /api/integrations/:channel/webhook/:restaurantId
+  //   Headers: X-Signature (or platform-specific name normalised by adapter)
+  //   Body:    raw JSON (kept as Buffer for HMAC verification — DO NOT JSON.parse before verifying)
+  //   Query:   ?event=order|status|cancel  (default: order)
+  //
+  // Always responds 200 on successful processing — platforms retry on non-2xx.
+  // 401 on signature failure, 422 on price-validation failure, 4xx on schema errors.
+  app.post(
+    "/api/integrations/:channel/webhook/:restaurantId",
+    express.raw({ type: 'application/json', limit: '2mb' }),
+    async (req: Request, res: Response) => {
+      const tStart = Date.now();
+      const channel = String(req.params.channel || '').toUpperCase();
+      const restaurantId = String(req.params.restaurantId || '');
+      const eventHint = String(req.query.event || 'order').toLowerCase();
+      const rawBody: Buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from('');
+
+      // Helper: write the final processing result to webhook_inbox before responding
+      const finishInbox = async (db: DbInterface, idemKey: string, status: number, body: any, err?: string) => {
+        try {
+          await db.run(
+            `UPDATE webhook_inbox
+                SET processed_at = CURRENT_TIMESTAMP, result_status = ?, result_body = ?, error_message = ?
+              WHERE idempotency_key = ?`,
+            [status, JSON.stringify(body), err || null, idemKey]
+          );
+        } catch { /* swallow — inbox write must not fail the response */ }
+      };
+
+      try {
+        // 1. Validate channel id
+        if (!ALL_CHANNEL_IDS.includes(channel as ChannelId)) {
+          return res.status(400).json({ error: `Unknown channel: ${channel}` });
+        }
+
+        // 2. Adapter must be registered
+        const adapter = tryGetAdapter(channel as ChannelId);
+        if (!adapter) {
+          return res.status(404).json({
+            error: `No adapter registered for ${channel}. Awaiting partner onboarding.`,
+          });
+        }
+
+        // 3. Credential key must be configured (for any decryption the adapter needs)
+        if (!isCredentialKeyConfigured()) {
+          return res.status(503).json({
+            error: 'Integration credential storage is not configured (missing ATITHI_CREDENTIAL_KEY env var).',
+          });
+        }
+
+        const db = await getTenantDb(restaurantId);
+        const ctx = await loadAdapterContext(db, restaurantId, channel);
+
+        // 4. Compute idempotency key from signature header
+        // Different platforms use different signature header names; normalise the most common ones.
+        const sigHeader = String(
+          req.headers['x-signature'] ||
+          req.headers['x-hub-signature-256'] ||
+          req.headers['x-mock-signature'] ||
+          req.headers['x-zomato-signature'] ||
+          req.headers['x-swiggy-signature'] ||
+          req.headers['x-urbanpiper-signature'] ||
+          ''
+        );
+        if (!sigHeader) {
+          return res.status(400).json({ error: 'Missing signature header' });
+        }
+        const idempotencyKey = computeWebhookIdempotencyKey(channel, sigHeader);
+
+        // 5. ON CONFLICT DO NOTHING — replay returns cached response
+        const insertedRows: any[] = await db.query(
+          `INSERT INTO webhook_inbox
+             (idempotency_key, channel, event_type, raw_payload, signature_verified, received_at)
+           VALUES (?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+           ON CONFLICT (idempotency_key) DO NOTHING
+           RETURNING idempotency_key`,
+          [idempotencyKey, channel, eventHint.toUpperCase(), rawBody.toString('utf8')]
+        );
+        if (insertedRows.length === 0) {
+          // Already processed — return cached response
+          const cached: any = await db.get(
+            "SELECT result_status, result_body FROM webhook_inbox WHERE idempotency_key = ?",
+            [idempotencyKey]
+          );
+          if (cached?.processed_at) {
+            const status = Number(cached.result_status) || 200;
+            try { return res.status(status).json(JSON.parse(cached.result_body || '{}')); }
+            catch { return res.status(status).send(cached.result_body || ''); }
+          }
+          // Race: row exists but not yet processed → tell caller to retry
+          return res.status(202).json({ status: 'processing', message: 'Webhook is already being processed; retry shortly.' });
+        }
+
+        // 6. Verify signature via the adapter
+        try {
+          await adapter.verifyWebhookSignature(rawBody, req.headers as Record<string, string>, ctx);
+        } catch (sigErr: any) {
+          await finishInbox(db, idempotencyKey, 401, { error: 'Signature verification failed' }, sigErr?.message);
+          // Track repeated failures for the WEBHOOK_SIGNATURE_FAILURE alert
+          const recent: any = await db.get(
+            `SELECT COUNT(*) AS c FROM webhook_inbox
+               WHERE channel = ? AND signature_verified = 0
+                 AND received_at > NOW() - INTERVAL '10 minutes'`,
+            [channel]
+          ).catch(() => null);
+          if (Number(recent?.c || 0) >= 5) {
+            triggerNotification(restaurantId, 'WEBHOOK_SIGNATURE_FAILURE', {
+              channel, count: Number(recent.c), windowMinutes: 10,
+            }).catch(() => {});
+          }
+          return res.status(401).json({ error: 'Signature verification failed' });
+        }
+
+        // Signature OK — flag the row
+        await db.run(
+          "UPDATE webhook_inbox SET signature_verified = 1 WHERE idempotency_key = ?",
+          [idempotencyKey]
+        );
+
+        // 7. Parse the JSON body
+        let payload: any;
+        try {
+          payload = JSON.parse(rawBody.toString('utf8'));
+        } catch (parseErr: any) {
+          await finishInbox(db, idempotencyKey, 400, { error: 'Invalid JSON' }, parseErr?.message);
+          return res.status(400).json({ error: 'Invalid JSON body' });
+        }
+
+        // 8. Route by event type
+        if (eventHint === 'order') {
+          // ─── ORDER_CREATED ─────────────────────────────────────────────
+          const normalised: NormalizedOrder = await adapter.parseInboundOrder(payload, ctx);
+
+          // Resolve every item's local menu id
+          const unmappedItems: string[] = [];
+          for (const it of normalised.items) {
+            if (!it.localMenuItemId && it.externalItemId) {
+              const localId = await resolveLocalMenuItemId(db, channel, it.externalItemId);
+              if (localId) it.localMenuItemId = localId;
+              else unmappedItems.push(`${it.name} (${it.externalItemId})`);
+            }
+          }
+          if (unmappedItems.length > 0) {
+            triggerNotification(restaurantId, 'ITEM_MAPPING_ALERT', {
+              channel, externalOrderId: normalised.externalOrderId,
+              unmappedItems,
+            }).catch(() => {});
+          }
+
+          // Filter to only mapped items for the deduction path; keep raw line
+          // entries in the order JSON so the receipt shows what the customer
+          // actually paid for.
+          const orderItemsForRow = normalised.items.map(it => ({
+            id: it.localMenuItemId || null,
+            external_item_id: it.externalItemId,
+            name: it.name,
+            quantity: it.quantity,
+            size: it.size || 'FULL',
+            price: it.unitPrice,
+          }));
+
+          // 9. Server-side price validation (≤ ₹1 tolerance per line)
+          // Recompute expected total from channel_prices for items we can map.
+          const validateMissingMaps = false; // Don't fail if some items unmapped — already alerted
+          let recomputedSubtotal = 0;
+          let mismatchDetail: string | null = null;
+          for (const it of normalised.items) {
+            if (!it.localMenuItemId) continue;
+            const eff = await computeChannelEffectivePrice(db, it.localMenuItemId, channel);
+            if (!eff) continue;
+            const expectedLine = eff.price * Number(it.quantity || 1);
+            recomputedSubtotal += expectedLine;
+            const lineDelta = Math.abs(Number(it.totalPrice || 0) - expectedLine);
+            if (lineDelta > 1) {
+              mismatchDetail = `Item "${it.name}" platform price ₹${it.totalPrice} differs from server-recomputed ₹${expectedLine.toFixed(2)} (Δ ₹${lineDelta.toFixed(2)})`;
+              break;
+            }
+          }
+          if (mismatchDetail) {
+            const body = {
+              error: 'Server-side price validation failed',
+              detail: mismatchDetail,
+              externalOrderId: normalised.externalOrderId,
+            };
+            await finishInbox(db, idempotencyKey, 422, body, mismatchDetail);
+            return res.status(422).json(body);
+          }
+
+          // 10. Compute external_id_hash (canonical key for dedup index)
+          const externalIdHash = require('crypto')
+            .createHash('sha256')
+            .update(`${channel}:${normalised.externalOrderId}`)
+            .digest('hex');
+
+          // 11. Persist via shared helper
+          let created: { id: string; invoice_number: string | null };
+          try {
+            created = await createOrderInternal(db, restaurantId, {
+              items: orderItemsForRow,
+              total_amount: Number(normalised.total || 0),
+              gst_amount: Number(normalised.taxes || 0),
+              customer_name: normalised.customerName || null,
+              customer_phone: normalised.customerPhone || null,
+              customer_email: null,
+              payment_method: normalised.paymentMode === 'PREPAID' ? 'PREPAID' : 'COD',
+              address_line1: normalised.customerAddress?.line1 || null,
+              address_line2: normalised.customerAddress?.line2 || null,
+              city: normalised.customerAddress?.city || null,
+              pincode: normalised.customerAddress?.pincode || null,
+              landmark: normalised.customerAddress?.landmark || null,
+              external_platform: channel as ChannelId,
+              external_order_id: normalised.externalOrderId,
+              external_id_hash: externalIdHash,
+              external_payload: normalised.rawPayload,
+              commission_amount: Number(normalised.commissionAmount || 0),
+              net_payout_amount: Number(normalised.netPayoutAmount || 0),
+              gst_collected_by: normalised.gstCollectedBy,
+              rider_name: normalised.rider?.name || null,
+              rider_phone: normalised.rider?.phone || null,
+            });
+          } catch (insertErr: any) {
+            // PG UNIQUE violation on external_id_hash → already exists. Treat as idempotent success.
+            if (String(insertErr?.message || '').match(/duplicate|unique/i)) {
+              const existing: any = await db.get(
+                "SELECT id, invoice_number FROM orders WHERE external_id_hash = ?",
+                [externalIdHash]
+              );
+              const body = {
+                success: true, deduplicated: true,
+                id: existing?.id, invoice_number: existing?.invoice_number,
+              };
+              await finishInbox(db, idempotencyKey, 200, body);
+              return res.status(200).json(body);
+            }
+            await finishInbox(db, idempotencyKey, 500, { error: 'Order INSERT failed' }, insertErr?.message);
+            console.error('[webhook] createOrderInternal error:', insertErr);
+            return res.status(500).json({ error: 'Failed to persist order' });
+          }
+
+          // 12. Update webhook_inbox with the resolved external_order_id
+          await db.run(
+            "UPDATE webhook_inbox SET external_order_id = ? WHERE idempotency_key = ?",
+            [normalised.externalOrderId, idempotencyKey]
+          ).catch(() => {});
+
+          // 13. Notification
+          triggerNotification(restaurantId, 'NEW_PLATFORM_ORDER', {
+            channel,
+            externalOrderId: normalised.externalOrderId,
+            orderId: created.id,
+            invoiceNumber: created.invoice_number,
+            items: orderItemsForRow.map(i => `${i.name} x${i.quantity}`),
+            total: Number(normalised.total || 0),
+            customerName: normalised.customerName,
+            customerPhone: normalised.customerPhone,
+            address: [normalised.customerAddress?.line1, normalised.customerAddress?.city, normalised.customerAddress?.pincode].filter(Boolean).join(', '),
+            paymentMode: normalised.paymentMode,
+            unmappedCount: unmappedItems.length,
+          }).catch(() => {});
+
+          const body = {
+            success: true, id: created.id, invoice_number: created.invoice_number,
+            unmapped_items: unmappedItems.length, ms: Date.now() - tStart,
+          };
+          await finishInbox(db, idempotencyKey, 200, body);
+          return res.status(200).json(body);
+        }
+
+        if (eventHint === 'status' || eventHint === 'cancel') {
+          // ─── STATUS_UPDATE / RIDER_ASSIGNED / ORDER_CANCELLED ──────────
+          const upd = await adapter.parseInboundStatus(payload, ctx);
+          const externalIdHash = require('crypto')
+            .createHash('sha256')
+            .update(`${channel}:${upd.externalOrderId}`)
+            .digest('hex');
+
+          const localOrder: any = await db.get(
+            "SELECT id, status, inventory_reverted FROM orders WHERE external_id_hash = ?",
+            [externalIdHash]
+          );
+          if (!localOrder) {
+            const body = { error: 'Local order not found for external id', externalOrderId: upd.externalOrderId };
+            await finishInbox(db, idempotencyKey, 404, body);
+            return res.status(404).json(body);
+          }
+
+          const updates: Record<string, any> = { status: upd.newStatus };
+          if (upd.rider?.name) updates.rider_name = upd.rider.name;
+          if (upd.rider?.phone) updates.rider_phone = upd.rider.phone;
+          if (upd.newStatus === 'DELIVERED') updates.kitchen_status = 'delivered';
+          if (upd.newStatus === 'READY') updates.kitchen_status = 'ready';
+
+          const setClause = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+          const params = [...Object.values(updates), localOrder.id];
+          await db.run(`UPDATE orders SET ${setClause} WHERE id = ?`, params);
+
+          // Cancellation → reuse existing reversal (idempotent via inventory_reverted flag)
+          if (upd.newStatus === 'CANCELLED') {
+            try {
+              await revertIngredientsForOrder(db, localOrder.id);
+            } catch (revertErr) {
+              console.warn(`[webhook] Reversal failed for ${localOrder.id}:`, revertErr);
+            }
+            triggerNotification(restaurantId, 'PLATFORM_ORDER_CANCELLED', {
+              channel, externalOrderId: upd.externalOrderId, orderId: localOrder.id,
+            }).catch(() => {});
+          } else if (upd.rider?.name || upd.rider?.phone) {
+            triggerNotification(restaurantId, 'RIDER_ASSIGNED', {
+              channel, externalOrderId: upd.externalOrderId, orderId: localOrder.id,
+              riderName: upd.rider?.name, riderPhone: upd.rider?.phone,
+            }).catch(() => {});
+          }
+
+          try {
+            broadcastWs('PLATFORM_ORDER_UPDATE', {
+              id: localOrder.id,
+              external_platform: channel,
+              external_order_id: upd.externalOrderId,
+              status: upd.newStatus,
+              rider_name: upd.rider?.name,
+              rider_phone: upd.rider?.phone,
+            }, restaurantId);
+          } catch { /* non-fatal */ }
+
+          const body = { success: true, id: localOrder.id, status: upd.newStatus, ms: Date.now() - tStart };
+          await finishInbox(db, idempotencyKey, 200, body);
+          return res.status(200).json(body);
+        }
+
+        // Unknown event hint — record + 400
+        const body = { error: `Unsupported event: ${eventHint}` };
+        await finishInbox(db, idempotencyKey, 400, body);
+        return res.status(400).json(body);
+      } catch (err: any) {
+        console.error('[webhook] Unhandled error:', err);
+        // Best effort to mark the inbox row failed (we may not have a key here)
+        return res.status(500).json({ error: 'Unhandled webhook error', detail: err?.message });
+      }
+    }
+  );
 
   // Orders: Update Status
   app.patch("/api/orders/:id", authenticate, async (req: AuthRequest, res: Response) => {

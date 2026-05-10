@@ -607,6 +607,105 @@ export function buildNotificationContent(
           `</div>`,
       };
 
+    /* ── Multi-platform Delivery Integration ──────────────────────────── */
+
+    case 'NEW_PLATFORM_ORDER': {
+      const items = (data.items as string[] | undefined)?.join(', ') || '—';
+      const channel = data.channel || 'PLATFORM';
+      const orderRef = data.invoiceNumber || data.orderId;
+      const unmappedLine = Number(data.unmappedCount || 0) > 0
+        ? `\n⚠️ ${data.unmappedCount} item(s) had no recipe mapping — see Inventory tab.`
+        : '';
+      return {
+        subject: `🍱 ${channel} order ${orderRef} — ${r}`,
+        text:
+          `🍱 *New ${channel} Order*\n` +
+          `Order: ${orderRef}\n` +
+          `Customer: ${data.customerName || '—'} · ${data.customerPhone || '—'}\n` +
+          `Address: ${data.address || '—'}\n` +
+          `Items: ${items}\n` +
+          `Total: ₹${data.total ?? '—'}\n` +
+          `Payment: ${data.paymentMode || '—'}` +
+          unmappedLine,
+        html:
+          `<h2 style="color:#cc5a16">🍱 New ${channel} Order</h2>` +
+          `<table cellpadding="6" style="border-collapse:collapse;font-size:14px;">` +
+          `<tr><td style="color:#6b5d52">Order</td><td><strong>${orderRef}</strong></td></tr>` +
+          `<tr><td style="color:#6b5d52">Customer</td><td>${data.customerName || '—'} · ${data.customerPhone || '—'}</td></tr>` +
+          `<tr><td style="color:#6b5d52">Address</td><td>${data.address || '—'}</td></tr>` +
+          `<tr><td style="color:#6b5d52">Items</td><td>${items}</td></tr>` +
+          `<tr><td style="color:#6b5d52">Total</td><td><strong>₹${data.total ?? '—'}</strong></td></tr>` +
+          `<tr><td style="color:#6b5d52">Payment</td><td>${data.paymentMode || '—'}</td></tr>` +
+          `</table>` +
+          (Number(data.unmappedCount || 0) > 0
+            ? `<p style="color:#d97706"><strong>⚠️ ${data.unmappedCount} item(s) had no recipe mapping</strong> — open the Inventory tab to map them.</p>`
+            : ''),
+      };
+    }
+
+    case 'PLATFORM_ORDER_CANCELLED':
+      return {
+        subject: `❌ ${data.channel || 'Platform'} order ${data.externalOrderId} cancelled — ${r}`,
+        text:
+          `❌ *${data.channel || 'Platform'} Order Cancelled*\n` +
+          `External order: ${data.externalOrderId}\n` +
+          `Local order: ${data.orderId}\n` +
+          `Stock has been auto-restored.`,
+        html:
+          `<h2 style="color:#dc2626">❌ ${data.channel || 'Platform'} Order Cancelled</h2>` +
+          `<p>External order <strong>${data.externalOrderId}</strong> (local <code>${data.orderId}</code>) cancelled.</p>` +
+          `<p>Stock has been auto-restored to the inventory.</p>`,
+      };
+
+    case 'RIDER_ASSIGNED':
+      return {
+        subject: `🛵 Rider assigned for ${data.channel || 'platform'} order ${data.externalOrderId} — ${r}`,
+        text:
+          `🛵 *Rider Assigned*\n` +
+          `${data.channel || 'Platform'} order: ${data.externalOrderId}\n` +
+          `Rider: ${data.riderName || '—'}${data.riderPhone ? ' · ' + data.riderPhone : ''}\n` +
+          `Hand over the order when they arrive.`,
+        html:
+          `<h2 style="color:#0E7490">🛵 Rider Assigned</h2>` +
+          `<p>${data.channel || 'Platform'} order <strong>${data.externalOrderId}</strong></p>` +
+          `<p>Rider: <strong>${data.riderName || '—'}</strong>${data.riderPhone ? ` · <a href="tel:${data.riderPhone}">${data.riderPhone}</a>` : ''}</p>`,
+      };
+
+    case 'ITEM_MAPPING_ALERT':
+      return {
+        subject: `⚠️ Unmapped items on ${data.channel || 'platform'} order — ${r}`,
+        text:
+          `⚠️ *Some items had no local mapping*\n` +
+          `Channel: ${data.channel || '—'}\n` +
+          `External order: ${data.externalOrderId || '—'}\n\n` +
+          `Unmapped items:\n${(data.unmappedItems || []).map((s: string) => `  • ${s}`).join('\n')}\n\n` +
+          `These items will not deduct ingredient stock. Map them in the Inventory tab → Recipes.`,
+        html:
+          `<h2 style="color:#d97706">⚠️ Unmapped Platform Items</h2>` +
+          `<p>Channel: <strong>${data.channel || '—'}</strong>${data.externalOrderId ? ` · order <code>${data.externalOrderId}</code>` : ''}</p>` +
+          `<p>The following items were received from the platform but have no matching menu item:</p>` +
+          `<ul>${(data.unmappedItems || []).map((s: string) => `<li>${s}</li>`).join('')}</ul>` +
+          `<p>Stock will not deduct for these items. Map them in <strong>Inventory → Recipes</strong>.</p>`,
+      };
+
+    case 'WEBHOOK_SIGNATURE_FAILURE':
+      return {
+        subject: `🛡️ Webhook signature failures on ${data.channel || 'platform'} — ${r}`,
+        text:
+          `🛡️ *Repeated webhook signature failures*\n` +
+          `${data.count || '?'} failures on ${data.channel || 'platform'} in the last ${data.windowMinutes || '?'} minutes.\n\n` +
+          `Possible causes:\n` +
+          `  • HMAC secret was rotated by the platform — update credentials\n` +
+          `  • Misconfigured webhook URL or wrong tenant id\n` +
+          `  • Replay attack (less likely; requires a leaked secret)\n\n` +
+          `Open Settings → Integrations → ${data.channel} to rotate credentials.`,
+        html:
+          `<h2 style="color:#dc2626">🛡️ Webhook Signature Failures</h2>` +
+          `<p><strong>${data.count}</strong> failures on <strong>${data.channel}</strong> in the last ${data.windowMinutes} min.</p>` +
+          `<p>Likely causes: rotated HMAC secret, misconfigured webhook URL, or replay attack.</p>` +
+          `<p><a href="#" style="color:#cc5a16">Open Settings → Integrations → ${data.channel} to rotate credentials.</a></p>`,
+      };
+
     /* ── Default fallback ─────────────────────────────────────────────── */
 
     default:
