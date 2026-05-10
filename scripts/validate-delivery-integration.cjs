@@ -91,10 +91,12 @@ async function main() {
     });
     if (r2.status === 404 && /No adapter registered/i.test(JSON.stringify(r2.body))) {
       ok('Unregistered adapter (SWIGGY) → 404 "No adapter registered" (expected pre-Phase-5)');
+    } else if (r2.status === 503 && /ATITHI_CREDENTIAL_KEY/.test(JSON.stringify(r2.body))) {
+      ok('SWIGGY → 503: adapter registered (Phase 5+), credential-key gate active');
     } else if (r2.status === 401) {
-      ok('SWIGGY → 401 (signature failed) — adapter is registered and verifying');
+      ok('SWIGGY → 401 (signature failed) — adapter registered, credentials configured');
     } else {
-      bad(`Adapter registry check failed: status ${r2.status}`);
+      bad(`Adapter registry check failed: status ${r2.status}, body: ${JSON.stringify(r2.body).slice(0, 120)}`);
     }
 
     // Credential boot guard / signature verification
