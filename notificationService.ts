@@ -688,6 +688,30 @@ export function buildNotificationContent(
           `<p>Stock will not deduct for these items. Map them in <strong>Inventory → Recipes</strong>.</p>`,
       };
 
+    case 'SYNC_JOB_DEAD':
+      return {
+        subject: `🔴 Sync to ${data.channel || 'platform'} failed (${data.jobType || 'job'}) — ${r}`,
+        text:
+          `🔴 *Outbound sync to ${data.channel || 'platform'} exhausted retries*\n` +
+          `Job type: ${data.jobType || '—'}\n` +
+          `Channel: ${data.channel || '—'}\n` +
+          `Job id: ${data.jobId || '—'}\n` +
+          `Last error: ${data.error || 'unknown'}\n\n` +
+          `What to do:\n` +
+          `  • Open Delivery Partners → Sync Health\n` +
+          `  • Inspect the error and check the platform's status page\n` +
+          `  • Click Retry once the platform is back, or rotate credentials if it's an auth error.`,
+        html:
+          `<h2 style="color:#dc2626">🔴 Outbound sync exhausted retries</h2>` +
+          `<table cellpadding="6" style="border-collapse:collapse;font-size:14px;">` +
+          `<tr><td style="color:#6b5d52">Channel</td><td><strong>${data.channel}</strong></td></tr>` +
+          `<tr><td style="color:#6b5d52">Job type</td><td>${data.jobType}</td></tr>` +
+          `<tr><td style="color:#6b5d52">Job id</td><td><code>${data.jobId}</code></td></tr>` +
+          `<tr><td style="color:#6b5d52">Last error</td><td>${data.error || '—'}</td></tr>` +
+          `</table>` +
+          `<p>Open <strong>Delivery Partners → Sync Health</strong> and Retry once resolved, or rotate credentials if it's an auth error.</p>`,
+      };
+
     case 'WEBHOOK_SIGNATURE_FAILURE':
       return {
         subject: `🛡️ Webhook signature failures on ${data.channel || 'platform'} — ${r}`,

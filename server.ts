@@ -33,6 +33,7 @@ import {
 import { MockAdapter } from "./integrations/adapters/MockAdapter.ts";
 import type { ChannelId, AdapterContext, NormalizedOrder } from "./integrations/types.ts";
 import { ALL_CHANNEL_IDS } from "./integrations/types.ts";
+import { enqueueSyncJob, processSyncJob, backoffSeconds, type PendingJobRow } from "./integrations/syncWorker.ts";
 
 /** Returns a map of { "HH:MI" → bookedCount } for a given date, excluding cancelled bookings. */
 async function getSlotCountMap(db: DbInterface, dateStr: string): Promise<Record<string, number>> {
@@ -9600,6 +9601,33 @@ async function startServer() {
         }
       }
 
+      // ── Phase 4: enqueue STATUS_PUSH for platform-originated orders ──
+      // If this order came from a delivery platform, queue a status push so
+      // the platform's customer-facing tracker reflects the kitchen state.
+      // Only PREPARING/READY/DELIVERED/CANCELLED map to platform-pushable
+      // statuses; other transitions (queued/held_for_payment) stay local.
+      try {
+        if (updatedOrder?.external_platform && updatedOrder?.external_order_id && status) {
+          const PUSHABLE: Record<string, string> = {
+            PREPARING: 'PREPARING',
+            READY: 'READY',
+            DELIVERED: 'DELIVERED',
+            CANCELLED: 'CANCELLED',
+          };
+          const target = PUSHABLE[String(status).toUpperCase()];
+          if (target) {
+            await enqueueSyncJob(db, 'STATUS_PUSH', String(updatedOrder.external_platform).toUpperCase() as ChannelId, {
+              externalOrderId: updatedOrder.external_order_id,
+              newStatus: target,
+              orderId: updatedOrder.id,
+            });
+          }
+        }
+      } catch (qErr) {
+        // Defensive: queue failure must NEVER fail the order PATCH response.
+        console.warn(`[sync-queue] Failed to enqueue STATUS_PUSH for ${req.params.id}:`, (qErr as any)?.message);
+      }
+
       res.json({ success: true, order: updatedOrder });
 
       // Notify on status transitions (non-blocking)
@@ -11313,6 +11341,214 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[inv-stocklow] Stock-low scan cron started — daily at 09:00 IST');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Phase 4 — Outbound delivery-platform sync queue worker ──────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Drains pending_sync_jobs every 30 seconds. Walks every active tenant in
+  // its own try/catch — one tenant's queue stuck on a dead platform doesn't
+  // block other tenants. Up to 10 jobs claimed per cycle per tenant.
+  cron.schedule('*/30 * * * * *', async () => {
+    try {
+      const restaurants = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'"
+      );
+      for (const r of restaurants) {
+        try {
+          const db = await getTenantDb(r.id);
+          // Claim up to 10 due jobs and mark IN_PROGRESS atomically.
+          // FOR UPDATE SKIP LOCKED is forward-compatible with multi-instance.
+          const due: any[] = await db.query(
+            `UPDATE pending_sync_jobs
+                SET status = 'IN_PROGRESS', attempts = attempts + 1
+              WHERE id IN (
+                SELECT id FROM pending_sync_jobs
+                 WHERE status IN ('PENDING','FAILED')
+                   AND next_attempt_at <= NOW()
+                 ORDER BY next_attempt_at ASC LIMIT 10
+                 FOR UPDATE SKIP LOCKED
+              )
+              RETURNING *`
+          ).catch(() => [] as any[]);
+          for (const job of due as PendingJobRow[]) {
+            try {
+              const res = await processSyncJob(r.id, db, job);
+              await db.run(
+                "UPDATE pending_sync_jobs SET status='DONE', completed_at=CURRENT_TIMESTAMP, last_error=? WHERE id = ?",
+                [res?.skipped || null, job.id]
+              );
+            } catch (err: any) {
+              const dead = (job.attempts || 0) >= (job.max_attempts || 5);
+              const backoff = backoffSeconds(job.attempts || 1);
+              await db.run(
+                `UPDATE pending_sync_jobs
+                    SET status = ?, last_error = ?,
+                        next_attempt_at = NOW() + INTERVAL '${backoff} seconds'
+                  WHERE id = ?`,
+                [dead ? 'DEAD' : 'FAILED', String(err?.message || err).slice(0, 1000), job.id]
+              );
+              if (dead) {
+                triggerNotification(r.id, 'SYNC_JOB_DEAD', {
+                  jobId: job.id, jobType: job.job_type, channel: job.channel, error: String(err?.message || err).slice(0, 200),
+                }).catch(() => {});
+              }
+            }
+          }
+        } catch (tenantErr) {
+          // Per-tenant try/catch — one tenant's failure doesn't block others.
+          console.warn(`[sync-worker] tenant ${r.id} cycle error:`, (tenantErr as any)?.message);
+        }
+      }
+    } catch (err) {
+      console.error('[sync-worker] cron error:', err);
+    }
+  });
+  console.log('[sync-worker] Sync queue worker cron started — every 30s');
+
+  // ── Menu-dirty scanner ─────────────────────────────────────────────────
+  // Every 15 minutes, find menu items with sync_dirty=1 across every active
+  // tenant and enqueue ONE MENU_PUSH job per active channel containing the
+  // dirty items' computed channel-prices. Clears the flag on enqueue.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const restaurants = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'"
+      );
+      for (const r of restaurants) {
+        try {
+          const db = await getTenantDb(r.id);
+          // Active channels for this tenant
+          const activeChannels: any[] = await db.query(
+            "SELECT channel, default_markup_percent FROM channel_settings WHERE is_active = 1"
+          ).catch(() => [] as any[]);
+          if (activeChannels.length === 0) continue;
+
+          // Dirty menu items
+          const dirtyItems: any[] = await db.query(
+            `SELECT id, name, description, price, price_full, category, image_url, is_available, dietary_type, external_ids
+               FROM menu WHERE sync_dirty = 1 LIMIT 200`
+          ).catch(() => [] as any[]);
+          if (dirtyItems.length === 0) continue;
+
+          // Build per-channel MENU_PUSH job. Enqueue independently per channel
+          // so a flaky platform doesn't block the others.
+          for (const ch of activeChannels) {
+            const channelId = String(ch.channel) as ChannelId;
+            const defaultMarkup = Number(ch.default_markup_percent || 25);
+            // Bulk-fetch overrides for this channel + these item ids
+            const itemIds = dirtyItems.map(i => i.id);
+            const placeholders = itemIds.map(() => '?').join(',');
+            const overrides: any[] = await db.query(
+              `SELECT * FROM channel_prices WHERE channel = ? AND menu_item_id IN (${placeholders})`,
+              [channelId, ...itemIds]
+            ).catch(() => [] as any[]);
+            const overrideByItem: Record<string, any> = {};
+            overrides.forEach((o: any) => { overrideByItem[o.menu_item_id] = o; });
+
+            const pushItems = dirtyItems.map(it => {
+              const basePrice = Number(it.price_full ?? it.price ?? 0);
+              const cp = overrideByItem[it.id];
+              if (cp && Number(cp.is_listed) === 0) return null; // hidden on this channel
+              let price = basePrice * (1 + defaultMarkup / 100);
+              if (cp?.price_override != null) price = Number(cp.price_override);
+              else if (cp?.markup_percent != null) price = basePrice * (1 + Number(cp.markup_percent) / 100);
+              const externalId = (it.external_ids && typeof it.external_ids === 'object')
+                ? it.external_ids[channelId]
+                : (() => { try { return JSON.parse(it.external_ids || '{}')[channelId]; } catch { return undefined; } })();
+              return {
+                localMenuItemId: it.id,
+                externalItemId: externalId,
+                name: it.name,
+                description: it.description || undefined,
+                price: Math.round(price * 100) / 100,
+                category: it.category || 'Other',
+                isAvailable: Number(it.is_available || 0) === 1,
+                imageUrl: it.image_url || undefined,
+                dietaryType: it.dietary_type || undefined,
+              };
+            }).filter(Boolean);
+            if (pushItems.length === 0) continue;
+
+            await enqueueSyncJob(db, 'MENU_PUSH', channelId, { items: pushItems });
+          }
+
+          // Clear dirty flag for the items we processed
+          const clearIds = dirtyItems.map(i => i.id);
+          if (clearIds.length > 0) {
+            const cph = clearIds.map(() => '?').join(',');
+            await db.run(
+              `UPDATE menu SET sync_dirty = 0 WHERE id IN (${cph})`,
+              clearIds
+            ).catch(() => {});
+          }
+          if (dirtyItems.length > 0) {
+            console.log(`[menu-dirty] tenant ${r.id}: enqueued ${activeChannels.length} MENU_PUSH job(s) covering ${dirtyItems.length} items`);
+          }
+        } catch (tenantErr) {
+          console.warn(`[menu-dirty] tenant ${r.id} error:`, (tenantErr as any)?.message);
+        }
+      }
+    } catch (err) {
+      console.error('[menu-dirty] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[menu-dirty] Menu sync-dirty scanner started — every 15 min');
+
+  // ── Manual retry endpoint for DEAD jobs ───────────────────────────────
+  app.post("/api/restaurant/:id/integrations/sync-jobs/:jobId/retry", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const job: any = await db.get("SELECT * FROM pending_sync_jobs WHERE id = ?", [req.params.jobId]);
+      if (!job) return res.status(404).json({ error: "Job not found" });
+      if (job.status === 'DONE') return res.status(409).json({ error: "Job already DONE — nothing to retry" });
+      // Reset attempts + push next_attempt_at to NOW so the worker picks it up next cycle
+      await db.run(
+        `UPDATE pending_sync_jobs
+            SET status = 'PENDING', attempts = 0,
+                next_attempt_at = CURRENT_TIMESTAMP, last_error = NULL
+          WHERE id = ?`,
+        [req.params.jobId]
+      );
+      res.json({ success: true, message: "Job queued for immediate retry" });
+    } catch (err) {
+      console.error("Retry sync-job error:", err);
+      res.status(500).json({ error: "Failed to retry job" });
+    }
+  });
+
+  // List sync jobs (status filter, limit) — drives the future Sync Health UI
+  app.get("/api/restaurant/:id/integrations/sync-jobs", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { status, channel } = req.query as any;
+      const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+      const conds: string[] = [];
+      const params: any[] = [];
+      if (status) { conds.push("status = ?"); params.push(String(status).toUpperCase()); }
+      if (channel) { conds.push("channel = ?"); params.push(String(channel).toUpperCase()); }
+      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      const rows: any[] = await db.query(
+        `SELECT id, job_type, channel, status, attempts, max_attempts,
+                next_attempt_at, last_error, created_at, completed_at
+           FROM pending_sync_jobs
+           ${whereSql}
+          ORDER BY created_at DESC LIMIT ${limit}`,
+        params
+      );
+      const counts: any = await db.get(
+        `SELECT
+            COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+            COUNT(*) FILTER (WHERE status = 'FAILED') AS failed,
+            COUNT(*) FILTER (WHERE status = 'DEAD') AS dead,
+            COUNT(*) FILTER (WHERE status = 'DONE' AND completed_at > NOW() - INTERVAL '24 hours') AS done_24h
+           FROM pending_sync_jobs`
+      ).catch(() => null);
+      res.json({ jobs: rows, counts: counts || {} });
+    } catch (err) {
+      console.error("List sync-jobs error:", err);
+      res.status(500).json({ error: "Failed to list sync jobs" });
+    }
+  });
 }
 
 // Helper: send pre-arrival email and record which stage was sent
