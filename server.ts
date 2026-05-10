@@ -3170,6 +3170,414 @@ async function startServer() {
     }
   });
 
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Phase 6 — Settlements (CSV upload) + reconciliation + analytics ────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Each platform sends weekly settlement statements detailing the gross
+  // revenue, commission deducted, taxes/fees, and the net payout to the
+  // restaurant. Owners upload these CSVs (most platforms only expose them
+  // via dashboard download — partner-API push comes in v2). We parse,
+  // persist into channel_settlements + settlement_order_lines, then auto-
+  // match each line to a local order via external_order_id.
+  //
+  // Variances flag for owner review. The Channel P&L analytics endpoint
+  // joins settlements with stock_movements to compute true-margin per
+  // channel: (net_payout − food_cost = profit). Answers "is Zomato actually
+  // profitable?" with a real number.
+
+  // Naive CSV parser — handles double-quoted fields with embedded commas
+  // and escaped quotes (RFC 4180 minimal). Sufficient for Swiggy / Zomato /
+  // Dunzo / UrbanPiper settlement CSVs which all use this dialect.
+  function parseCsvSettlement(text: string): { headers: string[]; rows: Record<string, string>[] } {
+    const lines = text.split(/\r?\n/).filter(l => l.length > 0);
+    if (lines.length === 0) return { headers: [], rows: [] };
+    const splitLine = (line: string): string[] => {
+      const out: string[] = [];
+      let cur = '';
+      let inQ = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+        else if (c === '"') { inQ = !inQ; }
+        else if (c === ',' && !inQ) { out.push(cur); cur = ''; }
+        else { cur += c; }
+      }
+      out.push(cur);
+      return out.map(s => s.trim());
+    };
+    const headers = splitLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, ''));
+    const rows = lines.slice(1).map(l => {
+      const vals = splitLine(l);
+      const obj: Record<string, string> = {};
+      headers.forEach((h, i) => { obj[h] = vals[i] ?? ''; });
+      return obj;
+    });
+    return { headers, rows };
+  }
+
+  // POST .../settlements — multipart CSV upload
+  // Body: multipart with field "file" containing the settlement CSV
+  // Optional fields:
+  //   period_from (YYYY-MM-DD) · period_to (YYYY-MM-DD) — defaults to min/max of data
+  app.post(
+    "/api/restaurant/:id/integrations/:channel/settlements",
+    authenticate,
+    upload.single('file'),
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const channel = String(req.params.channel).toUpperCase();
+        if (!VALID_CHANNELS.has(channel)) return res.status(400).json({ error: `Unknown channel: ${channel}` });
+        if (!req.file) return res.status(400).json({ error: "No file uploaded (field name: 'file')" });
+
+        const csvText = fs.readFileSync(req.file.path, 'utf8');
+        const { headers, rows } = parseCsvSettlement(csvText);
+        if (rows.length === 0) return res.status(400).json({ error: 'CSV is empty or unparseable' });
+
+        // Heuristic header detection — match platform CSV variants
+        const findHeader = (...candidates: string[]) =>
+          candidates.find(c => headers.includes(c)) || null;
+        const orderIdCol  = findHeader('order_id', 'external_order_id', 'platform_order_id', 'orderid', 'id');
+        const grossCol    = findHeader('gross_amount', 'gross', 'order_total', 'subtotal', 'order_value');
+        const commissionCol = findHeader('commission', 'commission_amount', 'platform_fee', 'aggregator_fee');
+        const netCol      = findHeader('net_payout', 'net_amount', 'net', 'payout');
+        const dateCol     = findHeader('order_date', 'date', 'placed_on', 'placed_at', 'timestamp');
+
+        if (!orderIdCol || !grossCol || !netCol) {
+          return res.status(400).json({
+            error: 'Could not detect required columns',
+            detail: `CSV needs at minimum: order_id, gross_amount, net_payout. Found columns: ${headers.join(', ')}`,
+          });
+        }
+
+        const db = await getTenantDb(req.params.id);
+
+        // Aggregate totals
+        let totalGross = 0;
+        let totalCommission = 0;
+        let totalNet = 0;
+        let minDate: string | null = null;
+        let maxDate: string | null = null;
+        for (const row of rows) {
+          totalGross     += Number(row[grossCol] || 0);
+          if (commissionCol) totalCommission += Number(row[commissionCol] || 0);
+          totalNet       += Number(row[netCol] || 0);
+          if (dateCol && row[dateCol]) {
+            const d = String(row[dateCol]).slice(0, 10);
+            if (!minDate || d < minDate) minDate = d;
+            if (!maxDate || d > maxDate) maxDate = d;
+          }
+        }
+        const periodFrom = req.body?.period_from || minDate || new Date().toISOString().slice(0, 10);
+        const periodTo   = req.body?.period_to   || maxDate || new Date().toISOString().slice(0, 10);
+
+        const settlementId = `STL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        await db.run(
+          `INSERT INTO channel_settlements
+            (id, channel, period_from, period_to, gross_sales, commission_amount, net_payout, raw_statement_url, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            settlementId, channel, periodFrom, periodTo,
+            totalGross, totalCommission, totalNet,
+            `/uploads/${req.file.filename}`,
+            `${rows.length} rows, columns: ${headers.join('|')}`,
+          ]
+        );
+
+        // Auto-match each row to a local order by external_order_id
+        let matched = 0;
+        let missingLocal = 0;
+        let varianceCount = 0;
+        for (const row of rows) {
+          const externalOrderId = String(row[orderIdCol] || '').trim();
+          if (!externalOrderId) continue;
+          const externalIdHash = require('crypto')
+            .createHash('sha256')
+            .update(`${channel}:${externalOrderId}`)
+            .digest('hex');
+          const localOrder: any = await db.get(
+            "SELECT id, total_amount, net_payout_amount FROM orders WHERE external_id_hash = ?",
+            [externalIdHash]
+          );
+          const lineId = `STLN-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+          const grossAmt = Number(row[grossCol] || 0);
+          const commAmt  = commissionCol ? Number(row[commissionCol] || 0) : 0;
+          const netAmt   = Number(row[netCol] || 0);
+          let matchTag: string;
+          let variance = 0;
+          if (!localOrder) {
+            matchTag = 'MISSING_LOCAL';
+            missingLocal++;
+          } else {
+            const localNet = Number(localOrder.net_payout_amount || 0);
+            variance = Math.abs(localNet - netAmt);
+            matchTag = variance <= 1 ? 'EXACT' : 'PARTIAL';
+            if (variance > 5) varianceCount++;
+            matched++;
+          }
+          await db.run(
+            `INSERT INTO settlement_order_lines
+              (id, settlement_id, order_id, external_order_id, gross_amount, commission_amount, net_amount, reconciled_match, variance)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [lineId, settlementId, localOrder?.id || null, externalOrderId, grossAmt, commAmt, netAmt, matchTag, variance]
+          );
+        }
+
+        // Mark reconciled if everything balances
+        const reconciled = missingLocal === 0 && varianceCount === 0 ? 1 : 0;
+        await db.run(
+          "UPDATE channel_settlements SET reconciled = ? WHERE id = ?",
+          [reconciled, settlementId]
+        );
+
+        // Owner notification on variance
+        if (varianceCount > 0 || missingLocal > 0) {
+          triggerNotification(req.params.id, 'SETTLEMENT_VARIANCE', {
+            channel, settlementId, missingLocal, varianceCount, totalGross, totalNet,
+          }).catch(() => {});
+        } else {
+          triggerNotification(req.params.id, 'SETTLEMENT_RECEIVED', {
+            channel, settlementId, totalGross, totalNet, periodFrom, periodTo,
+          }).catch(() => {});
+        }
+
+        res.json({
+          success: true,
+          settlement_id: settlementId,
+          rows: rows.length,
+          matched,
+          missing_local: missingLocal,
+          variance_count: varianceCount,
+          totals: { gross: totalGross, commission: totalCommission, net: totalNet },
+          reconciled: !!reconciled,
+        });
+      } catch (err) {
+        console.error("Settlement upload error:", err);
+        res.status(500).json({ error: "Failed to ingest settlement CSV" });
+      }
+    }
+  );
+
+  // GET .../settlements — list settlements (ordered DESC by period_to)
+  app.get("/api/restaurant/:id/integrations/settlements", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { channel } = req.query as any;
+      const conds: string[] = [];
+      const params: any[] = [];
+      if (channel) { conds.push("channel = ?"); params.push(String(channel).toUpperCase()); }
+      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      const rows: any[] = await db.query(
+        `SELECT * FROM channel_settlements ${whereSql} ORDER BY period_to DESC LIMIT 100`,
+        params
+      );
+      res.json(rows.map(r => ({
+        ...r,
+        gross_sales: Number(r.gross_sales || 0),
+        commission_amount: Number(r.commission_amount || 0),
+        net_payout: Number(r.net_payout || 0),
+        reconciled: Number(r.reconciled || 0) === 1,
+      })));
+    } catch (err) {
+      console.error("List settlements error:", err);
+      res.status(500).json({ error: "Failed to list settlements" });
+    }
+  });
+
+  // GET .../settlements/:id — detail with reconciliation lines
+  app.get("/api/restaurant/:id/integrations/settlements/:settlementId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const settlement: any = await db.get(
+        "SELECT * FROM channel_settlements WHERE id = ?",
+        [req.params.settlementId]
+      );
+      if (!settlement) return res.status(404).json({ error: "Settlement not found" });
+      const lines: any[] = await db.query(
+        "SELECT * FROM settlement_order_lines WHERE settlement_id = ? ORDER BY ABS(variance) DESC LIMIT 1000",
+        [req.params.settlementId]
+      );
+      res.json({
+        settlement: {
+          ...settlement,
+          gross_sales: Number(settlement.gross_sales || 0),
+          commission_amount: Number(settlement.commission_amount || 0),
+          net_payout: Number(settlement.net_payout || 0),
+          reconciled: Number(settlement.reconciled || 0) === 1,
+        },
+        lines: lines.map(l => ({
+          ...l,
+          gross_amount: Number(l.gross_amount || 0),
+          commission_amount: Number(l.commission_amount || 0),
+          net_amount: Number(l.net_amount || 0),
+          variance: Number(l.variance || 0),
+        })),
+        summary: {
+          total_lines: lines.length,
+          exact: lines.filter(l => l.reconciled_match === 'EXACT').length,
+          partial: lines.filter(l => l.reconciled_match === 'PARTIAL').length,
+          missing_local: lines.filter(l => l.reconciled_match === 'MISSING_LOCAL').length,
+        },
+      });
+    } catch (err) {
+      console.error("Settlement detail error:", err);
+      res.status(500).json({ error: "Failed to load settlement detail" });
+    }
+  });
+
+  // GET /integrations/analytics/channel-pnl
+  // True-margin analytics per channel over a date range. Joins orders →
+  // stock_movements (CONSUMPTION) → ingredients to compute food cost, then
+  // subtracts from net_payout (or commission-adjusted total) to get profit.
+  app.get("/api/restaurant/:id/integrations/analytics/channel-pnl", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as any;
+      const fromDate = from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+      const toDate   = to || new Date().toISOString().slice(0, 10);
+
+      // 1. Per-channel order aggregates
+      const orderRows: any[] = await db.query(
+        `SELECT external_platform AS channel,
+                COUNT(*) AS order_count,
+                COALESCE(SUM(total_amount), 0) AS gross,
+                COALESCE(SUM(commission_amount), 0) AS commission,
+                COALESCE(SUM(net_payout_amount), 0) AS net_payout
+           FROM orders
+          WHERE external_platform IS NOT NULL
+            AND status != 'CANCELLED'
+            AND created_at >= ?::date
+            AND created_at < ?::date + INTERVAL '1 day'
+          GROUP BY external_platform`,
+        [fromDate, toDate]
+      );
+
+      // 2. Per-channel food cost (sum of stock_movements.qty_delta × ingredient.default_unit_price
+      //    for CONSUMPTION movements tied to orders in this window)
+      const foodCostRows: any[] = await db.query(
+        `SELECT o.external_platform AS channel,
+                COALESCE(SUM(ABS(sm.qty_delta) * COALESCE(i.default_unit_price, 0)), 0) AS food_cost
+           FROM stock_movements sm
+           JOIN orders o ON o.id = sm.reference_id AND sm.reference_type = 'order'
+           LEFT JOIN ingredients i ON i.id = sm.ingredient_id
+          WHERE o.external_platform IS NOT NULL
+            AND o.status != 'CANCELLED'
+            AND o.created_at >= ?::date
+            AND o.created_at < ?::date + INTERVAL '1 day'
+            AND sm.movement_type = 'CONSUMPTION'
+          GROUP BY o.external_platform`,
+        [fromDate, toDate]
+      );
+      const foodCostByChannel: Record<string, number> = {};
+      foodCostRows.forEach(r => { foodCostByChannel[r.channel] = Number(r.food_cost || 0); });
+
+      // 3. Combine into per-channel P&L
+      const byChannel = orderRows.map(r => {
+        const channel = String(r.channel);
+        const gross      = Number(r.gross || 0);
+        const commission = Number(r.commission || 0);
+        const netPayout  = Number(r.net_payout || 0);
+        const foodCost   = foodCostByChannel[channel] || 0;
+        // If net_payout is missing (e.g. webhook didn't include it), fall back to gross − commission
+        const effectiveNet = netPayout > 0 ? netPayout : Math.max(0, gross - commission);
+        const profit       = effectiveNet - foodCost;
+        const profitPct    = gross > 0 ? Math.round((profit / gross) * 1000) / 10 : 0;
+        return {
+          channel,
+          order_count: Number(r.order_count || 0),
+          gross,
+          commission,
+          net_payout: effectiveNet,
+          food_cost: foodCost,
+          profit,
+          profit_pct: profitPct,
+          per_order_profit: Number(r.order_count) > 0 ? Math.round((profit / Number(r.order_count)) * 100) / 100 : 0,
+        };
+      }).sort((a, b) => b.profit - a.profit);
+
+      const totals = byChannel.reduce((s, r) => ({
+        order_count: s.order_count + r.order_count,
+        gross: s.gross + r.gross,
+        commission: s.commission + r.commission,
+        net_payout: s.net_payout + r.net_payout,
+        food_cost: s.food_cost + r.food_cost,
+        profit: s.profit + r.profit,
+      }), { order_count: 0, gross: 0, commission: 0, net_payout: 0, food_cost: 0, profit: 0 });
+
+      res.json({
+        from: fromDate, to: toDate,
+        by_channel: byChannel,
+        totals: { ...totals, profit_pct: totals.gross > 0 ? Math.round((totals.profit / totals.gross) * 1000) / 10 : 0 },
+      });
+    } catch (err) {
+      console.error("Channel P&L error:", err);
+      res.status(500).json({ error: "Failed to compute channel P&L" });
+    }
+  });
+
+  // Reconciliation auto-match cron — runs hourly. For settlements still
+  // marked reconciled=0, attempts to match any newly-placed local orders
+  // (e.g. a webhook that arrived after the settlement was uploaded).
+  cron.schedule('0 * * * *', async () => {
+    try {
+      const restaurants = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'"
+      );
+      for (const r of restaurants) {
+        try {
+          const db = await getTenantDb(r.id);
+          const unreconciled: any[] = await db.query(
+            "SELECT id, channel FROM channel_settlements WHERE reconciled = 0 LIMIT 50"
+          ).catch(() => [] as any[]);
+          for (const s of unreconciled) {
+            const missingLines: any[] = await db.query(
+              "SELECT * FROM settlement_order_lines WHERE settlement_id = ? AND reconciled_match = 'MISSING_LOCAL'",
+              [s.id]
+            ).catch(() => [] as any[]);
+            let nowMatched = 0;
+            for (const line of missingLines) {
+              const externalIdHash = require('crypto')
+                .createHash('sha256')
+                .update(`${s.channel}:${line.external_order_id}`)
+                .digest('hex');
+              const localOrder: any = await db.get(
+                "SELECT id, net_payout_amount FROM orders WHERE external_id_hash = ?",
+                [externalIdHash]
+              );
+              if (localOrder) {
+                const localNet = Number(localOrder.net_payout_amount || 0);
+                const remoteNet = Number(line.net_amount || 0);
+                const variance = Math.abs(localNet - remoteNet);
+                const matchTag = variance <= 1 ? 'EXACT' : 'PARTIAL';
+                await db.run(
+                  "UPDATE settlement_order_lines SET order_id = ?, reconciled_match = ?, variance = ? WHERE id = ?",
+                  [localOrder.id, matchTag, variance, line.id]
+                );
+                nowMatched++;
+              }
+            }
+            if (nowMatched > 0) {
+              // Re-check if all lines now matched
+              const stillMissing: any = await db.get(
+                "SELECT COUNT(*) AS c FROM settlement_order_lines WHERE settlement_id = ? AND reconciled_match = 'MISSING_LOCAL'",
+                [s.id]
+              );
+              if (Number(stillMissing?.c || 0) === 0) {
+                await db.run("UPDATE channel_settlements SET reconciled = 1 WHERE id = ?", [s.id]);
+                console.log(`[reconcile] tenant ${r.id} settlement ${s.id} fully reconciled (matched ${nowMatched} previously-missing)`);
+              } else {
+                console.log(`[reconcile] tenant ${r.id} settlement ${s.id}: matched ${nowMatched} more, ${stillMissing.c} still missing`);
+              }
+            }
+          }
+        } catch (tenantErr) {
+          console.warn(`[reconcile] tenant ${r.id} error:`, (tenantErr as any)?.message);
+        }
+      }
+    } catch (err) {
+      console.error('[reconcile] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+
   app.delete("/api/restaurant/:id/menu/:itemId/channel-prices/:channel", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const ch = String(req.params.channel).toUpperCase();

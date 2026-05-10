@@ -4331,6 +4331,99 @@ function ChannelCredentialsModal({
   );
 }
 
+// ─── Phase 6 — Settlement CSV upload form ────────────────────────────────
+function SettlementUploadForm({
+  restaurantId, token, onUploaded,
+}: {
+  restaurantId: string;
+  token: string;
+  onUploaded: () => void;
+}) {
+  const [channel, setChannel] = useState<string>('SWIGGY');
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; message: string; detail?: any } | null>(null);
+
+  const handleUpload = async () => {
+    if (!file) { setResult({ ok: false, message: 'Pick a CSV file first.' }); return; }
+    setUploading(true);
+    setResult(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/${channel}/settlements`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setResult({ ok: false, message: data?.error || `HTTP ${res.status}`, detail: data?.detail });
+      } else {
+        setResult({
+          ok: true,
+          message: `Imported ${data.rows} rows · ${data.matched} matched · ${data.missing_local} missing locally · ${data.variance_count} variances`,
+          detail: data,
+        });
+        setFile(null);
+        const input = document.getElementById('settlement-file-input') as HTMLInputElement | null;
+        if (input) input.value = '';
+        onUploaded();
+      }
+    } catch (err: any) {
+      setResult({ ok: false, message: err?.message || 'Upload failed' });
+    }
+    setUploading(false);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Channel</label>
+          <select value={channel} onChange={e => setChannel(e.target.value)}
+            className="w-full px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm">
+            {['SWIGGY', 'ZOMATO', 'DUNZO', 'MAGICPIN', 'ONDC', 'URBANPIPER'].map(p => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+        </div>
+        <div className="md:col-span-2">
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Settlement CSV</label>
+          <input
+            id="settlement-file-input"
+            type="file"
+            accept=".csv,text/csv"
+            onChange={e => setFile(e.target.files?.[0] || null)}
+            className="w-full text-xs file:mr-3 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-bold file:bg-[#cc5a16]/10 file:text-[#cc5a16] hover:file:bg-[#cc5a16]/20"
+          />
+        </div>
+      </div>
+      <div className="flex justify-end">
+        <button onClick={handleUpload} disabled={!file || uploading}
+          className="px-5 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">
+          {uploading ? 'Uploading…' : 'Upload & reconcile'}
+        </button>
+      </div>
+      {result && (
+        <div className={cn(
+          'rounded-xl p-3 text-xs',
+          result.ok ? 'bg-emerald-50 border border-emerald-200 text-emerald-900' : 'bg-red-50 border border-red-200 text-red-900'
+        )}>
+          <strong>{result.ok ? '✓' : '✗'}</strong> {result.message}
+          {result.detail?.totals && (
+            <p className="mt-1 font-mono">
+              ₹{Math.round(result.detail.totals.gross || 0).toLocaleString('en-IN')} gross ·
+              ₹{Math.round(result.detail.totals.commission || 0).toLocaleString('en-IN')} commission ·
+              ₹{Math.round(result.detail.totals.net || 0).toLocaleString('en-IN')} net
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
   const [activeTab, setActiveTab] = useState<
     | 'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS'
@@ -4348,10 +4441,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   >('DASHBOARD');
   // Delivery integration — sub-navigation
   const [deliverySubTab, setDeliverySubTab] = useState<
-    'CHANNELS' | 'LIVE_ORDERS'
+    'CHANNELS' | 'LIVE_ORDERS' | 'SETTLEMENTS' | 'CHANNEL_PNL'
   >('CHANNELS');
   // Credentials modal — channel id when open, null when closed
   const [credentialsModalChannel, setCredentialsModalChannel] = useState<string | null>(null);
+  // Phase 6 state
+  const [settlements, setSettlements] = useState<any[]>([]);
+  const [settlementDetail, setSettlementDetail] = useState<any | null>(null);
+  const [channelPnl, setChannelPnl] = useState<any | null>(null);
+  const [pnlRange, setPnlRange] = useState<{ from: string; to: string }>({
+    from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
+    to: new Date().toISOString().slice(0, 10),
+  });
   // State backing the DELIVERY tab
   const [deliveryChannels, setDeliveryChannels] = useState<any[]>([]);
   const [deliveryOrders, setDeliveryOrders] = useState<any[]>([]);
@@ -5799,11 +5900,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       return { ok: false, error: err?.message || 'Network error' };
     }
   };
+  const fetchSettlements = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/settlements`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      setSettlements(Array.isArray(data) ? data : []);
+    } catch { setSettlements([]); }
+  };
+  const fetchSettlementDetail = async (settlementId: string) => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/settlements/${settlementId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      setSettlementDetail(data);
+    } catch { setSettlementDetail(null); }
+  };
+  const fetchChannelPnl = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/analytics/channel-pnl?from=${pnlRange.from}&to=${pnlRange.to}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setChannelPnl(await res.json());
+    } catch { setChannelPnl(null); }
+  };
+
   const fetchDeliveryForSubTab = async () => {
     setDeliveryLoading(true);
     try {
       const promises: Promise<any>[] = [fetchDeliveryChannels()];
-      if (deliverySubTab === 'LIVE_ORDERS') promises.push(fetchDeliveryOrders());
+      if (deliverySubTab === 'LIVE_ORDERS')  promises.push(fetchDeliveryOrders());
+      if (deliverySubTab === 'SETTLEMENTS')  promises.push(fetchSettlements());
+      if (deliverySubTab === 'CHANNEL_PNL')  promises.push(fetchChannelPnl());
       await Promise.all(promises);
     } finally { setDeliveryLoading(false); }
   };
@@ -9548,6 +9681,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             {([
               ['CHANNELS', 'Channels & Pricing', deliveryChannels.filter((c: any) => c.is_active).length],
               ['LIVE_ORDERS', 'Live Orders', deliveryOrders.length],
+              ['SETTLEMENTS', 'Settlements', settlements.filter(s => !s.reconciled).length],
+              ['CHANNEL_PNL', 'Channel P&L', 0],
             ] as [typeof deliverySubTab, string, number][]).map(([id, label, count]) => (
               <button
                 key={id}
@@ -9751,6 +9886,236 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </table>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* ── SETTLEMENTS sub-view ── */}
+          {deliverySubTab === 'SETTLEMENTS' && (
+            <div className="space-y-3">
+              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+                <h3 className="text-sm font-bold text-[#1a1208] mb-1">Upload settlement CSV</h3>
+                <p className="text-xs text-[#6b5d52] leading-relaxed mb-3">
+                  Download the weekly settlement CSV from your platform's partner dashboard
+                  (Swiggy / Zomato / Dunzo / UrbanPiper) and upload it here. The system auto-matches
+                  each row to a local order via external order id and flags variances &gt; ₹5.
+                </p>
+                <SettlementUploadForm
+                  restaurantId={restaurantId}
+                  token={token}
+                  onUploaded={() => fetchSettlements()}
+                />
+              </div>
+
+              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                      <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                        <th className="px-4 py-2">Channel</th>
+                        <th className="px-4 py-2">Period</th>
+                        <th className="px-4 py-2 text-right">Gross</th>
+                        <th className="px-4 py-2 text-right">Commission</th>
+                        <th className="px-4 py-2 text-right">Net Payout</th>
+                        <th className="px-4 py-2">Status</th>
+                        <th className="px-4 py-2"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {settlements.length === 0 ? (
+                        <tr><td colSpan={7} className="px-4 py-12 text-center text-[#9c8e85]">
+                          <div className="text-2xl mb-2">📄</div>
+                          <p className="font-medium">No settlements uploaded yet</p>
+                          <p className="text-xs mt-1">Upload a CSV above to start reconciling.</p>
+                        </td></tr>
+                      ) : settlements.map(s => {
+                        const theme = CHANNEL_THEME[s.channel] || { color: '#6b5d52', bg: '#f3f4f6', label: s.channel };
+                        return (
+                          <tr key={s.id} className="border-b border-[#cc5a16]/5 hover:bg-[#faf7f2]/30">
+                            <td className="px-4 py-2">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase"
+                                style={{ background: theme.bg, color: theme.color, border: `1px solid ${theme.color}40` }}>
+                                {theme.label}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-xs">
+                              {String(s.period_from).slice(0, 10)} → {String(s.period_to).slice(0, 10)}
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono">₹{Math.round(Number(s.gross_sales)).toLocaleString('en-IN')}</td>
+                            <td className="px-4 py-2 text-right font-mono text-[#cc5a16]">₹{Math.round(Number(s.commission_amount)).toLocaleString('en-IN')}</td>
+                            <td className="px-4 py-2 text-right font-mono font-bold text-emerald-700">₹{Math.round(Number(s.net_payout)).toLocaleString('en-IN')}</td>
+                            <td className="px-4 py-2">
+                              {s.reconciled
+                                ? <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-emerald-100 text-emerald-700">✓ Reconciled</span>
+                                : <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-100 text-amber-700">Open</span>}
+                            </td>
+                            <td className="px-4 py-2 text-right">
+                              <button
+                                onClick={() => fetchSettlementDetail(s.id)}
+                                className="text-xs font-bold text-[#cc5a16] hover:underline"
+                              >Inspect →</button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Settlement detail modal */}
+              {settlementDetail && (
+                <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                  <div className="bg-white rounded-3xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+                    <div className="px-6 py-4 border-b border-[#cc5a16]/10 flex items-center justify-between bg-[#faf7f2]/50">
+                      <div>
+                        <h3 className="text-xl font-bold text-[#1a1208]">{settlementDetail.settlement?.channel} Settlement</h3>
+                        <p className="text-xs text-[#6b5d52]">
+                          {String(settlementDetail.settlement?.period_from).slice(0, 10)} → {String(settlementDetail.settlement?.period_to).slice(0, 10)} ·
+                          {settlementDetail.summary?.total_lines || 0} lines · {settlementDetail.summary?.exact || 0} exact · {settlementDetail.summary?.partial || 0} partial · {settlementDetail.summary?.missing_local || 0} missing
+                        </p>
+                      </div>
+                      <button onClick={() => setSettlementDetail(null)} className="text-[#6b5d52] hover:text-[#1a1208]"><X size={20}/></button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto px-2">
+                      <table className="w-full text-sm">
+                        <thead className="bg-[#faf7f2]/60 sticky top-0 z-10">
+                          <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                            <th className="px-4 py-2">External order</th>
+                            <th className="px-4 py-2 text-right">Gross</th>
+                            <th className="px-4 py-2 text-right">Commission</th>
+                            <th className="px-4 py-2 text-right">Net</th>
+                            <th className="px-4 py-2 text-right">Variance</th>
+                            <th className="px-4 py-2">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(settlementDetail.lines || []).slice(0, 200).map((l: any) => (
+                            <tr key={l.id} className="border-b border-[#cc5a16]/5">
+                              <td className="px-4 py-2 font-mono text-xs">{l.external_order_id}</td>
+                              <td className="px-4 py-2 text-right font-mono">₹{Number(l.gross_amount).toFixed(0)}</td>
+                              <td className="px-4 py-2 text-right font-mono">₹{Number(l.commission_amount).toFixed(0)}</td>
+                              <td className="px-4 py-2 text-right font-mono">₹{Number(l.net_amount).toFixed(0)}</td>
+                              <td className={cn("px-4 py-2 text-right font-mono", Number(l.variance) > 5 ? "text-red-700" : "text-[#9c8e85]")}>
+                                {Number(l.variance) > 0 ? '±' : ''}₹{Number(l.variance).toFixed(0)}
+                              </td>
+                              <td className="px-4 py-2">
+                                <span className={cn(
+                                  "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                                  l.reconciled_match === 'EXACT' ? "bg-emerald-100 text-emerald-700" :
+                                  l.reconciled_match === 'PARTIAL' ? "bg-amber-100 text-amber-700" :
+                                  "bg-red-100 text-red-700"
+                                )}>{l.reconciled_match}</span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── CHANNEL_PNL sub-view ── */}
+          {deliverySubTab === 'CHANNEL_PNL' && (
+            <div className="space-y-3">
+              <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 flex flex-wrap gap-3 items-end">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">From</label>
+                  <input type="date" value={pnlRange.from}
+                    onChange={e => setPnlRange(r => ({ ...r, from: e.target.value }))}
+                    className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">To</label>
+                  <input type="date" value={pnlRange.to}
+                    onChange={e => setPnlRange(r => ({ ...r, to: e.target.value }))}
+                    className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                </div>
+                <button onClick={fetchChannelPnl}
+                  className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase">Run Report</button>
+              </div>
+
+              {!channelPnl ? (
+                <div className="text-center py-12 bg-white rounded-3xl border border-[#cc5a16]/10">
+                  <p className="text-sm text-[#9c8e85]">Loading…</p>
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {[
+                      { label: 'Gross',     value: '₹' + Math.round(channelPnl.totals?.gross || 0).toLocaleString('en-IN'), accent: '#1a1208' },
+                      { label: 'Commission',value: '₹' + Math.round(channelPnl.totals?.commission || 0).toLocaleString('en-IN'), accent: '#cc5a16' },
+                      { label: 'Food Cost', value: '₹' + Math.round(channelPnl.totals?.food_cost || 0).toLocaleString('en-IN'), accent: '#b45309' },
+                      { label: `Profit (${channelPnl.totals?.profit_pct || 0}%)`, value: '₹' + Math.round(channelPnl.totals?.profit || 0).toLocaleString('en-IN'), accent: '#10b981' },
+                    ].map(k => (
+                      <div key={k.label} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                        <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">{k.label}</p>
+                        <p className="text-2xl font-bold font-mono mt-1" style={{ color: k.accent }}>{k.value}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                          <th className="px-4 py-2">Channel</th>
+                          <th className="px-4 py-2 text-right">Orders</th>
+                          <th className="px-4 py-2 text-right">Gross</th>
+                          <th className="px-4 py-2 text-right">Commission</th>
+                          <th className="px-4 py-2 text-right">Net Payout</th>
+                          <th className="px-4 py-2 text-right">Food Cost</th>
+                          <th className="px-4 py-2 text-right">Profit</th>
+                          <th className="px-4 py-2 text-right">Margin %</th>
+                          <th className="px-4 py-2 text-right">₹/Order</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(channelPnl.by_channel || []).length === 0 ? (
+                          <tr><td colSpan={9} className="px-4 py-12 text-center text-[#9c8e85]">
+                            No platform orders in the selected range.
+                          </td></tr>
+                        ) : (channelPnl.by_channel || []).map((row: any) => {
+                          const theme = CHANNEL_THEME[row.channel] || { color: '#6b5d52', bg: '#f3f4f6', label: row.channel };
+                          const profitColor = row.profit >= 0 ? 'text-emerald-700' : 'text-red-700';
+                          return (
+                            <tr key={row.channel} className="border-b border-[#cc5a16]/5">
+                              <td className="px-4 py-2">
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase"
+                                  style={{ background: theme.bg, color: theme.color, border: `1px solid ${theme.color}40` }}>
+                                  {theme.label}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2 text-right font-mono">{row.order_count}</td>
+                              <td className="px-4 py-2 text-right font-mono">₹{Math.round(row.gross).toLocaleString('en-IN')}</td>
+                              <td className="px-4 py-2 text-right font-mono text-[#cc5a16]">₹{Math.round(row.commission).toLocaleString('en-IN')}</td>
+                              <td className="px-4 py-2 text-right font-mono">₹{Math.round(row.net_payout).toLocaleString('en-IN')}</td>
+                              <td className="px-4 py-2 text-right font-mono text-[#b45309]">₹{Math.round(row.food_cost).toLocaleString('en-IN')}</td>
+                              <td className={cn("px-4 py-2 text-right font-mono font-bold", profitColor)}>
+                                ₹{Math.round(row.profit).toLocaleString('en-IN')}
+                              </td>
+                              <td className={cn("px-4 py-2 text-right font-mono", profitColor)}>
+                                {row.profit_pct}%
+                              </td>
+                              <td className={cn("px-4 py-2 text-right font-mono", profitColor)}>
+                                ₹{row.per_order_profit}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="bg-emerald-50/40 border border-emerald-200 rounded-2xl p-4 text-xs text-emerald-900">
+                    <strong>How to read this:</strong> Net Payout = what the platform will actually pay you (gross minus their commission).
+                    Food Cost = sum of stock_movements × ingredient unit price for orders in this range.
+                    Profit = Net Payout − Food Cost. If a channel's per-order profit is below ₹20-30, the unit economics may not be working for you.
+                  </div>
+                </>
+              )}
             </div>
           )}
 
