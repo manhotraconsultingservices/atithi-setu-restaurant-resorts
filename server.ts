@@ -3688,6 +3688,245 @@ async function startServer() {
     }
   });
 
+  // ── ADMIN-ONLY: seed mock platform orders for demo / testing ───────────
+  //
+  // POST /api/restaurant/:id/integrations/dev/seed-mock-orders
+  //   Auth: must be OWNER (with matching restaurantId) or SUPER_ADMIN/CTO
+  //   Body: {
+  //     count?: number,             default 30, max 200
+  //     channels?: ChannelId[],     default ['SWIGGY','ZOMATO','DUNZO']
+  //     days?: number,              spread orders over last N days (default 14)
+  //     dry_run?: boolean,
+  //     fire_notifications?: boolean,  default false
+  //     deduct_inventory?: boolean,    default false (mock orders never touch real stock)
+  //   }
+  //
+  // SAFETY:
+  //   • Every order's external_order_id starts with "MOCK-" so the data is
+  //     trivially identifiable and can be cleaned up later via the same prefix.
+  //   • Inventory deduction is OFF by default (mock orders don't drain real stock).
+  //   • Notifications are OFF by default (avoids spamming owner with 30 emails).
+  //   • Production-grade — inserts via the same INSERT path real platform
+  //     orders use, so the DELIVERY tab renders them identically.
+  app.post(
+    "/api/restaurant/:id/integrations/dev/seed-mock-orders",
+    authenticate,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        // Auth gate
+        const role = String(req.user?.role || '');
+        const isAdmin = role === 'SUPER_ADMIN' || role === 'CTO';
+        const isOwnerOfThisTenant = role === 'OWNER' && req.user?.restaurantId === req.params.id;
+        if (!isAdmin && !isOwnerOfThisTenant) {
+          return res.status(403).json({ error: 'Forbidden — OWNER (this tenant) or SUPER_ADMIN/CTO only' });
+        }
+
+        const count = Math.max(1, Math.min(200, Number(req.body?.count ?? 30)));
+        const days = Math.max(1, Math.min(90, Number(req.body?.days ?? 14)));
+        const dryRun = !!req.body?.dry_run;
+        const fireNotifications = !!req.body?.fire_notifications;
+        const deductInventory = !!req.body?.deduct_inventory;
+
+        const requestedChannels: ChannelId[] = Array.isArray(req.body?.channels) && req.body.channels.length > 0
+          ? req.body.channels.map((c: any) => String(c).toUpperCase()).filter((c: string) => ALL_CHANNEL_IDS.includes(c as ChannelId))
+          : (['SWIGGY', 'ZOMATO', 'DUNZO'] as ChannelId[]);
+        if (requestedChannels.length === 0) {
+          return res.status(400).json({ error: 'No valid channels supplied' });
+        }
+
+        const db = await getTenantDb(req.params.id);
+
+        // Need at least one menu item with a price
+        const menuItems: any[] = await db.query(
+          `SELECT id, name, COALESCE(price_full, price) AS price, dietary_type
+             FROM menu
+            WHERE COALESCE(price_full, price, 0) > 0
+              AND is_available = 1
+            LIMIT 200`
+        );
+        if (menuItems.length === 0) {
+          return res.status(400).json({
+            error: 'Tenant has no priced menu items — cannot generate mock orders',
+          });
+        }
+
+        // Lightweight RNG so the seed is reproducible if caller wants it
+        // (not required for current callers; deterministic-style for now)
+        const rand = (a: number, b: number) => Math.floor(Math.random() * (b - a + 1)) + a;
+        const pick = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+
+        const STATUS_DISTRIBUTION = ['DELIVERED', 'DELIVERED', 'DELIVERED', 'DELIVERED', 'DELIVERED', 'DELIVERED', 'READY', 'READY', 'PREPARING', 'CANCELLED'];
+        const PAYMENT_DISTRIBUTION = ['PREPAID', 'PREPAID', 'PREPAID', 'PREPAID', 'PREPAID', 'PREPAID', 'PREPAID', 'COD', 'COD', 'COD'];
+        const FIRST_NAMES = ['Ananya', 'Rohan', 'Priya', 'Vivek', 'Neha', 'Karthik', 'Sneha', 'Arjun', 'Meera', 'Sanjay', 'Pooja', 'Rajesh', 'Divya', 'Aditya', 'Kavita', 'Manish', 'Riya', 'Suresh', 'Anjali', 'Vikram'];
+        const LAST_NAMES = ['Sharma', 'Verma', 'Gupta', 'Iyer', 'Mehta', 'Nair', 'Reddy', 'Kapoor', 'Joshi', 'Patel', 'Singh', 'Desai', 'Khanna', 'Rao'];
+        const STREETS = ['Connaught Place', 'Greater Kailash', 'Hauz Khas', 'Saket', 'Rajouri Garden', 'Vasant Kunj', 'Karol Bagh', 'Lajpat Nagar', 'Janakpuri', 'Dwarka'];
+        const SAMPLE_PINCODES = ['110001', '110017', '110057', '110024', '110045', '110092', '110005', '110092'];
+
+        // Plan
+        const plan = {
+          tenant: req.params.id,
+          count,
+          days,
+          channels: requestedChannels,
+          fire_notifications: fireNotifications,
+          deduct_inventory: deductInventory,
+        };
+        if (dryRun) {
+          return res.json({ dry_run: true, plan, would_insert: count });
+        }
+
+        const inserted: { id: string; external_order_id: string; channel: ChannelId; status: string; total: number }[] = [];
+        let skippedDup = 0;
+
+        for (let i = 0; i < count; i++) {
+          const channel = pick(requestedChannels);
+          // External id format: MOCK-{channel}-{ts}-{rand}
+          const placedTs = Date.now() - rand(0, days * 86400000);
+          const placedAt = new Date(placedTs);
+          const dateStr = placedAt.toISOString().slice(0, 10).replace(/-/g, '');
+          const externalOrderId = `MOCK-${channel}-${dateStr}-${String(i).padStart(3, '0')}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+          const externalIdHash = require('crypto')
+            .createHash('sha256')
+            .update(`${channel}:${externalOrderId}`)
+            .digest('hex');
+
+          // 2-4 random items
+          const itemCount = rand(2, 4);
+          const orderItems: any[] = [];
+          let subtotal = 0;
+          for (let j = 0; j < itemCount; j++) {
+            const m = pick(menuItems);
+            const qty = rand(1, 3);
+            const unitPrice = Math.round(Number(m.price) * 1.25 * 100) / 100;  // ~25% platform markup
+            const lineTotal = unitPrice * qty;
+            subtotal += lineTotal;
+            orderItems.push({
+              id: m.id,
+              external_item_id: `${channel.toLowerCase()}-${m.id.slice(-6)}`,
+              name: m.name,
+              quantity: qty,
+              size: 'FULL',
+              price: unitPrice,
+            });
+          }
+          const taxes = Math.round(subtotal * 0.05 * 100) / 100;
+          const packaging = rand(0, 30);
+          const delivery = rand(0, 50);
+          const total = subtotal + taxes + packaging + delivery;
+          const commission = Math.round(subtotal * 0.25 * 100) / 100;
+          const netPayout = Math.round((total - commission) * 100) / 100;
+
+          const status = pick(STATUS_DISTRIBUTION);
+          const paymentMode = pick(PAYMENT_DISTRIBUTION);
+          const customerName = `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)}`;
+          const customerPhone = '9' + String(rand(100000000, 999999999));
+
+          // Generate a clearly-mock order id
+          const orderId = `ORD-${placedTs}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+          // Sequential invoice (cloud-kitchen-style) — atomic counter
+          const invoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id, /* forceSequential */ true);
+
+          // Read GST settings
+          let orderGstPercent = 0;
+          let orderApplyGst = 0;
+          try {
+            const restGst: any = await centralDb.get(
+              "SELECT is_gst_enabled, gst_percentage FROM restaurants WHERE id = ?",
+              [req.params.id]
+            );
+            if (restGst?.is_gst_enabled) {
+              orderGstPercent = Number(restGst.gst_percentage || 0);
+              orderApplyGst = 1;
+            }
+          } catch {}
+
+          try {
+            await db.run(`
+              INSERT INTO orders
+                (id, table_number, items, total_amount, gst_amount, status, customer_name, customer_phone,
+                 customer_email, payment_method, session_id, checkout_mode, round_number, kitchen_status, invoice_number,
+                 gst_percent, apply_gst, invoice_status,
+                 customer_address_line1, customer_address_line2, customer_city, customer_pincode, customer_landmark,
+                 external_platform, external_order_id, external_id_hash, external_payload,
+                 commission_amount, net_payout_amount, gst_collected_by,
+                 created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'cloud_kitchen', 1, ?, ?,
+                      ?, ?, 'PRINTED',
+                      ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?,
+                      ?, ?, ?,
+                      ?)
+            `, [
+              orderId,
+              `Online (${channel})`,
+              JSON.stringify(orderItems),
+              total,
+              taxes,
+              status,
+              customerName,
+              customerPhone,
+              null,
+              paymentMode,
+              status === 'DELIVERED' ? 'delivered' : status === 'READY' ? 'ready' : status === 'PREPARING' ? 'preparing' : 'queued',
+              invoiceNumber,
+              orderGstPercent,
+              orderApplyGst,
+              `${rand(1, 999)}, ${pick(STREETS)}`,
+              null,
+              'New Delhi',
+              pick(SAMPLE_PINCODES),
+              null,
+              channel,
+              externalOrderId,
+              externalIdHash,
+              JSON.stringify({ mock: true, generated_by: 'seed-mock-orders', generated_at: new Date().toISOString() }),
+              commission,
+              netPayout,
+              'PLATFORM',
+              placedAt.toISOString(),
+            ]);
+            inserted.push({ id: orderId, external_order_id: externalOrderId, channel, status, total });
+
+            // Fire-and-forget inventory deduction (only if explicitly opted in)
+            if (deductInventory) {
+              deductIngredientsForOrder(db, orderId, orderItems, req.params.id).catch(() => {});
+            }
+          } catch (err: any) {
+            // Most likely cause: unique-index collision on external_id_hash. Skip and continue.
+            if (String(err?.message || '').match(/duplicate|unique/i)) skippedDup++;
+            else console.warn(`[seed-mock] insert ${i} failed:`, err?.message);
+          }
+        }
+
+        // Optional notification fire (just one summary, not 30 individual ones)
+        if (fireNotifications && inserted.length > 0) {
+          triggerNotification(req.params.id, 'NEW_PLATFORM_ORDER', {
+            channel: 'MOCK',
+            externalOrderId: 'BULK-SEED',
+            orderId: 'BULK-SEED',
+            customerName: `${inserted.length} mock orders seeded across ${requestedChannels.join('/')}`,
+            address: 'Mock data',
+            items: [`${inserted.length} synthetic orders`],
+            total: inserted.reduce((s, o) => s + o.total, 0),
+          }).catch(() => {});
+        }
+
+        res.json({
+          success: true,
+          inserted: inserted.length,
+          skipped_duplicates: skippedDup,
+          channels: requestedChannels,
+          sample: inserted.slice(0, 5),
+          message: `Inserted ${inserted.length} mock orders. Visit Delivery Partners → Live Orders to see them.`,
+        });
+      } catch (err: any) {
+        console.error("Seed mock orders error:", err);
+        res.status(500).json({ error: "Failed to seed mock orders", detail: err?.message });
+      }
+    }
+  );
+
   // ═════════════════════════════════════════════════════════════════════════
   // ── Inventory Management — Phase 1: Ingredients & Recipes ───────────────
   // ═════════════════════════════════════════════════════════════════════════
