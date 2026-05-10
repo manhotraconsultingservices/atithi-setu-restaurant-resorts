@@ -6846,7 +6846,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       {/* ── DESKTOP: Horizontal scrollable tab bar (hidden on mobile) ── */}
       <div className="hidden md:flex flex-wrap gap-x-4 gap-y-1 border-b border-[#cc5a16]/10">
         {([
-          ['MONITOR', 'Command & Control'], ['MENU', 'Menu Management'], ['INVENTORY', 'Inventory'], ['REPORTS', 'Analytics & Reports'],
+          ['MONITOR', 'Command & Control'], ['MENU', 'Menu Management'], ['INVENTORY', 'Inventory'], ['DELIVERY', 'Delivery Partners'], ['REPORTS', 'Analytics & Reports'],
           ['QR', 'QR Management'], ['BOOKINGS', 'Bookings'],
           ...(isHotelEnabled ? [
               ['ROOMS','Rooms'],
