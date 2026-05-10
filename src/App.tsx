@@ -9738,14 +9738,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 ))}
               </div>
 
-              <div className="bg-emerald-50/50 border border-emerald-200 rounded-2xl p-4 text-xs text-emerald-900">
-                <strong>✅ Credentials are live:</strong> click <em>Configure credentials</em> on any
-                channel card to enter API keys, HMAC secrets, and store ids.  All values are encrypted
-                at rest with AES-256-GCM.  After saving, use <em>Test connection</em> to verify the
-                adapter can reach the platform with those credentials.
-                <br/><br/>
-                The inbound webhook URL <code className="bg-emerald-100 px-1 rounded">/api/integrations/:channel/webhook/{restaurantId}</code>
-                is shown in the credentials modal — copy it into the platform partner dashboard.
+              <div className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-2xl p-4 text-xs text-[#6b5d52]">
+                Need help wiring up Swiggy / Zomato / Dunzo? See the <strong className="text-[#cc5a16]">Delivery Partner integration guide</strong> in the docs folder for step-by-step instructions.
               </div>
             </div>
           )}
