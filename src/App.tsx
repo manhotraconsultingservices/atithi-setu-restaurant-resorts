@@ -77,7 +77,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // the bypass, those tabs would never appear until a SUPER_ADMIN manually
 // re-saves the role permissions for every restaurant. Owners and managers
 // expect new platform features to appear automatically.
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY']);
 
 // ─── CSV helpers — shared by inventory module ─────────────────────────────────
 // downloadCsv / parseCsv used by Ingredients, Suppliers, POs, GRNs sub-views
@@ -3953,12 +3953,174 @@ function ChannelPricingSection({
   );
 }
 
+// ─── Phase 2/3 — Per-channel settings card (Delivery Partners → Channels) ─
+//
+// Renders one card per platform (Swiggy / Zomato / Dunzo / Magicpin / ONDC /
+// UrbanPiper) showing: Active toggle, default markup %, commission %, prep time,
+// min-margin floor. Saves immediately on Apply. Defers to channel-pricing endpoints
+// added in Phase 2. The credentials/webhook-URL form ships in Phase 5.
+function ChannelSettingsCard({
+  channel, onSave,
+}: {
+  channel: any;
+  onSave: (patch: any) => Promise<boolean>;
+}) {
+  const theme = CHANNEL_THEME[channel.channel] || { color: '#6b5d52', bg: '#f3f4f6', label: channel.channel };
+  const [draft, setDraft] = useState({
+    is_active: !!channel.is_active,
+    default_markup_percent: String(channel.default_markup_percent ?? 25),
+    commission_percent: String(channel.commission_percent ?? 25),
+    prep_time_minutes: String(channel.prep_time_minutes ?? 20),
+    min_margin_floor_percent: String(channel.min_margin_floor_percent ?? 5),
+  });
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const dirty =
+    draft.is_active !== !!channel.is_active ||
+    Number(draft.default_markup_percent) !== Number(channel.default_markup_percent) ||
+    Number(draft.commission_percent) !== Number(channel.commission_percent) ||
+    Number(draft.prep_time_minutes) !== Number(channel.prep_time_minutes) ||
+    Number(draft.min_margin_floor_percent) !== Number(channel.min_margin_floor_percent);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaved(false);
+    const ok = await onSave({
+      is_active: draft.is_active,
+      default_markup_percent: Number(draft.default_markup_percent),
+      commission_percent: Number(draft.commission_percent),
+      prep_time_minutes: Number(draft.prep_time_minutes),
+      min_margin_floor_percent: Number(draft.min_margin_floor_percent),
+    });
+    setSaving(false);
+    if (ok) {
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    }
+  };
+
+  return (
+    <div
+      className="bg-white rounded-3xl border-2 overflow-hidden shadow-sm"
+      style={{ borderColor: theme.color + '30' }}
+    >
+      {/* Header strip */}
+      <div className="px-5 py-3 flex items-center justify-between" style={{ background: theme.bg }}>
+        <div>
+          <div className="text-base font-bold" style={{ color: theme.color }}>{theme.label}</div>
+          <div className="text-[10px] uppercase tracking-widest" style={{ color: theme.color + 'cc' }}>
+            {draft.is_active ? '● Active' : '○ Inactive'}
+          </div>
+        </div>
+        {/* Active toggle */}
+        <label className="inline-flex items-center cursor-pointer select-none">
+          <input
+            type="checkbox"
+            className="sr-only peer"
+            checked={draft.is_active}
+            onChange={e => setDraft({ ...draft, is_active: e.target.checked })}
+          />
+          <div
+            className="relative w-11 h-6 bg-gray-200 peer-checked:bg-current peer-focus:outline-none rounded-full peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"
+            style={{ color: theme.color }}
+          />
+        </label>
+      </div>
+
+      <div className="p-5 space-y-3">
+        {/* Default markup % */}
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">
+            Default Markup % <span className="font-normal lowercase tracking-normal text-[#6b5d52]">(applied to every menu item by default)</span>
+          </label>
+          <div className="relative">
+            <input
+              type="number" min="0" max="500" step="1"
+              value={draft.default_markup_percent}
+              onChange={e => setDraft({ ...draft, default_markup_percent: e.target.value })}
+              className="w-full pl-3 pr-10 py-2 rounded-xl border border-[#cc5a16]/15 text-sm font-mono"
+            />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-[#9c8e85]">%</span>
+          </div>
+        </div>
+
+        {/* Commission % + Min margin floor (side-by-side) */}
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Commission %</label>
+            <div className="relative">
+              <input
+                type="number" min="0" max="90" step="1"
+                value={draft.commission_percent}
+                onChange={e => setDraft({ ...draft, commission_percent: e.target.value })}
+                className="w-full pl-3 pr-7 py-2 rounded-xl border border-[#cc5a16]/15 text-sm font-mono"
+              />
+              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[#9c8e85]">%</span>
+            </div>
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Blocks any save that would leave the menu item priced below cost+floor">Min Margin Floor %</label>
+            <div className="relative">
+              <input
+                type="number" min="0" max="90" step="1"
+                value={draft.min_margin_floor_percent}
+                onChange={e => setDraft({ ...draft, min_margin_floor_percent: e.target.value })}
+                className="w-full pl-3 pr-7 py-2 rounded-xl border border-[#cc5a16]/15 text-sm font-mono"
+              />
+              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[#9c8e85]">%</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Prep time */}
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Prep Time</label>
+          <div className="relative">
+            <input
+              type="number" min="0" max="180" step="1"
+              value={draft.prep_time_minutes}
+              onChange={e => setDraft({ ...draft, prep_time_minutes: e.target.value })}
+              className="w-full pl-3 pr-12 py-2 rounded-xl border border-[#cc5a16]/15 text-sm font-mono"
+            />
+            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[#9c8e85]">min</span>
+          </div>
+        </div>
+
+        {/* Save button */}
+        <div className="pt-2">
+          <button
+            onClick={handleSave}
+            disabled={!dirty || saving}
+            className={cn(
+              "w-full px-4 py-2.5 rounded-xl text-sm font-bold transition-all",
+              !dirty || saving
+                ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                : saved
+                  ? "bg-emerald-600 text-white"
+                  : "bg-[#cc5a16] text-white hover:bg-[#a84612]"
+            )}
+            style={!dirty || saving || saved ? {} : { background: theme.color }}
+          >
+            {saving ? 'Saving…' : saved ? '✓ Saved' : dirty ? 'Apply changes' : 'No changes'}
+          </button>
+        </div>
+
+        <p className="text-[10px] text-[#9c8e85] text-center pt-1">
+          Per-item overrides: Menu Management → edit item → Channel Pricing
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
   const [activeTab, setActiveTab] = useState<
     | 'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'SETTINGS'
     | 'ORDERS' | 'INVOICES' | 'ATTENDANCE' | 'NOTIFICATIONS'
     | 'FEEDBACK' | 'SUBSCRIPTION' | 'BOOKINGS' | 'MONITOR'
     | 'INVENTORY'                                 // inventory module
+    | 'DELIVERY'                                  // multi-platform delivery integration
     | 'ROOMS' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE'  // hospitality Phase 2 & 3
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
@@ -3967,6 +4129,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [inventorySubTab, setInventorySubTab] = useState<
     'DASHBOARD' | 'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS' | 'INSIGHTS' | 'SETTINGS'
   >('DASHBOARD');
+  // Delivery integration — sub-navigation
+  const [deliverySubTab, setDeliverySubTab] = useState<
+    'CHANNELS' | 'LIVE_ORDERS'
+  >('CHANNELS');
+  // State backing the DELIVERY tab
+  const [deliveryChannels, setDeliveryChannels] = useState<any[]>([]);
+  const [deliveryOrders, setDeliveryOrders] = useState<any[]>([]);
+  const [deliverySummary, setDeliverySummary] = useState<any>(null);
+  const [deliveryLoading, setDeliveryLoading] = useState(false);
+  const [deliveryFilter, setDeliveryFilter] = useState<{ platform?: string; status?: string }>({});
   // Tier-2/3 insights panel — sub-tab within the INSIGHTS view
   type InsightsPanel = 'AUDIT' | 'VARIANCE' | 'COGS' | 'PRICES' | 'BATCHES';
   const [insightsPanel, setInsightsPanel] = useState<InsightsPanel>('AUDIT');
@@ -4349,12 +4521,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'MONITOR') fetchLiveTables();
     if (activeTab === 'INVOICES') fetchInvoices();
     if (activeTab === 'INVENTORY') fetchInventoryForSubTab();
+    if (activeTab === 'DELIVERY') fetchDeliveryForSubTab();
 
     const interval = setInterval(() => {
       fetchOrders();
       if (activeTab === 'REPORTS') fetchReports();
       if (activeTab === 'MONITOR') fetchLiveTables();
       if (activeTab === 'INVOICES') fetchInvoices();
+      // 30s auto-refresh for the live platform-orders feed when on DELIVERY tab
+      if (activeTab === 'DELIVERY' && deliverySubTab === 'LIVE_ORDERS') fetchDeliveryOrders();
     }, 30000);
 
     // Per-second clock tick — only needed on MONITOR tab (live visit timers).
@@ -4378,6 +4553,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'INVENTORY') fetchInventoryForSubTab();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inventorySubTab, poFilter]);
+
+  // Refetch delivery data when sub-tab or filter changes
+  useEffect(() => {
+    if (activeTab === 'DELIVERY') fetchDeliveryForSubTab();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deliverySubTab, deliveryFilter.platform, deliveryFilter.status]);
 
   // Refetch dashboard when horizon toggles (Daily / Weekly / Monthly)
   useEffect(() => {
@@ -5357,6 +5538,57 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } catch { setStorageLocations([]); }
   };
 
+  // ── Delivery integration fetchers ──────────────────────────────────────
+  const fetchDeliveryChannels = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/channels`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      setDeliveryChannels(Array.isArray(data) ? data : []);
+    } catch { setDeliveryChannels([]); }
+  };
+  const fetchDeliveryOrders = async () => {
+    if (!restaurantId) return;
+    try {
+      const params = new URLSearchParams();
+      if (deliveryFilter.platform) params.set('platform', deliveryFilter.platform);
+      if (deliveryFilter.status) params.set('status', deliveryFilter.status);
+      params.set('limit', '100');
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/orders?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      setDeliveryOrders(Array.isArray(data?.orders) ? data.orders : []);
+      setDeliverySummary(data?.summary || null);
+    } catch { setDeliveryOrders([]); setDeliverySummary(null); }
+  };
+  const saveChannelSettings = async (channel: string, patch: any): Promise<{ ok: boolean; error?: string }> => {
+    if (!restaurantId) return { ok: false, error: 'No restaurant' };
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/${channel}/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json();
+      if (!res.ok) return { ok: false, error: data?.error || `HTTP ${res.status}` };
+      await fetchDeliveryChannels();
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err?.message || 'Network error' };
+    }
+  };
+  const fetchDeliveryForSubTab = async () => {
+    setDeliveryLoading(true);
+    try {
+      const promises: Promise<any>[] = [fetchDeliveryChannels()];
+      if (deliverySubTab === 'LIVE_ORDERS') promises.push(fetchDeliveryOrders());
+      await Promise.all(promises);
+    } finally { setDeliveryLoading(false); }
+  };
+
   // Coordinated load for the active sub-tab. Always loads ingredients (everything depends on them).
   const fetchInventoryForSubTab = async () => {
     setInventoryLoading(true);
@@ -6195,7 +6427,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       <div className="md:hidden flex items-center justify-between bg-white border border-[#cc5a16]/10 rounded-2xl px-4 py-3 shadow-sm">
         <span className="text-sm font-bold text-[#1a1208]">
           {({
-            MENU: 'Menu Management', INVENTORY: 'Inventory', REPORTS: 'Analytics & Reports', QR: 'QR Management',
+            MENU: 'Menu Management', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', REPORTS: 'Analytics & Reports', QR: 'QR Management',
             BOOKINGS: 'Bookings', STAFF: 'Staff Management', ORDERS: 'Orders', INVOICES: 'Invoices',
             ATTENDANCE: 'Attendance', FEEDBACK: 'Feedback',
             SUBSCRIPTION: 'Subscription', NOTIFICATIONS: 'Notifications',
@@ -6217,7 +6449,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       {mobileNavOpen && (
         <div className="md:hidden -mt-3 rounded-2xl bg-white border border-[#cc5a16]/10 shadow-lg overflow-hidden z-40 relative">
           {([
-            ['MONITOR', 'Command & Control'], ['MENU', 'Menu Management'], ['INVENTORY', 'Inventory'], ['REPORTS', 'Analytics & Reports'],
+            ['MONITOR', 'Command & Control'], ['MENU', 'Menu Management'], ['INVENTORY', 'Inventory'], ['DELIVERY', 'Delivery Partners'], ['REPORTS', 'Analytics & Reports'],
             ['QR', 'QR Management'], ['BOOKINGS', 'Bookings'],
             ...(isHotelEnabled ? [
               ['ROOMS','Rooms'],
@@ -9065,6 +9297,238 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   />
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      ) : activeTab === 'DELIVERY' ? (
+        <div className="space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Delivery Partners</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">
+                Manage Swiggy / Zomato / Dunzo / Magicpin / ONDC pricing, monitor incoming orders,
+                and track per-channel performance.
+              </p>
+            </div>
+            {deliverySummary && (
+              <div className="flex flex-wrap gap-3 text-xs">
+                <div className="bg-white rounded-2xl border border-[#cc5a16]/10 px-4 py-2.5">
+                  <div className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Live Orders</div>
+                  <div className="text-xl font-bold text-[#cc5a16] font-mono">{deliverySummary.open || 0}</div>
+                </div>
+                <div className="bg-white rounded-2xl border border-[#cc5a16]/10 px-4 py-2.5">
+                  <div className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Today's Gross</div>
+                  <div className="text-xl font-bold text-[#1a1208] font-mono">₹{Math.round(deliverySummary.today_gross || 0).toLocaleString('en-IN')}</div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Sub-tab nav */}
+          <div className="flex gap-1 overflow-x-auto border-b border-[#cc5a16]/10">
+            {([
+              ['CHANNELS', 'Channels & Pricing', deliveryChannels.filter((c: any) => c.is_active).length],
+              ['LIVE_ORDERS', 'Live Orders', deliveryOrders.length],
+            ] as [typeof deliverySubTab, string, number][]).map(([id, label, count]) => (
+              <button
+                key={id}
+                onClick={() => setDeliverySubTab(id)}
+                className={cn(
+                  "px-5 py-3 text-xs font-bold uppercase tracking-widest whitespace-nowrap border-b-2 transition-all -mb-px",
+                  deliverySubTab === id
+                    ? "border-[#cc5a16] text-[#cc5a16]"
+                    : "border-transparent text-[#9c8e85] hover:text-[#6b5d52]"
+                )}
+              >
+                {label}
+                {count > 0 && (
+                  <span className={cn(
+                    "ml-2 px-1.5 py-0.5 rounded-full text-[10px] font-bold",
+                    deliverySubTab === id ? "bg-[#cc5a16]/15 text-[#cc5a16]" : "bg-[#0d0a07]/5 text-[#9c8e85]"
+                  )}>{count}</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* ── CHANNELS sub-view — config + activation per platform ── */}
+          {deliverySubTab === 'CHANNELS' && (
+            <div className="space-y-4">
+              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+                <h3 className="text-sm font-bold text-[#1a1208] mb-1">How channel pricing works</h3>
+                <p className="text-xs text-[#6b5d52] leading-relaxed">
+                  Set a default markup % per channel below. Each menu item then publishes at
+                  <span className="font-semibold"> base price × (1 + markup/100)</span> on that channel.
+                  Override individual items in <span className="font-semibold">Menu Management</span> →
+                  edit item → Channel Pricing section. Min-margin floor blocks any price below cost.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {deliveryChannels.length === 0 && !deliveryLoading ? (
+                  <div className="md:col-span-2 lg:col-span-3 text-center py-12 bg-white rounded-3xl border border-[#cc5a16]/10">
+                    <p className="text-sm text-[#9c8e85]">Loading channels…</p>
+                  </div>
+                ) : deliveryChannels.map((c: any) => (
+                  <div key={c.channel}>
+                    <ChannelSettingsCard
+                      channel={c}
+                      onSave={async (patch) => {
+                        const r = await saveChannelSettings(c.channel, patch);
+                        if (!r.ok) alert(r.error);
+                        return r.ok;
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <div className="bg-amber-50/50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-900">
+                <strong>📍 Setup roadmap:</strong> Phase 5 will add the credentials &amp; webhook-URL
+                input form per channel. Until then, configure markups here and use them via the
+                Channel Pricing section in Menu Management. The webhook endpoint
+                <code className="bg-amber-100 px-1 rounded">/api/integrations/:channel/webhook/{restaurantId}</code>
+                is live and ready once the platform onboarding (or UrbanPiper aggregator) lands.
+              </div>
+            </div>
+          )}
+
+          {/* ── LIVE_ORDERS sub-view — incoming platform orders ── */}
+          {deliverySubTab === 'LIVE_ORDERS' && (
+            <div className="space-y-3">
+              <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-3 flex flex-wrap gap-2 items-center">
+                <select
+                  value={deliveryFilter.platform || ''}
+                  onChange={e => setDeliveryFilter(f => ({ ...f, platform: e.target.value || undefined }))}
+                  className="px-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10"
+                >
+                  <option value="">All platforms</option>
+                  {['SWIGGY', 'ZOMATO', 'DUNZO', 'MAGICPIN', 'ONDC', 'URBANPIPER'].map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+                <select
+                  value={deliveryFilter.status || ''}
+                  onChange={e => setDeliveryFilter(f => ({ ...f, status: e.target.value || undefined }))}
+                  className="px-3 py-2 text-sm bg-[#faf7f2] rounded-xl border border-[#cc5a16]/10"
+                >
+                  <option value="">All statuses</option>
+                  <option value="CONFIRMED">Confirmed</option>
+                  <option value="PREPARING">Preparing</option>
+                  <option value="READY">Ready</option>
+                  <option value="DISPATCHED">Dispatched</option>
+                  <option value="DELIVERED">Delivered</option>
+                  <option value="CANCELLED">Cancelled</option>
+                </select>
+                {(deliveryFilter.platform || deliveryFilter.status) && (
+                  <button
+                    onClick={() => setDeliveryFilter({})}
+                    className="px-3 py-2 text-xs font-bold text-[#cc5a16] hover:underline"
+                  >Clear</button>
+                )}
+                <button
+                  onClick={fetchDeliveryOrders}
+                  className="ml-auto px-3 py-2 text-xs font-bold rounded-xl bg-[#cc5a16] text-white hover:bg-[#a84612] flex items-center gap-1.5"
+                >
+                  <RefreshCw size={12} /> Refresh
+                </button>
+              </div>
+
+              {deliverySummary?.by_platform && Object.keys(deliverySummary.by_platform).length > 0 && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                  {Object.entries(deliverySummary.by_platform).map(([ch, v]: [string, any]) => {
+                    const theme = CHANNEL_THEME[ch] || { color: '#6b5d52', bg: '#f3f4f6', label: ch };
+                    return (
+                      <div key={ch} className="rounded-xl px-3 py-2 border" style={{ background: theme.bg, borderColor: theme.color + '40' }}>
+                        <div className="text-[10px] font-bold uppercase tracking-widest" style={{ color: theme.color }}>{theme.label}</div>
+                        <div className="text-lg font-bold font-mono mt-0.5">{v.count}</div>
+                        <div className="text-[10px] text-[#6b5d52]">₹{Math.round(v.gross || 0).toLocaleString('en-IN')}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                      <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                        <th className="px-4 py-2">Platform</th>
+                        <th className="px-4 py-2">External / Invoice</th>
+                        <th className="px-4 py-2">Customer</th>
+                        <th className="px-4 py-2">Items</th>
+                        <th className="px-4 py-2 text-right">Total</th>
+                        <th className="px-4 py-2 text-right">Net</th>
+                        <th className="px-4 py-2">Status</th>
+                        <th className="px-4 py-2">Rider</th>
+                        <th className="px-4 py-2">Received</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {deliveryOrders.length === 0 ? (
+                        <tr>
+                          <td colSpan={9} className="px-4 py-12 text-center text-[#9c8e85]">
+                            <div className="text-2xl mb-2">📭</div>
+                            <p className="font-medium">No platform orders yet</p>
+                            <p className="text-xs mt-1">
+                              Orders from Swiggy / Zomato / etc. will appear here once the platform
+                              webhook URLs are configured.
+                            </p>
+                          </td>
+                        </tr>
+                      ) : deliveryOrders.map((o: any) => {
+                        const theme = CHANNEL_THEME[o.external_platform] || { color: '#6b5d52', bg: '#f3f4f6', label: o.external_platform };
+                        const itemList = Array.isArray(o.items)
+                          ? o.items.map((it: any) => `${it.name || it.external_item_id || 'Item'} ×${it.quantity}`).join(', ')
+                          : '—';
+                        const statusColor =
+                          o.status === 'DELIVERED' ? 'bg-emerald-100 text-emerald-700' :
+                          o.status === 'CANCELLED' ? 'bg-red-100 text-red-700' :
+                          o.status === 'READY' ? 'bg-amber-100 text-amber-700' :
+                          'bg-blue-100 text-blue-700';
+                        return (
+                          <tr key={o.id} className="border-b border-[#cc5a16]/5 hover:bg-[#faf7f2]/30">
+                            <td className="px-4 py-2">
+                              <span
+                                className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase"
+                                style={{ background: theme.bg, color: theme.color, border: `1px solid ${theme.color}40` }}
+                              >{theme.label}</span>
+                            </td>
+                            <td className="px-4 py-2">
+                              <p className="font-mono text-xs font-semibold">{o.external_order_id}</p>
+                              {o.invoice_number && <p className="text-[10px] text-[#9c8e85] font-mono">{o.invoice_number}</p>}
+                            </td>
+                            <td className="px-4 py-2">
+                              <p className="font-medium">{o.customer_name || '—'}</p>
+                              <p className="text-[10px] text-[#9c8e85]">{o.customer_phone || ''}</p>
+                            </td>
+                            <td className="px-4 py-2 text-xs max-w-xs truncate" title={itemList}>{itemList}</td>
+                            <td className="px-4 py-2 text-right font-mono">₹{Number(o.total_amount).toFixed(0)}</td>
+                            <td className="px-4 py-2 text-right font-mono text-emerald-700">₹{Number(o.net_payout_amount || 0).toFixed(0)}</td>
+                            <td className="px-4 py-2">
+                              <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold uppercase", statusColor)}>
+                                {o.status}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-xs">
+                              {o.rider_name ? (
+                                <>
+                                  <p className="font-medium">{o.rider_name}</p>
+                                  {o.rider_phone && <a href={`tel:${o.rider_phone}`} className="text-[10px] text-[#cc5a16]">{o.rider_phone}</a>}
+                                </>
+                              ) : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-xs text-[#6b5d52] whitespace-nowrap">
+                              {new Date(o.created_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' })}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           )}
         </div>

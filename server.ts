@@ -3038,6 +3038,99 @@ async function startServer() {
     }
   });
 
+  // ── Live platform orders feed — drives DELIVERY tab → Live Orders panel ──
+  //
+  // Returns orders where external_platform IS NOT NULL — i.e. orders that
+  // came in from Swiggy / Zomato / Dunzo / etc. via the Phase 3 webhook.
+  // Filters: ?platform= (case-insensitive) · ?status= · ?from= · ?to= · ?limit=
+  // Default limit 100, max 500. Sorted by created_at DESC for live monitoring.
+  app.get("/api/restaurant/:id/integrations/orders", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { platform, status, from, to } = req.query as any;
+      const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+
+      const conds: string[] = ["external_platform IS NOT NULL"];
+      const params: any[] = [];
+      if (platform) {
+        conds.push("UPPER(external_platform) = ?");
+        params.push(String(platform).toUpperCase());
+      }
+      if (status) {
+        conds.push("UPPER(status) = ?");
+        params.push(String(status).toUpperCase());
+      }
+      if (from) {
+        conds.push("created_at >= ?");
+        params.push(String(from));
+      }
+      if (to) {
+        conds.push("created_at < ?::date + INTERVAL '1 day'");
+        params.push(String(to));
+      }
+
+      const rows: any[] = await db.query(
+        `SELECT id, external_platform, external_order_id, invoice_number, status, kitchen_status,
+                customer_name, customer_phone,
+                customer_address_line1, customer_city, customer_pincode,
+                items, total_amount, gst_amount, payment_method, payment_status,
+                commission_amount, net_payout_amount, gst_collected_by,
+                rider_name, rider_phone, rider_arrived_at,
+                created_at
+           FROM orders
+          WHERE ${conds.join(' AND ')}
+          ORDER BY created_at DESC
+          LIMIT ${limit}`,
+        params
+      );
+
+      // Aggregate live counters for the dashboard banner
+      const byPlatform: Record<string, { count: number; gross: number }> = {};
+      const byStatus: Record<string, number> = {};
+      let openCount = 0; // Not DELIVERED / CANCELLED
+      let todayGross = 0;
+      const todayStr = new Date().toISOString().slice(0, 10);
+      rows.forEach(r => {
+        const ch = String(r.external_platform);
+        if (!byPlatform[ch]) byPlatform[ch] = { count: 0, gross: 0 };
+        byPlatform[ch].count++;
+        byPlatform[ch].gross += Number(r.total_amount || 0);
+        const st = String(r.status || '').toUpperCase();
+        byStatus[st] = (byStatus[st] || 0) + 1;
+        if (st !== 'DELIVERED' && st !== 'CANCELLED') openCount++;
+        if (String(r.created_at).slice(0, 10) === todayStr) todayGross += Number(r.total_amount || 0);
+      });
+
+      res.json({
+        orders: rows.map(r => {
+          // items is stored as JSON text; parse defensively
+          let items = r.items;
+          if (typeof items === 'string') {
+            try { items = JSON.parse(items); } catch { /* keep as string */ }
+          }
+          return {
+            ...r,
+            items,
+            total_amount: Number(r.total_amount || 0),
+            gst_amount: Number(r.gst_amount || 0),
+            commission_amount: Number(r.commission_amount || 0),
+            net_payout_amount: Number(r.net_payout_amount || 0),
+          };
+        }),
+        summary: {
+          total: rows.length,
+          open: openCount,
+          today_gross: todayGross,
+          by_platform: byPlatform,
+          by_status: byStatus,
+        },
+      });
+    } catch (err) {
+      console.error("List platform orders error:", err);
+      res.status(500).json({ error: "Failed to list platform orders" });
+    }
+  });
+
   // ═════════════════════════════════════════════════════════════════════════
   // ── Inventory Management — Phase 1: Ingredients & Recipes ───────────────
   // ═════════════════════════════════════════════════════════════════════════
