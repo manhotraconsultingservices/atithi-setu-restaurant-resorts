@@ -19,6 +19,11 @@ import multer from "multer";
 import cron from "node-cron";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 
+// ── Multi-platform delivery integration ──────────────────────────────────
+import { isCredentialKeyConfigured } from "./integrations/security.ts";
+import { registerAdapter, listRegisteredChannels } from "./integrations/registry.ts";
+import { MockAdapter } from "./integrations/adapters/MockAdapter.ts";
+
 /** Returns a map of { "HH:MI" → bookedCount } for a given date, excluding cancelled bookings. */
 async function getSlotCountMap(db: DbInterface, dateStr: string): Promise<Record<string, number>> {
   const rows = await db.query(
@@ -621,6 +626,32 @@ async function startServer() {
     console.log("Retrying in 5 seconds...");
     setTimeout(startServer, 5000);
     return;
+  }
+
+  // ── Bootstrap delivery-platform integration adapters ───────────────────
+  // The MockAdapter (registered as 'URBANPIPER') is always available so E2E
+  // tests can exercise the full pipeline without a real platform. Real
+  // adapters (UrbanPiperAdapter, ONDCAdapter, SwiggyDirectAdapter,
+  // ZomatoDirectAdapter) get registered in subsequent phases.
+  //
+  // The webhook endpoints additionally check `isCredentialKeyConfigured()`
+  // before accepting traffic — if the master key isn't configured, the
+  // routes 503 with a clear "Integration not configured" response rather
+  // than silently writing plaintext credentials.
+  try {
+    registerAdapter(new MockAdapter());
+    if (!isCredentialKeyConfigured()) {
+      console.warn(
+        '[integrations] ATITHI_CREDENTIAL_KEY env var is not configured. ' +
+        'Delivery-platform credential storage will be disabled. ' +
+        'Generate one via `openssl rand -base64 32` to enable.'
+      );
+    } else {
+      console.log(`[integrations] ${listRegisteredChannels().length} adapter(s) registered: ${listRegisteredChannels().join(', ')}`);
+    }
+  } catch (err) {
+    console.error('[integrations] Bootstrap failed:', err);
+    // Non-fatal — the rest of the server boots fine without the integration module.
   }
 
   // Ensure SYSTEM restaurant exists

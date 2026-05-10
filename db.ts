@@ -897,6 +897,179 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS display_order INTEGER");
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_display_order ON ingredients (display_order)`);
 
+  // ───────────────────────────────────────────────────────────────────────
+  // Multi-platform delivery integration (Swiggy / Zomato / Dunzo / Magicpin
+  // / ONDC / UrbanPiper) — Phase 1 schema.  Net-new infrastructure on top
+  // of the existing checkout_mode abstraction.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Per-order channel facet — orders.checkout_mode stays unchanged, but
+  // platform orders also carry external_platform + external_order_id so
+  // we can dedup, route status updates back, and reconcile settlements.
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_platform TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_order_id TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_id_hash TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_payload JSONB");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS commission_amount DOUBLE PRECISION DEFAULT 0");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS net_payout_amount DOUBLE PRECISION DEFAULT 0");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_collected_by TEXT DEFAULT 'RESTAURANT'");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_name TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_phone TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_arrived_at TIMESTAMP");
+  // Partial UNIQUE index — only enforces uniqueness when external_id_hash IS NOT NULL,
+  // so the existing in-house orders (without an external id) aren't subject to it.
+  await db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_external_id_hash
+      ON orders (external_id_hash) WHERE external_id_hash IS NOT NULL
+  `);
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_orders_external_platform_status
+      ON orders (external_platform, status, created_at)
+  `);
+
+  // Per-menu-item channel facet — owner can override visibility & list ids
+  // per channel without bloating the menu row beyond JSONB blobs.
+  await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS external_visibility JSONB DEFAULT '{}'::jsonb");
+  await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS external_ids JSONB DEFAULT '{}'::jsonb");
+  await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS sync_dirty INT DEFAULT 0");
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_menu_sync_dirty ON menu (sync_dirty) WHERE sync_dirty = 1`);
+
+  // (a) Per-channel pricing.  exactly one of (price_override, markup_percent)
+  // is non-null.  is_listed = 0 hides this item from this channel entirely.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS channel_prices (
+      id TEXT PRIMARY KEY,
+      menu_item_id TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      price_override DOUBLE PRECISION,
+      markup_percent DOUBLE PRECISION,
+      is_listed INT DEFAULT 1,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (menu_item_id, channel)
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_channel_prices_menu ON channel_prices (menu_item_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_channel_prices_channel ON channel_prices (channel)`);
+
+  // (b) Default channel-wide settings.  Owner sets once; new menu items inherit.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS channel_settings (
+      channel TEXT PRIMARY KEY,
+      is_active INT DEFAULT 0,
+      default_markup_percent DOUBLE PRECISION DEFAULT 25,
+      commission_percent DOUBLE PRECISION DEFAULT 25,
+      packaging_charge DOUBLE PRECISION DEFAULT 0,
+      min_order_amount DOUBLE PRECISION DEFAULT 0,
+      prep_time_minutes INT DEFAULT 20,
+      webhook_url_inbound TEXT,
+      brand_display_name TEXT,
+      min_margin_floor_percent DOUBLE PRECISION DEFAULT 5,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // (c) Encrypted per-tenant credentials (AES-256-GCM, master key in env).
+  // Master key sourced from process.env.ATITHI_CREDENTIAL_KEY (32-byte base64).
+  // Boot guard in server.ts refuses to start if the env var is missing/short.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS integration_credentials (
+      id TEXT PRIMARY KEY,
+      channel TEXT NOT NULL,
+      credential_type TEXT NOT NULL,
+      ciphertext TEXT NOT NULL,
+      iv TEXT NOT NULL,
+      auth_tag TEXT NOT NULL,
+      metadata JSONB DEFAULT '{}'::jsonb,
+      is_active INT DEFAULT 1,
+      rotated_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (channel, credential_type)
+    )
+  `);
+
+  // (d) Idempotency / dedup for inbound webhooks.  idempotency_key is
+  // sha256(channel + ':' + signatureHeader) — guarantees a replayed webhook
+  // collides with the original and we serve the cached response.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS webhook_inbox (
+      idempotency_key TEXT PRIMARY KEY,
+      channel TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      external_order_id TEXT,
+      raw_payload JSONB NOT NULL,
+      signature_verified INT NOT NULL,
+      processed_at TIMESTAMP,
+      result_status INT,
+      result_body TEXT,
+      received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      error_message TEXT
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_webhook_inbox_received ON webhook_inbox (received_at DESC)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_webhook_inbox_unprocessed ON webhook_inbox (channel, processed_at) WHERE processed_at IS NULL`);
+
+  // (e) Outbound background-task queue.  Worker cron in server.ts polls
+  // this every 30s with FOR UPDATE SKIP LOCKED so multiple instances are
+  // forward-safe.  Exponential backoff: 30s → 60s → 120s → ... → 15m.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS pending_sync_jobs (
+      id TEXT PRIMARY KEY,
+      job_type TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      payload JSONB NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      attempts INT DEFAULT 0,
+      max_attempts INT DEFAULT 5,
+      next_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      last_error TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      completed_at TIMESTAMP
+    )
+  `);
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_pending_jobs_due ON pending_sync_jobs (status, next_attempt_at)
+      WHERE status IN ('PENDING', 'FAILED')
+  `);
+
+  // (f) Channel settlements (one row per platform statement, typically weekly).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS channel_settlements (
+      id TEXT PRIMARY KEY,
+      channel TEXT NOT NULL,
+      period_from DATE NOT NULL,
+      period_to DATE NOT NULL,
+      gross_sales DOUBLE PRECISION NOT NULL,
+      commission_amount DOUBLE PRECISION NOT NULL,
+      payment_gateway_fee DOUBLE PRECISION DEFAULT 0,
+      taxes_collected_by_platform DOUBLE PRECISION DEFAULT 0,
+      promotional_discount DOUBLE PRECISION DEFAULT 0,
+      cancellation_recovery DOUBLE PRECISION DEFAULT 0,
+      net_payout DOUBLE PRECISION NOT NULL,
+      payout_received_at TIMESTAMP,
+      raw_statement_url TEXT,
+      reconciled INT DEFAULT 0,
+      notes TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // (g) Order-to-settlement reconciliation links.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS settlement_order_lines (
+      id TEXT PRIMARY KEY,
+      settlement_id TEXT NOT NULL,
+      order_id TEXT NOT NULL,
+      external_order_id TEXT,
+      gross_amount DOUBLE PRECISION,
+      commission_amount DOUBLE PRECISION,
+      net_amount DOUBLE PRECISION,
+      reconciled_match TEXT,
+      variance DOUBLE PRECISION DEFAULT 0
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_settlement_lines_settlement ON settlement_order_lines (settlement_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_settlement_lines_order ON settlement_order_lines (order_id)`);
+
   tenantDbCache.set(schema, db);
   return db;
 }
