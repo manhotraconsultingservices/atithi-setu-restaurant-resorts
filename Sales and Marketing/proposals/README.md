@@ -12,6 +12,10 @@ Six print-ready HTML proposals for three customer segments × two languages. Dra
 | **Hotels** (boutique, resort, chain) | `Hotel_Proposal.html` | `Hotel_Proposal_Hindi.html` |
 | **Franchise networks** (5+ outlets, multi-brand) | `Franchise_Proposal.html` | `Franchise_Proposal_Hindi.html` |
 
+### Companion assets
+
+- **`LinkedIn_Posts.md`** — Ready-to-paste LinkedIn post templates (6 posts × 2 languages), 5-slide carousel briefs, long-form Article outline, posting cadence, UTM convention. Use this to distribute the proposals on LinkedIn.
+
 ## How to use
 
 1. **For email distribution**: open the relevant `.html` file in Chrome, press `Ctrl+P` (or `Cmd+P` on Mac), select **Save as PDF**, paper A4, margins 12mm, background graphics **ON**. Email the PDF to the prospect.
