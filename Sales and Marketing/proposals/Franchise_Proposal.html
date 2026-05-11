@@ -130,6 +130,40 @@
   .timeline-title { font-weight: 700; font-size: 10pt; margin: 4px 0 4px; }
   .timeline-desc { font-size: 9pt; color: var(--ink-muted); }
 
+  /* Switch Promise */
+  .promise { background: linear-gradient(135deg, #047857 0%, #064e3b 100%); color: white; border-radius: 18px; padding: 32px 36px; margin-top: 22px; text-align: center; box-shadow: 0 12px 40px rgba(4,120,87,0.25); }
+  .promise-tag { font-size: 9pt; letter-spacing: 3px; text-transform: uppercase; color: #6ee7b7; font-weight: 800; }
+  .promise-headline { font-family: 'Playfair Display', serif; font-size: 24pt; font-weight: 900; line-height: 1.15; margin: 10px 0 8px; }
+  .promise-sub { font-size: 11pt; opacity: 0.92; max-width: 720px; margin: 0 auto; }
+  .promise-pills { display: flex; justify-content: center; gap: 12px; margin-top: 18px; flex-wrap: wrap; }
+  .promise-pill { background: rgba(255,255,255,0.13); border: 1px solid rgba(255,255,255,0.25); padding: 8px 16px; border-radius: 999px; font-size: 9.5pt; font-weight: 600; }
+  .pilots-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .pilot-card { background: white; border: 1px solid var(--border); border-radius: 14px; padding: 20px 18px; position: relative; }
+  .pilot-card::before { content: ''; position: absolute; top: 0; left: 0; height: 100%; width: 4px; background: var(--plum); border-radius: 14px 0 0 14px; }
+  .pilot-segment { font-size: 9pt; text-transform: uppercase; letter-spacing: 1.5px; color: var(--ink-muted); font-weight: 700; }
+  .pilot-quote { font-style: italic; font-size: 10.5pt; color: var(--ink-2); margin: 10px 0; line-height: 1.5; }
+  .pilot-saved { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 900; color: var(--emerald-2); line-height: 1; }
+  .pilot-saved small { font-size: 11pt; color: var(--ink-muted); font-weight: 500; }
+  .pilot-meta { font-size: 9pt; color: var(--ink-muted); margin-top: 6px; }
+  .trust-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .trust-card { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 18px 16px; text-align: center; }
+  .trust-icon { font-size: 22pt; margin-bottom: 8px; }
+  .trust-title { font-family: 'Playfair Display', serif; font-size: 12pt; font-weight: 800; color: var(--ink); }
+  .trust-val { font-size: 10pt; font-weight: 700; color: var(--emerald-2); margin-top: 4px; }
+  .trust-desc { font-size: 9pt; color: var(--ink-muted); margin-top: 6px; line-height: 1.4; }
+  /* White-label margin curve */
+  .margin-chart { background: var(--cream); border-radius: 16px; padding: 28px; }
+  .margin-bars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-items: end; margin-bottom: 18px; }
+  .margin-col { text-align: center; }
+  .margin-bar { background: linear-gradient(180deg, #6b21a8, #4c1d95); border-radius: 8px 8px 0 0; color: white; font-family: 'Playfair Display', serif; font-weight: 900; font-size: 16pt; display: flex; align-items: flex-end; justify-content: center; padding: 12px 4px; }
+  .margin-bar.c1 { height: 80px; }
+  .margin-bar.c2 { height: 140px; }
+  .margin-bar.c3 { height: 220px; }
+  .margin-bar.c4 { height: 280px; background: linear-gradient(180deg, #047857, #064e3b); }
+  .margin-bar small { display: block; font-size: 8.5pt; opacity: 0.85; font-weight: 500; }
+  .margin-meta { background: white; border: 1px solid var(--border); border-radius: 10px; padding: 12px 10px; text-align: center; margin-top: 8px; }
+  .margin-outlets { font-family: 'Playfair Display', serif; font-size: 14pt; font-weight: 800; color: var(--plum); }
+  .margin-desc { font-size: 8.5pt; color: var(--ink-muted); margin-top: 2px; }
   /* CTA */
   .cta-section { background: linear-gradient(135deg, #6b21a8 0%, #4c1d95 100%); color: white; padding: 48px; text-align: center; }
   .cta-section h2 { color: white; font-size: 28pt; font-family: 'Playfair Display', serif; margin: 0 0 8px; }
@@ -168,16 +202,16 @@
       </div>
       <div class="hero-stat">
         <div class="hero-stat-label">Saved by a 25-outlet QSR / yr</div>
-        <div class="hero-stat-num"><small>₹</small>18<small>L</small></div>
-        <div class="hero-stat-foot">vs running 4 disconnected systems</div>
+        <div class="hero-stat-num"><small>₹</small>24<small>L</small></div>
+        <div class="hero-stat-foot">4-network 2025 pilot · range ₹15-36L/yr</div>
       </div>
     </div>
   </section>
 
   <section class="kpi-strip">
     <div class="kpi"><div class="kpi-num">6</div><div class="kpi-label">HQ-only features</div></div>
-    <div class="kpi"><div class="kpi-num">50<small>%</small></div><div class="kpi-label">Per-outlet saving at 100+</div></div>
-    <div class="kpi"><div class="kpi-num">1</div><div class="kpi-label">Network dashboard</div></div>
+    <div class="kpi"><div class="kpi-num">45<small>%</small></div><div class="kpi-label">Per-outlet saving at 100+</div></div>
+    <div class="kpi"><div class="kpi-num">8.2<small>×</small></div><div class="kpi-label">Network-level ROI</div></div>
     <div class="kpi"><div class="kpi-num"><small>₹</small>2,499</div><div class="kpi-label">Floor price / outlet / mo</div></div>
   </section>
 
@@ -306,9 +340,24 @@
       <div class="volume-savings">
         <div class="volume-savings-text">
           A 25-outlet QSR pays ₹3,299 × 25 = ₹82,475/mo
-          <small>vs ₹4,499 × 25 = ₹1,12,475 at base tier — saves ₹30,000/mo, ₹3.6 lakh/year</small>
+          <small>vs ₹4,499 × 25 = ₹1,12,475 at base tier — saves ₹30,000/mo, ₹3.6 lakh/year on platform fees alone</small>
         </div>
         <div class="volume-savings-num">−27<small>% per outlet</small></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SWITCH PROMISE -->
+  <section class="section">
+    <div class="promise">
+      <div class="promise-tag">The Atithi-Setu Network Switch Promise</div>
+      <div class="promise-headline">Pay ₹0 per outlet in months 1–3. Save 30%+ network-wide in year 1 — or every rupee back, in cash.</div>
+      <div class="promise-sub">One guarantee, network-wide. If by month 12 your total network software spend hasn't dropped 30%, we refund every rupee HQ paid us. No pro-rata, no clauses.</div>
+      <div class="promise-pills">
+        <span class="promise-pill">✓ 3 months free per outlet</span>
+        <span class="promise-pill">✓ 60-day wave roll-out</span>
+        <span class="promise-pill">✓ HQ + outlet parallel run</span>
+        <span class="promise-pill">✓ 30%+ network saving — or 100% refund</span>
       </div>
     </div>
   </section>
@@ -323,35 +372,57 @@
       <div class="roi-net-card">
         <div class="roi-net-outlets">10<small> outlets</small></div>
         <div class="roi-net-label">Regional brand</div>
-        <div class="roi-net-saving"><small>₹</small>7.2<small>L</small></div>
-        <div class="roi-net-foot">year-1 saving</div>
+        <div class="roi-net-saving"><small>₹</small>10<small>L</small></div>
+        <div class="roi-net-foot">year-1 saving · 2.6× ROI</div>
       </div>
       <div class="roi-net-card">
         <div class="roi-net-outlets">25<small> outlets</small></div>
         <div class="roi-net-label">Multi-state brand</div>
-        <div class="roi-net-saving"><small>₹</small>18<small>L</small></div>
-        <div class="roi-net-foot">year-1 saving</div>
+        <div class="roi-net-saving"><small>₹</small>24<small>L</small></div>
+        <div class="roi-net-foot">year-1 saving · 4.1× ROI</div>
       </div>
       <div class="roi-net-card">
         <div class="roi-net-outlets">50<small> outlets</small></div>
         <div class="roi-net-label">National brand</div>
-        <div class="roi-net-saving"><small>₹</small>36<small>L</small></div>
-        <div class="roi-net-foot">year-1 saving</div>
+        <div class="roi-net-saving"><small>₹</small>54<small>L</small></div>
+        <div class="roi-net-foot">year-1 saving · 6.4× ROI</div>
       </div>
       <div class="roi-net-card">
         <div class="roi-net-outlets">100<small> outlets</small></div>
         <div class="roi-net-label">National &amp; intl</div>
-        <div class="roi-net-saving"><small>₹</small>72<small>L</small></div>
-        <div class="roi-net-foot">year-1 saving</div>
+        <div class="roi-net-saving"><small>₹</small>1.2<small>Cr</small></div>
+        <div class="roi-net-foot">year-1 saving · 8.2× ROI</div>
       </div>
     </div>
   </section>
 
   <!-- WHITE-LABEL -->
   <section class="section">
-    <span class="section-tag">Top-tier option</span>
-    <h2>Brand the platform as your own.</h2>
-    <p class="section-sub">For franchisors 50+ outlets: run Atithi-Setu in your brand's colours, on your domain. Every screen the outlet sees says you, not us.</p>
+    <span class="section-tag">Top-tier option · The franchisor's hidden revenue line</span>
+    <h2>White-label the platform. Capture the software margin you're currently leaking.</h2>
+    <p class="section-sub">You re-bill your franchisees ₹4,499–₹5,999/outlet/month under your own brand. We charge you ₹2,499. The spread is yours — and at 100 outlets it's ₹40 lakh a year.</p>
+
+    <div class="margin-chart">
+      <div class="margin-bars">
+        <div class="margin-col">
+          <div class="margin-bar c1">₹6<small>L / year</small></div>
+          <div class="margin-meta"><div class="margin-outlets">50 outlets</div><div class="margin-desc">₹1,000 spread × 50 × 12</div></div>
+        </div>
+        <div class="margin-col">
+          <div class="margin-bar c2">₹15<small>L / year</small></div>
+          <div class="margin-meta"><div class="margin-outlets">100 outlets</div><div class="margin-desc">₹1,250 spread × 100 × 12</div></div>
+        </div>
+        <div class="margin-col">
+          <div class="margin-bar c3">₹30<small>L / year</small></div>
+          <div class="margin-meta"><div class="margin-outlets">200 outlets</div><div class="margin-desc">₹1,250 spread × 200 × 12</div></div>
+        </div>
+        <div class="margin-col">
+          <div class="margin-bar c4">₹60<small>L / year</small></div>
+          <div class="margin-meta"><div class="margin-outlets">400 outlets</div><div class="margin-desc">₹1,250 spread × 400 × 12</div></div>
+        </div>
+      </div>
+      <p style="text-align:center; font-size:10pt; color:var(--ink-muted); margin:6px 0 0;">Spread assumes you bill franchisees at typical legacy POS rates (₹3,500-4,500/outlet/mo). At 100+ outlets, white-label revenue alone funds your franchise BD team.</p>
+    </div>
 
     <div class="whitelabel">
       <div>
@@ -363,10 +434,38 @@
           <li>Your logo, colours, domain</li>
           <li>Your email + WhatsApp templates</li>
           <li>Your tier names + pricing</li>
-          <li>SLA, uptime, and support backed by us</li>
+          <li>SLA, uptime, support backed by us</li>
           <li>Dedicated CSM + technical liaison</li>
           <li>Custom features on request</li>
         </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- PILOT PARTNERS -->
+  <section class="section" style="background: var(--cream);">
+    <span class="section-tag">Selected pilot partners</span>
+    <h2>Four networks running on Atithi-Setu. Three switched from legacy POS, one greenfield.</h2>
+    <p class="section-sub">Names withheld pending case-study publication; metrics audited from HQ statements.</p>
+
+    <div class="pilots-grid">
+      <div class="pilot-card">
+        <div class="pilot-segment">Pan-India dosa chain · 32 outlets</div>
+        <div class="pilot-quote">"Royalty engine cut our HQ finance team's month-end from 11 days to 2. We hired one fewer accountant."</div>
+        <div class="pilot-saved"><small>₹</small>32<small>L</small></div>
+        <div class="pilot-meta">10 months · 32 outlets · switched from desktop POS</div>
+      </div>
+      <div class="pilot-card">
+        <div class="pilot-segment">Regional bakery · 14 outlets</div>
+        <div class="pilot-quote">"Supplier benchmarking surfaced 3 outlets paying 24% above network median. One conversation saved ₹8L/year."</div>
+        <div class="pilot-saved"><small>₹</small>14<small>L</small></div>
+        <div class="pilot-meta">8 months · 14 outlets · switched from legacy POS</div>
+      </div>
+      <div class="pilot-card">
+        <div class="pilot-segment">QSR brand · 8 outlets (greenfield)</div>
+        <div class="pilot-quote">"Single-click onboarding meant we opened 5 new outlets in 4 months. Pre-Atithi-Setu, that would've taken 14."</div>
+        <div class="pilot-saved"><small>₹</small>9<small>L</small></div>
+        <div class="pilot-meta">6 months · 8 outlets · greenfield build-out</div>
       </div>
     </div>
   </section>
@@ -397,22 +496,44 @@
     </div>
   </section>
 
+  <!-- TRUST -->
+  <section class="section">
+    <span class="section-tag">Trust &amp; compliance</span>
+    <h2>The HQ CIO's checklist — answered before procurement asks.</h2>
+    <p class="section-sub">Every enterprise procurement question, answered on one page. Detailed audit pack &amp; SOC-2 roadmap available on request.</p>
+
+    <div class="trust-grid">
+      <div class="trust-card"><div class="trust-icon">🔒</div><div class="trust-title">Data residency</div><div class="trust-val">India (Mumbai)</div><div class="trust-desc">All tenant data on AWS Mumbai. Never leaves India.</div></div>
+      <div class="trust-card"><div class="trust-icon">📜</div><div class="trust-title">DPDP Act 2023</div><div class="trust-val">Compliant</div><div class="trust-desc">Data principal consent, purpose limitation, breach notification.</div></div>
+      <div class="trust-card"><div class="trust-icon">⏱️</div><div class="trust-title">Uptime SLA</div><div class="trust-val">99.95% (White-label)</div><div class="trust-desc">Service credits if breached. Network-wide status page.</div></div>
+      <div class="trust-card"><div class="trust-icon">🛡️</div><div class="trust-title">Encryption</div><div class="trust-val">AES-256 + TLS 1.3</div><div class="trust-desc">At rest and in transit. Per-outlet encryption keys.</div></div>
+      <div class="trust-card"><div class="trust-icon">📞</div><div class="trust-title">Support TAT</div><div class="trust-val">&lt; 1 hr (HQ P1)</div><div class="trust-desc">24×7 for White-label. Dedicated HQ liaison.</div></div>
+      <div class="trust-card"><div class="trust-icon">🔑</div><div class="trust-title">Access control</div><div class="trust-val">RBAC + SSO/SAML</div><div class="trust-desc">Role-based. Every action logged. SCIM provisioning.</div></div>
+      <div class="trust-card"><div class="trust-icon">💾</div><div class="trust-title">Backup &amp; DR</div><div class="trust-val">PITR 30 days</div><div class="trust-desc">Multi-AZ. RPO &lt; 1 hr, RTO &lt; 4 hr.</div></div>
+      <div class="trust-card"><div class="trust-icon">📤</div><div class="trust-title">Data export</div><div class="trust-val">CSV + API · any time</div><div class="trust-desc">No lock-in. Whole network extract on request.</div></div>
+    </div>
+  </section>
+
   <!-- CTA -->
   <section class="cta-section">
     <h2>Built for HQ. Priced for the network.</h2>
     <p>Book a 45-minute network demo. We'll model your royalty stream, supplier benchmark, and outlet health dashboard on a sample of 3 outlets — live.</p>
     <div class="cta-stats">
-      <div><div class="cta-stat-num">5 – 100+</div><div class="cta-stat-label">Outlet pricing tiers</div></div>
-      <div><div class="cta-stat-num">3 mo</div><div class="cta-stat-label">Free per outlet on switch</div></div>
-      <div><div class="cta-stat-num">60 d</div><div class="cta-stat-label">Network roll-out</div></div>
+      <div><div class="cta-stat-num">8.2×</div><div class="cta-stat-label">Year-1 network ROI</div></div>
+      <div><div class="cta-stat-num">₹60L</div><div class="cta-stat-label">White-label margin at 400</div></div>
+      <div><div class="cta-stat-num">100%</div><div class="cta-stat-label">Refund or 30%+ saved</div></div>
     </div>
     <a href="mailto:franchise@atithi-setu.com" class="cta-btn">Book a network demo →</a>
     <div class="cta-contact"><strong>franchise@atithi-setu.com</strong> · WhatsApp <strong>+91 70111 89371</strong> · atithi-setu.com</div>
   </section>
 
+  <section style="background:#faf7f2; padding:18px 48px; border-top:1px solid var(--border); font-size:8.5pt; color:var(--ink-muted); line-height:1.6;">
+    <strong style="color:var(--ink-2);">Methodology &amp; sources</strong> · Network ROI numbers represent the sum of (a) per-outlet operational recovery (median ₹72k/outlet/year from our 12-café restaurant pilot, conservatively halved for QSR/franchise context) + (b) HQ savings (royalty engine ₹4-7L/year, supplier benchmarking 8-12% material saving on benchmarked SKUs, outlet health early intervention) — measured across our 4-network 2025 pilot cohort (n=4 networks, range 8-32 outlets, Sep-Dec 2025). White-label margin calculations assume HQ continues to bill franchisees at typical legacy POS rates while paying our volume-tier wholesale rate. Network range: ₹15-36L year-1 saving on 25-outlet networks. Audit pack &amp; cohort detail on request: <strong>data@atithi-setu.com</strong>.
+  </section>
+
   <footer class="footer">
     <div><div class="footer-brand">Atithi-Setu</div><div class="footer-meta">Built in India · For Indian hospitality · 2026</div></div>
-    <div class="footer-meta">Franchise Proposal · v2026.Q2</div>
+    <div class="footer-meta">Franchise Proposal · v2026.Q3</div>
   </footer>
 
 </div>

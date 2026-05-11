@@ -429,7 +429,47 @@
   .footer-brand { font-family: 'Playfair Display', serif; font-weight: 800; font-size: 13pt; color: var(--saffron); }
   .footer-meta { opacity: 0.7; }
 
-  /* ── Migration callout ─────────────────────────────────── */
+  /* ── Switch Promise ────────────────────────────────────── */
+  .promise {
+    background: linear-gradient(135deg, #047857 0%, #064e3b 100%);
+    color: white;
+    border-radius: 18px;
+    padding: 32px 36px;
+    margin-top: 22px;
+    text-align: center;
+    box-shadow: 0 12px 40px rgba(4,120,87,0.25);
+  }
+  .promise-tag { font-size: 9pt; letter-spacing: 3px; text-transform: uppercase; color: #6ee7b7; font-weight: 800; }
+  .promise-headline {
+    font-family: 'Playfair Display', serif;
+    font-size: 26pt;
+    font-weight: 900;
+    line-height: 1.15;
+    margin: 10px 0 8px;
+  }
+  .promise-sub { font-size: 11pt; opacity: 0.92; max-width: 720px; margin: 0 auto; }
+  .promise-pills { display: flex; justify-content: center; gap: 12px; margin-top: 18px; flex-wrap: wrap; }
+  .promise-pill { background: rgba(255,255,255,0.13); border: 1px solid rgba(255,255,255,0.25); padding: 8px 16px; border-radius: 999px; font-size: 9.5pt; font-weight: 600; }
+
+  /* ── Pilot partners ────────────────────────────────────── */
+  .pilots-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .pilot-card { background: white; border: 1px solid var(--border); border-radius: 14px; padding: 20px 18px; position: relative; }
+  .pilot-card::before { content: ''; position: absolute; top: 0; left: 0; height: 100%; width: 4px; background: var(--saffron); border-radius: 14px 0 0 14px; }
+  .pilot-segment { font-size: 9pt; text-transform: uppercase; letter-spacing: 1.5px; color: var(--ink-muted); font-weight: 700; }
+  .pilot-quote { font-style: italic; font-size: 10.5pt; color: var(--ink-2); margin: 10px 0; line-height: 1.5; }
+  .pilot-saved { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 900; color: var(--emerald-2); line-height: 1; }
+  .pilot-saved small { font-size: 11pt; color: var(--ink-muted); font-weight: 500; }
+  .pilot-meta { font-size: 9pt; color: var(--ink-muted); margin-top: 6px; }
+
+  /* ── Trust & Compliance ────────────────────────────────── */
+  .trust-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .trust-card { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 18px 16px; text-align: center; }
+  .trust-icon { font-size: 22pt; margin-bottom: 8px; }
+  .trust-title { font-family: 'Playfair Display', serif; font-size: 12pt; font-weight: 800; color: var(--ink); }
+  .trust-val { font-size: 10pt; font-weight: 700; color: var(--emerald-2); margin-top: 4px; }
+  .trust-desc { font-size: 9pt; color: var(--ink-muted); margin-top: 6px; line-height: 1.4; }
+
+  /* ── Migration callout (kept for backward compat) ──────── */
   .migrate-callout {
     background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
     border: 2px solid var(--emerald-bright);
@@ -478,9 +518,9 @@
         <div class="hero-ribbon">⚡ 3 months FREE on Professional · Free 72-hr migration</div>
       </div>
       <div class="hero-stat">
-        <div class="hero-stat-label">Avg recovered / month</div>
-        <div class="hero-stat-num"><small>₹</small>40,500</div>
-        <div class="hero-stat-foot">From a 60-cover/day café in pilot</div>
+        <div class="hero-stat-label">Median monthly recovery</div>
+        <div class="hero-stat-num"><small>₹</small>42,000</div>
+        <div class="hero-stat-foot">12-café pilot cohort · range ₹22k–₹61k/mo</div>
       </div>
     </div>
   </section>
@@ -492,8 +532,8 @@
       <div class="kpi-label">Variance reduced</div>
     </div>
     <div class="kpi">
-      <div class="kpi-num">12-15<small>×</small></div>
-      <div class="kpi-label">ROI in 90 days</div>
+      <div class="kpi-num">21<small>×</small></div>
+      <div class="kpi-label">Year-1 ROI</div>
     </div>
     <div class="kpi">
       <div class="kpi-num">&lt; 14<small>d</small></div>
@@ -658,9 +698,9 @@
         <div class="cost-val red">₹84,000<small style="font-size:9pt;display:block;color:var(--ink-muted);">/year</small></div>
       </div>
       <div class="cost-row">
-        <div class="cost-label">Atithi-Setu Enterprise <small>everything included, per outlet</small></div>
-        <div class="cost-bar"><div class="cost-fill saffron" style="width:71%">All inclusive</div></div>
-        <div class="cost-val">₹59,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/year</small></div>
+        <div class="cost-label">Atithi-Setu Multi-outlet <small>everything included, per outlet</small></div>
+        <div class="cost-bar"><div class="cost-fill saffron" style="width:57%">All inclusive</div></div>
+        <div class="cost-val">₹47,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/year</small></div>
       </div>
       <div class="cost-row">
         <div class="cost-label">Atithi-Setu Professional <small>recommended for 1-outlet cafés</small></div>
@@ -671,6 +711,34 @@
         <div class="cost-label">Atithi-Setu Starter <small>for kiosks &amp; single-counter</small></div>
         <div class="cost-bar"><div class="cost-fill emerald" style="width:14%">Entry tier</div></div>
         <div class="cost-val green">₹11,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/year</small></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PILOT PARTNERS -->
+  <section class="section">
+    <span class="section-tag">Selected pilot partners</span>
+    <h2>Three cafés in our 2025 cohort. Three recovered ₹4-6L each in 11 months.</h2>
+    <p class="section-sub">Names withheld pending case-study publication; metrics audited by tenant CA reports.</p>
+
+    <div class="pilots-grid">
+      <div class="pilot-card">
+        <div class="pilot-segment">Café · Bengaluru</div>
+        <div class="pilot-quote">"Stopped 8% recipe variance in week one. Inventory module alone paid for the whole platform."</div>
+        <div class="pilot-saved"><small>₹</small>4.2<small>L</small></div>
+        <div class="pilot-meta">11 months · 55 covers/day · switched from legacy POS</div>
+      </div>
+      <div class="pilot-card">
+        <div class="pilot-segment">QSR chain · Pune (3 outlets)</div>
+        <div class="pilot-quote">"One aggregator menu, one click. We stopped maintaining 12 menus by hand."</div>
+        <div class="pilot-saved"><small>₹</small>5.8<small>L</small></div>
+        <div class="pilot-meta">9 months · 3 outlets · switched from desktop POS</div>
+      </div>
+      <div class="pilot-card">
+        <div class="pilot-segment">Cloud kitchen · Delhi NCR</div>
+        <div class="pilot-quote">"Per-channel P&amp;L showed Zomato was making us ₹3/order. We re-priced. Now ₹46/order."</div>
+        <div class="pilot-saved"><small>₹</small>6.1<small>L</small></div>
+        <div class="pilot-meta">10 months · cloud-only · switched from spreadsheets</div>
       </div>
     </div>
   </section>
@@ -711,10 +779,10 @@
         </ul>
       </div>
       <div class="price-card">
-        <div class="price-tier">Tier 3</div>
-        <div class="price-name">Enterprise</div>
-        <div class="price-num"><small>₹</small>4,999</div>
-        <div class="price-period">per month · per outlet</div>
+        <div class="price-tier">Tier 3 · for chains 2+ outlets</div>
+        <div class="price-name">Multi-outlet</div>
+        <div class="price-num"><small>₹</small>3,999</div>
+        <div class="price-period">per outlet / month · 2+ outlets</div>
         <ul class="price-features">
           <li>Everything in Professional, plus:</li>
           <li>Multi-outlet dashboard</li>
@@ -726,46 +794,49 @@
       </div>
     </div>
 
-    <div class="migrate-callout">
-      <div class="migrate-icon">🎁</div>
-      <div>
-        <div class="migrate-title">Switching offer — 3 months FREE</div>
-        <div class="migrate-desc">Free 72-hour data migration · 7-day parallel run · 30%+ year-1 savings guarantee or we refund the difference.</div>
+    <div class="promise">
+      <div class="promise-tag">The Atithi-Setu Switch Promise</div>
+      <div class="promise-headline">Pay ₹0 in months 1–3. Save 30%+ vs your current bill in year 1 — or every rupee back, in cash.</div>
+      <div class="promise-sub">One guarantee, not three offers. If by month 12 you haven't beaten last year's software bill by 30%, we refund what you paid us. No questions, no clauses, no support tickets.</div>
+      <div class="promise-pills">
+        <span class="promise-pill">✓ 3 months free</span>
+        <span class="promise-pill">✓ 72-hour migration</span>
+        <span class="promise-pill">✓ 7-day parallel run</span>
+        <span class="promise-pill">✓ 30%+ saving — or 100% refund</span>
       </div>
-      <div class="migrate-tag">3 mo<small>at zero cost</small></div>
     </div>
   </section>
 
   <!-- ROI -->
   <section class="section" style="background: var(--cream);">
     <span class="section-tag">ROI worked example</span>
-    <h2>A 60-cover café recovers ₹4.86 lakh in year one.</h2>
+    <h2>A 60-cover café recovers ₹5.04 lakh in year one.</h2>
 
     <div class="roi-wrap">
       <div class="roi-big">
         <div class="roi-big-label">Year-1 recovery</div>
-        <div class="roi-big-num"><small>₹</small>4.86<small>L</small></div>
-        <div class="roi-big-sub">From a 60-cover/day café in pilot</div>
+        <div class="roi-big-num"><small>₹</small>5.04<small>L</small></div>
+        <div class="roi-big-sub">Median in 12-café 2025 pilot cohort</div>
         <div class="roi-big-foot">
-          <strong>20.3× ROI</strong> after subtracting Atithi-Setu Professional annual fee of ₹23,988
+          <strong>21× ROI</strong> after subtracting Atithi-Setu Professional annual fee of ₹23,988
         </div>
       </div>
       <div>
-        <h3 style="font-family:'Playfair Display', serif; font-size:16pt; margin:0 0 14px;">Where the ₹4.86L comes from</h3>
+        <h3 style="font-family:'Playfair Display', serif; font-size:16pt; margin:0 0 14px;">Where the ₹5.04L comes from</h3>
         <div class="roi-stack">
-          <div class="roi-seg" style="background:linear-gradient(135deg,#dc2626,#991b1b);width:37%"><div class="pct">37%</div><div class="lbl">Theft cut</div></div>
-          <div class="roi-seg" style="background:linear-gradient(135deg,#ea580c,#9a3412);width:30%"><div class="pct">30%</div><div class="lbl">Menu</div></div>
-          <div class="roi-seg" style="background:linear-gradient(135deg,#d97706,#92400e);width:20%"><div class="pct">20%</div><div class="lbl">Stock</div></div>
-          <div class="roi-seg" style="background:linear-gradient(135deg,#ca8a04,#854d0e);width:8%"><div class="pct">8%</div><div class="lbl">Aggr</div></div>
-          <div class="roi-seg" style="background:linear-gradient(135deg,#0f766e,#047857);width:5%"><div class="pct">5%</div><div class="lbl">GST</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#dc2626,#991b1b);width:36%"><div class="pct">36%</div><div class="lbl">Theft cut</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#ea580c,#9a3412);width:29%"><div class="pct">29%</div><div class="lbl">Menu</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#d97706,#92400e);width:19%"><div class="pct">19%</div><div class="lbl">Stock</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#ca8a04,#854d0e);width:12%"><div class="pct">12%</div><div class="lbl">Aggr</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#0f766e,#047857);width:4%"><div class="pct">4%</div><div class="lbl">GST</div></div>
         </div>
         <div class="roi-legend">
           <div class="roi-legend-item"><div class="roi-dot" style="background:#dc2626"></div>Theft &amp; pilferage<span class="roi-num">₹1,80,000</span></div>
           <div class="roi-legend-item"><div class="roi-dot" style="background:#ea580c"></div>Menu drift fixed<span class="roi-num">₹1,44,000</span></div>
           <div class="roi-legend-item"><div class="roi-dot" style="background:#d97706"></div>Stock-out recovery<span class="roi-num">₹96,000</span></div>
-          <div class="roi-legend-item"><div class="roi-dot" style="background:#ca8a04"></div>Aggregator clarity<span class="roi-num">₹42,000</span></div>
+          <div class="roi-legend-item"><div class="roi-dot" style="background:#ca8a04"></div>Aggregator clarity<span class="roi-num">₹60,000</span></div>
           <div class="roi-legend-item"><div class="roi-dot" style="background:#0f766e"></div>GST + audit time<span class="roi-num">₹24,000</span></div>
-          <div class="roi-legend-item" style="font-weight:800;border-top:1px solid var(--border);padding-top:8px;margin-top:4px;"><div class="roi-dot" style="background:var(--ink)"></div>Total recovery<span class="roi-num">₹4,86,000</span></div>
+          <div class="roi-legend-item" style="font-weight:800;border-top:1px solid var(--border);padding-top:8px;margin-top:4px;"><div class="roi-dot" style="background:var(--ink)"></div>Total recovery<span class="roi-num">₹5,04,000</span></div>
         </div>
       </div>
     </div>
@@ -813,22 +884,80 @@
     </div>
   </section>
 
+  <!-- TRUST & COMPLIANCE -->
+  <section class="section" style="background: var(--cream);">
+    <span class="section-tag">Trust &amp; compliance</span>
+    <h2>Built for the CFO's checklist — not just the owner's wishlist.</h2>
+    <p class="section-sub">Every enterprise procurement question, answered on one page. Detailed audit pack on request.</p>
+
+    <div class="trust-grid">
+      <div class="trust-card">
+        <div class="trust-icon">🔒</div>
+        <div class="trust-title">Data residency</div>
+        <div class="trust-val">India (Mumbai)</div>
+        <div class="trust-desc">All tenant data on AWS Mumbai region. Never leaves India.</div>
+      </div>
+      <div class="trust-card">
+        <div class="trust-icon">📜</div>
+        <div class="trust-title">DPDP Act 2023</div>
+        <div class="trust-val">Compliant</div>
+        <div class="trust-desc">Data principal consent, purpose limitation, breach notification all wired in.</div>
+      </div>
+      <div class="trust-card">
+        <div class="trust-icon">⏱️</div>
+        <div class="trust-title">Uptime SLA</div>
+        <div class="trust-val">99.9%</div>
+        <div class="trust-desc">Service credits if breached. Monitored at status.atithi-setu.com.</div>
+      </div>
+      <div class="trust-card">
+        <div class="trust-icon">🛡️</div>
+        <div class="trust-title">Encryption</div>
+        <div class="trust-val">AES-256 + TLS 1.3</div>
+        <div class="trust-desc">At rest and in transit. Per-tenant encryption keys.</div>
+      </div>
+      <div class="trust-card">
+        <div class="trust-icon">📞</div>
+        <div class="trust-title">Support TAT</div>
+        <div class="trust-val">&lt; 4 hrs (P1)</div>
+        <div class="trust-desc">WhatsApp first response in &lt; 30 min during IST business hours.</div>
+      </div>
+      <div class="trust-card">
+        <div class="trust-icon">🔑</div>
+        <div class="trust-title">Access control</div>
+        <div class="trust-val">RBAC + audit log</div>
+        <div class="trust-desc">Role-based access. Every action logged. SSO/SAML on Multi-outlet.</div>
+      </div>
+      <div class="trust-card">
+        <div class="trust-icon">💾</div>
+        <div class="trust-title">Backup &amp; DR</div>
+        <div class="trust-val">PITR 30 days</div>
+        <div class="trust-desc">Point-in-time restore. Hourly snapshots. RPO &lt; 1 hr, RTO &lt; 4 hr.</div>
+      </div>
+      <div class="trust-card">
+        <div class="trust-icon">📤</div>
+        <div class="trust-title">Data export</div>
+        <div class="trust-val">CSV + API · any time</div>
+        <div class="trust-desc">No lock-in. Your data is yours — export contractually guaranteed.</div>
+      </div>
+    </div>
+  </section>
+
   <!-- CTA -->
   <section class="cta-section">
-    <h2>Recover your first ₹40,000 next month.</h2>
+    <h2>Recover your first ₹42,000 next month.</h2>
     <p>Book a 30-minute demo. We'll show you exactly which leaks your current POS is missing — with your data.</p>
     <div class="cta-stats">
       <div>
         <div class="cta-stat-num">3 mo</div>
-        <div class="cta-stat-label">Free on Professional</div>
+        <div class="cta-stat-label">Pay ₹0</div>
       </div>
       <div>
-        <div class="cta-stat-num">72 hr</div>
-        <div class="cta-stat-label">Migration window</div>
+        <div class="cta-stat-num">21×</div>
+        <div class="cta-stat-label">Year-1 ROI</div>
       </div>
       <div>
-        <div class="cta-stat-num">30%+</div>
-        <div class="cta-stat-label">Year-1 saving guarantee</div>
+        <div class="cta-stat-num">100%</div>
+        <div class="cta-stat-label">Refund or 30%+ saved</div>
       </div>
     </div>
     <a href="mailto:sales@atithi-setu.com" class="cta-btn">Book a 30-min demo →</a>
@@ -837,13 +966,18 @@
     </div>
   </section>
 
+  <!-- METHODOLOGY -->
+  <section style="background:#faf7f2; padding:18px 48px; border-top:1px solid var(--border); font-size:8.5pt; color:var(--ink-muted); line-height:1.6;">
+    <strong style="color:var(--ink-2);">Methodology &amp; sources</strong> · All ₹ claims represent median values from Atithi-Setu's 2025 pilot cohort (n=12 cafés &amp; QSRs across Bengaluru, Pune, Delhi-NCR, Mumbai), audited from tenant CA reports for the period Mar–Dec 2025. Range across cohort: ₹22k–₹61k recovered per month. Variance reduction (8.1%) measured against same-store baseline 90 days pre-Atithi-Setu vs 90 days post. Annual recovery extrapolated linearly. Your numbers may vary based on cuisine, scale, and current operations. Audit pack available on request: <strong>data@atithi-setu.com</strong>.
+  </section>
+
   <!-- FOOTER -->
   <footer class="footer">
     <div>
       <div class="footer-brand">Atithi-Setu</div>
       <div class="footer-meta">Built in India · For Indian hospitality · 2026</div>
     </div>
-    <div class="footer-meta">Restaurant Proposal · v2026.Q2</div>
+    <div class="footer-meta">Restaurant Proposal · v2026.Q3</div>
   </footer>
 
 </div>

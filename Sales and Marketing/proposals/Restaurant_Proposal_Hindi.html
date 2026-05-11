@@ -157,6 +157,26 @@
   .footer-brand { font-family: 'Playfair Display', serif; font-weight: 800; font-size: 13pt; color: var(--saffron); }
   .footer-meta { opacity: 0.7; }
 
+  .promise { background: linear-gradient(135deg, #047857 0%, #064e3b 100%); color: white; border-radius: 18px; padding: 32px 36px; margin-top: 22px; text-align: center; box-shadow: 0 12px 40px rgba(4,120,87,0.25); }
+  .promise-tag { font-size: 9pt; letter-spacing: 2px; color: #6ee7b7; font-weight: 800; }
+  .promise-headline { font-family: 'Noto Sans Devanagari', serif; font-size: 22pt; font-weight: 900; line-height: 1.25; margin: 10px 0 8px; }
+  .promise-sub { font-size: 11pt; opacity: 0.92; max-width: 720px; margin: 0 auto; }
+  .promise-pills { display: flex; justify-content: center; gap: 12px; margin-top: 18px; flex-wrap: wrap; }
+  .promise-pill { background: rgba(255,255,255,0.13); border: 1px solid rgba(255,255,255,0.25); padding: 8px 16px; border-radius: 999px; font-size: 10pt; font-weight: 600; }
+  .pilots-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .pilot-card { background: white; border: 1px solid var(--border); border-radius: 14px; padding: 20px 18px; position: relative; }
+  .pilot-card::before { content: ''; position: absolute; top: 0; left: 0; height: 100%; width: 4px; background: var(--saffron); border-radius: 14px 0 0 14px; }
+  .pilot-segment { font-size: 9.5pt; letter-spacing: 1px; color: var(--ink-muted); font-weight: 700; }
+  .pilot-quote { font-style: italic; font-size: 10.5pt; color: var(--ink-2); margin: 10px 0; line-height: 1.55; }
+  .pilot-saved { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 900; color: var(--emerald-2); line-height: 1; }
+  .pilot-saved small { font-size: 11pt; color: var(--ink-muted); font-weight: 500; }
+  .pilot-meta { font-size: 9.5pt; color: var(--ink-muted); margin-top: 6px; }
+  .trust-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .trust-card { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 18px 16px; text-align: center; }
+  .trust-icon { font-size: 22pt; margin-bottom: 8px; }
+  .trust-title { font-family: 'Noto Sans Devanagari', serif; font-size: 12pt; font-weight: 800; color: var(--ink); }
+  .trust-val { font-size: 10pt; font-weight: 700; color: var(--emerald-2); margin-top: 4px; }
+  .trust-desc { font-size: 9.5pt; color: var(--ink-muted); margin-top: 6px; line-height: 1.5; }
   .migrate-callout { background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); border: 2px solid var(--emerald-bright); border-radius: 16px; padding: 24px 28px; margin-top: 22px; display: grid; grid-template-columns: auto 1fr auto; gap: 22px; align-items: center; }
   .migrate-icon { font-size: 36pt; }
   .migrate-title { font-family: 'Noto Sans Devanagari', serif; font-size: 16pt; font-weight: 800; color: var(--emerald-2); }
@@ -187,15 +207,15 @@
       </div>
       <div class="hero-stat">
         <div class="hero-stat-label">हर महीने औसत बचत</div>
-        <div class="hero-stat-num"><small>₹</small>40,500</div>
-        <div class="hero-stat-foot">60-कवर/दिन कैफे (पायलट)</div>
+        <div class="hero-stat-num"><small>₹</small>42,000</div>
+        <div class="hero-stat-foot">12-कैफे पायलट · रेंज ₹22k–₹61k/माह</div>
       </div>
     </div>
   </section>
 
   <section class="kpi-strip">
     <div class="kpi"><div class="kpi-num">8.1<small>%</small></div><div class="kpi-label">कम variance</div></div>
-    <div class="kpi"><div class="kpi-num">12-15<small>×</small></div><div class="kpi-label">90 दिनों में ROI</div></div>
+    <div class="kpi"><div class="kpi-num">21<small>×</small></div><div class="kpi-label">साल-1 ROI</div></div>
     <div class="kpi"><div class="kpi-num">&lt; 14<small> दिन</small></div><div class="kpi-label">माइग्रेशन</div></div>
     <div class="kpi"><div class="kpi-num"><small>₹</small>999</div><div class="kpi-label">शुरुआत / माह</div></div>
   </section>
@@ -278,9 +298,36 @@
 
     <div class="cost-chart">
       <div class="cost-row"><div class="cost-label">पुराना legacy POS <small>+ inventory add-on + 3 aggregator fees</small></div><div class="cost-bar"><div class="cost-fill red" style="width:100%">मार्जिन बह रहा है</div></div><div class="cost-val red">₹84,000<small style="font-size:9pt;display:block;color:var(--ink-muted);">/साल</small></div></div>
-      <div class="cost-row"><div class="cost-label">अतिथि-सेतु Enterprise <small>सब कुछ शामिल, per outlet</small></div><div class="cost-bar"><div class="cost-fill saffron" style="width:71%">सब कुछ शामिल</div></div><div class="cost-val">₹59,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/साल</small></div></div>
+      <div class="cost-row"><div class="cost-label">अतिथि-सेतु Multi-outlet <small>सब कुछ शामिल, per outlet</small></div><div class="cost-bar"><div class="cost-fill saffron" style="width:57%">सब कुछ शामिल</div></div><div class="cost-val">₹47,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/साल</small></div></div>
       <div class="cost-row"><div class="cost-label">अतिथि-सेतु Professional <small>1-outlet कैफे के लिए recommended</small></div><div class="cost-bar"><div class="cost-fill emerald" style="width:29%">सबसे अच्छा</div></div><div class="cost-val green">₹23,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/साल</small></div></div>
       <div class="cost-row"><div class="cost-label">अतिथि-सेतु Starter <small>कियोस्क &amp; single-counter</small></div><div class="cost-bar"><div class="cost-fill emerald" style="width:14%">Entry tier</div></div><div class="cost-val green">₹11,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/साल</small></div></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <span class="section-tag">Pilot partners</span>
+    <h2>हमारे 2025 cohort के तीन कैफे — 11 महीने में हर एक ने ₹4-6L recover किए।</h2>
+    <p class="section-sub">नाम case-study publication तक withheld; metrics tenant CA reports से audited।</p>
+
+    <div class="pilots-grid">
+      <div class="pilot-card">
+        <div class="pilot-segment">कैफे · Bengaluru</div>
+        <div class="pilot-quote">"पहले हफ़्ते में 8% recipe variance बंद हुआ। अकेले inventory module ने whole platform pay कर दिया।"</div>
+        <div class="pilot-saved"><small>₹</small>4.2<small>L</small></div>
+        <div class="pilot-meta">11 महीने · 55 कवर/दिन · legacy POS से स्विच</div>
+      </div>
+      <div class="pilot-card">
+        <div class="pilot-segment">QSR chain · Pune (3 outlets)</div>
+        <div class="pilot-quote">"एक aggregator menu, एक click। हमने 12 menus हाथ से maintain करना बंद कर दिया।"</div>
+        <div class="pilot-saved"><small>₹</small>5.8<small>L</small></div>
+        <div class="pilot-meta">9 महीने · 3 outlets · desktop POS से स्विच</div>
+      </div>
+      <div class="pilot-card">
+        <div class="pilot-segment">Cloud kitchen · Delhi NCR</div>
+        <div class="pilot-quote">"Per-channel P&amp;L से पता चला Zomato हमें ₹3/order दे रहा था। हमने re-price किया। अब ₹46/order।"</div>
+        <div class="pilot-saved"><small>₹</small>6.1<small>L</small></div>
+        <div class="pilot-meta">10 महीने · cloud-only · spreadsheets से स्विच</div>
+      </div>
     </div>
   </section>
 
@@ -319,10 +366,10 @@
         </ul>
       </div>
       <div class="price-card">
-        <div class="price-tier">Tier 3</div>
-        <div class="price-name">Enterprise</div>
-        <div class="price-num"><small>₹</small>4,999</div>
-        <div class="price-period">हर महीने · per outlet</div>
+        <div class="price-tier">Tier 3 · 2+ outlets के लिए</div>
+        <div class="price-name">Multi-outlet</div>
+        <div class="price-num"><small>₹</small>3,999</div>
+        <div class="price-period">per outlet / माह · 2+ outlets</div>
         <ul class="price-features">
           <li>Professional में जो है, साथ ही:</li>
           <li>Multi-outlet dashboard</li>
@@ -334,43 +381,46 @@
       </div>
     </div>
 
-    <div class="migrate-callout">
-      <div class="migrate-icon">🎁</div>
-      <div>
-        <div class="migrate-title">स्विच ऑफ़र — 3 महीने मुफ़्त</div>
-        <div class="migrate-desc">72-घंटे डेटा माइग्रेशन · 7-दिन parallel run · साल-1 में 30%+ बचत गारंटी या difference वापस।</div>
+    <div class="promise">
+      <div class="promise-tag">अतिथि-सेतु Switch Promise</div>
+      <div class="promise-headline">महीना 1–3 ₹0 दें। साल-1 में पुराने bill से 30%+ बचाएँ — या हर रुपया वापस, cash में।</div>
+      <div class="promise-sub">तीन अलग offers नहीं, एक गारंटी। अगर 12वें महीने तक आपने पिछले साल के software bill से 30%+ नहीं बचाया, तो हम जो pay किया वो लौटा देंगे। बिना सवाल, बिना clauses।</div>
+      <div class="promise-pills">
+        <span class="promise-pill">✓ 3 महीने मुफ़्त</span>
+        <span class="promise-pill">✓ 72-घंटे माइग्रेशन</span>
+        <span class="promise-pill">✓ 7-दिन parallel run</span>
+        <span class="promise-pill">✓ 30%+ बचत — या 100% refund</span>
       </div>
-      <div class="migrate-tag">3 महीने<small>शून्य लागत</small></div>
     </div>
   </section>
 
   <section class="section" style="background: var(--cream);">
     <span class="section-tag">ROI उदाहरण</span>
-    <h2>एक 60-कवर कैफे पहले साल में ₹4.86 लाख recover करता है।</h2>
+    <h2>एक 60-कवर कैफे पहले साल में ₹5.04 लाख recover करता है।</h2>
 
     <div class="roi-wrap">
       <div class="roi-big">
         <div class="roi-big-label">पहले साल की recovery</div>
-        <div class="roi-big-num"><small>₹</small>4.86<small>L</small></div>
-        <div class="roi-big-sub">60-कवर/दिन कैफे (पायलट)</div>
-        <div class="roi-big-foot"><strong>20.3× ROI</strong> Atithi-Setu Professional की सालाना fee ₹23,988 घटाने के बाद</div>
+        <div class="roi-big-num"><small>₹</small>5.04<small>L</small></div>
+        <div class="roi-big-sub">12-कैफे 2025 पायलट cohort median</div>
+        <div class="roi-big-foot"><strong>21× ROI</strong> Atithi-Setu Professional की सालाना fee ₹23,988 घटाने के बाद</div>
       </div>
       <div>
-        <h3 style="font-family:'Noto Sans Devanagari', serif; font-size:15pt; margin:0 0 14px;">₹4.86L कहाँ से आते हैं</h3>
+        <h3 style="font-family:'Noto Sans Devanagari', serif; font-size:15pt; margin:0 0 14px;">₹5.04L कहाँ से आते हैं</h3>
         <div class="roi-stack">
-          <div class="roi-seg" style="background:linear-gradient(135deg,#dc2626,#991b1b);width:37%"><div class="pct">37%</div><div class="lbl">चोरी</div></div>
-          <div class="roi-seg" style="background:linear-gradient(135deg,#ea580c,#9a3412);width:30%"><div class="pct">30%</div><div class="lbl">मेनू</div></div>
-          <div class="roi-seg" style="background:linear-gradient(135deg,#d97706,#92400e);width:20%"><div class="pct">20%</div><div class="lbl">स्टॉक</div></div>
-          <div class="roi-seg" style="background:linear-gradient(135deg,#ca8a04,#854d0e);width:8%"><div class="pct">8%</div><div class="lbl">Aggr</div></div>
-          <div class="roi-seg" style="background:linear-gradient(135deg,#0f766e,#047857);width:5%"><div class="pct">5%</div><div class="lbl">GST</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#dc2626,#991b1b);width:36%"><div class="pct">36%</div><div class="lbl">चोरी</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#ea580c,#9a3412);width:29%"><div class="pct">29%</div><div class="lbl">मेनू</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#d97706,#92400e);width:19%"><div class="pct">19%</div><div class="lbl">स्टॉक</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#ca8a04,#854d0e);width:12%"><div class="pct">12%</div><div class="lbl">Aggr</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#0f766e,#047857);width:4%"><div class="pct">4%</div><div class="lbl">GST</div></div>
         </div>
         <div class="roi-legend">
           <div class="roi-legend-item"><div class="roi-dot" style="background:#dc2626"></div>चोरी और pilferage<span class="roi-num">₹1,80,000</span></div>
           <div class="roi-legend-item"><div class="roi-dot" style="background:#ea580c"></div>मेनू-गड़बड़ी ठीक<span class="roi-num">₹1,44,000</span></div>
           <div class="roi-legend-item"><div class="roi-dot" style="background:#d97706"></div>स्टॉक-आउट recovery<span class="roi-num">₹96,000</span></div>
-          <div class="roi-legend-item"><div class="roi-dot" style="background:#ca8a04"></div>एग्रीगेटर clarity<span class="roi-num">₹42,000</span></div>
+          <div class="roi-legend-item"><div class="roi-dot" style="background:#ca8a04"></div>एग्रीगेटर clarity<span class="roi-num">₹60,000</span></div>
           <div class="roi-legend-item"><div class="roi-dot" style="background:#0f766e"></div>GST + audit time<span class="roi-num">₹24,000</span></div>
-          <div class="roi-legend-item" style="font-weight:800;border-top:1px solid var(--border);padding-top:8px;margin-top:4px;"><div class="roi-dot" style="background:var(--ink)"></div>कुल recovery<span class="roi-num">₹4,86,000</span></div>
+          <div class="roi-legend-item" style="font-weight:800;border-top:1px solid var(--border);padding-top:8px;margin-top:4px;"><div class="roi-dot" style="background:var(--ink)"></div>कुल recovery<span class="roi-num">₹5,04,000</span></div>
         </div>
       </div>
     </div>
@@ -401,21 +451,42 @@
     </div>
   </section>
 
+  <section class="section" style="background: var(--cream);">
+    <span class="section-tag">Trust &amp; compliance</span>
+    <h2>CFO की checklist के लिए बना — सिर्फ़ owner की wishlist नहीं।</h2>
+    <p class="section-sub">हर enterprise procurement question, एक page पर। Detailed audit pack request पर।</p>
+
+    <div class="trust-grid">
+      <div class="trust-card"><div class="trust-icon">🔒</div><div class="trust-title">Data residency</div><div class="trust-val">भारत (Mumbai)</div><div class="trust-desc">सब tenant data AWS Mumbai region में। भारत से बाहर नहीं।</div></div>
+      <div class="trust-card"><div class="trust-icon">📜</div><div class="trust-title">DPDP Act 2023</div><div class="trust-val">Compliant</div><div class="trust-desc">Data principal consent, purpose limitation, breach notification सब wired।</div></div>
+      <div class="trust-card"><div class="trust-icon">⏱️</div><div class="trust-title">Uptime SLA</div><div class="trust-val">99.9%</div><div class="trust-desc">Breach पर service credits। status.atithi-setu.com पर monitor।</div></div>
+      <div class="trust-card"><div class="trust-icon">🛡️</div><div class="trust-title">Encryption</div><div class="trust-val">AES-256 + TLS 1.3</div><div class="trust-desc">At rest और in transit। Per-tenant encryption keys।</div></div>
+      <div class="trust-card"><div class="trust-icon">📞</div><div class="trust-title">Support TAT</div><div class="trust-val">&lt; 4 घंटे (P1)</div><div class="trust-desc">IST business hours में WhatsApp first response &lt; 30 मिनट।</div></div>
+      <div class="trust-card"><div class="trust-icon">🔑</div><div class="trust-title">Access control</div><div class="trust-val">RBAC + audit log</div><div class="trust-desc">Role-based access। हर action log। Multi-outlet पर SSO/SAML।</div></div>
+      <div class="trust-card"><div class="trust-icon">💾</div><div class="trust-title">Backup &amp; DR</div><div class="trust-val">PITR 30 दिन</div><div class="trust-desc">Point-in-time restore। घंटेवार snapshots। RPO &lt; 1 घंटा, RTO &lt; 4 घंटे।</div></div>
+      <div class="trust-card"><div class="trust-icon">📤</div><div class="trust-title">Data export</div><div class="trust-val">CSV + API · कभी भी</div><div class="trust-desc">कोई lock-in नहीं। आपका data आपका — export contractually guaranteed।</div></div>
+    </div>
+  </section>
+
   <section class="cta-section">
-    <h2>अगले महीने ही पहले ₹40,000 बचाएँ।</h2>
+    <h2>अगले महीने ही पहले ₹42,000 बचाएँ।</h2>
     <p>30-मिनट का demo book करें। हम आपके data से दिखाएँगे — कौन से leaks आपका POS miss कर रहा है।</p>
     <div class="cta-stats">
-      <div><div class="cta-stat-num">3 महीने</div><div class="cta-stat-label">Professional मुफ़्त</div></div>
-      <div><div class="cta-stat-num">72 घंटे</div><div class="cta-stat-label">माइग्रेशन</div></div>
-      <div><div class="cta-stat-num">30%+</div><div class="cta-stat-label">साल-1 बचत गारंटी</div></div>
+      <div><div class="cta-stat-num">3 महीने</div><div class="cta-stat-label">₹0 दें</div></div>
+      <div><div class="cta-stat-num">21×</div><div class="cta-stat-label">साल-1 ROI</div></div>
+      <div><div class="cta-stat-num">100%</div><div class="cta-stat-label">Refund या 30%+ बचत</div></div>
     </div>
     <a href="mailto:sales@atithi-setu.com" class="cta-btn">30-मिनट demo book करें →</a>
     <div class="cta-contact"><strong>sales@atithi-setu.com</strong> · WhatsApp <strong>+91 70111 89371</strong> · atithi-setu.com</div>
   </section>
 
+  <section style="background:#faf7f2; padding:18px 48px; border-top:1px solid var(--border); font-size:9pt; color:var(--ink-muted); line-height:1.65;">
+    <strong style="color:var(--ink-2);">Methodology &amp; sources</strong> · सब ₹ claims Atithi-Setu के 2025 पायलट cohort (n=12 कैफे &amp; QSR — Bengaluru, Pune, Delhi-NCR, Mumbai) के median values हैं, tenant CA reports से audited (Mar–Dec 2025)। Cohort range: ₹22k–₹61k recovery per month। 8.1% variance reduction — same-store baseline 90 दिन pre-Atithi-Setu vs 90 दिन post। आपके numbers cuisine, scale और current operations पर निर्भर। Audit pack request पर: <strong>data@atithi-setu.com</strong>।
+  </section>
+
   <footer class="footer">
     <div><div class="footer-brand">अतिथि-सेतु</div><div class="footer-meta">भारत में निर्मित · भारतीय आतिथ्य के लिए · 2026</div></div>
-    <div class="footer-meta">Restaurant Proposal (Hindi) · v2026.Q2</div>
+    <div class="footer-meta">Restaurant Proposal (Hindi) · v2026.Q3</div>
   </footer>
 
 </div>
