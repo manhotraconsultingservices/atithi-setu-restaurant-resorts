@@ -27,3 +27,10 @@ feature-showcase.html
 atithi-setu-feature-showcase.png
 *login_resp.json
 smtptest.mjs
+
+# Sales, marketing, proposals — kept local, never pushed to GitHub
+Sales and Marketing/
+Marketing/
+Sales/
+Proposals/
+proposals/
