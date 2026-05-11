@@ -2,6 +2,8 @@
 
 Six print-ready HTML proposals for three customer segments × two languages. Drafted by Atithi-Setu sales leadership with BCG-trained strategic review.
 
+**Design philosophy (2026.Q2 redesign):** number-heavy, chart-heavy, visual-first. Indian business owners scan rather than read — every page leads with a ₹ number, a bar/stacked/timeline chart, or a side-by-side comparison. Text is reduced to one-liners that explain the visual.
+
 ## Files
 
 | Segment | English | Hindi (हिन्दी) |
@@ -26,17 +28,19 @@ Six print-ready HTML proposals for three customer segments × two languages. Dra
 
 ## What each proposal contains
 
-### Common structure (all 6)
-1. **Cover** — bold headline + positioning statement + 3-month-free ribbon
-2. **Pain points** — 6-7 problems with rupee-impact tags
-3. **Atithi-Setu solutions** — feature-mapped, one-to-one to pain points
-4. **Competitor comparison table** — feature-by-feature vs the typical incumbent platform
-5. **Pricing tiers** — 3 cards (Starter / Professional / Enterprise pattern)
-6. **ROI worked example** — real numbers on a representative customer
-7. **Migration plan** — week-by-week timeline
-8. **BCG-style strategic insight** — embedded in each section, dark indigo callout boxes
-9. **Objection handling** — 5 most common pushbacks, honest answers
-10. **CTA** — 3-step next 14-21 days, contact info
+### Common visual structure (all 6)
+1. **Hero** — bold headline + giant ₹ recovery/saving stat + 3-month-free ribbon
+2. **KPI strip** — 4 dark cards (variance %, ROI ×, migration days, starting price)
+3. **Leak / pain bar chart** — horizontal bars sized to ₹ impact, total monthly bleed
+4. **Impact grid** — 8 emoji+number+1-liner cards, every feature mapped to a leak
+5. **Side-by-side cards** — old vs new comparison with ❌/✓ rows
+6. **Annual cost bar chart** — show 4-5 cost stacks ranked top to bottom
+7. **Pricing cards** — 3 tier cards (middle one featured, scaled +3%)
+8. **ROI section** — giant ₹ year-1 recovery + stacked horizontal bar (7 segments) + legend
+9. **14/60-day timeline** — inline SVG (line + circles) + 4 step descriptions
+10. **CTA** — 3 mini-stats + saffron pill button + contact
+
+Page-length target: ~3 A4 pages when printed. Every section fits a screen.
 
 ### Per-segment differentiators
 

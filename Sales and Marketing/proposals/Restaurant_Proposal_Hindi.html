@@ -3,359 +3,420 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Atithi-Setu रेस्टोरेंट के लिए — अपने मौजूदा POS से switch करें, 40-60% बचत और 3 अतिरिक्त मॉड्यूल</title>
+<title>अतिथि-सेतु — रेस्टोरेंट के लिए ₹40,000/महीने की चुप्पी से बचाव</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700;800;900&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&family=Noto+Sans+Devanagari:wght@400;500;600;700;800;900&family=Playfair+Display:wght@600;700;800;900&display=swap" rel="stylesheet">
 <style>
   :root {
-    --saffron: #cc5a16; --saffron-2: #a84612; --saffron-light: #fef0e4;
-    --emerald: #0f766e; --emerald-light: #d1fae5; --emerald-bright: #10b981;
-    --ruby: #9f1239; --ruby-light: #fee2e2;
-    --indigo: #1e3a5f; --cream: #faf7f2;
-    --ink: #14110c; --ink-2: #3d3128; --ink-muted: #6b5d52;
+    --saffron: #cc5a16;
+    --saffron-2: #a84612;
+    --saffron-light: #fef0e4;
+    --emerald: #0f766e;
+    --emerald-2: #047857;
+    --emerald-bright: #10b981;
+    --ruby: #9f1239;
+    --indigo: #1e3a5f;
+    --cream: #faf7f2;
+    --cream-2: #f3ece0;
+    --ink: #14110c;
+    --ink-2: #3d3128;
+    --ink-muted: #6b5d52;
     --border: #e8dfd0;
   }
   * { box-sizing: border-box; }
-  body {
-    font-family: 'Noto Sans Devanagari', 'DM Sans', sans-serif;
-    background: var(--cream); color: var(--ink);
-    font-size: 11pt; line-height: 1.65;
-    margin: 0; padding: 0;
-  }
-  .page { max-width: 980px; margin: 0 auto; background: white; padding: 30px 38px; box-shadow: 0 4px 30px rgba(0,0,0,0.06); }
-  .cover {
-    background: linear-gradient(135deg, #1a1208 0%, #2a1d10 100%);
-    color: white; padding: 60px 48px; border-radius: 20px;
-    margin: -30px -38px 30px; position: relative; overflow: hidden;
-  }
-  .cover::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 8px; background: linear-gradient(90deg, var(--saffron), #f59e0b, var(--saffron)); }
-  .cover .brand { font-size: 10pt; text-transform: uppercase; letter-spacing: 4px; color: var(--saffron); font-weight: 800; margin-bottom: 20px; font-family: 'DM Sans', sans-serif; }
-  .cover h1 { font-family: 'Noto Sans Devanagari', serif; font-size: 28pt; line-height: 1.2; font-weight: 800; margin: 0 0 16px; }
-  .cover h1 .accent { color: var(--saffron); }
-  .cover .sub { font-size: 14pt; color: #d8cbb9; max-width: 740px; line-height: 1.55; }
-  .cover .ribbon { display: inline-block; margin-top: 28px; background: var(--saffron); color: white; padding: 10px 20px; border-radius: 8px; font-size: 11pt; font-weight: 700; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: 'Noto Sans Devanagari', 'DM Sans', sans-serif; background: var(--cream); color: var(--ink); font-size: 11pt; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  .page { max-width: 1020px; margin: 0 auto; background: white; box-shadow: 0 4px 30px rgba(0,0,0,0.06); }
 
-  h2 { font-family: 'Noto Sans Devanagari', 'Playfair Display', serif; font-size: 20pt; color: var(--ink); margin: 36px 0 14px; font-weight: 800; line-height: 1.2; }
-  h2 .num { display: inline-block; width: 36px; height: 36px; line-height: 36px; background: var(--saffron); color: white; border-radius: 50%; text-align: center; font-size: 16pt; margin-right: 10px; vertical-align: 4px; font-family: 'DM Sans', sans-serif; }
-  h3 { font-family: 'Noto Sans Devanagari', serif; font-size: 14pt; margin: 20px 0 8px; color: var(--saffron-2); font-weight: 700; }
-  p { margin: 0 0 12px; }
+  .hero { background: linear-gradient(135deg, #cc5a16 0%, #a84612 55%, #7a2e08 100%); color: white; padding: 44px 48px 36px; position: relative; overflow: hidden; }
+  .hero::before { content: ''; position: absolute; right: -120px; top: -120px; width: 360px; height: 360px; border-radius: 50%; background: rgba(255,255,255,0.06); }
+  .hero-grid { position: relative; display: grid; grid-template-columns: 1.4fr 1fr; gap: 36px; align-items: center; z-index: 2; }
+  .brand-tag { font-size: 9pt; letter-spacing: 3px; opacity: 0.85; font-weight: 700; }
+  .hero h1 { font-family: 'Noto Sans Devanagari', serif; font-size: 30pt; line-height: 1.2; font-weight: 800; margin: 14px 0 14px; }
+  .hero-sub { font-size: 12pt; opacity: 0.95; max-width: 480px; }
+  .hero-stat { background: rgba(255,255,255,0.13); border: 1px solid rgba(255,255,255,0.25); border-radius: 16px; padding: 24px 26px; text-align: center; }
+  .hero-stat-label { font-size: 10pt; letter-spacing: 1.5px; opacity: 0.85; }
+  .hero-stat-num { font-family: 'Playfair Display', serif; font-size: 56pt; line-height: 1; font-weight: 900; margin: 8px 0 4px; }
+  .hero-stat-num small { font-size: 22pt; opacity: 0.9; }
+  .hero-stat-foot { font-size: 10pt; opacity: 0.9; margin-top: 6px; }
+  .hero-ribbon { display: inline-block; background: #fff; color: var(--saffron-2); font-weight: 800; padding: 8px 18px; border-radius: 999px; font-size: 10.5pt; margin-top: 18px; box-shadow: 0 6px 20px rgba(0,0,0,0.2); }
 
-  .callout { background: var(--saffron-light); border-left: 4px solid var(--saffron); padding: 16px 20px; border-radius: 0 12px 12px 0; margin: 16px 0; font-size: 10.5pt; }
-  .callout strong { color: var(--saffron-2); }
+  .kpi-strip { display: grid; grid-template-columns: repeat(4, 1fr); background: var(--ink-2); color: white; }
+  .kpi { padding: 22px 18px; text-align: center; border-right: 1px solid rgba(255,255,255,0.1); }
+  .kpi:last-child { border-right: 0; }
+  .kpi-num { font-family: 'Playfair Display', serif; font-size: 30pt; font-weight: 800; line-height: 1; color: #f0c896; }
+  .kpi-num small { font-size: 14pt; opacity: 0.8; }
+  .kpi-label { font-size: 10pt; opacity: 0.9; margin-top: 8px; }
 
-  .insight { background: linear-gradient(135deg, var(--indigo) 0%, #2a4a75 100%); color: white; padding: 22px 26px; border-radius: 14px; margin: 24px 0; font-size: 10.5pt; line-height: 1.6; }
-  .insight .badge { display: inline-block; background: rgba(255,255,255,0.15); color: white; padding: 4px 12px; border-radius: 20px; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 2px; font-weight: 800; margin-bottom: 10px; font-family: 'DM Sans', sans-serif; }
-  .insight h4 { color: white; margin: 0 0 8px; font-size: 13pt; font-family: 'Noto Sans Devanagari', serif; }
-  .insight p { margin: 0; color: rgba(255,255,255,0.92); }
+  .section { padding: 36px 48px; border-bottom: 1px solid var(--border); }
+  .section-tag { display: inline-block; background: var(--saffron-light); color: var(--saffron-2); padding: 4px 12px; border-radius: 999px; font-size: 9.5pt; font-weight: 700; letter-spacing: 1px; }
+  .section h2 { font-family: 'Noto Sans Devanagari', serif; font-size: 22pt; font-weight: 800; margin: 12px 0 6px; line-height: 1.25; }
+  .section-sub { color: var(--ink-muted); font-size: 11pt; margin-bottom: 24px; max-width: 720px; }
 
-  .pains, .solutions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 20px 0; }
-  .pain { background: var(--ruby-light); border-left: 4px solid var(--ruby); padding: 14px 18px; border-radius: 0 10px 10px 0; }
-  .pain .h { font-weight: 700; color: var(--ruby); font-size: 11pt; margin-bottom: 4px; }
-  .pain .b { font-size: 10.5pt; color: var(--ink-2); line-height: 1.55; }
-  .pain .cost { display: inline-block; margin-top: 6px; background: var(--ruby); color: white; padding: 2px 8px; border-radius: 4px; font-size: 9pt; font-weight: 700; }
-  .sol { background: var(--emerald-light); border-left: 4px solid var(--emerald-bright); padding: 14px 18px; border-radius: 0 10px 10px 0; }
-  .sol .h { font-weight: 700; color: var(--emerald); font-size: 11pt; margin-bottom: 4px; }
-  .sol .b { font-size: 10.5pt; color: var(--ink-2); line-height: 1.55; }
+  .leak-chart { display: flex; flex-direction: column; gap: 10px; }
+  .leak-row { display: grid; grid-template-columns: 240px 1fr 130px; gap: 14px; align-items: center; }
+  .leak-label { font-size: 10.5pt; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .leak-icon { font-size: 16pt; }
+  .leak-bar { background: var(--cream-2); height: 38px; border-radius: 8px; overflow: hidden; }
+  .leak-fill { height: 100%; display: flex; align-items: center; padding: 0 12px; color: white; font-weight: 600; font-size: 9.5pt; background: linear-gradient(90deg, #dc2626, #991b1b); border-radius: 8px; }
+  .leak-fill.warn { background: linear-gradient(90deg, #ea580c, #9a3412); }
+  .leak-fill.amber { background: linear-gradient(90deg, #d97706, #92400e); }
+  .leak-cost { font-family: 'Playfair Display', serif; font-size: 17pt; font-weight: 800; color: var(--ruby); text-align: right; }
+  .leak-cost small { font-size: 9pt; color: var(--ink-muted); font-weight: 500; font-family: 'Noto Sans Devanagari'; display: block; }
+  .leak-total { margin-top: 22px; padding: 22px 26px; background: linear-gradient(135deg, #9f1239 0%, #7a0e2a 100%); color: white; border-radius: 14px; display: grid; grid-template-columns: 1fr auto; align-items: center; }
+  .leak-total-num { font-family: 'Playfair Display', serif; font-size: 36pt; font-weight: 900; line-height: 1; }
+  .leak-total-label { font-size: 12pt; font-weight: 600; }
+  .leak-total-sub { font-size: 10pt; opacity: 0.9; margin-top: 4px; }
 
-  table.compare { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
-  table.compare th { background: var(--ink); color: white; padding: 12px 14px; text-align: left; font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1px; font-weight: 800; font-family: 'DM Sans', sans-serif; }
-  table.compare th.saffron { background: var(--saffron); }
-  table.compare td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  table.compare tr:last-child td { border-bottom: 0; }
-  table.compare td:first-child { font-weight: 600; color: var(--ink); width: 30%; }
-  table.compare td.win { color: var(--emerald); font-weight: 600; }
-  table.compare td.lose { color: var(--ruby); }
-  table.compare td.neutral { color: var(--ink-muted); }
-  table.compare .check { color: var(--emerald-bright); font-weight: 800; }
-  table.compare .cross { color: var(--ruby); font-weight: 800; }
+  .impact-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .impact-card { background: white; border: 1px solid var(--border); border-radius: 14px; padding: 20px 18px; position: relative; }
+  .impact-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px; background: var(--saffron); border-radius: 14px 14px 0 0; }
+  .impact-emoji { font-size: 22pt; margin-bottom: 10px; }
+  .impact-num { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 800; color: var(--saffron-2); line-height: 1; }
+  .impact-num small { font-size: 11pt; }
+  .impact-label { font-size: 9.5pt; font-weight: 700; color: var(--ink-muted); margin-top: 6px; }
+  .impact-desc { font-size: 10pt; color: var(--ink-2); margin-top: 8px; line-height: 1.45; }
 
-  .pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 20px 0; }
-  .pcard { background: white; border: 2px solid var(--border); border-radius: 18px; padding: 24px 22px; position: relative; }
-  .pcard.featured { border-color: var(--saffron); background: linear-gradient(180deg, var(--saffron-light) 0%, white 50%); }
-  .pcard.featured::before { content: 'सबसे लोकप्रिय'; position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: var(--saffron); color: white; padding: 4px 14px; border-radius: 20px; font-size: 9pt; font-weight: 700; font-family: 'Noto Sans Devanagari', sans-serif; }
-  .pcard .name { font-weight: 700; font-size: 12pt; color: var(--ink); }
-  .pcard .price { font-family: 'Playfair Display', serif; font-size: 30pt; font-weight: 900; color: var(--saffron-2); line-height: 1; margin: 12px 0 6px; }
-  .pcard .price .small { font-size: 11pt; color: var(--ink-muted); font-weight: 500; font-family: 'Noto Sans Devanagari', sans-serif; }
-  .pcard .price.featured-price { color: var(--saffron); }
-  .pcard .tagline { font-size: 10pt; color: var(--ink-muted); margin-bottom: 14px; min-height: 32px; line-height: 1.4; }
-  .pcard ul { padding-left: 16px; margin: 0; font-size: 10pt; line-height: 1.65; }
-  .pcard ul li { margin-bottom: 4px; color: var(--ink-2); }
-  .pcard ul li strong { color: var(--ink); }
+  .vs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .vs-card { border-radius: 14px; padding: 24px 22px; border: 2px solid; }
+  .vs-old { border-color: #d1d5db; background: #f9fafb; }
+  .vs-new { border-color: var(--saffron); background: linear-gradient(135deg, #fff8f0 0%, #fef0e4 100%); position: relative; }
+  .vs-new::after { content: 'सिफारिश'; position: absolute; top: -12px; right: 18px; background: var(--saffron); color: white; font-size: 9pt; font-weight: 800; padding: 4px 12px; border-radius: 999px; }
+  .vs-title { font-size: 9.5pt; font-weight: 700; letter-spacing: 1px; color: var(--ink-muted); }
+  .vs-name { font-family: 'Noto Sans Devanagari', serif; font-size: 17pt; font-weight: 800; margin: 4px 0 18px; }
+  .vs-new .vs-name { color: var(--saffron-2); }
+  .vs-row { display: flex; justify-content: space-between; padding: 9px 0; border-top: 1px solid rgba(0,0,0,0.06); font-size: 10pt; }
+  .vs-row:first-of-type { border-top: 0; }
+  .vs-row-label { color: var(--ink-muted); }
+  .vs-row-val { font-weight: 700; }
+  .vs-old .vs-row-val { color: var(--ruby); }
+  .vs-new .vs-row-val { color: var(--emerald-2); }
 
-  .roi-box { background: linear-gradient(135deg, var(--saffron-light), #fde2c8); border: 2px solid var(--saffron); border-radius: 16px; padding: 26px; margin: 24px 0; }
-  .roi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 14px; }
-  .roi-cell { background: white; padding: 16px; border-radius: 12px; text-align: center; }
-  .roi-cell .v { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 800; color: var(--saffron-2); line-height: 1; }
-  .roi-cell .l { font-size: 9.5pt; color: var(--ink-muted); margin-top: 6px; font-weight: 600; line-height: 1.3; }
+  .cost-chart { display: flex; flex-direction: column; gap: 12px; }
+  .cost-row { display: grid; grid-template-columns: 230px 1fr 140px; gap: 14px; align-items: center; }
+  .cost-label { font-size: 10pt; font-weight: 600; }
+  .cost-label small { display: block; color: var(--ink-muted); font-weight: 500; font-size: 9pt; }
+  .cost-bar { background: var(--cream-2); height: 32px; border-radius: 8px; overflow: hidden; }
+  .cost-fill { height: 100%; border-radius: 8px; display: flex; align-items: center; padding: 0 12px; color: white; font-weight: 600; font-size: 9.5pt; }
+  .cost-fill.red { background: linear-gradient(90deg, #dc2626, #991b1b); }
+  .cost-fill.saffron { background: linear-gradient(90deg, var(--saffron), var(--saffron-2)); }
+  .cost-fill.emerald { background: linear-gradient(90deg, var(--emerald-bright), var(--emerald-2)); }
+  .cost-val { font-family: 'Playfair Display', serif; font-size: 16pt; font-weight: 800; text-align: right; }
+  .cost-val.red { color: var(--ruby); }
+  .cost-val.green { color: var(--emerald-2); }
 
-  .timeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 20px 0; }
-  .step { background: var(--cream); border: 1px solid var(--border); border-top: 3px solid var(--saffron); border-radius: 0 0 10px 10px; padding: 14px; font-size: 10pt; }
-  .step .when { font-weight: 700; color: var(--saffron-2); font-size: 9.5pt; margin-bottom: 4px; }
-  .step .what { color: var(--ink-2); line-height: 1.5; }
+  .price-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .price-card { border: 2px solid var(--border); border-radius: 16px; padding: 26px 22px; background: white; position: relative; }
+  .price-card.featured { border-color: var(--saffron); background: linear-gradient(180deg, #fff8f0 0%, #fff 60%); transform: scale(1.03); box-shadow: 0 12px 32px rgba(204,90,22,0.18); }
+  .price-card.featured::before { content: 'सबसे लोकप्रिय'; position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: var(--saffron); color: white; font-size: 9pt; font-weight: 800; padding: 5px 14px; border-radius: 999px; }
+  .price-tier { font-size: 10pt; font-weight: 700; letter-spacing: 1.5px; color: var(--ink-muted); }
+  .price-name { font-family: 'Noto Sans Devanagari', serif; font-size: 20pt; font-weight: 800; margin: 6px 0 14px; }
+  .price-num { font-family: 'Playfair Display', serif; font-size: 42pt; font-weight: 900; line-height: 1; color: var(--saffron-2); }
+  .price-num small { font-size: 14pt; color: var(--ink-muted); font-weight: 600; }
+  .price-period { color: var(--ink-muted); font-size: 10pt; margin-top: 4px; }
+  .price-features { list-style: none; padding: 18px 0 0; margin: 18px 0 0; border-top: 1px solid var(--border); }
+  .price-features li { padding: 6px 0; font-size: 10pt; display: flex; align-items: flex-start; gap: 8px; }
+  .price-features li::before { content: '✓'; color: var(--emerald-bright); font-weight: 800; }
 
-  .cta { background: var(--ink); color: white; padding: 30px 36px; border-radius: 18px; margin: 32px 0 0; display: grid; grid-template-columns: 2fr 1fr; gap: 20px; align-items: center; }
-  .cta h2 { color: white; margin: 0 0 6px; font-size: 18pt; }
-  .cta h2 .num { background: var(--saffron); }
-  .cta p { margin: 0; color: rgba(255,255,255,0.88); font-size: 10.5pt; }
-  .cta .btn { background: var(--saffron); color: white; padding: 18px 22px; border-radius: 12px; text-align: center; font-weight: 700; }
-  .cta .btn .l1 { font-size: 10pt; }
-  .cta .btn .l2 { font-family: 'Playfair Display', serif; font-size: 18pt; font-weight: 900; margin-top: 4px; }
-  .cta .btn .l3 { font-size: 9pt; opacity: 0.9; margin-top: 4px; font-family: 'DM Sans', sans-serif; }
+  .roi-wrap { display: grid; grid-template-columns: 1fr 1.4fr; gap: 28px; align-items: center; }
+  .roi-big { background: linear-gradient(135deg, #0f766e 0%, #047857 100%); color: white; border-radius: 18px; padding: 32px 28px; text-align: center; }
+  .roi-big-label { font-size: 10.5pt; letter-spacing: 1.5px; opacity: 0.9; }
+  .roi-big-num { font-family: 'Playfair Display', serif; font-size: 60pt; line-height: 1; font-weight: 900; margin: 12px 0 6px; }
+  .roi-big-num small { font-size: 22pt; opacity: 0.9; }
+  .roi-big-sub { font-size: 11pt; opacity: 0.95; margin-top: 8px; }
+  .roi-big-foot { margin-top: 22px; padding-top: 22px; border-top: 1px solid rgba(255,255,255,0.2); font-size: 10pt; opacity: 0.95; }
+  .roi-stack { display: flex; height: 56px; border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
+  .roi-seg { display: flex; flex-direction: column; align-items: center; justify-content: center; color: white; font-weight: 800; padding: 0 4px; text-align: center; }
+  .roi-seg .pct { font-family: 'Playfair Display', serif; font-size: 14pt; }
+  .roi-seg .lbl { font-size: 7.5pt; opacity: 0.9; }
+  .roi-legend { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+  .roi-legend-item { display: flex; align-items: center; gap: 8px; font-size: 10pt; }
+  .roi-dot { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+  .roi-num { margin-left: auto; font-weight: 700; }
 
-  .foot { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 9.5pt; color: var(--ink-muted); text-align: center; line-height: 1.6; }
+  .timeline-wrap { background: var(--cream); padding: 28px; border-radius: 16px; }
+  .timeline-svg { width: 100%; height: 80px; }
+  .timeline-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 14px; }
+  .timeline-step { text-align: center; }
+  .timeline-day { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 900; color: var(--saffron-2); line-height: 1; }
+  .timeline-title { font-weight: 700; font-size: 10.5pt; margin: 4px 0 4px; }
+  .timeline-desc { font-size: 9.5pt; color: var(--ink-muted); }
 
-  ul.checks { list-style: none; padding: 0; margin: 12px 0; }
-  ul.checks li { padding-left: 26px; margin-bottom: 8px; position: relative; font-size: 10.5pt; line-height: 1.55; }
-  ul.checks li::before { content: '✓'; position: absolute; left: 4px; top: 0; color: var(--emerald-bright); font-weight: 900; font-size: 13pt; }
+  .cta-section { background: linear-gradient(135deg, #1e3a5f 0%, #0f1f3a 100%); color: white; padding: 48px; text-align: center; }
+  .cta-section h2 { color: white; font-size: 24pt; font-family: 'Noto Sans Devanagari', serif; margin: 0 0 8px; }
+  .cta-section p { opacity: 0.92; max-width: 600px; margin: 0 auto 22px; font-size: 11.5pt; }
+  .cta-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; max-width: 640px; margin: 0 auto 30px; }
+  .cta-stat-num { font-family: 'Playfair Display', serif; font-size: 32pt; font-weight: 900; color: #f0c896; line-height: 1; }
+  .cta-stat-label { font-size: 9.5pt; opacity: 0.9; margin-top: 6px; }
+  .cta-btn { display: inline-block; background: linear-gradient(135deg, var(--saffron), var(--saffron-2)); color: white; padding: 16px 36px; border-radius: 999px; font-weight: 800; font-size: 13pt; text-decoration: none; box-shadow: 0 10px 30px rgba(204,90,22,0.4); }
+  .cta-contact { margin-top: 22px; font-size: 10pt; opacity: 0.85; }
+  .cta-contact strong { color: #f0c896; }
 
-  @page { size: A4; margin: 12mm; }
+  .footer { background: var(--ink); color: white; padding: 24px 48px; font-size: 9.5pt; display: grid; grid-template-columns: 1fr auto; align-items: center; }
+  .footer-brand { font-family: 'Playfair Display', serif; font-weight: 800; font-size: 13pt; color: var(--saffron); }
+  .footer-meta { opacity: 0.7; }
+
+  .migrate-callout { background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); border: 2px solid var(--emerald-bright); border-radius: 16px; padding: 24px 28px; margin-top: 22px; display: grid; grid-template-columns: auto 1fr auto; gap: 22px; align-items: center; }
+  .migrate-icon { font-size: 36pt; }
+  .migrate-title { font-family: 'Noto Sans Devanagari', serif; font-size: 16pt; font-weight: 800; color: var(--emerald-2); }
+  .migrate-desc { font-size: 10pt; color: var(--ink-2); margin-top: 4px; }
+  .migrate-tag { background: var(--emerald-2); color: white; padding: 10px 16px; border-radius: 10px; font-weight: 800; text-align: center; font-size: 12pt; }
+  .migrate-tag small { display: block; font-size: 8.5pt; opacity: 0.9; font-weight: 500; margin-top: 2px; }
+
   @media print {
-    body { background: white; font-size: 10.5pt; }
-    .page { box-shadow: none; padding: 0; max-width: none; }
-    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    body { background: white; font-size: 10pt; }
+    .page { box-shadow: none; max-width: none; }
+    .section { padding: 24px 32px; page-break-inside: avoid; }
+    .hero { padding: 32px; }
+    .price-card.featured { transform: none; }
+    @page { size: A4; margin: 8mm; }
   }
 </style>
 </head>
 <body>
 <div class="page">
 
-  <div class="cover">
-    <div class="brand">Atithi-Setu · रेस्टोरेंट प्रस्ताव</div>
-    <h1>वो हर सुविधा जो <span class="accent">legacy POS कभी नहीं दे पाया।</span></h1>
-    <p class="sub">
-      एक सब्सक्रिप्शन। एक डैशबोर्ड। हर चैनल — इन-हाउस QR, ऑनलाइन, Swiggy, Zomato, Dunzo, ONDC। साथ में भारत का एकमात्र रेस्टोरेंट इन्वेंट्री मॉड्यूल जिसमें FIFO बैच, रेसिपी वर्शनिंग और चैनल-वार P&L है। और <strong style="color:white">legacy POS से 40-60% कम कीमत</strong> पर।
-    </p>
-    <div class="ribbon">हर legacy POS स्विच पर 3 महीने मुफ्त · ₹999/महीने से शुरू</div>
-  </div>
-
-  <!-- ═══ § 1 · Pain points ═════════════════════════════════ -->
-  <h2><span class="num">1</span>हर भारतीय रेस्टोरेंट मालिक की रोज़ की कहानी</h2>
-  <p>आप हर महीने ₹40,000 से ₹1,20,000 तक खो रहे हैं — ऐसी समस्याओं की वजह से जो legacy POS या तो हल नहीं करता या उनके लिए अलग पैसा वसूलता है। ये रहीं सात सबसे बड़ी लीक:</p>
-
-  <div class="pains">
-    <div class="pain">
-      <div class="h">मल्टी-टैबलेट की उलझन</div>
-      <div class="b">एक टैबलेट पर Swiggy, दूसरे पर Zomato, और इन-हाउस POS — कैशियर को हर ऑर्डर किचन के लिए दोबारा टाइप करना पड़ता है। गलतियाँ, देरी, नाराज़ ग्राहक।</div>
-      <span class="cost">₹15-25 हज़ार/महीना खोए ऑर्डर</span>
+  <section class="hero">
+    <div class="hero-grid">
+      <div>
+        <div class="brand-tag">अतिथि-सेतु · भारत के लिए · 2026</div>
+        <h1>आपके रेस्टोरेंट में हर महीने ₹40,000 चुपचाप निकल रहे हैं।</h1>
+        <p class="hero-sub">चोरी, मेनू-गड़बड़ी, एग्रीगेटर टेबलेट का झमेला, स्टॉक-आउट — आपका मौजूदा POS कुछ भी नहीं पकड़ता। हमने एक ऐसा बनाया जो पकड़ता है।</p>
+        <div class="hero-ribbon">⚡ Professional पर 3 महीने मुफ़्त · 72 घंटे में डेटा माइग्रेशन</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-label">हर महीने औसत बचत</div>
+        <div class="hero-stat-num"><small>₹</small>40,500</div>
+        <div class="hero-stat-foot">60-कवर/दिन कैफे (पायलट)</div>
+      </div>
     </div>
-    <div class="pain">
-      <div class="h">अचानक स्टॉक खत्म होना</div>
-      <div class="b">रश के बीच पनीर खत्म। ग्राहक ऑर्डर करता है। कैंसल हो जाता है। 1-स्टार रिव्यू। कोई सिस्टम 2 दिन पहले खपत के आधार पर चेतावनी नहीं देता।</div>
-      <span class="cost">₹8-12 हज़ार/महीना + ब्रांड को नुकसान</span>
+  </section>
+
+  <section class="kpi-strip">
+    <div class="kpi"><div class="kpi-num">8.1<small>%</small></div><div class="kpi-label">कम variance</div></div>
+    <div class="kpi"><div class="kpi-num">12-15<small>×</small></div><div class="kpi-label">90 दिनों में ROI</div></div>
+    <div class="kpi"><div class="kpi-num">&lt; 14<small> दिन</small></div><div class="kpi-label">माइग्रेशन</div></div>
+    <div class="kpi"><div class="kpi-num"><small>₹</small>999</div><div class="kpi-label">शुरुआत / माह</div></div>
+  </section>
+
+  <section class="section">
+    <span class="section-tag">पैसा कहाँ जा रहा है</span>
+    <h2>5 चुप लीक्स — हर महीने ₹42,000 की हानि।</h2>
+    <p class="section-sub">80+ भारतीय QSR और कैफे के पायलट से मैप किया गया। आपका मौजूदा POS एक भी नहीं पकड़ता।</p>
+
+    <div class="leak-chart">
+      <div class="leak-row"><div class="leak-label"><span class="leak-icon">🥷</span>चोरी और pilferage</div><div class="leak-bar"><div class="leak-fill" style="width:100%">Recipe-level ट्रैकिंग नहीं</div></div><div class="leak-cost">₹15,000<small>हर महीना</small></div></div>
+      <div class="leak-row"><div class="leak-label"><span class="leak-icon">📋</span>मेनू और कीमत में गड़बड़ी</div><div class="leak-bar"><div class="leak-fill warn" style="width:80%">4 प्लेटफ़ॉर्म हाथ से</div></div><div class="leak-cost">₹12,000<small>हर महीना</small></div></div>
+      <div class="leak-row"><div class="leak-label"><span class="leak-icon">📦</span>स्टॉक-आउट से खोए ऑर्डर</div><div class="leak-bar"><div class="leak-fill warn" style="width:53%">3 जगह manual toggle</div></div><div class="leak-cost">₹8,000<small>हर महीना</small></div></div>
+      <div class="leak-row"><div class="leak-label"><span class="leak-icon">📊</span>एग्रीगेटर ब्लाइंड-स्पॉट</div><div class="leak-bar"><div class="leak-fill amber" style="width:33%">Per-channel P&amp;L नहीं</div></div><div class="leak-cost">₹5,000<small>हर महीना</small></div></div>
+      <div class="leak-row"><div class="leak-label"><span class="leak-icon">🧾</span>GST और CA परेशानी</div><div class="leak-bar"><div class="leak-fill amber" style="width:13%">Sec 9(5) गलत</div></div><div class="leak-cost">₹2,000<small>हर महीना</small></div></div>
     </div>
-    <div class="pain">
-      <div class="h">रेसिपी से ज़्यादा सामग्री, चोरी</div>
-      <div class="b">शेफ हर डिश में "थोड़ी ज़्यादा" क्रीम डालता है। महीने के 1,800 प्लेट पर ये ₹6-10 हज़ार। साथ ही इन्वेंट्री शॉर्टेज जो साल के अंत तक पता नहीं चलती।</div>
-      <span class="cost">₹10-20 हज़ार/महीना अदृश्य नुकसान</span>
+
+    <div class="leak-total">
+      <div>
+        <div class="leak-total-label">कुल मासिक नुक़सान — आपका POS नहीं पकड़ता</div>
+        <div class="leak-total-sub">साल में ₹5+ लाख, हर साल — जब तक आप इसे ठीक नहीं करते</div>
+      </div>
+      <div class="leak-total-num">₹42,000</div>
     </div>
-    <div class="pain">
-      <div class="h">कीमत संतुलन का सिरदर्द</div>
-      <div class="b">एग्रीगेटर्स पर 25-30% मार्कअप ज़रूरी है ताकि उनका कमीशन निकल सके। 4 मेनू अलग-अलग मेंटेन करना नामुमकिन। legacy POS हर चैनल के लिए अलग चार्ज लेता है।</div>
-      <span class="cost">5-8% मार्जिन में गिरावट</span>
+  </section>
+
+  <section class="section" style="background: var(--cream);">
+    <span class="section-tag">आपको क्या मिलेगा</span>
+    <h2>एक प्लेटफ़ॉर्म। आठ मापने योग्य फ़ायदे।</h2>
+    <p class="section-sub">हर फ़ीचर एक लीक से जुड़ा। हर लीक एक रुपए की संख्या से।</p>
+
+    <div class="impact-grid">
+      <div class="impact-card"><div class="impact-emoji">📉</div><div class="impact-num"><small>−</small>8.1<small>%</small></div><div class="impact-label">चोरी में कमी</div><p class="impact-desc">FIFO + recipe-level deduction — आपका POS आज नहीं देख पाता।</p></div>
+      <div class="impact-card"><div class="impact-emoji">🍽️</div><div class="impact-num">1<small> क्लिक</small></div><div class="impact-label">4-चैनल सिंक</div><p class="impact-desc">एक मेनू, एक कीमत — Swiggy, Zomato, Dunzo, in-house सब पर।</p></div>
+      <div class="impact-card"><div class="impact-emoji">⚡</div><div class="impact-num">30<small> सेकंड</small></div><div class="impact-label">ऑटो स्टॉक-आउट</div><p class="impact-desc">पनीर ख़त्म → हर प्लेटफ़ॉर्म 30 सेकंड में बंद। कोई 1-स्टार नहीं।</p></div>
+      <div class="impact-card"><div class="impact-emoji">📈</div><div class="impact-num">5</div><div class="impact-label">Per-channel P&amp;L</div><p class="impact-desc">कौन सा एग्रीगेटर असली में profitable है, commission और food cost के बाद।</p></div>
+      <div class="impact-card"><div class="impact-emoji">🧾</div><div class="impact-num">100<small>%</small></div><div class="impact-label">GST-ready</div><p class="impact-desc">Sec 9(5) split tracking। आपके CA 1 क्लिक में किताबें export करें।</p></div>
+      <div class="impact-card"><div class="impact-emoji">💳</div><div class="impact-num">9</div><div class="impact-label">पेमेंट मोड</div><p class="impact-desc">UPI, कार्ड, कैश, वॉलेट, postpaid, prepaid QR, cloud-kitchen।</p></div>
+      <div class="impact-card"><div class="impact-emoji">🤖</div><div class="impact-num">3<small> AI</small></div><div class="impact-label">देसी AI</div><p class="impact-desc">Invoice OCR, review sentiment, मेनू image generation — सब built-in।</p></div>
+      <div class="impact-card"><div class="impact-emoji">📱</div><div class="impact-num">0<small>%</small></div><div class="impact-label">हार्डवेयर खर्च</div><p class="impact-desc">आपके पास जो टैबलेट/फ़ोन है उसी पर चलता है। कोई install नहीं।</p></div>
     </div>
-    <div class="pain">
-      <div class="h">चैनल-वार P&L की जानकारी नहीं</div>
-      <div class="b">Zomato का 25% कमीशन और आपकी फूड कॉस्ट के बाद, क्या Zomato वाकई फायदेमंद है? आप नहीं बता सकते। legacy POS सिर्फ ग्रॉस रेवेन्यू दिखाता है।</div>
-      <span class="cost">रणनीतिक अंधेरा</span>
+  </section>
+
+  <section class="section">
+    <span class="section-tag">तुलना</span>
+    <h2>आपका मौजूदा POS बनाम अतिथि-सेतु — फ़र्क ही आपकी बचत है।</h2>
+
+    <div class="vs-grid">
+      <div class="vs-card vs-old">
+        <div class="vs-title">पुराना legacy POS</div>
+        <div class="vs-name">जो आपके पास आज है</div>
+        <div class="vs-row"><div class="vs-row-label">Inventory module</div><div class="vs-row-val">❌ Add-on</div></div>
+        <div class="vs-row"><div class="vs-row-label">एग्रीगेटर सिंक</div><div class="vs-row-val">❌ Per-channel ₹</div></div>
+        <div class="vs-row"><div class="vs-row-label">Recipe deduction</div><div class="vs-row-val">❌ Manual</div></div>
+        <div class="vs-row"><div class="vs-row-label">ऑटो स्टॉक-आउट</div><div class="vs-row-val">❌ नहीं</div></div>
+        <div class="vs-row"><div class="vs-row-label">AI फ़ीचर्स</div><div class="vs-row-val">❌ नहीं</div></div>
+        <div class="vs-row"><div class="vs-row-label">Cloud-native</div><div class="vs-row-val">❌ Desktop</div></div>
+        <div class="vs-row"><div class="vs-row-label">हार्डवेयर lock-in</div><div class="vs-row-val">❌ हाँ</div></div>
+        <div class="vs-row" style="border-top: 2px solid var(--ruby); margin-top: 6px; padding-top: 12px;"><div class="vs-row-label" style="font-weight:700;">सालाना खर्च</div><div class="vs-row-val" style="font-size:13pt;">₹84,000+</div></div>
+      </div>
+      <div class="vs-card vs-new">
+        <div class="vs-title">अतिथि-सेतु Professional</div>
+        <div class="vs-name">इसकी जगह यह मिलेगा</div>
+        <div class="vs-row"><div class="vs-row-label">Inventory module</div><div class="vs-row-val">✓ शामिल</div></div>
+        <div class="vs-row"><div class="vs-row-label">एग्रीगेटर सिंक</div><div class="vs-row-val">✓ एक contract</div></div>
+        <div class="vs-row"><div class="vs-row-label">Recipe deduction</div><div class="vs-row-val">✓ FIFO + versioned</div></div>
+        <div class="vs-row"><div class="vs-row-label">ऑटो स्टॉक-आउट</div><div class="vs-row-val">✓ 30 सेकंड</div></div>
+        <div class="vs-row"><div class="vs-row-label">AI फ़ीचर्स</div><div class="vs-row-val">✓ OCR + sentiment</div></div>
+        <div class="vs-row"><div class="vs-row-label">Cloud-native</div><div class="vs-row-val">✓ कोई भी device</div></div>
+        <div class="vs-row"><div class="vs-row-label">हार्डवेयर lock-in</div><div class="vs-row-val">✓ शून्य</div></div>
+        <div class="vs-row" style="border-top: 2px solid var(--emerald-bright); margin-top: 6px; padding-top: 12px;"><div class="vs-row-label" style="font-weight:700;">सालाना खर्च</div><div class="vs-row-val" style="font-size:13pt;">₹23,988</div></div>
+      </div>
     </div>
-    <div class="pain">
-      <div class="h">साल के अंत का झटका</div>
-      <div class="b">CA COGS ब्रेकडाउन, GST 9(5) स्प्लिट, सेटलमेंट रीकंसिलिएशन मांगता है। आप 2 हफ्ते स्प्रेडशीट में डूबे रहते हैं, बिज़नेस ठप।</div>
-      <span class="cost">5-10 दिन बर्बाद</span>
+  </section>
+
+  <section class="section" style="background: var(--cream);">
+    <span class="section-tag">गणित</span>
+    <h2>आप 72% ज़्यादा pay कर रहे हैं।</h2>
+    <p class="section-sub">सिंगल-आउटलेट 60-कवर/दिन कैफे। सिर्फ़ software cost — पुराने POS के hardware और per-channel fees शामिल नहीं।</p>
+
+    <div class="cost-chart">
+      <div class="cost-row"><div class="cost-label">पुराना legacy POS <small>+ inventory add-on + 3 aggregator fees</small></div><div class="cost-bar"><div class="cost-fill red" style="width:100%">मार्जिन बह रहा है</div></div><div class="cost-val red">₹84,000<small style="font-size:9pt;display:block;color:var(--ink-muted);">/साल</small></div></div>
+      <div class="cost-row"><div class="cost-label">अतिथि-सेतु Enterprise <small>सब कुछ शामिल, per outlet</small></div><div class="cost-bar"><div class="cost-fill saffron" style="width:71%">सब कुछ शामिल</div></div><div class="cost-val">₹59,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/साल</small></div></div>
+      <div class="cost-row"><div class="cost-label">अतिथि-सेतु Professional <small>1-outlet कैफे के लिए recommended</small></div><div class="cost-bar"><div class="cost-fill emerald" style="width:29%">सबसे अच्छा</div></div><div class="cost-val green">₹23,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/साल</small></div></div>
+      <div class="cost-row"><div class="cost-label">अतिथि-सेतु Starter <small>कियोस्क &amp; single-counter</small></div><div class="cost-bar"><div class="cost-fill emerald" style="width:14%">Entry tier</div></div><div class="cost-val green">₹11,988<small style="font-size:9pt;display:block;color:var(--ink-muted);">/साल</small></div></div>
     </div>
-  </div>
+  </section>
 
-  <!-- ═══ § 2 · Solutions ═══════════════════════════════════ -->
-  <h2><span class="num">2</span>Atithi-Setu हर लीक को कैसे रोकता है</h2>
+  <section class="section">
+    <span class="section-tag">सरल pricing</span>
+    <h2>तीन tier। एक पारदर्शी रुपए की संख्या। कोई surprise नहीं।</h2>
+    <p class="section-sub">हार्डवेयर अलग से charge नहीं। Per-channel delivery integration fee नहीं। कभी भी रद्द करें।</p>
 
-  <div class="solutions">
-    <div class="sol">
-      <div class="h">✓ एक स्क्रीन, सभी चैनल</div>
-      <div class="b">Swiggy / Zomato / Dunzo / Magicpin / ONDC के ऑर्डर इन-हाउस QR के साथ उसी KDS में आते हैं। कैशियर को कभी दोबारा टाइप नहीं करना पड़ता। स्टेटस ऑटो-सिंक होता है।</div>
+    <div class="price-grid">
+      <div class="price-card">
+        <div class="price-tier">Tier 1</div>
+        <div class="price-name">Starter</div>
+        <div class="price-num"><small>₹</small>999</div>
+        <div class="price-period">हर महीने · single outlet</div>
+        <ul class="price-features">
+          <li>Unlimited orders &amp; menu items</li>
+          <li>Inventory module शामिल</li>
+          <li>UPI, cash, card, wallet</li>
+          <li>Basic reports &amp; GST exports</li>
+          <li>1 user · email support</li>
+        </ul>
+      </div>
+      <div class="price-card featured">
+        <div class="price-tier">Tier 2 · सबसे फिट</div>
+        <div class="price-name">Professional</div>
+        <div class="price-num"><small>₹</small>1,999</div>
+        <div class="price-period">हर महीने · single outlet</div>
+        <ul class="price-features">
+          <li>Starter में जो है, साथ ही:</li>
+          <li><strong>एग्रीगेटर सिंक</strong> (Swiggy, Zomato, Dunzo)</li>
+          <li><strong>Recipe FIFO deduction</strong> + variance</li>
+          <li>Per-channel P&amp;L dashboard</li>
+          <li>Hotel/PMS module bundled</li>
+          <li>Unlimited users · WhatsApp support</li>
+          <li><strong>स्विच पर 3 महीने मुफ़्त</strong></li>
+        </ul>
+      </div>
+      <div class="price-card">
+        <div class="price-tier">Tier 3</div>
+        <div class="price-name">Enterprise</div>
+        <div class="price-num"><small>₹</small>4,999</div>
+        <div class="price-period">हर महीने · per outlet</div>
+        <ul class="price-features">
+          <li>Professional में जो है, साथ ही:</li>
+          <li>Multi-outlet dashboard</li>
+          <li>Central kitchen + supplier mgmt</li>
+          <li>Custom reports &amp; API access</li>
+          <li>Dedicated CSM · phone support</li>
+          <li>SLA-backed uptime &amp; data export</li>
+        </ul>
+      </div>
     </div>
-    <div class="sol">
-      <div class="h">✓ दिन के हिसाब से खपत का अनुमान</div>
-      <div class="b">हर सामग्री के लिए 28-दिन का साप्ताहिक रोलिंग एवरेज। 9 बजे मालिक को मैसेज: "पनीर 2.3 दिन का स्टॉक · PO-47 भेजें?" एक टैप पर सप्लायर को PDF।</div>
+
+    <div class="migrate-callout">
+      <div class="migrate-icon">🎁</div>
+      <div>
+        <div class="migrate-title">स्विच ऑफ़र — 3 महीने मुफ़्त</div>
+        <div class="migrate-desc">72-घंटे डेटा माइग्रेशन · 7-दिन parallel run · साल-1 में 30%+ बचत गारंटी या difference वापस।</div>
+      </div>
+      <div class="migrate-tag">3 महीने<small>शून्य लागत</small></div>
     </div>
-    <div class="sol">
-      <div class="h">✓ रेसिपी-आधारित ऑटो-डिडक्शन</div>
-      <div class="b">हर ऑर्डर पर रेसिपी से सामग्री ऑटोमैटिक घटती है। साप्ताहिक वेरियंस रिपोर्ट अपेक्षित बनाम वास्तविक तुलना करती है। चोरी अब "शक" नहीं, "आंकड़ा" है।</div>
+  </section>
+
+  <section class="section" style="background: var(--cream);">
+    <span class="section-tag">ROI उदाहरण</span>
+    <h2>एक 60-कवर कैफे पहले साल में ₹4.86 लाख recover करता है।</h2>
+
+    <div class="roi-wrap">
+      <div class="roi-big">
+        <div class="roi-big-label">पहले साल की recovery</div>
+        <div class="roi-big-num"><small>₹</small>4.86<small>L</small></div>
+        <div class="roi-big-sub">60-कवर/दिन कैफे (पायलट)</div>
+        <div class="roi-big-foot"><strong>20.3× ROI</strong> Atithi-Setu Professional की सालाना fee ₹23,988 घटाने के बाद</div>
+      </div>
+      <div>
+        <h3 style="font-family:'Noto Sans Devanagari', serif; font-size:15pt; margin:0 0 14px;">₹4.86L कहाँ से आते हैं</h3>
+        <div class="roi-stack">
+          <div class="roi-seg" style="background:linear-gradient(135deg,#dc2626,#991b1b);width:37%"><div class="pct">37%</div><div class="lbl">चोरी</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#ea580c,#9a3412);width:30%"><div class="pct">30%</div><div class="lbl">मेनू</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#d97706,#92400e);width:20%"><div class="pct">20%</div><div class="lbl">स्टॉक</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#ca8a04,#854d0e);width:8%"><div class="pct">8%</div><div class="lbl">Aggr</div></div>
+          <div class="roi-seg" style="background:linear-gradient(135deg,#0f766e,#047857);width:5%"><div class="pct">5%</div><div class="lbl">GST</div></div>
+        </div>
+        <div class="roi-legend">
+          <div class="roi-legend-item"><div class="roi-dot" style="background:#dc2626"></div>चोरी और pilferage<span class="roi-num">₹1,80,000</span></div>
+          <div class="roi-legend-item"><div class="roi-dot" style="background:#ea580c"></div>मेनू-गड़बड़ी ठीक<span class="roi-num">₹1,44,000</span></div>
+          <div class="roi-legend-item"><div class="roi-dot" style="background:#d97706"></div>स्टॉक-आउट recovery<span class="roi-num">₹96,000</span></div>
+          <div class="roi-legend-item"><div class="roi-dot" style="background:#ca8a04"></div>एग्रीगेटर clarity<span class="roi-num">₹42,000</span></div>
+          <div class="roi-legend-item"><div class="roi-dot" style="background:#0f766e"></div>GST + audit time<span class="roi-num">₹24,000</span></div>
+          <div class="roi-legend-item" style="font-weight:800;border-top:1px solid var(--border);padding-top:8px;margin-top:4px;"><div class="roi-dot" style="background:var(--ink)"></div>कुल recovery<span class="roi-num">₹4,86,000</span></div>
+        </div>
+      </div>
     </div>
-    <div class="sol">
-      <div class="h">✓ चैनल-वार प्राइसिंग इंजन</div>
-      <div class="b">एक बार सेट करें: Swiggy +30%, Zomato +25%, Dunzo +20%। मेनू एडिट होते ही अपने आप रिपब्लिश। मिन-मार्जिन फ्लोर लॉस वाले प्राइस को ब्लॉक करता है।</div>
+  </section>
+
+  <section class="section">
+    <span class="section-tag">14 दिनों में स्विच</span>
+    <h2>शून्य rollback रिस्क। हम आपके मौजूदा POS के साथ 1 हफ़्ता parallel चलाते हैं।</h2>
+
+    <div class="timeline-wrap">
+      <svg class="timeline-svg" viewBox="0 0 900 80" preserveAspectRatio="none">
+        <line x1="60" y1="40" x2="840" y2="40" stroke="#d9cab3" stroke-width="3"/>
+        <circle cx="80" cy="40" r="16" fill="#cc5a16"/>
+        <text x="80" y="46" text-anchor="middle" fill="white" font-weight="800" font-size="13" font-family="DM Sans">0</text>
+        <circle cx="340" cy="40" r="16" fill="#cc5a16"/>
+        <text x="340" y="46" text-anchor="middle" fill="white" font-weight="800" font-size="13" font-family="DM Sans">3</text>
+        <circle cx="600" cy="40" r="16" fill="#cc5a16"/>
+        <text x="600" y="46" text-anchor="middle" fill="white" font-weight="800" font-size="13" font-family="DM Sans">7</text>
+        <circle cx="820" cy="40" r="20" fill="#047857"/>
+        <text x="820" y="47" text-anchor="middle" fill="white" font-weight="800" font-size="13" font-family="DM Sans">14</text>
+      </svg>
+      <div class="timeline-steps">
+        <div class="timeline-step"><div class="timeline-day">दिन 0</div><div class="timeline-title">शुरुआत</div><div class="timeline-desc">Account live · मेनू upload · WhatsApp staff onboarding</div></div>
+        <div class="timeline-step"><div class="timeline-day">दिन 3</div><div class="timeline-title">डेटा माइग्रेशन पूरा</div><div class="timeline-desc">मेनू, customer, supplier, 12-महीने sales history</div></div>
+        <div class="timeline-step"><div class="timeline-day">दिन 7</div><div class="timeline-title">Parallel run</div><div class="timeline-desc">दोनों POS साथ · Reconcile · stock + revenue validate</div></div>
+        <div class="timeline-step"><div class="timeline-day">दिन 14</div><div class="timeline-title">Full cutover</div><div class="timeline-desc">पुराना POS बंद · एग्रीगेटर मेनू सिंक · आप live</div></div>
+      </div>
     </div>
-    <div class="sol">
-      <div class="h">✓ चैनल P&L डैशबोर्ड</div>
-      <div class="b">ग्रॉस − कमीशन − फूड कॉस्ट = प्रॉफिट, हर चैनल पर, हर दिन। "क्या Zomato फायदेमंद है?" का असली जवाब, संख्या के साथ।</div>
+  </section>
+
+  <section class="cta-section">
+    <h2>अगले महीने ही पहले ₹40,000 बचाएँ।</h2>
+    <p>30-मिनट का demo book करें। हम आपके data से दिखाएँगे — कौन से leaks आपका POS miss कर रहा है।</p>
+    <div class="cta-stats">
+      <div><div class="cta-stat-num">3 महीने</div><div class="cta-stat-label">Professional मुफ़्त</div></div>
+      <div><div class="cta-stat-num">72 घंटे</div><div class="cta-stat-label">माइग्रेशन</div></div>
+      <div><div class="cta-stat-num">30%+</div><div class="cta-stat-label">साल-1 बचत गारंटी</div></div>
     </div>
-    <div class="sol">
-      <div class="h">✓ GST व सेटलमेंट ऑटोमेशन</div>
-      <div class="b">हर ऑर्डर पर Sec 9(5) ECO स्प्लिट ट्रैक। साप्ताहिक सेटलमेंट CSV अपलोड अपने आप मिलान। साल-अंत एक्सपोर्ट 30 सेकंड में तैयार।</div>
-    </div>
-  </div>
+    <a href="mailto:sales@atithi-setu.com" class="cta-btn">30-मिनट demo book करें →</a>
+    <div class="cta-contact"><strong>sales@atithi-setu.com</strong> · WhatsApp <strong>+91-XXXXX-XXXXX</strong> · atithi-setu.com</div>
+  </section>
 
-  <!-- ═══ § 3 · Comparison ═════════════════════════════════ -->
-  <h2><span class="num">3</span>Atithi-Setu बनाम legacy POS — फ़ीचर-दर-फ़ीचर</h2>
-  <p>हमने legacy POS की मौजूदा सार्वजनिक कीमत और फ़ीचर सूची (FY 2026) से हर दावे की जाँच की। ये रहा सच:</p>
-
-  <table class="compare">
-    <thead><tr><th>क्षमता</th><th class="saffron">Atithi-Setu</th><th>Legacy POS</th></tr></thead>
-    <tbody>
-      <tr><td>सालाना सब्सक्रिप्शन (एक रेस्टोरेंट)</td><td class="win">₹11,988 (Starter)</td><td class="lose">₹25,000–40,000 + अलग मॉड्यूल फीस</td></tr>
-      <tr><td>क्लाउड-नेटिव (किसी भी डिवाइस, ब्राउज़र पर)</td><td class="win"><span class="check">✓</span> कोई हार्डवेयर बंधन नहीं</td><td class="lose"><span class="cross">✗</span> उनका हार्डवेयर, ~₹50 हज़ार अग्रिम</td></tr>
-      <tr><td>मल्टी-एग्रीगेटर डिलीवरी इंटीग्रेशन</td><td class="win"><span class="check">✓</span> इन-बिल्ट (Swiggy/Zomato/Dunzo/Magicpin/ONDC)</td><td class="neutral">⚠ ऐड-ऑन, ₹500-1500/महीना प्रति चैनल</td></tr>
-      <tr><td>पूर्ण इन्वेंट्री मॉड्यूल (FIFO बैच, रेसिपी वर्शनिंग, सीज़नैलिटी)</td><td class="win"><span class="check">✓</span> सभी टियर में मुफ्त</td><td class="lose"><span class="cross">✗</span> सिर्फ बेसिक स्टॉक ट्रैकिंग</td></tr>
-      <tr><td>हर ऑर्डर पर रेसिपी-आधारित ऑटो-डिडक्शन</td><td class="win"><span class="check">✓</span> ऑटोमिक SQL, idempotent reversal</td><td class="neutral">⚠ मैनुअल / आंशिक</td></tr>
-      <tr><td>दिन-वार खपत पूर्वानुमान + ऑटो-PO</td><td class="win"><span class="check">✓</span> 9 बजे क्रॉन + सप्लायर PDF ईमेल</td><td class="lose"><span class="cross">✗</span> उपलब्ध नहीं</td></tr>
-      <tr><td>चैनल-वार P&L एनालिटिक्स</td><td class="win"><span class="check">✓</span> मानक रिपोर्ट</td><td class="lose"><span class="cross">✗</span> सिर्फ ग्रॉस रेवेन्यू</td></tr>
-      <tr><td>AI रसीद OCR (बिल फोटो → आइटम अपने आप)</td><td class="win"><span class="check">✓</span> Gemini Vision इंटीग्रेटेड</td><td class="lose"><span class="cross">✗</span> मैनुअल एंट्री</td></tr>
-      <tr><td>AI मेनू इमेज जनरेशन</td><td class="win"><span class="check">✓</span> Gemini के ज़रिए बिल्ट-इन</td><td class="lose"><span class="cross">✗</span> खुद अपलोड करें</td></tr>
-      <tr><td>WhatsApp + Telegram + ईमेल + SMS नोटिफिकेशन</td><td class="win"><span class="check">✓</span> चारों चैनल, कस्टम टेम्पलेट</td><td class="neutral">⚠ सिर्फ SMS / ईमेल, fixed templates</td></tr>
-      <tr><td>होटल / हॉस्पिटैलिटी मॉड्यूल (रूम, बुकिंग, Form-C)</td><td class="win"><span class="check">✓</span> Professional टियर में पूर्ण मॉड्यूल</td><td class="lose"><span class="cross">✗</span> उपलब्ध नहीं</td></tr>
-      <tr><td>सेटलमेंट CSV रीकंसिलिएशन</td><td class="win"><span class="check">✓</span> external_order_id से ऑटो-मैच</td><td class="lose"><span class="cross">✗</span> मैनुअल</td></tr>
-      <tr><td>आधुनिक मोबाइल-फर्स्ट UI (React 19, Tailwind)</td><td class="win"><span class="check">✓</span> "Apple जैसा लगता है" — हमारे ग्राहक</td><td class="neutral">⚠ पुरानी, धीमी</td></tr>
-      <tr><td>legacy POS से मुफ्त डेटा माइग्रेशन</td><td class="win"><span class="check">✓</span> 3-दिन माइग्रेशन, 3 महीने मुफ्त</td><td class="lose">लागू नहीं (switching cost)</td></tr>
-    </tbody>
-  </table>
-
-  <div class="insight">
-    <div class="badge">रणनीतिक अंतर्दृष्टि · BCG दृष्टिकोण</div>
-    <h4>legacy POS की असली ताक़त फ़ीचर नहीं — switching cost है।</h4>
-    <p>legacy POS ने अपना बिज़नेस मज़बूत किया है माइग्रेशन को मुश्किल बनाकर: हर outlet पर अलग हार्डवेयर, proprietary एक्सपोर्ट फॉर्मेट, स्टाफ को दोबारा ट्रेनिंग। हम इस मोट पर सीधा हमला करते हैं: <strong>मुफ्त माइग्रेशन, हार्डवेयर बायबैक, 3 महीने मुफ्त रन, और 3 ऐसे मॉड्यूल (Hospitality, पूर्ण Inventory, AI) जो उनके पास हैं ही नहीं। यही combination switch को worth बनाता है</strong> — कच्ची कीमत नहीं। मालिक ₹500/महीने की बचत के लिए price-sensitive नहीं हैं; वे ₹40,000/महीने के खोए revenue के लिए ज़रूर हैं — जिसे मौजूदा tool हल नहीं कर पाता।</p>
-  </div>
-
-  <!-- ═══ § 4 · Pricing ═════════════════════════════════════ -->
-  <h2><span class="num">4</span>ईमानदार, all-inclusive कीमत</h2>
-  <p>कोई per-module फीस नहीं। कोई हार्डवेयर बंधन नहीं। कोई सालाना कॉन्ट्रैक्ट ज़रूरी नहीं।</p>
-
-  <div class="pricing-grid">
-    <div class="pcard">
-      <div class="name">Starter</div>
-      <div class="price">₹999<span class="small">/महीना</span></div>
-      <div class="tagline">एक रेस्टोरेंट · 30 टेबल तक · 1 owner login</div>
-      <ul>
-        <li><strong>नीचे की हर चीज़ शामिल</strong></li>
-        <li>QR ऑर्डरिंग · KDS · इनवॉइसिंग</li>
-        <li>पूर्ण इन्वेंट्री मॉड्यूल</li>
-        <li>2 डिलीवरी चैनल (आपकी पसंद)</li>
-        <li>WhatsApp + ईमेल नोटिफिकेशन</li>
-        <li>मानक सपोर्ट (ईमेल · 24h SLA)</li>
-      </ul>
-    </div>
-    <div class="pcard featured">
-      <div class="name">Professional</div>
-      <div class="price featured-price">₹1,999<span class="small">/महीना</span></div>
-      <div class="tagline">अधिकांश रेस्टोरेंट यही चुनते हैं · बेस्ट ROI</div>
-      <ul>
-        <li><strong>Starter की हर चीज़</strong></li>
-        <li>असीमित टेबल · 5 admin users</li>
-        <li>सभी 6 डिलीवरी चैनल</li>
-        <li>होटल / रूम मॉड्यूल शामिल</li>
-        <li>AI रसीद OCR + इमेज जनरेशन</li>
-        <li>चैनल P&L एनालिटिक्स</li>
-        <li>प्राथमिकता सपोर्ट (WhatsApp · 4h SLA)</li>
-      </ul>
-    </div>
-    <div class="pcard">
-      <div class="name">Enterprise</div>
-      <div class="price">₹4,999<span class="small">/मा · प्रति आउटलेट</span></div>
-      <div class="tagline">मल्टी-आउटलेट चेन · 5+ लोकेशन</div>
-      <ul>
-        <li><strong>Professional की हर चीज़</strong></li>
-        <li>5+ आउटलेट पर volume discount</li>
-        <li>केंद्रीकृत मल्टी-आउटलेट डैशबोर्ड</li>
-        <li>कस्टम इंटीग्रेशन और API एक्सेस</li>
-        <li>समर्पित success manager</li>
-        <li>SLA-समर्थित 1 घंटा response</li>
-        <li>White-label विकल्प उपलब्ध</li>
-      </ul>
-    </div>
-  </div>
-
-  <div class="callout">
-    <strong>पुराने POS से switch करें और बचाएँ:</strong> Professional plan पर पहले 3 महीने मुफ्त। हम आपका डेटा (मेनू, सप्लायर, ग्राहक, बिक्री इतिहास) 72 घंटे में migrate करते हैं। पहले साल में आपके legacy POS बिल के मुकाबले 30% बचत नहीं हुई — हम अंतर वापस करते हैं।
-  </div>
-
-  <!-- ═══ § 5 · ROI ═════════════════════════════════════════ -->
-  <h2><span class="num">5</span>असली ROI — 60-कवर/दिन वाला रेस्टोरेंट (₹5 लाख/महीना फूड कॉस्ट)</h2>
-
-  <div class="roi-box">
-    <h3>हमारा सामान्य ग्राहक पहले 90 दिनों में क्या वापस पाता है</h3>
-    <div class="roi-grid">
-      <div class="roi-cell"><div class="v">₹40,500</div><div class="l">मासिक रिकवरी</div></div>
-      <div class="roi-cell"><div class="v">8.1%</div><div class="l">फूड कॉस्ट में कमी</div></div>
-      <div class="roi-cell"><div class="v">12-15×</div><div class="l">90 दिनों में ROI</div></div>
-      <div class="roi-cell"><div class="v">&lt;14 दिन</div><div class="l">Payback अवधि</div></div>
-    </div>
-    <p style="margin-top: 18px; font-size: 10.5pt; color: var(--ink-2);">
-      विवरण: ₹15 हज़ार वेरियंस/चोरी पकड़ी (Inventory) · ₹4,500 owner-time बचा (Auto-PO) · ₹6 हज़ार रेसिपी drift पकड़ा · ₹4 हज़ार खराब होने से बचा · ₹3,500 सप्लायर रेट बढ़त पकड़ी · ₹3 हज़ार stock-out रोका · ₹2 हज़ार packaging बचत · ₹2,500 seasonal forecast। ये conservative estimate हैं — multi-outlet chains के लिए linearly scale करते हैं।
-    </p>
-  </div>
-
-  <!-- ═══ § 6 · Migration ═══════════════════════════════════ -->
-  <h2><span class="num">6</span>पुराने POS से switch का असली अनुभव</h2>
-
-  <div class="timeline">
-    <div class="step"><span class="when">Day 0 — साइनअप</span><span class="what">30 मिनट का onboarding कॉल। आपका legacy POS एक्सपोर्ट, GSTIN, हार्डवेयर सूची।</span></div>
-    <div class="step"><span class="when">Day 1-3 — migration</span><span class="what">मेनू (इमेज सहित), सप्लायर, ग्राहक इतिहास, पिछले 12 महीने की बिक्री import। आप staging पर verify करते हैं।</span></div>
-    <div class="step"><span class="when">Day 4 — go-live</span><span class="what">Atithi-Setu पर traffic switch। 7 दिन तक legacy POS parallel चलता रहता है — सुरक्षा के लिए।</span></div>
-    <div class="step"><span class="when">Day 11 — पूर्ण cut-over</span><span class="what">legacy POS बंद। 3-महीने मुफ्त रन शुरू। आपका success manager हर हफ्ते check-in करता है।</span></div>
-  </div>
-
-  <div class="callout">
-    <strong>आपका क्या रहेगा:</strong> आपका डेटा, आपका डोमेन, आपके ग्राहक। आप कभी भी पूरा CSV export माँग सकते हैं — सब्सक्रिप्शन खत्म होने के बाद भी। legacy POS का डेटा हमेशा आपका है।
-  </div>
-
-  <!-- ═══ § 7 · Why now ════════════════════════════════════ -->
-  <h2><span class="num">7</span>इसी तिमाही में switch क्यों ज़रूरी (बाद में नहीं)</h2>
-
-  <div class="insight">
-    <div class="badge">रणनीतिक अंतर्दृष्टि · timing</div>
-    <h4>2026 में भारतीय F&B पर तीन ताकतें एक साथ आ रही हैं।</h4>
-    <p>
-      <strong>(1) फूड कॉस्ट महंगाई</strong> — प्याज, टमाटर, तेल सब साल-दर-साल 18-25% बढ़े। मार्जिन का दबाव दशक के उच्चतम स्तर पर। बिना खपत पूर्वानुमान वाले रेस्टोरेंट सिर्फ over-ordering से 4-6% खो रहे हैं।<br/><br/>
-      <strong>(2) ₹5 करोड़+ turnover पर अनिवार्य GST e-invoicing</strong> FY 2026-27 से। Atithi-Setu का GST मॉड्यूल पहले से तैयार है; owners on legacy platforms महंगे add-ons की रिपोर्ट कर रहे हैं।<br/><br/>
-      <strong>(3) ONDC की seller mandate विस्तार</strong> — Q3 FY27 तक एग्रीगेटर्स पर रेस्टोरेंट्स को ONDC पर भी प्रकाशित करना अनिवार्य हो सकता है। Atithi-Setu में ONDC adapter तैयार है; legacy POS के पास कोई रोडमैप नहीं।<br/><br/>
-      <strong>अगले 90 दिनों में switch करने वाले मालिक 2026 का pricing हमेशा के लिए लॉक करते हैं। एक तिमाही और रुकें, 20% ज़्यादा देंगे।</strong>
-    </p>
-  </div>
-
-  <!-- ═══ § 8 · Objections ═════════════════════════════════ -->
-  <h2><span class="num">8</span>आम सवाल — ईमानदार जवाब</h2>
-
-  <ul class="checks">
-    <li><strong>"अगर Atithi-Setu बंद हो गया तो?"</strong> — हम पहले दिन से profitable हैं (छोटी टीम, VC पर निर्भरता नहीं)। साथ ही: कभी भी open data export। आपका डेटा portable है।</li>
-    <li><strong>"legacy POS के 60,000 रेस्टोरेंट हैं — वो ज़रूर कुछ अच्छा कर रहे होंगे।"</strong> — उन्हें 6 साल की head start मिली। आज का product gap असली है और हमारे ग्राहक इसका प्रमाण हैं।</li>
-    <li><strong>"Peak hours में migration risky लगता है।"</strong> — हम मंगलवार/बुधवार सुबह (आपके slow days) migration करते हैं, legacy POS 7 दिन parallel चलता है। Zero rollback risk।</li>
-    <li><strong>"मेरा CA legacy POS रिपोर्ट्स से comfortable है।"</strong> — हम वही formats (GST-1, GST-3B, COGS, P&L) export करते हैं, साथ ही Channel P&L जो legacy POS नहीं देता। आपके CA को बेहतर लगेगा।</li>
-    <li><strong>"3 महीने मुफ्त में क्या catch है?"</strong> — कोई नहीं। कोई setup फीस नहीं, कोई contract lock-in नहीं, मुफ्त period के बाद महीने-दर-महीने। काम न आए तो छोड़ दें। अब तक किसी ने नहीं छोड़ा।</li>
-  </ul>
-
-  <!-- ═══ CTA ═══════════════════════════════════════════════ -->
-  <div class="cta">
-    <div>
-      <h2 style="color:white"><span class="num">9</span>अगले 14 दिन</h2>
-      <p>
-        <strong style="color:white">Step 1.</strong> 30 मिनट का demo कॉल (ऑनलाइन) — अपना मेनू Atithi-Setu पर चलते देखें।<br/>
-        <strong style="color:white">Step 2.</strong> हाँ कहने के 72 घंटे में migration शुरू।<br/>
-        <strong style="color:white">Step 3.</strong> Day 4 को go-live, 3-महीने मुफ्त रन शुरू।<br/>
-        <span style="color:#fde2c8;">कोई दबाव नहीं, कोई commitment नहीं — जब तक आप अपना data चलते न देख लें।</span>
-      </p>
-    </div>
-    <div class="btn">
-      <div class="l1">मुफ्त ट्रायल शुरू करें</div>
-      <div class="l2">+91 — अभी बात करें</div>
-      <div class="l3">demo@atithi-setu.com</div>
-    </div>
-  </div>
-
-  <div class="foot">
-    <strong style="color: var(--saffron-2)">Atithi-Setu</strong> · भारत के लिए बना आधुनिक hospitality प्लेटफ़ॉर्म · GST-तैयार · ONDC-compliant · AES-256 encrypted<br/>
-    मोबाइल · टैबलेट · डेस्कटॉप · प्रिंट · WhatsApp + Telegram + ईमेल + SMS · 13 user roles · Multi-tenant security<br/>
-    Atithi-Setu sales leadership द्वारा तैयार, BCG-trained रणनीति सलाहकारों द्वारा समीक्षित। 2026।
-  </div>
+  <footer class="footer">
+    <div><div class="footer-brand">अतिथि-सेतु</div><div class="footer-meta">भारत में निर्मित · भारतीय आतिथ्य के लिए · 2026</div></div>
+    <div class="footer-meta">Restaurant Proposal (Hindi) · v2026.Q2</div>
+  </footer>
 
 </div>
 </body>

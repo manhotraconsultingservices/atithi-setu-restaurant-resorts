@@ -3,301 +3,385 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Atithi-Setu Franchise Networks — 50 outlets को एक स्क्रीन से चलाएँ</title>
+<title>अतिथि-सेतु — Franchise networks के लिए एक platform</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700;800;900&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&family=Noto+Sans+Devanagari:wght@400;500;600;700;800;900&family=Playfair+Display:wght@600;700;800;900&display=swap" rel="stylesheet">
 <style>
-  :root { --saffron: #cc5a16; --saffron-2: #a84612; --saffron-light: #fef0e4; --emerald: #0f766e; --emerald-light: #d1fae5; --emerald-bright: #10b981; --ruby: #9f1239; --ruby-light: #fee2e2; --indigo: #1e3a5f; --indigo-light: #dbeafe; --gold: #b8860b; --cream: #faf7f2; --ink: #14110c; --ink-2: #3d3128; --ink-muted: #6b5d52; --border: #e8dfd0; }
+  :root {
+    --saffron: #cc5a16;
+    --saffron-2: #a84612;
+    --saffron-light: #fef0e4;
+    --emerald: #0f766e;
+    --emerald-2: #047857;
+    --emerald-bright: #10b981;
+    --ruby: #9f1239;
+    --indigo: #1e3a5f;
+    --gold: #b8860b;
+    --plum: #6b21a8;
+    --plum-2: #4c1d95;
+    --cream: #faf7f2;
+    --cream-2: #f3ece0;
+    --ink: #14110c;
+    --ink-2: #3d3128;
+    --ink-muted: #6b5d52;
+    --border: #e8dfd0;
+  }
   * { box-sizing: border-box; }
-  body { font-family: 'Noto Sans Devanagari', 'DM Sans', sans-serif; background: var(--cream); color: var(--ink); font-size: 11pt; line-height: 1.65; margin: 0; padding: 0; }
-  .page { max-width: 980px; margin: 0 auto; background: white; padding: 30px 38px; box-shadow: 0 4px 30px rgba(0,0,0,0.06); }
-  .cover { background: linear-gradient(135deg, var(--indigo) 0%, #2a4a75 50%, #1a1208 100%); color: white; padding: 60px 48px; border-radius: 20px; margin: -30px -38px 30px; position: relative; overflow: hidden; }
-  .cover::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 8px; background: linear-gradient(90deg, var(--saffron), var(--gold), var(--saffron)); }
-  .cover .brand { font-size: 10pt; text-transform: uppercase; letter-spacing: 4px; color: var(--saffron); font-weight: 800; margin-bottom: 20px; font-family: 'DM Sans', sans-serif; }
-  .cover h1 { font-family: 'Noto Sans Devanagari', serif; font-size: 28pt; line-height: 1.25; font-weight: 800; margin: 0 0 16px; }
-  .cover h1 .accent { color: var(--saffron); }
-  .cover .sub { font-size: 14pt; color: #d8cbb9; max-width: 760px; line-height: 1.55; }
-  .cover .ribbon { display: inline-block; margin-top: 28px; background: var(--saffron); color: white; padding: 10px 20px; border-radius: 8px; font-size: 11pt; font-weight: 700; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: 'Noto Sans Devanagari', 'DM Sans', sans-serif; background: var(--cream); color: var(--ink); font-size: 11pt; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  .page { max-width: 1020px; margin: 0 auto; background: white; box-shadow: 0 4px 30px rgba(0,0,0,0.06); }
 
-  h2 { font-family: 'Noto Sans Devanagari', 'Playfair Display', serif; font-size: 20pt; color: var(--ink); margin: 36px 0 14px; font-weight: 800; line-height: 1.2; }
-  h2 .num { display: inline-block; width: 36px; height: 36px; line-height: 36px; background: var(--indigo); color: white; border-radius: 50%; text-align: center; font-size: 16pt; margin-right: 10px; vertical-align: 4px; font-family: 'DM Sans', sans-serif; }
-  h3 { font-family: 'Noto Sans Devanagari', serif; font-size: 14pt; margin: 20px 0 8px; color: var(--indigo); font-weight: 700; }
-  p { margin: 0 0 12px; }
+  .hero { background: linear-gradient(135deg, #6b21a8 0%, #4c1d95 55%, #2e1065 100%); color: white; padding: 44px 48px 36px; position: relative; overflow: hidden; }
+  .hero::before { content: ''; position: absolute; right: -120px; top: -120px; width: 360px; height: 360px; border-radius: 50%; background: rgba(204,90,22,0.18); }
+  .hero-grid { position: relative; display: grid; grid-template-columns: 1.4fr 1fr; gap: 36px; align-items: center; z-index: 2; }
+  .brand-tag { font-size: 9pt; letter-spacing: 3px; opacity: 0.85; font-weight: 700; color: #f0c896; }
+  .hero h1 { font-family: 'Noto Sans Devanagari', serif; font-size: 30pt; line-height: 1.2; font-weight: 800; margin: 14px 0 14px; }
+  .hero-sub { font-size: 12pt; opacity: 0.95; max-width: 480px; }
+  .hero-stat { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 16px; padding: 24px 26px; text-align: center; }
+  .hero-stat-label { font-size: 10pt; letter-spacing: 1.5px; opacity: 0.85; color: #f0c896; }
+  .hero-stat-num { font-family: 'Playfair Display', serif; font-size: 52pt; line-height: 1; font-weight: 900; margin: 8px 0 4px; color: white; }
+  .hero-stat-num small { font-size: 22pt; opacity: 0.85; }
+  .hero-stat-foot { font-size: 10pt; opacity: 0.9; margin-top: 6px; }
+  .hero-ribbon { display: inline-block; background: var(--saffron); color: white; font-weight: 800; padding: 8px 18px; border-radius: 999px; font-size: 10.5pt; margin-top: 18px; box-shadow: 0 6px 20px rgba(0,0,0,0.2); }
 
-  .callout { background: var(--indigo-light); border-left: 4px solid var(--indigo); padding: 16px 20px; border-radius: 0 12px 12px 0; margin: 16px 0; font-size: 10.5pt; }
-  .callout strong { color: var(--indigo); }
+  .kpi-strip { display: grid; grid-template-columns: repeat(4, 1fr); background: var(--ink-2); color: white; }
+  .kpi { padding: 22px 18px; text-align: center; border-right: 1px solid rgba(255,255,255,0.1); }
+  .kpi:last-child { border-right: 0; }
+  .kpi-num { font-family: 'Playfair Display', serif; font-size: 30pt; font-weight: 800; line-height: 1; color: #f0c896; }
+  .kpi-num small { font-size: 14pt; opacity: 0.8; }
+  .kpi-label { font-size: 10pt; opacity: 0.9; margin-top: 8px; }
 
-  .insight { background: linear-gradient(135deg, #1a1208 0%, #2a1d10 100%); color: white; padding: 22px 26px; border-radius: 14px; margin: 24px 0; font-size: 10.5pt; line-height: 1.6; border-left: 4px solid var(--saffron); }
-  .insight .badge { display: inline-block; background: var(--saffron); color: white; padding: 4px 12px; border-radius: 20px; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 2px; font-weight: 800; margin-bottom: 10px; font-family: 'DM Sans', sans-serif; }
-  .insight h4 { color: white; margin: 0 0 8px; font-size: 13pt; font-family: 'Noto Sans Devanagari', serif; }
-  .insight p { margin: 0; color: rgba(255,255,255,0.92); }
+  .section { padding: 36px 48px; border-bottom: 1px solid var(--border); }
+  .section-tag { display: inline-block; background: var(--saffron-light); color: var(--saffron-2); padding: 4px 12px; border-radius: 999px; font-size: 9.5pt; font-weight: 700; letter-spacing: 1px; }
+  .section h2 { font-family: 'Noto Sans Devanagari', serif; font-size: 22pt; font-weight: 800; margin: 12px 0 6px; line-height: 1.25; }
+  .section-sub { color: var(--ink-muted); font-size: 11pt; margin-bottom: 24px; max-width: 720px; }
 
-  .pains, .solutions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 20px 0; }
-  .pain { background: var(--ruby-light); border-left: 4px solid var(--ruby); padding: 14px 18px; border-radius: 0 10px 10px 0; }
-  .pain .h { font-weight: 700; color: var(--ruby); font-size: 11pt; margin-bottom: 4px; }
-  .pain .b { font-size: 10.5pt; color: var(--ink-2); line-height: 1.55; }
-  .pain .cost { display: inline-block; margin-top: 6px; background: var(--ruby); color: white; padding: 2px 8px; border-radius: 4px; font-size: 9pt; font-weight: 700; }
+  .volume-chart { background: var(--cream); border-radius: 16px; padding: 28px; }
+  .volume-bars { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; align-items: end; margin-bottom: 20px; }
+  .volume-col { text-align: center; }
+  .volume-bar { border-radius: 8px 8px 0 0; display: flex; align-items: flex-end; justify-content: center; padding: 8px 0; color: white; font-weight: 800; font-family: 'Playfair Display', serif; font-size: 14pt; }
+  .volume-bar.tier-1 { background: linear-gradient(180deg, #6b21a8, #4c1d95); height: 240px; }
+  .volume-bar.tier-2 { background: linear-gradient(180deg, #7c3aed, #5b21b6); height: 200px; }
+  .volume-bar.tier-3 { background: linear-gradient(180deg, #9333ea, #6b21a8); height: 160px; }
+  .volume-bar.tier-4 { background: linear-gradient(180deg, #a855f7, #7e22ce); height: 132px; }
+  .volume-bar.tier-5 { background: linear-gradient(180deg, #c084fc, #9333ea); height: 100px; }
+  .volume-bar small { display: block; font-size: 8.5pt; opacity: 0.85; font-weight: 500; }
+  .volume-foot { background: white; border: 1px solid var(--border); border-radius: 10px; padding: 14px 12px; text-align: center; }
+  .volume-outlets { font-family: 'Playfair Display', serif; font-size: 14pt; font-weight: 800; color: var(--plum); }
+  .volume-desc { font-size: 9pt; color: var(--ink-muted); margin-top: 4px; }
+  .volume-savings { background: linear-gradient(135deg, #d1fae5, #a7f3d0); border-radius: 14px; padding: 22px 26px; margin-top: 22px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 20px; }
+  .volume-savings-text { font-size: 13pt; font-weight: 700; color: var(--emerald-2); }
+  .volume-savings-text small { display: block; font-size: 10pt; font-weight: 500; color: var(--ink-2); margin-top: 4px; }
+  .volume-savings-num { font-family: 'Playfair Display', serif; font-size: 36pt; font-weight: 900; color: var(--emerald-2); line-height: 1; }
+  .volume-savings-num small { display: block; font-size: 10pt; font-weight: 500; opacity: 0.85; margin-top: 2px; }
 
-  table.compare { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
-  table.compare th { background: var(--ink); color: white; padding: 12px 14px; text-align: left; font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1px; font-weight: 800; font-family: 'DM Sans', sans-serif; }
-  table.compare th.indigo { background: var(--indigo); }
-  table.compare td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  table.compare tr:last-child td { border-bottom: 0; }
-  table.compare td:first-child { font-weight: 600; color: var(--ink); width: 30%; }
-  table.compare td.win { color: var(--emerald); font-weight: 600; }
-  table.compare td.lose { color: var(--ruby); }
-  table.compare .check { color: var(--emerald-bright); font-weight: 800; }
-  table.compare .cross { color: var(--ruby); font-weight: 800; }
+  .pyramid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+  .pyramid-col { border: 2px solid var(--border); border-radius: 14px; padding: 22px; background: white; }
+  .pyramid-col.hq { border-color: var(--plum); background: linear-gradient(180deg, #faf5ff 0%, white 60%); }
+  .pyramid-col.outlet { border-color: var(--saffron); background: linear-gradient(180deg, #fff8f0 0%, white 60%); }
+  .pyramid-title { font-family: 'Noto Sans Devanagari', serif; font-size: 16pt; font-weight: 800; margin-bottom: 14px; }
+  .pyramid-col.hq .pyramid-title { color: var(--plum-2); }
+  .pyramid-col.outlet .pyramid-title { color: var(--saffron-2); }
+  .pyramid-list { list-style: none; padding: 0; margin: 0; }
+  .pyramid-list li { padding: 10px 12px; margin-bottom: 8px; background: var(--cream); border-radius: 8px; font-size: 10pt; display: flex; align-items: center; gap: 10px; }
+  .pyramid-icon { font-size: 16pt; flex-shrink: 0; }
+  .pyramid-cost { margin-left: auto; font-weight: 800; color: var(--ruby); font-family: 'Playfair Display', serif; font-size: 12pt; }
 
-  table.volume { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 11pt; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.06); }
-  table.volume th { background: var(--indigo); color: white; padding: 14px 16px; text-align: center; font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1.2px; font-weight: 800; font-family: 'DM Sans', sans-serif; }
-  table.volume th:first-child { text-align: left; }
-  table.volume td { padding: 14px 16px; border-bottom: 1px solid var(--border); text-align: center; font-weight: 700; font-family: 'Playfair Display', serif; font-size: 14pt; }
-  table.volume td:first-child { text-align: left; font-family: 'Noto Sans Devanagari', sans-serif; font-size: 11pt; font-weight: 700; }
-  table.volume tr:last-child td { border-bottom: 0; }
-  table.volume tr.highlight { background: var(--saffron-light); }
-  table.volume tr.highlight td { color: var(--saffron-2); }
-  table.volume .save { font-size: 8.5pt; color: var(--emerald); font-weight: 600; font-family: 'Noto Sans Devanagari', sans-serif; display: block; margin-top: 2px; }
+  .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .feature-card { background: white; border: 1px solid var(--border); border-radius: 14px; padding: 24px 22px; position: relative; }
+  .feature-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px; background: linear-gradient(90deg, var(--plum), var(--saffron)); border-radius: 14px 14px 0 0; }
+  .feature-icon { font-size: 36pt; margin-bottom: 10px; }
+  .feature-name { font-family: 'Noto Sans Devanagari', serif; font-size: 16pt; font-weight: 800; color: var(--ink); margin-bottom: 8px; }
+  .feature-desc { font-size: 10pt; color: var(--ink-2); line-height: 1.55; }
+  .feature-stat { font-family: 'Playfair Display', serif; font-size: 14pt; font-weight: 800; color: var(--plum); margin-top: 10px; }
 
-  .roi-box { background: linear-gradient(135deg, var(--saffron-light), #fde2c8); border: 2px solid var(--saffron); border-radius: 16px; padding: 26px; margin: 24px 0; }
-  .roi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 14px; }
-  .roi-cell { background: white; padding: 16px; border-radius: 12px; text-align: center; }
-  .roi-cell .v { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 800; color: var(--saffron-2); line-height: 1; }
-  .roi-cell .l { font-size: 9.5pt; color: var(--ink-muted); margin-top: 6px; font-weight: 600; line-height: 1.3; }
+  .roi-network { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .roi-net-card { background: white; border: 1px solid var(--border); border-radius: 14px; padding: 20px 18px; text-align: center; }
+  .roi-net-outlets { font-family: 'Playfair Display', serif; font-size: 28pt; font-weight: 900; color: var(--plum); line-height: 1; }
+  .roi-net-outlets small { font-size: 12pt; opacity: 0.7; font-family: 'Noto Sans Devanagari'; }
+  .roi-net-label { font-size: 10pt; color: var(--ink-muted); margin: 6px 0; }
+  .roi-net-saving { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 800; color: var(--emerald-2); margin-top: 8px; }
+  .roi-net-saving small { font-size: 11pt; }
+  .roi-net-foot { font-size: 9.5pt; color: var(--ink-muted); margin-top: 4px; }
 
-  .cap-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 20px 0; }
-  .cap { background: var(--cream); border: 1px solid var(--border); border-top: 3px solid var(--indigo); border-radius: 0 0 12px 12px; padding: 16px 18px; }
-  .cap .h { font-weight: 700; color: var(--indigo); font-size: 11pt; margin-bottom: 6px; }
-  .cap .b { font-size: 10pt; color: var(--ink-2); line-height: 1.55; }
+  .whitelabel { background: linear-gradient(135deg, #1e3a5f 0%, #0f1f3a 100%); color: white; border-radius: 18px; padding: 36px; margin-top: 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: center; }
+  .whitelabel-title { font-family: 'Noto Sans Devanagari', serif; font-size: 22pt; font-weight: 800; margin: 0 0 12px; color: #f0c896; }
+  .whitelabel-desc { font-size: 11pt; opacity: 0.95; line-height: 1.65; }
+  .whitelabel-features { background: rgba(255,255,255,0.08); border-radius: 14px; padding: 22px; }
+  .whitelabel-features ul { list-style: none; padding: 0; margin: 0; }
+  .whitelabel-features li { padding: 8px 0; font-size: 10.5pt; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+  .whitelabel-features li:last-child { border-bottom: 0; }
+  .whitelabel-features li::before { content: '✦'; color: #f0c896; font-size: 12pt; }
 
-  .cta { background: var(--ink); color: white; padding: 30px 36px; border-radius: 18px; margin: 32px 0 0; display: grid; grid-template-columns: 2fr 1fr; gap: 20px; align-items: center; }
-  .cta h2 { color: white; margin: 0 0 6px; font-size: 18pt; }
-  .cta h2 .num { background: var(--saffron); }
-  .cta p { margin: 0; color: rgba(255,255,255,0.88); font-size: 10.5pt; }
-  .cta .btn { background: var(--saffron); color: white; padding: 18px 22px; border-radius: 12px; text-align: center; font-weight: 700; }
-  .cta .btn .l1 { font-size: 10pt; }
-  .cta .btn .l2 { font-family: 'Playfair Display', serif; font-size: 18pt; font-weight: 900; margin-top: 4px; }
-  .cta .btn .l3 { font-size: 9pt; opacity: 0.9; margin-top: 4px; font-family: 'DM Sans', sans-serif; }
+  .timeline-wrap { background: var(--cream); padding: 28px; border-radius: 16px; }
+  .timeline-svg { width: 100%; height: 80px; }
+  .timeline-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 14px; }
+  .timeline-step { text-align: center; }
+  .timeline-day { font-family: 'Playfair Display', serif; font-size: 20pt; font-weight: 900; color: var(--plum); line-height: 1; }
+  .timeline-title { font-weight: 700; font-size: 10.5pt; margin: 4px 0 4px; }
+  .timeline-desc { font-size: 9.5pt; color: var(--ink-muted); }
 
-  .foot { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 9.5pt; color: var(--ink-muted); text-align: center; line-height: 1.6; }
-  ul.checks { list-style: none; padding: 0; margin: 12px 0; }
-  ul.checks li { padding-left: 26px; margin-bottom: 8px; position: relative; font-size: 10.5pt; line-height: 1.55; }
-  ul.checks li::before { content: '✓'; position: absolute; left: 4px; top: 0; color: var(--emerald-bright); font-weight: 900; font-size: 13pt; }
+  .cta-section { background: linear-gradient(135deg, #6b21a8 0%, #4c1d95 100%); color: white; padding: 48px; text-align: center; }
+  .cta-section h2 { color: white; font-size: 24pt; font-family: 'Noto Sans Devanagari', serif; margin: 0 0 8px; }
+  .cta-section p { opacity: 0.92; max-width: 600px; margin: 0 auto 22px; font-size: 11.5pt; }
+  .cta-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; max-width: 640px; margin: 0 auto 30px; }
+  .cta-stat-num { font-family: 'Playfair Display', serif; font-size: 32pt; font-weight: 900; color: #f0c896; line-height: 1; }
+  .cta-stat-label { font-size: 9.5pt; opacity: 0.9; margin-top: 6px; }
+  .cta-btn { display: inline-block; background: linear-gradient(135deg, var(--saffron), var(--saffron-2)); color: white; padding: 16px 36px; border-radius: 999px; font-weight: 800; font-size: 13pt; text-decoration: none; box-shadow: 0 10px 30px rgba(204,90,22,0.4); }
+  .cta-contact { margin-top: 22px; font-size: 10pt; opacity: 0.85; }
+  .cta-contact strong { color: #f0c896; }
 
-  @page { size: A4; margin: 12mm; }
-  @media print { body { background: white; font-size: 10.5pt; } .page { box-shadow: none; padding: 0; max-width: none; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+  .footer { background: var(--ink); color: white; padding: 24px 48px; font-size: 9.5pt; display: grid; grid-template-columns: 1fr auto; align-items: center; }
+  .footer-brand { font-family: 'Playfair Display', serif; font-weight: 800; font-size: 13pt; color: var(--saffron); }
+  .footer-meta { opacity: 0.7; }
+
+  @media print {
+    body { background: white; font-size: 10pt; }
+    .page { box-shadow: none; max-width: none; }
+    .section { padding: 24px 32px; page-break-inside: avoid; }
+    .hero { padding: 32px; }
+    @page { size: A4; margin: 8mm; }
+  }
 </style>
 </head>
 <body>
 <div class="page">
 
-  <div class="cover">
-    <div class="brand">Atithi-Setu · Franchise Networks प्रस्ताव</div>
-    <h1>50 outlets को ऐसे चलाएँ जैसे 50 मालिक चलाते हैं — <span class="accent">एक स्क्रीन से।</span></h1>
-    <p class="sub">
-      भारत भर में 5+ outlets चलाने वाले franchisors के लिए। केंद्रीकृत brand standards। ऑटोमेटेड royalty + marketing-fund collection। Cross-outlet supplier price benchmarking। Real-time P&L roll-up। <strong style="color:white">legacy POS का per-outlet licensing scale पर टूट जाता है — आप एक ही feature के लिए 50 बार पैसा देते हैं।</strong>
-    </p>
-    <div class="ribbon">Volume pricing ₹3,499/outlet से · Brand-control package शामिल</div>
-  </div>
-
-  <h2><span class="num">1</span>2026 में franchise network चलाना क्यों खास तौर पर मुश्किल है</h2>
-
-  <div class="pains">
-    <div class="pain">
-      <div class="h">Per-outlet licensing math जान खाता है</div>
-      <div class="b">Legacy POS: ₹25-40 हज़ार × N outlets/साल। साथ ही per-module add-ons × N। 30-outlet chain साल में ₹15-18 लाख देती है — delivery integration, hardware, training से पहले।</div>
-      <span class="cost">₹15-18 लाख/साल</span>
+  <section class="hero">
+    <div class="hero-grid">
+      <div>
+        <div class="brand-tag">अतिथि-सेतु Franchise · HQ &amp; network के लिए · 2026</div>
+        <h1>एक platform — Franchisor के लिए, हर outlet, हर brand।</h1>
+        <p class="hero-sub">ज़्यादातर platforms franchisee के लिए बने हैं। हम HQ के लिए optimise करते हैं। Brand control, royalty automation, supplier benchmarking, outlet health scoring — अंत में built-in।</p>
+        <div class="hero-ribbon">⚡ 5 outlets से volume pricing · स्विच पर हर outlet को 3 महीने मुफ़्त</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-label">25-outlet QSR की सालाना बचत</div>
+        <div class="hero-stat-num"><small>₹</small>18<small>L</small></div>
+        <div class="hero-stat-foot">4 अलग systems के मुकाबले</div>
+      </div>
     </div>
-    <div class="pain">
-      <div class="h">केंद्रीकृत brand standards लागू करने का कोई तरीका नहीं</div>
-      <div class="b">मुंबई outlet "Butter Chicken" का नाम बदलकर "Makhani Chicken" कर देता है क्योंकि manager को वो पसंद है। पुणे अलग price लगाता है। Brand consistency खत्म। ग्राहक confused। कोई system इसे नहीं रोकता।</div>
-      <span class="cost">Brand equity में गिरावट</span>
+  </section>
+
+  <section class="kpi-strip">
+    <div class="kpi"><div class="kpi-num">6</div><div class="kpi-label">HQ-only features</div></div>
+    <div class="kpi"><div class="kpi-num">50<small>%</small></div><div class="kpi-label">100+ पर per-outlet बचत</div></div>
+    <div class="kpi"><div class="kpi-num">1</div><div class="kpi-label">Network dashboard</div></div>
+    <div class="kpi"><div class="kpi-num"><small>₹</small>2,499</div><div class="kpi-label">Floor / outlet / माह</div></div>
+  </section>
+
+  <section class="section">
+    <span class="section-tag">दो stakeholders, दो दर्द</span>
+    <h2>Franchisor का दर्द franchisee का नहीं है — फिर भी आपको same product बेचा जाता है।</h2>
+
+    <div class="pyramid">
+      <div class="pyramid-col hq">
+        <div class="pyramid-title">🏢 HQ दर्द (Franchisor)</div>
+        <ul class="pyramid-list">
+          <li><span class="pyramid-icon">📊</span>कोई real-time network P&amp;L नहीं<span class="pyramid-cost">₹50k/माह</span></li>
+          <li><span class="pyramid-icon">💰</span>Manual royalty calculation<span class="pyramid-cost">₹35k/माह</span></li>
+          <li><span class="pyramid-icon">🏪</span>Brand drift outlets में<span class="pyramid-cost">₹30k/माह</span></li>
+          <li><span class="pyramid-icon">📦</span>कोई supplier benchmarking नहीं<span class="pyramid-cost">₹40k/माह</span></li>
+          <li><span class="pyramid-icon">🚨</span>परेशान outlets देर से पता<span class="pyramid-cost">₹60k/माह</span></li>
+          <li><span class="pyramid-icon">📝</span>30-दिन का नया outlet onboarding<span class="pyramid-cost">₹25k/माह</span></li>
+        </ul>
+      </div>
+      <div class="pyramid-col outlet">
+        <div class="pyramid-title">🍽️ Outlet दर्द (Franchisee)</div>
+        <ul class="pyramid-list">
+          <li><span class="pyramid-icon">🥷</span>चोरी &amp; recipe variance<span class="pyramid-cost">₹15k/माह</span></li>
+          <li><span class="pyramid-icon">📋</span>4 platforms हाथ से<span class="pyramid-cost">₹12k/माह</span></li>
+          <li><span class="pyramid-icon">📦</span>स्टॉक-आउट खोए orders<span class="pyramid-cost">₹8k/माह</span></li>
+          <li><span class="pyramid-icon">⭐</span>Customer review issues<span class="pyramid-cost">₹6k/माह</span></li>
+          <li><span class="pyramid-icon">💳</span>Channel commission opacity<span class="pyramid-cost">₹5k/माह</span></li>
+          <li><span class="pyramid-icon">🧾</span>GST &amp; CA paperwork<span class="pyramid-cost">₹4k/माह</span></li>
+        </ul>
+      </div>
     </div>
-    <div class="pain">
-      <div class="h">Royalty + marketing-fund collection मैनुअल</div>
-      <div class="b">हर outlet हर महीने Excel sales report email करता है। Franchisor का accountant 5% royalty + 2% marketing fund प्रति outlet calculate करता है। 30 outlets × 4 घंटे = 120 person-घंटे/महीना बर्बाद।</div>
-      <span class="cost">120 घंटे/महीना + विवाद</span>
+  </section>
+
+  <section class="section" style="background: var(--cream);">
+    <span class="section-tag">HQ-exclusive capabilities</span>
+    <h2>छह features जो सिर्फ़ Franchisor के लिए बने हैं।</h2>
+    <p class="section-sub">ज़्यादातर POS networks मानते हैं HQ "बहुत सारे franchisees" है। हम मानते हैं HQ एक अलग customer है जिसकी अलग समस्याएँ हैं।</p>
+
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon">🏪</div>
+        <div class="feature-name">Centralised brand</div>
+        <div class="feature-desc">Master menu, master recipe, master pricing — सब outlets पर 1 click में push। Allowed जगहों पर outlets local override कर सकते हैं।</div>
+        <div class="feature-stat">~ 30% कम brand drift</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">💰</div>
+        <div class="feature-name">Royalty engine</div>
+        <div class="feature-desc">Auto royalty + brand fund + marketing levy हर order पर। अगले महीने की 1 तारीख़ को HQ के लिए statement और invoice तैयार।</div>
+        <div class="feature-stat">~ 5-7 घंटे/हफ़्ता बचा HQ पर</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📦</div>
+        <div class="feature-name">Supplier benchmarking</div>
+        <div class="feature-desc">हर outlet का same SKU का procurement price compare करें। 20%+ ज़्यादा pay करने वाले outlets surface करें।</div>
+        <div class="feature-stat">~ 8-12% material बचत</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🚥</div>
+        <div class="feature-name">Outlet health scoring</div>
+        <div class="feature-desc">हर outlet का composite score — revenue trend, variance %, customer review velocity, NPS। HQ पर red/amber/green dashboard।</div>
+        <div class="feature-stat">~ 14-दिन पहले intervention</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">⚡</div>
+        <div class="feature-name">Single-click onboarding</div>
+        <div class="feature-desc">नए outlet को &lt; 24 घंटों में master menu + tax + payment config + supplier list clone। 30-दिन standard के मुकाबले।</div>
+        <div class="feature-stat">~ 29 दिन जल्दी opening</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📊</div>
+        <div class="feature-name">Group P&amp;L</div>
+        <div class="feature-desc">सब outlets पर roll-up — revenue, cost, margin, royalty, marketing levy — HQ पर। Network से outlet से dish तक drill करें।</div>
+        <div class="feature-stat">Real-time, month-end नहीं</div>
+      </div>
     </div>
-    <div class="pain">
-      <div class="h">कमज़ोर outlets महीनों तक छुपे रहते हैं</div>
-      <div class="b">जब तक franchisor को पता चलता है कि Bangalore-3 साल-दर-साल 25% नीचे है, बहुत देर हो चुकी होती है। Outlet बंद, brand को धक्का, franchise fee refund विवाद।</div>
-      <span class="cost">Outlet failure risk</span>
+  </section>
+
+  <section class="section">
+    <span class="section-tag">Volume pricing</span>
+    <h2>Network जितना बड़ा, per-outlet cost उतनी कम।</h2>
+    <p class="section-sub">Network-wide pricing जो आपके साथ बढ़ती है। Negotiate नहीं — पारदर्शी volume tiers।</p>
+
+    <div class="volume-chart">
+      <div class="volume-bars">
+        <div class="volume-col">
+          <div class="volume-bar tier-1">₹4,499<small>/outlet/माह</small></div>
+          <div class="volume-foot"><div class="volume-outlets">5 – 9</div><div class="volume-desc">उभरता franchise</div></div>
+        </div>
+        <div class="volume-col">
+          <div class="volume-bar tier-2">₹3,799<small>/outlet/माह</small></div>
+          <div class="volume-foot"><div class="volume-outlets">10 – 24</div><div class="volume-desc">Regional brand</div></div>
+        </div>
+        <div class="volume-col">
+          <div class="volume-bar tier-3">₹3,299<small>/outlet/माह</small></div>
+          <div class="volume-foot"><div class="volume-outlets">25 – 49</div><div class="volume-desc">Multi-state brand</div></div>
+        </div>
+        <div class="volume-col">
+          <div class="volume-bar tier-4">₹2,799<small>/outlet/माह</small></div>
+          <div class="volume-foot"><div class="volume-outlets">50 – 99</div><div class="volume-desc">National brand</div></div>
+        </div>
+        <div class="volume-col">
+          <div class="volume-bar tier-5">₹2,499<small>/outlet/माह</small></div>
+          <div class="volume-foot"><div class="volume-outlets">100 +</div><div class="volume-desc">National &amp; intl</div></div>
+        </div>
+      </div>
+
+      <div class="volume-savings">
+        <div class="volume-savings-text">
+          25-outlet QSR ₹3,299 × 25 = ₹82,475/माह pay करता है
+          <small>vs ₹4,499 × 25 = ₹1,12,475 base tier पर — ₹30,000/माह, साल में ₹3.6 लाख बचत</small>
+        </div>
+        <div class="volume-savings-num">−27<small>% per outlet</small></div>
+      </div>
     </div>
-    <div class="pain">
-      <div class="h">Cross-outlet supplier leverage नहीं</div>
-      <div class="b">30 outlets 30 अलग local suppliers से 30 अलग कीमतों पर पनीर खरीद रहे। Franchisor buying power aggregate नहीं कर सकता। 8-12% margin टेबल पर पड़ा रह जाता है।</div>
-      <span class="cost">8-12% margin loss</span>
+  </section>
+
+  <section class="section" style="background: var(--cream);">
+    <span class="section-tag">Network ROI</span>
+    <h2>आपके outlet count के साथ साल-1 बचत बढ़ती है।</h2>
+    <p class="section-sub">Per-outlet बचत (हर outlet 4 disconnected systems के मुकाबले) + HQ बचत (royalty automation, supplier benchmarking) मिलाकर।</p>
+
+    <div class="roi-network">
+      <div class="roi-net-card">
+        <div class="roi-net-outlets">10<small> outlets</small></div>
+        <div class="roi-net-label">Regional brand</div>
+        <div class="roi-net-saving"><small>₹</small>7.2<small>L</small></div>
+        <div class="roi-net-foot">साल-1 बचत</div>
+      </div>
+      <div class="roi-net-card">
+        <div class="roi-net-outlets">25<small> outlets</small></div>
+        <div class="roi-net-label">Multi-state brand</div>
+        <div class="roi-net-saving"><small>₹</small>18<small>L</small></div>
+        <div class="roi-net-foot">साल-1 बचत</div>
+      </div>
+      <div class="roi-net-card">
+        <div class="roi-net-outlets">50<small> outlets</small></div>
+        <div class="roi-net-label">National brand</div>
+        <div class="roi-net-saving"><small>₹</small>36<small>L</small></div>
+        <div class="roi-net-foot">साल-1 बचत</div>
+      </div>
+      <div class="roi-net-card">
+        <div class="roi-net-outlets">100<small> outlets</small></div>
+        <div class="roi-net-label">National &amp; intl</div>
+        <div class="roi-net-saving"><small>₹</small>72<small>L</small></div>
+        <div class="roi-net-foot">साल-1 बचत</div>
+      </div>
     </div>
-    <div class="pain">
-      <div class="h">नया franchisee onboard करने में 6 हफ्ते</div>
-      <div class="b">Hardware procurement, software installation, menu setup, staff training। हर outlet के लिए। हर बार। Growth ops complexity से throttled।</div>
-      <span class="cost">2× growth ceiling</span>
+  </section>
+
+  <section class="section">
+    <span class="section-tag">Top-tier option</span>
+    <h2>Platform को अपनी brand में चलाएँ।</h2>
+    <p class="section-sub">50+ outlets वाले franchisors के लिए: अपनी brand की रंगों में, अपने domain पर Atithi-Setu चलाएँ। Outlet को हर screen पर आप दिखेंगे, हम नहीं।</p>
+
+    <div class="whitelabel">
+      <div>
+        <div class="whitelabel-title">White-label Enterprise</div>
+        <div class="whitelabel-desc">आपके franchisees आपकी brand देखेंगे — हमारी नहीं। हम platform चलाते हैं; आप brand equity, contract और upsell margin लें। Network value आपके हाथ में रहती है।</div>
+      </div>
+      <div class="whitelabel-features">
+        <ul>
+          <li>आपका logo, रंग, domain</li>
+          <li>आपके email + WhatsApp templates</li>
+          <li>आपके tier names + pricing</li>
+          <li>SLA, uptime, support हमारे support से</li>
+          <li>Dedicated CSM + technical liaison</li>
+          <li>Custom features request पर</li>
+        </ul>
+      </div>
     </div>
-  </div>
+  </section>
 
-  <h2><span class="num">2</span>Atithi-Setu Franchise — multi-outlet operator के लिए बना</h2>
+  <section class="section" style="background: var(--cream);">
+    <span class="section-tag">Roll-out plan</span>
+    <h2>30-outlet network 60 दिनों में live। Parallel run, शून्य रिस्क।</h2>
 
-  <p>Restaurant + Hotel proposals की हर चीज़, साथ ही franchisor-exclusive छह क्षमताएँ:</p>
-
-  <div class="cap-grid">
-    <div class="cap">
-      <div class="h">केंद्रीकृत brand control</div>
-      <div class="b">Master menu, master recipes, master pricing — HQ द्वारा नियंत्रित। Outlets को default पर read-only menu दिखता है। Outlet-level override के लिए HQ approval workflow।</div>
+    <div class="timeline-wrap">
+      <svg class="timeline-svg" viewBox="0 0 900 80" preserveAspectRatio="none">
+        <line x1="60" y1="40" x2="840" y2="40" stroke="#d9cab3" stroke-width="3"/>
+        <circle cx="80" cy="40" r="16" fill="#6b21a8"/>
+        <text x="80" y="46" text-anchor="middle" fill="white" font-weight="800" font-size="13" font-family="DM Sans">0</text>
+        <circle cx="300" cy="40" r="16" fill="#6b21a8"/>
+        <text x="300" y="46" text-anchor="middle" fill="white" font-weight="800" font-size="13" font-family="DM Sans">14</text>
+        <circle cx="540" cy="40" r="16" fill="#6b21a8"/>
+        <text x="540" y="46" text-anchor="middle" fill="white" font-weight="800" font-size="13" font-family="DM Sans">30</text>
+        <circle cx="820" cy="40" r="20" fill="#047857"/>
+        <text x="820" y="47" text-anchor="middle" fill="white" font-weight="800" font-size="13" font-family="DM Sans">60</text>
+      </svg>
+      <div class="timeline-steps">
+        <div class="timeline-step"><div class="timeline-day">दिन 0</div><div class="timeline-title">HQ live</div><div class="timeline-desc">Master menu, recipe, royalty rules · HQ training</div></div>
+        <div class="timeline-step"><div class="timeline-day">दिन 14</div><div class="timeline-title">3 outlets pilot</div><div class="timeline-desc">3 reps · parallel · royalty engine validate</div></div>
+        <div class="timeline-step"><div class="timeline-day">दिन 30</div><div class="timeline-title">60% roll-out</div><div class="timeline-desc">Wave 2 outlets · WhatsApp staff onboarding</div></div>
+        <div class="timeline-step"><div class="timeline-day">दिन 60</div><div class="timeline-title">100% live</div><div class="timeline-desc">सब outlets cut over · पुराने systems बंद · HQ dashboard live</div></div>
+      </div>
     </div>
-    <div class="cap">
-      <div class="h">Automated royalty engine</div>
-      <div class="b">5% royalty + 2% marketing fund per outlet सेट करें। System मासिक compute करता है, franchisor के letterhead पर invoice बनाता है, outlet owner को auto-email। Net-7 collection workflow।</div>
+  </section>
+
+  <section class="cta-section">
+    <h2>HQ के लिए बना। Network के लिए कीमत।</h2>
+    <p>45-मिनट का network demo book करें। हम 3 sample outlets पर आपकी royalty stream, supplier benchmark और outlet health dashboard live model करेंगे।</p>
+    <div class="cta-stats">
+      <div><div class="cta-stat-num">5 – 100+</div><div class="cta-stat-label">Outlet pricing tiers</div></div>
+      <div><div class="cta-stat-num">3 महीने</div><div class="cta-stat-label">हर outlet को मुफ़्त</div></div>
+      <div><div class="cta-stat-num">60 दिन</div><div class="cta-stat-label">Network roll-out</div></div>
     </div>
-    <div class="cap">
-      <div class="h">Outlet health scoring</div>
-      <div class="b">Real-time outlet KPIs: revenue trend, food cost %, customer rating, inventory turnover, NPS। Red-flag scoring failure से 60 दिन पहले underperformers की पहचान।</div>
-    </div>
-    <div class="cap">
-      <div class="h">Supplier price benchmarking</div>
-      <div class="b">Cross-outlet supplier price visibility (anonymous)। HQ पता लगाता है कौन पनीर पर ज़्यादा दे रहा है; सबसे अच्छा supplier rate सभी outlets पर push करता है। 8-12% सीधा margin uplift।</div>
-    </div>
-    <div class="cap">
-      <div class="h">Single-click outlet onboarding</div>
-      <div class="b">नया franchisee sign-up → master menu, recipes, branding, supplier list उनके tenant में 30 मिनट में clone। Hardware ज़रूरी नहीं। Day-1 live।</div>
-    </div>
-    <div class="cap">
-      <div class="h">Group P&L roll-up</div>
-      <div class="b">सभी outlets के पार real-time consolidated P&L — region, manager, outlet type के अनुसार। Quarterly board reports auto-generated। CA-ready exports।</div>
-    </div>
-  </div>
+    <a href="mailto:franchise@atithi-setu.com" class="cta-btn">Network demo book करें →</a>
+    <div class="cta-contact"><strong>franchise@atithi-setu.com</strong> · WhatsApp <strong>+91-XXXXX-XXXXX</strong> · atithi-setu.com</div>
+  </section>
 
-  <h2><span class="num">3</span>Atithi-Setu Franchise बनाम legacy POS (at scale)</h2>
-
-  <table class="compare">
-    <thead><tr><th>Franchise operator के लिए क्षमता</th><th class="indigo">Atithi-Setu</th><th>Legacy POS</th></tr></thead>
-    <tbody>
-      <tr><td>30-outlet chain का साल-1 खर्च (all-inclusive)</td><td class="win">₹12.6 लाख</td><td class="lose">₹18-22 लाख</td></tr>
-      <tr><td>100-outlet chain का खर्च</td><td class="win">₹35 लाख</td><td class="lose">₹55-70 लाख</td></tr>
-      <tr><td>केंद्रीकृत master menu + recipe control</td><td class="win"><span class="check">✓</span> Built-in</td><td class="lose"><span class="cross">✗</span> हर outlet अलग</td></tr>
-      <tr><td>Outlet-level override approval workflow</td><td class="win"><span class="check">✓</span> HQ moderates</td><td class="lose"><span class="cross">✗</span> कोई approval gate नहीं</td></tr>
-      <tr><td>Automated royalty + marketing-fund calculation</td><td class="win"><span class="check">✓</span> मासिक auto-invoice</td><td class="lose"><span class="cross">✗</span> मैनुअल Excel</td></tr>
-      <tr><td>Cross-outlet supplier price benchmarking</td><td class="win"><span class="check">✓</span> Anonymous तुलना</td><td class="lose"><span class="cross">✗</span> Outlet-isolated</td></tr>
-      <tr><td>Outlet health scoring + early-warning</td><td class="win"><span class="check">✓</span> 60-दिन predictive alerts</td><td class="lose"><span class="cross">✗</span> सिर्फ reactive</td></tr>
-      <tr><td>Group P&L roll-up dashboard (live, सभी outlets)</td><td class="win"><span class="check">✓</span> Real-time</td><td>⚠ Manual export + Excel</td></tr>
-      <tr><td>Single-click outlet onboarding (master menu clone)</td><td class="win"><span class="check">✓</span> 30 मिनट</td><td class="lose"><span class="cross">✗</span> 4-6 हफ्ते प्रति outlet</td></tr>
-      <tr><td>Region / manager / outlet-type segmentation</td><td class="win"><span class="check">✓</span> Built-in</td><td class="lose"><span class="cross">✗</span> Native नहीं</td></tr>
-      <tr><td>White-label विकल्प (franchise brand हर screen पर)</td><td class="win"><span class="check">✓</span> उपलब्ध</td><td class="lose"><span class="cross">✗</span></td></tr>
-      <tr><td>Multi-region GST handling (state-wise)</td><td class="win"><span class="check">✓</span></td><td class="win"><span class="check">✓</span></td></tr>
-      <tr><td>Hardware lock-in?</td><td class="win">नहीं — किसी भी browser device पर</td><td class="lose">हाँ — उनका hardware preferred</td></tr>
-    </tbody>
-  </table>
-
-  <div class="insight">
-    <div class="badge">रणनीतिक अंतर्दृष्टि · BCG दृष्टिकोण</div>
-    <h4>Franchisors तीन numbers पर जीतते या हारते हैं: per-outlet acquisition cost, brand consistency, और royalty leakage।</h4>
-    <p>
-      legacy POS franchisee के लिए optimize करता है, franchisor के लिए नहीं। हर outlet उनके लिए एक independent SMB जैसा दिखता है। <strong>Atithi-Setu एकमात्र platform है जो franchisor के around design किया गया है — HQ ग्राहक है, outlets deployment हैं।</strong> नतीजा: brand consistency software से लागू, royalty leakage खत्म (हर ऑर्डर बहता है, छुप नहीं सकता), और outlet onboarding cost ₹2-3 लाख / 6 हफ्ते से गिरकर ₹0 / 30 मिनट।
-      <br/><br/>
-      50-outlet franchise जो साल में 10 नए outlets खोलती है — math निर्मम है: सिर्फ onboarding पर ₹20-30 लाख/साल बचत। साथ ही royalty-leakage capture (अनुमान 3-5% gross), supplier aggregation (8-12% food cost पर), platform खुद को 4-6× over भुगतान करता है।
-    </p>
-  </div>
-
-  <h2><span class="num">4</span>Volume pricing — chains के लिए design</h2>
-
-  <p>Linear scaling growth में invest करने वाले operators के साथ अन्याय है। हम pricing tier करते हैं — आप जितने बड़े होते हैं, per-outlet कीमत उतनी कम।</p>
-
-  <table class="volume">
-    <thead><tr><th>Network size</th><th>प्रति outlet / महीना</th><th>सालाना / network</th></tr></thead>
-    <tbody>
-      <tr><td>5 – 9 outlets</td><td>₹4,499<span class="save">vs ₹4,999 standalone</span></td><td>₹2.7 – 4.9 लाख</td></tr>
-      <tr class="highlight"><td>10 – 24 outlets <span style="font-size:9pt; color: var(--saffron-2); font-weight: 600">सबसे लोकप्रिय</span></td><td>₹3,999<span class="save">15% off list</span></td><td>₹4.8 – 11.5 लाख</td></tr>
-      <tr><td>25 – 49 outlets</td><td>₹3,499<span class="save">25% off list</span></td><td>₹10.5 – 20.5 लाख</td></tr>
-      <tr><td>50 – 99 outlets</td><td>₹2,999<span class="save">37% off list</span></td><td>₹18 – 35 लाख</td></tr>
-      <tr><td>100+ outlets</td><td>Custom (₹2,499 floor)<span class="save">50% off list</span></td><td>₹30 लाख से</td></tr>
-    </tbody>
-  </table>
-
-  <div class="callout">
-    <strong>Brand-control package — हर franchise tier में शामिल:</strong> केंद्रीकृत master menu, recipe vault, royalty engine, supplier benchmarking, outlet health scoring, group P&L roll-up, single-click outlet onboarding। HQ tenant के लिए कोई अतिरिक्त license fee नहीं।
-  </div>
-
-  <h2><span class="num">5</span>ROI calculation — 50-outlet QSR chain</h2>
-
-  <div class="roi-box">
-    <h3>पुराने POS से switch करने वाली 50-outlet chain — साल 1 economics</h3>
-    <div class="roi-grid">
-      <div class="roi-cell"><div class="v">₹22L</div><div class="l">सीधा software cost बचत</div></div>
-      <div class="roi-cell"><div class="v">₹38L</div><div class="l">Royalty leakage recovered</div></div>
-      <div class="roi-cell"><div class="v">₹65L</div><div class="l">Supplier price aggregation बचत</div></div>
-      <div class="roi-cell"><div class="v">₹1.25 करोड़</div><div class="l">कुल साल-1 असर</div></div>
-    </div>
-    <p style="margin-top: 18px; font-size: 10.5pt; color: var(--ink-2);">
-      50-outlet chain जिसका प्रति outlet औसत मासिक revenue ₹5 लाख (वार्षिक gross ₹30 करोड़) — विवरण:
-      <br/>
-      • Software cost: legacy POS ₹45 लाख → Atithi-Setu ₹23 लाख = ₹22 लाख बचत
-      <br/>
-      • Royalty leakage: legacy POS के outlet-isolated model पर अनुमानित 2.5% under-reporting = ₹38 लाख recovered जब हर ऑर्डर Atithi-Setu HQ से अपने आप बहता है
-      <br/>
-      • Supplier aggregation: 50 outlets अलग-अलग 8-12% premium पर खरीदते हैं = ₹65-90 लाख ₹6-7 करोड़ सालाना ingredient खर्च पर
-      <br/>
-      • साथ ही: तेज़ outlet onboarding (₹2-3 लाख × साल में 10 नए outlets = ₹25 लाख), outlet failure रोकथाम (2-3 outlets/साल × ₹15 लाख recovery), brand-consistency uplift (मात्रात्मक मुश्किल पर customer NPS 8-12 points बढ़ता है)
-    </p>
-  </div>
-
-  <h2><span class="num">6</span>Signed contract से सभी 50 outlets live तक — 60 दिनों में</h2>
-
-  <ul class="checks">
-    <li><strong>Week 1:</strong> Discovery — franchisor की HQ team current outlet count, ops, royalty structure map करती है। हम deployment architecture propose करते हैं।</li>
-    <li><strong>Week 2-3:</strong> HQ tenant setup — master menu imported (आप canonical menu देते हैं, हम recipes, suppliers, branding onboard करते हैं)। Royalty engine configure।</li>
-    <li><strong>Week 4-6:</strong> पहले 10 outlets migrated। HQ template lock होने के बाद हर outlet में 30 मिनट। 7 दिन तक उनके existing POS के साथ parallel run।</li>
-    <li><strong>Week 7-8:</strong> बाकी outlets 10-10 के batches में migrated। Outlet manager training: 1-घंटा video + 1-घंटा live Q&A। Hardware install नहीं।</li>
-    <li><strong>Day 60:</strong> पूरा network live। Quarterly business review हमारी success team के साथ — roll-out और optimize करने के लिए।</li>
-  </ul>
-
-  <div class="callout">
-    <strong>White-label विकल्प (केवल Enterprise tier):</strong> "Atithi-Setu" branding की जगह आपका franchise brand हर screen, email, invoice, customer-facing QR पर। Customers और outlet staff सिर्फ आपका brand देखते हैं। Optional ₹2 लाख setup + ₹5,000/महीना अतिरिक्त।
-  </div>
-
-  <div class="insight">
-    <div class="badge">रणनीतिक अंतर्दृष्टि · 2026 में यह क्यों मायने रखता है</div>
-    <h4>भारतीय franchise model एक inflection point पर है।</h4>
-    <p>
-      भारत का F&B franchise sector 26% CAGR से बढ़ रहा है — Wow! Momo, Bikkgane Biryani, Burger Singh, Pizza Hut India, Behrouz Biryani सब आक्रामक विस्तार कर रहे हैं। हर साल 50-200 outlets जोड़ते हैं। <strong>जो franchisors operating-system scale हल करेंगे (सिर्फ food taste नहीं), वो दशक पर हावी होंगे।</strong>
-      <br/><br/>
-      अभी सामान्य 50-outlet chain एक patchwork पर चलती है: हर outlet पर legacy POS, HQ में Excel, compliance के लिए WhatsApp, मैनुअल royalty। 200 तक scale नहीं करता, 1000 तो छोड़ ही दीजिए। Atithi-Setu एकमात्र platform है जो franchise को 5 से 5,000 outlets तक ops cost explosion के बिना ले जा सकता है।
-      <br/><br/>
-      <strong>अगले 6 महीनों में switch करने वाले franchisors 2026 volume pricing हमेशा के लिए lock करते हैं और वो operational leverage unlock करते हैं जो competitors के पास नहीं होगा।</strong>
-    </p>
-  </div>
-
-  <h2><span class="num">7</span>Franchise CXOs से सुनी आम आपत्तियाँ</h2>
-
-  <ul class="checks">
-    <li><strong>"हमारे outlets 8 राज्यों में अलग GST profiles के साथ हैं।"</strong> — Atithi-Setu state-wise GST native handle करता है (CGST/SGST intra-state, IGST inter-state)। एक tenant per outlet, एक HQ rollup। राज्य complexity system की समस्या है, आपकी नहीं।</li>
-    <li><strong>"हमारा legacy POS से 5-साल का exclusivity contract है।"</strong> — लगभग हर ऐसे contract में "equivalent or better platform पर early termination" clause होता है। उन्हें comparison table दिखाएँ — 2025 में हमने 11 chains को legacy POS contract से बाहर निकलते देखा।</li>
-    <li><strong>"क्या outlet managers नए software का विरोध करेंगे?"</strong> — हमारा UI user testing में 4.7/5 score करता है (legacy POS 3.1)। Week 1 में speed difference देखकर विरोध खत्म हो जाता है। साथ ही: hardware install नहीं करना।</li>
-    <li><strong>"अगर Atithi-Setu fashion-of-the-month बनकर गायब हो गया?"</strong> — हम bootstrapped हैं, पहले दिन से profitable, flip करने का VC pressure नहीं। साथ ही: open data export, कभी भी, मुफ्त। आपका master menu, outlet data, royalty history — कभी जाएँ तो ले जाएँ।</li>
-    <li><strong>"नया geo कितनी जल्दी add कर सकते हैं (मान लें Dubai)?"</strong> — वही architecture multi-currency, multi-tax-regime handle करता है। 30-मिनट outlet onboarding international outlets के लिए भी काम करता है। Customers बताते हैं internationalization पर हम legacy POS से 24-महीने roadmap आगे हैं।</li>
-  </ul>
-
-  <div class="cta">
-    <div>
-      <h2 style="color:white"><span class="num">8</span>अगले 21 दिन</h2>
-      <p>
-        <strong style="color:white">Week 1.</strong> Discovery call (90 मिनट) — हमारे franchise success lead + आपके COO के साथ<br/>
-        <strong style="color:white">Week 2.</strong> Custom proposal with TCO model, migration plan, deployment timeline<br/>
-        <strong style="color:white">Week 3.</strong> 3 आपके outlets पर 30 दिन का pilot मुफ्त — जब हम network deal negotiate कर रहे होंगे<br/>
-        <span style="color:#fde2c8;">Pilot 15%+ outlet-level margin lift नहीं देता — हम बिना charge निकल जाते हैं।</span>
-      </p>
-    </div>
-    <div class="btn">
-      <div class="l1">Discovery book करें</div>
-      <div class="l2">+91 — direct line</div>
-      <div class="l3">franchise@atithi-setu.com</div>
-    </div>
-  </div>
-
-  <div class="foot">
-    <strong style="color: var(--indigo)">Atithi-Setu Franchise Networks</strong> · भारत की F&B और hospitality chains के लिए multi-outlet operating system<br/>
-    Cloud-native · मोबाइल · टैबलेट · डेस्कटॉप · प्रिंट · WhatsApp + Telegram + ईमेल + SMS · 13 user roles · Multi-tenant security · White-label optional<br/>
-    Atithi-Setu enterprise leadership द्वारा तैयार, BCG-trained रणनीति सलाहकारों द्वारा समीक्षित। 2026।
-  </div>
+  <footer class="footer">
+    <div><div class="footer-brand">अतिथि-सेतु</div><div class="footer-meta">भारत में निर्मित · भारतीय आतिथ्य के लिए · 2026</div></div>
+    <div class="footer-meta">Franchise Proposal (Hindi) · v2026.Q2</div>
+  </footer>
 
 </div>
 </body>
