@@ -106,4 +106,4 @@ Pricing reviewed quarterly. Last review: 2026 Q2. To update:
 
 ## Contact
 
-`sales@atithi-setu.com` · `+91-XXXX-XXXXXX` (replace with actual number before distribution)
+`sales@atithi-setu.com` · `+91 70111 89371` (WhatsApp)
