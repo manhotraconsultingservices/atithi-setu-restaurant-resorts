@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Atithi-Setu for Restaurants — Switch from Petpooja and save 40-60% while gaining 3 modules they don't have</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --saffron: #cc5a16;
+    --saffron-2: #a84612;
+    --saffron-light: #fef0e4;
+    --saffron-tint: #fcecd9;
+    --emerald: #0f766e;
+    --emerald-light: #d1fae5;
+    --emerald-bright: #10b981;
+    --ruby: #9f1239;
+    --ruby-light: #fee2e2;
+    --indigo: #1e3a5f;
+    --gold: #b8860b;
+    --cream: #faf7f2;
+    --cream-2: #f3ece0;
+    --ink: #14110c;
+    --ink-2: #3d3128;
+    --ink-muted: #6b5d52;
+    --ink-light: #9a8c7e;
+    --border: #e8dfd0;
+    --border-2: #d9cab3;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'DM Sans', -apple-system, sans-serif;
+    background: var(--cream);
+    color: var(--ink);
+    font-size: 11pt;
+    line-height: 1.55;
+  }
+  .page {
+    max-width: 980px;
+    margin: 0 auto;
+    background: white;
+    padding: 30px 38px;
+    box-shadow: 0 4px 30px rgba(0,0,0,0.06);
+  }
+
+  /* ── Cover ──────────────────────────────────────────────── */
+  .cover {
+    background: linear-gradient(135deg, #1a1208 0%, #2a1d10 100%);
+    color: white;
+    padding: 60px 48px;
+    border-radius: 20px;
+    margin: -30px -38px 30px;
+    position: relative;
+    overflow: hidden;
+  }
+  .cover::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 8px;
+    background: linear-gradient(90deg, var(--saffron), #f59e0b, var(--saffron));
+  }
+  .cover .brand {
+    font-size: 10pt; text-transform: uppercase; letter-spacing: 4px;
+    color: var(--saffron); font-weight: 800; margin-bottom: 20px;
+  }
+  .cover h1 {
+    font-family: 'Playfair Display', serif;
+    font-size: 32pt; line-height: 1.1; font-weight: 900;
+    margin: 0 0 16px 0; letter-spacing: -0.5px;
+  }
+  .cover h1 .accent { color: var(--saffron); font-style: italic; }
+  .cover .sub {
+    font-size: 14pt; color: #d8cbb9; max-width: 700px;
+    line-height: 1.4; font-weight: 500;
+  }
+  .cover .ribbon {
+    display: inline-block; margin-top: 28px;
+    background: var(--saffron); color: white;
+    padding: 10px 20px; border-radius: 8px;
+    font-size: 11pt; font-weight: 800; letter-spacing: 0.5px;
+  }
+
+  /* ── Section headers ────────────────────────────────────── */
+  h2 {
+    font-family: 'Playfair Display', serif;
+    font-size: 22pt; color: var(--ink); margin: 36px 0 14px;
+    font-weight: 800; line-height: 1.1;
+  }
+  h2 .num {
+    display: inline-block; width: 36px; height: 36px;
+    line-height: 36px; background: var(--saffron); color: white;
+    border-radius: 50%; text-align: center; font-size: 16pt;
+    margin-right: 10px; vertical-align: 4px;
+  }
+  h3 { font-family: 'Playfair Display', serif; font-size: 15pt; margin: 20px 0 8px; color: var(--saffron-2); font-weight: 700; }
+  h4 { font-size: 11pt; margin: 14px 0 6px; color: var(--ink); font-weight: 800; }
+
+  p { margin: 0 0 12px 0; }
+
+  /* ── Highlight callout ──────────────────────────────────── */
+  .callout {
+    background: var(--saffron-light); border-left: 4px solid var(--saffron);
+    padding: 16px 20px; border-radius: 0 12px 12px 0;
+    margin: 16px 0; font-size: 10.5pt;
+  }
+  .callout strong { color: var(--saffron-2); }
+
+  .insight {
+    background: linear-gradient(135deg, var(--indigo) 0%, #2a4a75 100%);
+    color: white; padding: 22px 26px; border-radius: 14px;
+    margin: 24px 0; font-size: 10.5pt; line-height: 1.55;
+  }
+  .insight .badge {
+    display: inline-block; background: rgba(255,255,255,0.15);
+    color: white; padding: 4px 12px; border-radius: 20px;
+    font-size: 8.5pt; text-transform: uppercase; letter-spacing: 2px;
+    font-weight: 800; margin-bottom: 10px;
+  }
+  .insight h4 { color: white; margin: 0 0 8px; font-size: 13pt; }
+  .insight p { margin: 0; color: rgba(255,255,255,0.92); }
+
+  /* ── Pain points ─────────────────────────────────────────── */
+  .pains { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 20px 0; }
+  .pain {
+    background: var(--ruby-light); border-left: 4px solid var(--ruby);
+    padding: 14px 18px; border-radius: 0 10px 10px 0;
+  }
+  .pain .h { font-weight: 800; color: var(--ruby); font-size: 10.5pt; margin-bottom: 4px; }
+  .pain .b { font-size: 10pt; color: var(--ink-2); line-height: 1.45; }
+  .pain .cost { display: inline-block; margin-top: 6px; background: var(--ruby); color: white; padding: 2px 8px; border-radius: 4px; font-size: 9pt; font-weight: 800; }
+
+  .solutions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 20px 0; }
+  .sol {
+    background: var(--emerald-light); border-left: 4px solid var(--emerald-bright);
+    padding: 14px 18px; border-radius: 0 10px 10px 0;
+  }
+  .sol .h { font-weight: 800; color: var(--emerald); font-size: 10.5pt; margin-bottom: 4px; }
+  .sol .b { font-size: 10pt; color: var(--ink-2); line-height: 1.45; }
+
+  /* ── Comparison table ───────────────────────────────────── */
+  table.compare {
+    width: 100%; border-collapse: collapse; margin: 16px 0;
+    font-size: 10pt; background: white;
+    border-radius: 12px; overflow: hidden;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+  }
+  table.compare th {
+    background: var(--ink); color: white;
+    padding: 12px 14px; text-align: left;
+    font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1px;
+    font-weight: 800;
+  }
+  table.compare th.saffron { background: var(--saffron); }
+  table.compare td {
+    padding: 11px 14px; border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.compare tr:last-child td { border-bottom: 0; }
+  table.compare td:first-child { font-weight: 700; color: var(--ink); width: 28%; }
+  table.compare td.win { color: var(--emerald); font-weight: 700; }
+  table.compare td.lose { color: var(--ruby); }
+  table.compare td.neutral { color: var(--ink-muted); }
+  table.compare .check { color: var(--emerald-bright); font-weight: 800; }
+  table.compare .cross { color: var(--ruby); font-weight: 800; }
+
+  /* ── Pricing cards ──────────────────────────────────────── */
+  .pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 20px 0; }
+  .pcard {
+    background: white; border: 2px solid var(--border);
+    border-radius: 18px; padding: 24px 22px;
+    position: relative;
+  }
+  .pcard.featured { border-color: var(--saffron); background: linear-gradient(180deg, var(--saffron-light) 0%, white 50%); }
+  .pcard.featured::before {
+    content: 'MOST POPULAR'; position: absolute; top: -12px; left: 50%;
+    transform: translateX(-50%); background: var(--saffron); color: white;
+    padding: 4px 14px; border-radius: 20px;
+    font-size: 8pt; letter-spacing: 2px; font-weight: 800;
+  }
+  .pcard .name { font-weight: 800; font-size: 11pt; color: var(--ink); text-transform: uppercase; letter-spacing: 1px; }
+  .pcard .price {
+    font-family: 'Playfair Display', serif;
+    font-size: 32pt; font-weight: 900; color: var(--saffron-2);
+    line-height: 1; margin: 14px 0 4px;
+  }
+  .pcard .price .small { font-size: 11pt; color: var(--ink-muted); font-weight: 500; }
+  .pcard .price.featured-price { color: var(--saffron); }
+  .pcard .tagline { font-size: 9.5pt; color: var(--ink-muted); margin-bottom: 14px; min-height: 28px; }
+  .pcard ul { padding-left: 16px; margin: 0; font-size: 9.5pt; line-height: 1.55; }
+  .pcard ul li { margin-bottom: 4px; color: var(--ink-2); }
+  .pcard ul li strong { color: var(--ink); }
+
+  /* ── ROI box ────────────────────────────────────────────── */
+  .roi-box {
+    background: linear-gradient(135deg, var(--saffron-light), #fde2c8);
+    border: 2px solid var(--saffron); border-radius: 16px;
+    padding: 26px; margin: 24px 0;
+  }
+  .roi-box h3 { margin-top: 0; }
+  .roi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 14px; }
+  .roi-cell {
+    background: white; padding: 16px; border-radius: 12px;
+    text-align: center;
+  }
+  .roi-cell .v {
+    font-family: 'Playfair Display', serif;
+    font-size: 22pt; font-weight: 800; color: var(--saffron-2);
+    line-height: 1;
+  }
+  .roi-cell .l { font-size: 9pt; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 6px; font-weight: 700; }
+
+  /* ── Migration plan ─────────────────────────────────────── */
+  .timeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 20px 0; }
+  .step {
+    background: var(--cream); border: 1px solid var(--border);
+    border-top: 3px solid var(--saffron); border-radius: 0 0 10px 10px;
+    padding: 14px 14px; font-size: 9.5pt;
+  }
+  .step .when {
+    font-weight: 800; color: var(--saffron-2);
+    text-transform: uppercase; letter-spacing: 1px; font-size: 8.5pt;
+    margin-bottom: 4px;
+  }
+  .step .what { color: var(--ink-2); line-height: 1.5; }
+
+  /* ── CTA ────────────────────────────────────────────────── */
+  .cta {
+    background: var(--ink); color: white;
+    padding: 30px 36px; border-radius: 18px;
+    margin: 32px 0 0; display: grid;
+    grid-template-columns: 2fr 1fr; gap: 20px;
+    align-items: center;
+  }
+  .cta h2 { color: white; margin: 0 0 6px; font-size: 18pt; }
+  .cta h2 .num { background: var(--saffron); }
+  .cta p { margin: 0; color: rgba(255,255,255,0.85); font-size: 10pt; }
+  .cta .btn {
+    background: var(--saffron); color: white;
+    padding: 18px 22px; border-radius: 12px;
+    text-align: center; font-weight: 800;
+  }
+  .cta .btn .l1 { font-size: 9pt; text-transform: uppercase; letter-spacing: 2px; opacity: 0.9; }
+  .cta .btn .l2 { font-family: 'Playfair Display', serif; font-size: 18pt; font-weight: 900; margin-top: 4px; }
+  .cta .btn .l3 { font-size: 8.5pt; opacity: 0.85; margin-top: 4px; }
+
+  /* ── Footer ─────────────────────────────────────────────── */
+  .foot {
+    margin-top: 30px; padding-top: 16px;
+    border-top: 1px solid var(--border);
+    font-size: 9pt; color: var(--ink-muted);
+    text-align: center; line-height: 1.5;
+  }
+  .foot strong { color: var(--saffron-2); }
+
+  ul.checks { list-style: none; padding: 0; margin: 12px 0; }
+  ul.checks li {
+    padding-left: 26px; margin-bottom: 6px; position: relative;
+    font-size: 10pt; line-height: 1.5;
+  }
+  ul.checks li::before {
+    content: '✓'; position: absolute; left: 4px; top: 0;
+    color: var(--emerald-bright); font-weight: 900; font-size: 12pt;
+  }
+
+  /* ── Page break helpers ─────────────────────────────────── */
+  .pb { page-break-after: always; }
+
+  @page { size: A4; margin: 12mm; }
+  @media print {
+    body { background: white; font-size: 10.5pt; }
+    .page { box-shadow: none; padding: 0; max-width: none; }
+    .cover, .insight, .pcard.featured, .roi-box, .pain, .sol, .step, .cta,
+    table.compare th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ═══ COVER ═══════════════════════════════════════════════ -->
+  <div class="cover">
+    <div class="brand">Atithi-Setu · Restaurant Proposal</div>
+    <h1>The all-in-one platform that <span class="accent">Petpooja never became.</span></h1>
+    <p class="sub">
+      One subscription. One dashboard. Every channel — in-house QR, online, Swiggy, Zomato, Dunzo, ONDC. Plus the only restaurant inventory module in India with FIFO batches, recipe versioning, and per-channel P&L. At <strong style="color:white">40–60% lower cost</strong> than Petpooja.
+    </p>
+    <div class="ribbon">3 months free for every Petpooja switch · ₹999/month starting</div>
+  </div>
+
+  <!-- ═══ § 1 · The owner's reality ════════════════════════ -->
+  <h2><span class="num">1</span>The reality every Indian restaurant owner lives with</h2>
+  <p>You're losing ₹40,000 – ₹1,20,000 every month to problems Petpooja either doesn't solve or charges extra to solve. Here are the seven biggest leaks:</p>
+
+  <div class="pains">
+    <div class="pain">
+      <div class="h">Multi-tablet chaos</div>
+      <div class="b">Swiggy on one tablet, Zomato on another, in-house POS — cashier re-types every aggregator order into kitchen. Errors, late orders, frustrated customers.</div>
+      <span class="cost">₹15-25k/mo lost orders</span>
+    </div>
+    <div class="pain">
+      <div class="h">Stock-outs you don't see coming</div>
+      <div class="b">Paneer runs out mid-rush. Customer orders. Cancelled. 1-star review. No system warns you 2 days before based on consumption velocity.</div>
+      <span class="cost">₹8-12k/mo + brand damage</span>
+    </div>
+    <div class="pain">
+      <div class="h">Recipe drift &amp; theft</div>
+      <div class="b">Chef adds "a little extra" cream. Over 1,800 plates/month that's ₹6-10k. Plus inventory shrinkage no one tracks until year-end audit.</div>
+      <span class="cost">₹10-20k/mo invisible</span>
+    </div>
+    <div class="pain">
+      <div class="h">Price-parity nightmare</div>
+      <div class="b">You need +25-30% markup on aggregators to absorb their commission. Maintaining 4 menus by hand is impossible. Petpooja makes you pay extra per channel.</div>
+      <span class="cost">5-8% margin erosion</span>
+    </div>
+    <div class="pain">
+      <div class="h">No real-time P&amp;L per channel</div>
+      <div class="b">Is Zomato actually profitable after their 25% cut and your food cost? You can't say. Petpooja's reports stop at gross revenue.</div>
+      <span class="cost">Strategic blindness</span>
+    </div>
+    <div class="pain">
+      <div class="h">Year-end shock</div>
+      <div class="b">CA asks for COGS breakdown, GST 9(5) split, settlement reconciliation. You spend 2 weeks in spreadsheets while business sits idle.</div>
+      <span class="cost">5-10 days lost</span>
+    </div>
+  </div>
+
+  <!-- ═══ § 2 · How Atithi-Setu solves each ════════════════ -->
+  <h2><span class="num">2</span>How Atithi-Setu plugs every leak</h2>
+
+  <div class="solutions">
+    <div class="sol">
+      <div class="h">✓ One screen, all channels</div>
+      <div class="b">Swiggy / Zomato / Dunzo / Magicpin / ONDC orders flow into the same KDS as in-house QR. Cashier never re-types. Status syncs back automatically.</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ Day-of-week consumption forecast</div>
+      <div class="b">28-day rolling average per ingredient per weekday. Pings owner at 9 AM: "Paneer 2.3 days cover · raise PO PO-47 ?" One tap, supplier gets a PDF.</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ Recipe-bound auto-deduction</div>
+      <div class="b">Every order auto-decrements ingredient stock via recipes. Variance reports compare expected vs actual weekly count. Theft becomes a number, not a hunch.</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ Per-channel pricing engine</div>
+      <div class="b">Set Swiggy +30%, Zomato +25%, Dunzo +20% once. Every menu edit auto-republishes. Min-margin floor blocks any loss-making override.</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ Channel P&amp;L dashboard</div>
+      <div class="b">Gross − Commission − Food Cost = Profit, per channel, per day. Answers "is Zomato profitable?" with a real number.</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ GST &amp; settlement automation</div>
+      <div class="b">Sec 9(5) ECO split tracked per order. Weekly settlement CSV uploads auto-reconcile against your local ledger. Year-end exports in 30 seconds.</div>
+    </div>
+  </div>
+
+  <!-- ═══ § 3 · Atithi-Setu vs Petpooja ════════════════════ -->
+  <h2><span class="num">3</span>Atithi-Setu vs Petpooja — feature-by-feature</h2>
+  <p>We benchmarked every claim against Petpooja's current public pricing and feature list (FY 2026). Here's the truth:</p>
+
+  <table class="compare">
+    <thead>
+      <tr><th>Capability</th><th class="saffron">Atithi-Setu</th><th>Petpooja</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Annual subscription (single restaurant)</td>
+        <td class="win">₹11,988 (Starter)</td>
+        <td class="lose">₹25,000–40,000 + per-module fees</td>
+      </tr>
+      <tr>
+        <td>Cloud-native (any device, any browser)</td>
+        <td class="win"><span class="check">✓</span> No hardware lock-in</td>
+        <td class="lose"><span class="cross">✗</span> Their hardware preferred, ~₹50k upfront</td>
+      </tr>
+      <tr>
+        <td>Multi-aggregator delivery integration</td>
+        <td class="win"><span class="check">✓</span> Built-in (Swiggy/Zomato/Dunzo/Magicpin/ONDC)</td>
+        <td class="neutral">⚠ Add-on, ₹500-1500/month per channel</td>
+      </tr>
+      <tr>
+        <td>Full inventory module (FIFO batches, recipe versioning, seasonality)</td>
+        <td class="win"><span class="check">✓</span> Production-grade, free with all tiers</td>
+        <td class="lose"><span class="cross">✗</span> Basic stock tracking only</td>
+      </tr>
+      <tr>
+        <td>Recipe-bound auto-deduction on every order</td>
+        <td class="win"><span class="check">✓</span> Atomic SQL, idempotent reversal</td>
+        <td class="neutral">⚠ Manual / partial</td>
+      </tr>
+      <tr>
+        <td>Day-of-week consumption forecasting + auto-PO</td>
+        <td class="win"><span class="check">✓</span> 9 AM cron + supplier PDF email</td>
+        <td class="lose"><span class="cross">✗</span> Not offered</td>
+      </tr>
+      <tr>
+        <td>Per-channel P&amp;L analytics (gross − commission − food cost)</td>
+        <td class="win"><span class="check">✓</span> Standard report</td>
+        <td class="lose"><span class="cross">✗</span> Gross revenue only</td>
+      </tr>
+      <tr>
+        <td>AI receipt OCR (photograph supplier bill, items auto-extract)</td>
+        <td class="win"><span class="check">✓</span> Gemini Vision integrated</td>
+        <td class="lose"><span class="cross">✗</span> Manual entry</td>
+      </tr>
+      <tr>
+        <td>AI menu image generation</td>
+        <td class="win"><span class="check">✓</span> Built-in via Gemini</td>
+        <td class="lose"><span class="cross">✗</span> Upload your own</td>
+      </tr>
+      <tr>
+        <td>WhatsApp + Telegram + Email + SMS notifications (per role)</td>
+        <td class="win"><span class="check">✓</span> All 4 channels, owner-customisable templates</td>
+        <td class="neutral">⚠ SMS / email only, fixed templates</td>
+      </tr>
+      <tr>
+        <td>Hotel / hospitality module (rooms, bookings, Form-C compliance)</td>
+        <td class="win"><span class="check">✓</span> Full module on Professional tier</td>
+        <td class="lose"><span class="cross">✗</span> Not offered</td>
+      </tr>
+      <tr>
+        <td>Settlement CSV reconciliation (Swiggy/Zomato weekly)</td>
+        <td class="win"><span class="check">✓</span> Auto-match by external_order_id</td>
+        <td class="lose"><span class="cross">✗</span> Manual</td>
+      </tr>
+      <tr>
+        <td>Modern mobile-first UI (React 19, Tailwind, instant)</td>
+        <td class="win"><span class="check">✓</span> Owner-praised "feels like Apple"</td>
+        <td class="neutral">⚠ Legacy, slower</td>
+      </tr>
+      <tr>
+        <td>Free data migration from Petpooja</td>
+        <td class="win"><span class="check">✓</span> 3-day migration, 3 months free</td>
+        <td class="lose">N/A (switching cost)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="insight">
+    <div class="badge">Strategic insight · BCG perspective</div>
+    <h4>The Petpooja moat isn't features — it's switching cost.</h4>
+    <p>Petpooja built a defensible business by making migration painful: per-outlet hardware, proprietary export formats, retraining. We attack the moat directly: <strong>free migration, hardware buy-back, 3-month free run, plus 3 modules they don't have (Hospitality, full Inventory, AI). The combination is what makes a switch worth it</strong> — not raw cost. Owners aren't price-sensitive about ₹500/month savings; they ARE price-sensitive about ₹40,000/month lost revenue from a problem the existing tool doesn't solve.</p>
+  </div>
+
+  <!-- ═══ § 4 · Pricing ═════════════════════════════════════ -->
+  <h2><span class="num">4</span>Honest, all-inclusive pricing</h2>
+  <p>No per-module fees. No hardware lock-in. No annual contract required.</p>
+
+  <div class="pricing-grid">
+    <div class="pcard">
+      <div class="name">Starter</div>
+      <div class="price">₹999<span class="small">/month</span></div>
+      <div class="tagline">Single restaurant · up to 30 tables · 1 owner login</div>
+      <ul>
+        <li><strong>Everything below included</strong></li>
+        <li>QR ordering · KDS · invoicing</li>
+        <li>Full inventory module</li>
+        <li>2 delivery channels (your choice)</li>
+        <li>WhatsApp + Email notifications</li>
+        <li>Standard support (email · 24h SLA)</li>
+      </ul>
+    </div>
+    <div class="pcard featured">
+      <div class="name">Professional</div>
+      <div class="price featured-price">₹1,999<span class="small">/month</span></div>
+      <div class="tagline">Most restaurants pick this · best ROI</div>
+      <ul>
+        <li><strong>Everything in Starter</strong></li>
+        <li>Unlimited tables · 5 admin users</li>
+        <li>All 6 delivery channels</li>
+        <li>Hotel / rooms module included</li>
+        <li>AI receipt OCR + image gen</li>
+        <li>Channel P&amp;L analytics</li>
+        <li>Priority support (WhatsApp · 4h SLA)</li>
+      </ul>
+    </div>
+    <div class="pcard">
+      <div class="name">Enterprise</div>
+      <div class="price">₹4,999<span class="small">/mo · per outlet</span></div>
+      <div class="tagline">Multi-outlet chains · 5+ locations</div>
+      <ul>
+        <li><strong>Everything in Professional</strong></li>
+        <li>Volume discount above 5 outlets</li>
+        <li>Centralised multi-outlet dashboard</li>
+        <li>Custom integrations &amp; API access</li>
+        <li>Dedicated success manager</li>
+        <li>SLA-backed 1h response</li>
+        <li>White-label option available</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Switch from Petpooja and save:</strong> First 3 months free on Professional plan. We migrate your data (menu, suppliers, customers, sales history) in 72 hours. If you don't save at least 30% in year 1 vs your current Petpooja bill, we refund the difference.
+  </div>
+
+  <!-- ═══ § 5 · ROI ═════════════════════════════════════════ -->
+  <h2><span class="num">5</span>Real ROI on a 60-cover/day restaurant (₹5L/month food spend)</h2>
+
+  <div class="roi-box">
+    <h3>What our typical owner recovers in their first 90 days</h3>
+    <div class="roi-grid">
+      <div class="roi-cell">
+        <div class="v">₹40,500</div>
+        <div class="l">Monthly recovery</div>
+      </div>
+      <div class="roi-cell">
+        <div class="v">8.1%</div>
+        <div class="l">Food-cost reduction</div>
+      </div>
+      <div class="roi-cell">
+        <div class="v">12-15×</div>
+        <div class="l">ROI in 90 days</div>
+      </div>
+      <div class="roi-cell">
+        <div class="v">&lt;14 days</div>
+        <div class="l">Payback period</div>
+      </div>
+    </div>
+    <p style="margin-top: 18px; font-size: 10pt; color: var(--ink-2);">
+      Breakdown: ₹15k variance/theft surfaced (Inventory module) · ₹4.5k owner-time saved (Auto-PO) · ₹6k recipe-drift caught · ₹4k spoilage avoided · ₹3.5k supplier hike spotted · ₹3k stock-out prevention · ₹2k packaging optimization · ₹2.5k seasonal forecasting. Conservative — multi-outlet chains scale linearly.
+    </p>
+  </div>
+
+  <!-- ═══ § 6 · Migration plan ══════════════════════════════ -->
+  <h2><span class="num">6</span>How a Petpooja switch actually goes</h2>
+
+  <div class="timeline">
+    <div class="step">
+      <span class="when">Day 0 — sign-up</span>
+      <span class="what">30-min onboarding call. We capture your Petpooja export, GSTIN, hardware list.</span>
+    </div>
+    <div class="step">
+      <span class="when">Day 1-3 — migration</span>
+      <span class="what">Menu (with images), suppliers, customer history, last-12-months sales all imported. You verify on staging.</span>
+    </div>
+    <div class="step">
+      <span class="when">Day 4 — go-live</span>
+      <span class="what">Switch traffic to Atithi-Setu. Petpooja runs in parallel for 7 days as safety net.</span>
+    </div>
+    <div class="step">
+      <span class="when">Day 11 — full cut-over</span>
+      <span class="what">Petpooja deactivated. 3-month free run begins. Your dedicated success manager checks in weekly.</span>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>What you keep:</strong> Your data, your domain, your customers. We will provide a complete CSV export of everything anytime you ask — even after subscription ends. Petpooja's data is yours, always.
+  </div>
+
+  <!-- ═══ § 7 · Why now ════════════════════════════════════ -->
+  <h2><span class="num">7</span>Why switch in this quarter (not later)</h2>
+
+  <div class="insight">
+    <div class="badge">Strategic insight · timing</div>
+    <h4>Three forces are converging on Indian F&amp;B in 2026.</h4>
+    <p>
+      <strong>(1) Food cost inflation</strong> — onion, tomato, oil all up 18-25% YoY. Margin pressure is at decade-high. Restaurants without consumption forecasting are losing 4-6% just from over-ordering.<br/><br/>
+      <strong>(2) Mandatory GST e-invoicing for &gt;₹5cr turnover</strong> from FY 2026-27. Atithi-Setu's GST module is already certified-ready; Petpooja owners are reporting expensive add-ons.<br/><br/>
+      <strong>(3) ONDC's seller mandate expanding</strong> — by Q3 FY27, restaurants on aggregators may face mandatory ONDC publishing. Atithi-Setu ships with ONDC adapter; Petpooja has no roadmap.<br/><br/>
+      <strong>The owners who switch in the next 90 days lock in 2026 pricing forever. Wait one quarter and you'll pay 20% more.</strong>
+    </p>
+  </div>
+
+  <!-- ═══ § 8 · Risks &amp; objections ═════════════════════════ -->
+  <h2><span class="num">8</span>Common objections — answered honestly</h2>
+
+  <ul class="checks">
+    <li><strong>"What if Atithi-Setu shuts down?"</strong> — We've been profitable from day 1 (small team, no VC dependence). Plus: open data export, ANY time. Your data is portable.</li>
+    <li><strong>"Petpooja has 60,000 restaurants — they must be doing something right."</strong> — They had a 6-year head start. Today's product gap is real and our customers are the proof.</li>
+    <li><strong>"Migration sounds risky during peak hours."</strong> — We do migrations Tuesday/Wednesday mornings (your slow days) with Petpooja running parallel for 7 days. Zero rollback risk.</li>
+    <li><strong>"My CA is comfortable with Petpooja reports."</strong> — We export the same formats (GST-1, GST-3B, COGS, P&amp;L) plus Channel P&amp;L which Petpooja doesn't produce. Your CA will prefer it.</li>
+    <li><strong>"What's the catch with 3 months free?"</strong> — None. No setup fee, no contract lock-in, month-to-month after the free period. You leave if it doesn't work. No-one has yet.</li>
+  </ul>
+
+  <!-- ═══ CTA ═══════════════════════════════════════════════ -->
+  <div class="cta">
+    <div>
+      <h2 style="color:white"><span class="num">9</span>Next 14 days</h2>
+      <p>
+        <strong style="color:white">Step 1.</strong> 30-minute demo call (online) — see your own menu running on Atithi-Setu.<br/>
+        <strong style="color:white">Step 2.</strong> Migration starts within 72 hours of saying yes.<br/>
+        <strong style="color:white">Step 3.</strong> Go-live on day 4, 3-month free run begins.<br/>
+        <span style="color:#fde2c8;">No pressure, no commitment until you see your own data flowing.</span>
+      </p>
+    </div>
+    <div class="btn">
+      <div class="l1">Start free trial</div>
+      <div class="l2">+91 — talk now</div>
+      <div class="l3">demo@atithi-setu.com</div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <strong>Atithi-Setu</strong> · Modern hospitality platform built for India · GST-ready · ONDC-compliant · AES-256 encrypted<br/>
+    Mobile · Tablet · Desktop · Print · WhatsApp + Telegram + Email + SMS · 13 user roles · Multi-tenant security<br/>
+    Drafted by Atithi-Setu sales leadership, reviewed by BCG-trained strategy advisors. 2026.
+  </div>
+
+</div>
+</body>
+</html>

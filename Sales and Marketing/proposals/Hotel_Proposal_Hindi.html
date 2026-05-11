@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Atithi-Setu होटल के लिए — Petpooja जो नहीं बेचता और legacy PMS से तीन गुना सस्ता</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700;800;900&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root { --saffron: #cc5a16; --saffron-2: #a84612; --saffron-light: #fef0e4; --emerald: #0f766e; --emerald-light: #d1fae5; --emerald-bright: #10b981; --ruby: #9f1239; --ruby-light: #fee2e2; --indigo: #1e3a5f; --gold: #b8860b; --gold-light: #fef3c7; --cream: #faf7f2; --ink: #14110c; --ink-2: #3d3128; --ink-muted: #6b5d52; --border: #e8dfd0; }
+  * { box-sizing: border-box; }
+  body { font-family: 'Noto Sans Devanagari', 'DM Sans', sans-serif; background: var(--cream); color: var(--ink); font-size: 11pt; line-height: 1.65; margin: 0; padding: 0; }
+  .page { max-width: 980px; margin: 0 auto; background: white; padding: 30px 38px; box-shadow: 0 4px 30px rgba(0,0,0,0.06); }
+  .cover { background: linear-gradient(135deg, #1a1208 0%, #2a1d10 50%, #3d2a14 100%); color: white; padding: 60px 48px; border-radius: 20px; margin: -30px -38px 30px; position: relative; overflow: hidden; }
+  .cover::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 8px; background: linear-gradient(90deg, var(--gold), var(--saffron), var(--gold)); }
+  .cover .brand { font-size: 10pt; text-transform: uppercase; letter-spacing: 4px; color: var(--gold); font-weight: 800; margin-bottom: 20px; font-family: 'DM Sans', sans-serif; }
+  .cover h1 { font-family: 'Noto Sans Devanagari', serif; font-size: 28pt; line-height: 1.25; font-weight: 800; margin: 0 0 16px; }
+  .cover h1 .accent { color: var(--gold); }
+  .cover .sub { font-size: 14pt; color: #d8cbb9; max-width: 720px; line-height: 1.55; }
+  .cover .ribbon { display: inline-block; margin-top: 28px; background: var(--gold); color: white; padding: 10px 20px; border-radius: 8px; font-size: 11pt; font-weight: 700; }
+
+  h2 { font-family: 'Noto Sans Devanagari', 'Playfair Display', serif; font-size: 20pt; color: var(--ink); margin: 36px 0 14px; font-weight: 800; line-height: 1.2; }
+  h2 .num { display: inline-block; width: 36px; height: 36px; line-height: 36px; background: var(--gold); color: white; border-radius: 50%; text-align: center; font-size: 16pt; margin-right: 10px; vertical-align: 4px; font-family: 'DM Sans', sans-serif; }
+  h3 { font-family: 'Noto Sans Devanagari', serif; font-size: 14pt; margin: 20px 0 8px; color: var(--gold); font-weight: 700; }
+  p { margin: 0 0 12px; }
+
+  .callout { background: var(--gold-light); border-left: 4px solid var(--gold); padding: 16px 20px; border-radius: 0 12px 12px 0; margin: 16px 0; font-size: 10.5pt; }
+  .callout strong { color: var(--gold); }
+
+  .insight { background: linear-gradient(135deg, var(--indigo) 0%, #2a4a75 100%); color: white; padding: 22px 26px; border-radius: 14px; margin: 24px 0; font-size: 10.5pt; line-height: 1.6; }
+  .insight .badge { display: inline-block; background: rgba(255,255,255,0.15); color: white; padding: 4px 12px; border-radius: 20px; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 2px; font-weight: 800; margin-bottom: 10px; font-family: 'DM Sans', sans-serif; }
+  .insight h4 { color: white; margin: 0 0 8px; font-size: 13pt; font-family: 'Noto Sans Devanagari', serif; }
+  .insight p { margin: 0; color: rgba(255,255,255,0.92); }
+
+  .pains, .solutions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 20px 0; }
+  .pain { background: var(--ruby-light); border-left: 4px solid var(--ruby); padding: 14px 18px; border-radius: 0 10px 10px 0; }
+  .pain .h { font-weight: 700; color: var(--ruby); font-size: 11pt; margin-bottom: 4px; }
+  .pain .b { font-size: 10.5pt; color: var(--ink-2); line-height: 1.55; }
+  .pain .cost { display: inline-block; margin-top: 6px; background: var(--ruby); color: white; padding: 2px 8px; border-radius: 4px; font-size: 9pt; font-weight: 700; }
+  .sol { background: var(--emerald-light); border-left: 4px solid var(--emerald-bright); padding: 14px 18px; border-radius: 0 10px 10px 0; }
+  .sol .h { font-weight: 700; color: var(--emerald); font-size: 11pt; margin-bottom: 4px; }
+  .sol .b { font-size: 10.5pt; color: var(--ink-2); line-height: 1.55; }
+
+  table.compare { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+  table.compare th { background: var(--ink); color: white; padding: 12px 14px; text-align: left; font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1px; font-weight: 800; font-family: 'DM Sans', sans-serif; }
+  table.compare th.gold { background: var(--gold); }
+  table.compare td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.compare tr:last-child td { border-bottom: 0; }
+  table.compare td:first-child { font-weight: 600; color: var(--ink); width: 30%; }
+  table.compare td.win { color: var(--emerald); font-weight: 600; }
+  table.compare td.lose { color: var(--ruby); }
+  table.compare .check { color: var(--emerald-bright); font-weight: 800; }
+  table.compare .cross { color: var(--ruby); font-weight: 800; }
+
+  .pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 20px 0; }
+  .pcard { background: white; border: 2px solid var(--border); border-radius: 18px; padding: 24px 22px; position: relative; }
+  .pcard.featured { border-color: var(--gold); background: linear-gradient(180deg, var(--gold-light) 0%, white 50%); }
+  .pcard.featured::before { content: 'सबसे लोकप्रिय'; position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: var(--gold); color: white; padding: 4px 14px; border-radius: 20px; font-size: 9pt; font-weight: 700; }
+  .pcard .name { font-weight: 700; font-size: 12pt; color: var(--ink); }
+  .pcard .price { font-family: 'Playfair Display', serif; font-size: 30pt; font-weight: 900; color: var(--saffron-2); line-height: 1; margin: 12px 0 6px; }
+  .pcard .price .small { font-size: 11pt; color: var(--ink-muted); font-weight: 500; }
+  .pcard .price.featured-price { color: var(--gold); }
+  .pcard .tagline { font-size: 10pt; color: var(--ink-muted); margin-bottom: 14px; min-height: 32px; line-height: 1.4; }
+  .pcard ul { padding-left: 16px; margin: 0; font-size: 10pt; line-height: 1.65; }
+  .pcard ul li { margin-bottom: 4px; color: var(--ink-2); }
+
+  .roi-box { background: linear-gradient(135deg, var(--gold-light), #fde6a8); border: 2px solid var(--gold); border-radius: 16px; padding: 26px; margin: 24px 0; }
+  .roi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 14px; }
+  .roi-cell { background: white; padding: 16px; border-radius: 12px; text-align: center; }
+  .roi-cell .v { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 800; color: var(--gold); line-height: 1; }
+  .roi-cell .l { font-size: 9.5pt; color: var(--ink-muted); margin-top: 6px; font-weight: 600; line-height: 1.3; }
+
+  .cta { background: var(--ink); color: white; padding: 30px 36px; border-radius: 18px; margin: 32px 0 0; display: grid; grid-template-columns: 2fr 1fr; gap: 20px; align-items: center; }
+  .cta h2 { color: white; margin: 0 0 6px; font-size: 18pt; }
+  .cta h2 .num { background: var(--gold); }
+  .cta p { margin: 0; color: rgba(255,255,255,0.88); font-size: 10.5pt; }
+  .cta .btn { background: var(--gold); color: white; padding: 18px 22px; border-radius: 12px; text-align: center; font-weight: 700; }
+  .cta .btn .l1 { font-size: 10pt; }
+  .cta .btn .l2 { font-family: 'Playfair Display', serif; font-size: 18pt; font-weight: 900; margin-top: 4px; }
+  .cta .btn .l3 { font-size: 9pt; opacity: 0.9; margin-top: 4px; font-family: 'DM Sans', sans-serif; }
+
+  .foot { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 9.5pt; color: var(--ink-muted); text-align: center; line-height: 1.6; }
+  ul.checks { list-style: none; padding: 0; margin: 12px 0; }
+  ul.checks li { padding-left: 26px; margin-bottom: 8px; position: relative; font-size: 10.5pt; line-height: 1.55; }
+  ul.checks li::before { content: '✓'; position: absolute; left: 4px; top: 0; color: var(--emerald-bright); font-weight: 900; font-size: 13pt; }
+
+  @page { size: A4; margin: 12mm; }
+  @media print { body { background: white; font-size: 10.5pt; } .page { box-shadow: none; padding: 0; max-width: none; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="cover">
+    <div class="brand">Atithi-Setu · होटल और रिज़ॉर्ट प्रस्ताव</div>
+    <h1>वो hospitality OS जो Petpooja ने कभी बनाने की कोशिश नहीं की, और legacy PMS से <span class="accent">⅓ कीमत</span> पर।</h1>
+    <p class="sub">
+      एक प्लेटफ़ॉर्म: रूम · इन-रूम QR ऑर्डरिंग · हाउसकीपिंग · concierge · AI sentiment analysis · Form-C compliance · GST-aware folios। <strong style="color:white">eZee, IDS, Hotelogix, Cloudbeds सब pre-mobile युग के लिए बने हैं।</strong> Petpooja होटल मॉड्यूल देता ही नहीं। आप बेहतर के हक़दार हैं।
+    </p>
+    <div class="ribbon">Boutique hotels: ₹2,499/महीना all-inclusive · legacy-PMS switch पर 3 महीने मुफ्त</div>
+  </div>
+
+  <h2><span class="num">1</span>हर भारतीय होटलियर की रोज़ की सात तकलीफें</h2>
+
+  <div class="pains">
+    <div class="pain">
+      <div class="h">2008 में अटका हुआ PMS</div>
+      <div class="b">eZee, IDS, Cloudbeds: clunky desktop apps, धीमे lookups, मोबाइल parity नहीं। Front-desk staff शिफ्ट में 50 बार सिस्टम को कोसता है। नए स्टाफ की ट्रेनिंग 3 हफ्ते।</div>
+      <span class="cost">10-15 staff घंटे/हफ्ता बर्बाद</span>
+    </div>
+    <div class="pain">
+      <div class="h">F&B और रूम अलग silos में</div>
+      <div class="b">In-room dining ऑर्डर रूम सर्विस फोन पर → हाथ से लिखी चिट → किचन। Check-out पर बिल याद से बनता है। आधे ऑर्डर bill ही नहीं होते।</div>
+      <span class="cost">₹30-80 हज़ार/महीना F&B revenue leak</span>
+    </div>
+    <div class="pain">
+      <div class="h">विदेशी अतिथि का Form-C झंझट</div>
+      <div class="b">Foreign national check-in → 12-field मैनुअल फॉर्म → ID की फोटोकॉपी → FRRO को फैक्स। ऑडिट: "trail कहाँ है?" हर बार 2 दिन की घबराहट।</div>
+      <span class="cost">Compliance + ऑडिट जोखिम</span>
+    </div>
+    <div class="pain">
+      <div class="h">Guest sentiment का कोई संकेत नहीं</div>
+      <div class="b">Check-out के बाद Booking.com पर बुरा रिव्यू। आपको पहले से कुछ नहीं पता था। नाराज़ guest को Day 2 पर manage किया जा सकता था — पर आपको पता ही नहीं चला।</div>
+      <span class="cost">5-12% repeat rate में गिरावट</span>
+    </div>
+    <div class="pain">
+      <div class="h">Checkout पर folio की उलझन</div>
+      <div class="b">Mini-bar, laundry, room service, late checkout fee — 4 systems में मैनुअल। CGST/SGST split आधी बार गलत। Front-desk guest से 15 मिनट बहस करता है।</div>
+      <span class="cost">सीधे guest experience पर असर</span>
+    </div>
+    <div class="pain">
+      <div class="h">WhatsApp में Housekeeping का chaos</div>
+      <div class="b">"Room 203 तैयार है?" — तीन WhatsApp groups में टाइप। Engineering tickets गायब। चोरी हुए स्लिपर्स और दाग़दार चादरें कभी source तक नहीं पहुँचतीं।</div>
+      <span class="cost">8-12 घंटे/हफ्ता staff churn</span>
+    </div>
+  </div>
+
+  <h2><span class="num">2</span>Atithi-Setu हर समस्या का समाधान — भारत के लिए बना</h2>
+
+  <div class="solutions">
+    <div class="sol">
+      <div class="h">✓ Cloud-native PMS, हर device पर instant</div>
+      <div class="b">Mobile-first React UI। Front desk टैबलेट, iPad mini, या लैपटॉप पर काम करे। 200ms से कम पेज लोड। नया staff 30 मिनट में productive।</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ एक folio, हर charge</div>
+      <div class="b">In-room QR ऑर्डर, mini-bar swipe, laundry, service add-ons — सब अपने आप guest folio पर post। State-aware GST (CGST+SGST intra-state, IGST inter-state)। Check-out पर एक बिल, हर line itemised।</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ Form-C ऑटो-जेनरेट + logged</div>
+      <div class="b">Foreign guest का passport scan + visa fields → 30 सेकंड में PDF Form-C → digital signature + audit log → optional FRRO upload integration। Year-end ऑडिट 2 दिन नहीं, 30 मिनट।</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ हर feedback पर AI sentiment</div>
+      <div class="b">Groq-powered analysis नकारात्मक feedback submit होते ही पकड़ता है। Manager को 2 मिनट में Telegram alert — guest review डालने से पहले recover करने का मौका।</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ Mini-bar और amenity inventory ट्रैकिंग</div>
+      <div class="b">Atithi-Setu का Inventory मॉड्यूल linens, mini-bar bottles, amenities cover करता है। Par-level alerts housekeeping के खत्म होने से पहले। Stock-low Telegram alert + supplier को ऑटो-PO।</div>
+    </div>
+    <div class="sol">
+      <div class="h">✓ Guest FAQs के लिए AI concierge</div>
+      <div class="b">In-room QR आपके होटल के FAQs पर trained chatbot खोलता है (wifi, spa timing, breakfast, taxi)। Guests को instant जवाब; staff असली requests पर focus।</div>
+    </div>
+  </div>
+
+  <h2><span class="num">3</span>Atithi-Setu बनाम hotel PMS market</h2>
+  <p>हमने eZee FrontDesk (भारत का outlet-count लीडर) और Cloudbeds (cloud-native premium player) से तुलना की। Petpooja यहाँ नहीं है — उनके पास होटल मॉड्यूल नहीं।</p>
+
+  <table class="compare">
+    <thead><tr><th>क्षमता</th><th class="gold">Atithi-Setu</th><th>eZee</th><th>Cloudbeds</th></tr></thead>
+    <tbody>
+      <tr><td>सालाना सब्सक्रिप्शन (छोटा boutique, 20 कमरे)</td><td class="win">₹30,000</td><td>₹60,000</td><td>$249/मा ≈ ₹2.5 लाख</td></tr>
+      <tr><td>Cloud-native, किसी भी device पर</td><td class="win"><span class="check">✓</span></td><td class="lose"><span class="cross">✗</span> Desktop-first</td><td class="win"><span class="check">✓</span></td></tr>
+      <tr><td>Native F&B (रेस्टोरेंट POS + KDS) एक ही tenant में</td><td class="win"><span class="check">✓</span> Single product</td><td class="lose"><span class="cross">✗</span> अलग eZee BurrP</td><td class="lose"><span class="cross">✗</span> 3rd-party</td></tr>
+      <tr><td>In-room QR ordering (guest scan → kitchen → folio)</td><td class="win"><span class="check">✓</span></td><td class="lose"><span class="cross">✗</span></td><td class="lose"><span class="cross">✗</span></td></tr>
+      <tr><td>Form-C जेनरेशन + FRRO ऑडिट log</td><td class="win"><span class="check">✓</span> Auto + PDF + signature</td><td class="win"><span class="check">✓</span></td><td class="lose"><span class="cross">✗</span> मैनुअल</td></tr>
+      <tr><td>State-aware GST (CGST/SGST/IGST) folios पर</td><td class="win"><span class="check">✓</span></td><td class="win"><span class="check">✓</span></td><td class="lose"><span class="cross">✗</span> US-built, India-native नहीं</td></tr>
+      <tr><td>AI guest sentiment analysis</td><td class="win"><span class="check">✓</span> Groq-powered</td><td class="lose"><span class="cross">✗</span></td><td class="lose"><span class="cross">✗</span></td></tr>
+      <tr><td>AI concierge chatbot (FAQ-grounded)</td><td class="win"><span class="check">✓</span> प्रति होटल knowledge base</td><td class="lose"><span class="cross">✗</span></td><td class="lose"><span class="cross">✗</span></td></tr>
+      <tr><td>Mini-bar + amenity inventory मॉड्यूल</td><td class="win"><span class="check">✓</span> Atithi-Setu Inventory</td><td class="lose"><span class="cross">✗</span> मैनुअल count</td><td class="lose"><span class="cross">✗</span></td></tr>
+      <tr><td>WhatsApp + Telegram + ईमेल + SMS guest comms</td><td class="win"><span class="check">✓</span></td><td>⚠ केवल ईमेल/SMS</td><td>⚠ केवल ईमेल/SMS</td></tr>
+      <tr><td>Pre-arrival upsell ईमेल (7d) + पुष्टि (1d)</td><td class="win"><span class="check">✓</span> Auto-cron, branded</td><td class="lose"><span class="cross">✗</span></td><td>⚠ मैनुअल setup</td></tr>
+      <tr><td>OTA channel manager (Booking.com / MMT / Agoda / Goibibo)</td><td>⚠ Q3 में आ रहा (या SiteMinder/RateGain use करें)</td><td class="win"><span class="check">✓</span></td><td class="win"><span class="check">✓</span></td></tr>
+      <tr><td>Hotel KPIs (ADR · RevPAR · Occupancy)</td><td class="win"><span class="check">✓</span> Live dashboard</td><td class="win"><span class="check">✓</span></td><td class="win"><span class="check">✓</span></td></tr>
+      <tr><td>Mobile-first staff app (housekeeping के लिए)</td><td class="win"><span class="check">✓</span> Native + QR</td><td class="lose"><span class="cross">✗</span> सिर्फ desktop</td><td>⚠ अलग app</td></tr>
+      <tr><td>मुफ्त माइग्रेशन + 3 महीने मुफ्त रन</td><td class="win"><span class="check">✓</span></td><td class="lose">N/A</td><td class="lose">N/A</td></tr>
+    </tbody>
+  </table>
+
+  <div class="insight">
+    <div class="badge">रणनीतिक अंतर्दृष्टि · BCG दृष्टिकोण</div>
+    <h4>भारत के hotel PMS market की pricing गलत है — और Atithi-Setu पहला है जो इसे सही कर रहा है।</h4>
+    <p>Cloudbeds global SaaS दाम (~₹2.5 लाख/साल 20-room boutique के लिए) मांगता है — एक ऐसे product के लिए जो Indian GST मूलतः बोलता ही नहीं। eZee उसकी आधी कीमत पर है पर 15 साल पुराना desktop product है जिस पर web skin लगा है। <strong>50 कमरे से कम वाला पूरा Indian boutique-hotel segment ignored है।</strong> उन्हें चाहिए cloud-native UX, native F&B integration, Form-C automation, और India-aware GST — ₹2,499/महीना पर, ₹20,000/महीना नहीं। हम पहले platform हैं जो इस segment के लिए सही price और सही product दे रहा है। राष्ट्रीय TAM 47,000+ boutique hotels — ₹150 करोड़ ARR market बिना किसी dominant player के। Atithi-Setu native, integrated और global alternatives से 5× सस्ता होकर जीतता है।</p>
+  </div>
+
+  <h2><span class="num">4</span>भारतीय hospitality हकीकत के लिए pricing</h2>
+
+  <div class="pricing-grid">
+    <div class="pcard">
+      <div class="name">Boutique</div>
+      <div class="price">₹2,499<span class="small">/मा</span></div>
+      <div class="tagline">20 कमरे तक · single property · B&Bs और homestays के लिए</div>
+      <ul>
+        <li>पूर्ण PMS (रूम, बुकिंग, folios)</li>
+        <li>In-room QR + रेस्टोरेंट POS</li>
+        <li>Form-C automation</li>
+        <li>Mini-bar inventory</li>
+        <li>WhatsApp + ईमेल guest comms</li>
+        <li>1 admin · 3 staff users</li>
+        <li>Standard support (24h SLA)</li>
+      </ul>
+    </div>
+    <div class="pcard featured">
+      <div class="name">Resort</div>
+      <div class="price featured-price">₹4,999<span class="small">/मा</span></div>
+      <div class="tagline">80 कमरे तक · F&B-attached · अधिकांश resorts यही चुनते हैं</div>
+      <ul>
+        <li><strong>Boutique की हर चीज़</strong></li>
+        <li>असीमित staff users</li>
+        <li>AI guest sentiment + concierge</li>
+        <li>Pre-arrival upsell automation</li>
+        <li>Service requests (housekeeping/maintenance/concierge tickets)</li>
+        <li>Hotel KPIs dashboard (ADR/RevPAR)</li>
+        <li>प्राथमिकता support (WhatsApp · 4h SLA)</li>
+      </ul>
+    </div>
+    <div class="pcard">
+      <div class="name">Chain</div>
+      <div class="price">₹9,999<span class="small">/मा · प्रति property</span></div>
+      <div class="tagline">Multi-property groups · केंद्रीकृत brand standards</div>
+      <ul>
+        <li><strong>Resort की हर चीज़</strong></li>
+        <li>3+ properties पर volume discount</li>
+        <li>Group-level analytics + benchmarking</li>
+        <li>केंद्रीकृत user / role management</li>
+        <li>Custom OTA channel-manager integration</li>
+        <li>समर्पित success manager</li>
+        <li>SLA-समर्थित 1h response</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>eZee, IDS, या Cloudbeds से switch कर रहे हैं?</strong> Resort plan पर पहले 3 महीने मुफ्त। हम 72 घंटे में आपकी room inventory, current bookings, customer database, और पिछले 12 महीने का ADR/RevPAR migrate करते हैं। Form-C archive ऑडिट reference के लिए रखा जाता है। शून्य downtime — 7 दिन parallel run।
+  </div>
+
+  <h2><span class="num">5</span>असली ROI — 30-कमरे का boutique होटल</h2>
+
+  <div class="roi-box">
+    <h3>हमारा सामान्य होटलियर पहले 6 महीनों में क्या वापस पाता है</h3>
+    <div class="roi-grid">
+      <div class="roi-cell"><div class="v">₹85,000</div><div class="l">मासिक रिकवरी</div></div>
+      <div class="roi-cell"><div class="v">+12%</div><div class="l">Repeat-guest rate</div></div>
+      <div class="roi-cell"><div class="v">+₹680</div><div class="l">ADR वृद्धि</div></div>
+      <div class="roi-cell"><div class="v">25-30×</div><div class="l">साल 1 में ROI</div></div>
+    </div>
+    <p style="margin-top: 18px; font-size: 10.5pt; color: var(--ink-2);">
+      विवरण: ₹30 हज़ार F&B revenue recovered (in-room QR पहले छूटे ऑर्डर पकड़ता है) · ₹18 हज़ार mini-bar inventory loss खत्म · ₹15 हज़ार staff time बचा (Excel नहीं) · ₹12 हज़ार pre-arrival upsells (spa, late checkout, room upgrade) · ₹6 हज़ार 1-star reviews से बचाव (AI sentiment) · ₹4 हज़ार Form-C compliance time।
+    </p>
+  </div>
+
+  <h2><span class="num">6</span>होटलियर हमें क्यों switch करते हैं — उनके शब्दों में</h2>
+
+  <ul class="checks">
+    <li><strong>"मेरा front-desk अब फोन पर check-in करता है।"</strong> — 200-पन्ने की eZee training manual की जगह 5-tab interface। नए hire पहले दिन से productive।</li>
+    <li><strong>"मुझे Booking.com reviews पहले दिखते हैं।"</strong> — Post-stay feedback form पर AI sentiment analysis नाराज़गी Booking.com पर post होने से पहले पकड़ता है। Pilot hotels में 8+ negative reviews रोके।</li>
+    <li><strong>"मेरा in-room dining revenue दोगुना हुआ।"</strong> — Guests room QR scan करें, photos के साथ menu देखें, in-room ऑर्डर करें। Front-desk का फोन बजना बंद। F&B वो ऑर्डर पकड़ता है जो पहले खो रहा था।</li>
+    <li><strong>"Form-C अब 2-दिन का सालाना सिरदर्द नहीं।"</strong> — Foreign guest check-in करता है, हम passport scan + visa capture करते हैं, PDF Form-C audit log के साथ अपने आप बनता है। ऑडिट 30 मिनट।</li>
+    <li><strong>"मेरा CA मेरा पीछा करना बंद कर चुका है।"</strong> — GST folios, state-aware CGST/SGST/IGST, monthly GST-1 / GST-3B exports। CA को direct file मिलती है, तिमाही अंत तक हम मिलते ही नहीं।</li>
+  </ul>
+
+  <div class="insight">
+    <div class="badge">रणनीतिक अंतर्दृष्टि · why now</div>
+    <h4>2025-26 में भारत का hotel inventory 18% बढ़ा। Software नहीं बढ़ा।</h4>
+    <p>Domestic travel boom है — tier-2 destinations में RevPAR 22% YoY। हर हफ्ते नई properties खुल रहीं। PMS market ने रफ्तार नहीं पकड़ी: eZee stagnant, Cloudbeds का price-point अलग दुनिया का, Hotelogix पिछड़ चुका। <strong>पहला cloud-native, India-priced, AI-augmented PMS जो ship होगा वो इस cycle को जीतेगा।</strong>
+      <br/><br/>
+      Atithi-Setu वो platform है। हम पहले से 14 boutique hotels पर live हैं (production में, pilot नहीं)। eZee retrofit करने से पहले market share पकड़ने की 90-दिन की window अभी है।</p>
+  </div>
+
+  <div class="cta">
+    <div>
+      <h2 style="color:white"><span class="num">7</span>14 दिनों में अपनी property पर आज़माएँ</h2>
+      <p>
+        <strong style="color:white">Step 1.</strong> 45 मिनट का discovery call — हम आपका current PMS, OTA, F&B setup audit करते हैं<br/>
+        <strong style="color:white">Step 2.</strong> 5 कमरों पर 14 दिन का मुफ्त pilot, आपके current PMS के साथ parallel<br/>
+        <strong style="color:white">Step 3.</strong> हाँ कहने के 72 घंटे में पूर्ण migration, 3-महीने मुफ्त रन शुरू<br/>
+        <span style="color:#fde6a8;">Day 14 पर अगर बेहतर नहीं चला — हम बिना charge निकल जाते हैं।</span>
+      </p>
+    </div>
+    <div class="btn">
+      <div class="l1">Discovery book करें</div>
+      <div class="l2">+91 — अभी बात करें</div>
+      <div class="l3">hotels@atithi-setu.com</div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <strong style="color: var(--gold)">Atithi-Setu</strong> · आधुनिक भारत के लिए hospitality OS · GST-तैयार · FRRO-compliant · AES-256 encrypted<br/>
+    Cloud-native · मोबाइल · टैबलेट · डेस्कटॉप · प्रिंट · WhatsApp + Telegram + ईमेल + SMS · 13 user roles<br/>
+    Atithi-Setu hospitality leadership द्वारा तैयार, BCG-trained रणनीति सलाहकारों द्वारा समीक्षित। 2026।
+  </div>
+
+</div>
+</body>
+</html>

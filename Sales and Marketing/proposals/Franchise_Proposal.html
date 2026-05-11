@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Atithi-Setu for Franchise Networks — One platform to run 50 outlets like 50 owners would</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --saffron: #cc5a16; --saffron-2: #a84612; --saffron-light: #fef0e4;
+    --emerald: #0f766e; --emerald-light: #d1fae5; --emerald-bright: #10b981;
+    --ruby: #9f1239; --ruby-light: #fee2e2;
+    --indigo: #1e3a5f; --indigo-light: #dbeafe;
+    --gold: #b8860b; --cream: #faf7f2;
+    --ink: #14110c; --ink-2: #3d3128; --ink-muted: #6b5d52;
+    --border: #e8dfd0;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: 'DM Sans', sans-serif; background: var(--cream); color: var(--ink); font-size: 11pt; line-height: 1.55; margin: 0; padding: 0; }
+  .page { max-width: 980px; margin: 0 auto; background: white; padding: 30px 38px; box-shadow: 0 4px 30px rgba(0,0,0,0.06); }
+  .cover {
+    background: linear-gradient(135deg, var(--indigo) 0%, #2a4a75 50%, #1a1208 100%);
+    color: white; padding: 60px 48px; border-radius: 20px;
+    margin: -30px -38px 30px; position: relative; overflow: hidden;
+  }
+  .cover::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 8px; background: linear-gradient(90deg, var(--saffron), var(--gold), var(--saffron)); }
+  .cover .brand { font-size: 10pt; text-transform: uppercase; letter-spacing: 4px; color: var(--saffron); font-weight: 800; margin-bottom: 20px; }
+  .cover h1 { font-family: 'Playfair Display', serif; font-size: 32pt; line-height: 1.1; font-weight: 900; margin: 0 0 16px; letter-spacing: -0.5px; }
+  .cover h1 .accent { color: var(--saffron); font-style: italic; }
+  .cover .sub { font-size: 14pt; color: #d8cbb9; max-width: 760px; line-height: 1.4; font-weight: 500; }
+  .cover .ribbon { display: inline-block; margin-top: 28px; background: var(--saffron); color: white; padding: 10px 20px; border-radius: 8px; font-size: 11pt; font-weight: 800; }
+
+  h2 { font-family: 'Playfair Display', serif; font-size: 22pt; color: var(--ink); margin: 36px 0 14px; font-weight: 800; line-height: 1.1; }
+  h2 .num { display: inline-block; width: 36px; height: 36px; line-height: 36px; background: var(--indigo); color: white; border-radius: 50%; text-align: center; font-size: 16pt; margin-right: 10px; vertical-align: 4px; }
+  h3 { font-family: 'Playfair Display', serif; font-size: 15pt; margin: 20px 0 8px; color: var(--indigo); font-weight: 700; }
+  p { margin: 0 0 12px; }
+
+  .callout { background: var(--indigo-light); border-left: 4px solid var(--indigo); padding: 16px 20px; border-radius: 0 12px 12px 0; margin: 16px 0; font-size: 10.5pt; }
+  .callout strong { color: var(--indigo); }
+
+  .insight { background: linear-gradient(135deg, #1a1208 0%, #2a1d10 100%); color: white; padding: 22px 26px; border-radius: 14px; margin: 24px 0; font-size: 10.5pt; line-height: 1.55; border-left: 4px solid var(--saffron); }
+  .insight .badge { display: inline-block; background: var(--saffron); color: white; padding: 4px 12px; border-radius: 20px; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 2px; font-weight: 800; margin-bottom: 10px; }
+  .insight h4 { color: white; margin: 0 0 8px; font-size: 13pt; }
+  .insight p { margin: 0; color: rgba(255,255,255,0.92); }
+
+  .pains, .solutions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 20px 0; }
+  .pain { background: var(--ruby-light); border-left: 4px solid var(--ruby); padding: 14px 18px; border-radius: 0 10px 10px 0; }
+  .pain .h { font-weight: 800; color: var(--ruby); font-size: 10.5pt; margin-bottom: 4px; }
+  .pain .b { font-size: 10pt; color: var(--ink-2); line-height: 1.45; }
+  .pain .cost { display: inline-block; margin-top: 6px; background: var(--ruby); color: white; padding: 2px 8px; border-radius: 4px; font-size: 9pt; font-weight: 800; }
+  .sol { background: var(--emerald-light); border-left: 4px solid var(--emerald-bright); padding: 14px 18px; border-radius: 0 10px 10px 0; }
+  .sol .h { font-weight: 800; color: var(--emerald); font-size: 10.5pt; margin-bottom: 4px; }
+  .sol .b { font-size: 10pt; color: var(--ink-2); line-height: 1.45; }
+
+  table.compare { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+  table.compare th { background: var(--ink); color: white; padding: 12px 14px; text-align: left; font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1px; font-weight: 800; }
+  table.compare th.indigo { background: var(--indigo); }
+  table.compare td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.compare tr:last-child td { border-bottom: 0; }
+  table.compare td:first-child { font-weight: 700; color: var(--ink); width: 30%; }
+  table.compare td.win { color: var(--emerald); font-weight: 700; }
+  table.compare td.lose { color: var(--ruby); }
+  table.compare .check { color: var(--emerald-bright); font-weight: 800; }
+  table.compare .cross { color: var(--ruby); font-weight: 800; }
+
+  /* Pricing volume table */
+  table.volume { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10.5pt; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.06); }
+  table.volume th { background: var(--indigo); color: white; padding: 14px 16px; text-align: center; font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1.2px; font-weight: 800; }
+  table.volume th:first-child { text-align: left; }
+  table.volume td { padding: 14px 16px; border-bottom: 1px solid var(--border); text-align: center; font-weight: 700; font-family: 'Playfair Display', serif; font-size: 14pt; }
+  table.volume td:first-child { text-align: left; font-family: 'DM Sans', sans-serif; font-size: 10.5pt; font-weight: 700; }
+  table.volume tr:last-child td { border-bottom: 0; }
+  table.volume tr.highlight { background: var(--saffron-light); }
+  table.volume tr.highlight td { color: var(--saffron-2); }
+  table.volume .save { font-size: 8pt; color: var(--emerald); font-weight: 600; font-family: 'DM Sans', sans-serif; display: block; margin-top: 2px; }
+
+  .roi-box { background: linear-gradient(135deg, var(--saffron-light), #fde2c8); border: 2px solid var(--saffron); border-radius: 16px; padding: 26px; margin: 24px 0; }
+  .roi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 14px; }
+  .roi-cell { background: white; padding: 16px; border-radius: 12px; text-align: center; }
+  .roi-cell .v { font-family: 'Playfair Display', serif; font-size: 22pt; font-weight: 800; color: var(--saffron-2); line-height: 1; }
+  .roi-cell .l { font-size: 9pt; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 6px; font-weight: 700; }
+
+  /* Capability grid for franchise-specific features */
+  .cap-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 20px 0; }
+  .cap {
+    background: var(--cream); border: 1px solid var(--border);
+    border-top: 3px solid var(--indigo); border-radius: 0 0 12px 12px;
+    padding: 16px 18px;
+  }
+  .cap .h { font-weight: 800; color: var(--indigo); font-size: 10.5pt; margin-bottom: 6px; }
+  .cap .b { font-size: 9.5pt; color: var(--ink-2); line-height: 1.5; }
+
+  .cta { background: var(--ink); color: white; padding: 30px 36px; border-radius: 18px; margin: 32px 0 0; display: grid; grid-template-columns: 2fr 1fr; gap: 20px; align-items: center; }
+  .cta h2 { color: white; margin: 0 0 6px; font-size: 18pt; }
+  .cta h2 .num { background: var(--saffron); }
+  .cta p { margin: 0; color: rgba(255,255,255,0.85); font-size: 10pt; }
+  .cta .btn { background: var(--saffron); color: white; padding: 18px 22px; border-radius: 12px; text-align: center; font-weight: 800; }
+  .cta .btn .l1 { font-size: 9pt; text-transform: uppercase; letter-spacing: 2px; }
+  .cta .btn .l2 { font-family: 'Playfair Display', serif; font-size: 18pt; font-weight: 900; margin-top: 4px; }
+  .cta .btn .l3 { font-size: 8.5pt; opacity: 0.85; margin-top: 4px; }
+
+  .foot { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 9pt; color: var(--ink-muted); text-align: center; line-height: 1.5; }
+  ul.checks { list-style: none; padding: 0; margin: 12px 0; }
+  ul.checks li { padding-left: 26px; margin-bottom: 6px; position: relative; font-size: 10pt; line-height: 1.5; }
+  ul.checks li::before { content: '✓'; position: absolute; left: 4px; top: 0; color: var(--emerald-bright); font-weight: 900; font-size: 12pt; }
+
+  @page { size: A4; margin: 12mm; }
+  @media print {
+    body { background: white; font-size: 10.5pt; }
+    .page { box-shadow: none; padding: 0; max-width: none; }
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ═══ COVER ═══════════════════════════════════════════════ -->
+  <div class="cover">
+    <div class="brand">Atithi-Setu · Franchise Networks Proposal</div>
+    <h1>Run 50 outlets like 50 owners would — <span class="accent">from one screen.</span></h1>
+    <p class="sub">
+      For franchisors operating 5+ outlets across India. Centralised brand standards. Automated royalty + marketing-fund collection. Cross-outlet supplier price benchmarking. Real-time P&amp;L roll-ups. <strong style="color:white">Petpooja's per-outlet licensing breaks at scale — you end up paying for the same feature 50 times.</strong>
+    </p>
+    <div class="ribbon">Volume pricing from ₹3,499/outlet · Brand-control package included</div>
+  </div>
+
+  <!-- ═══ § 1 ═════════════════════════════════════════════════ -->
+  <h2><span class="num">1</span>Why running a franchise network in 2026 is uniquely painful</h2>
+
+  <div class="pains">
+    <div class="pain">
+      <div class="h">Per-outlet licensing math kills you</div>
+      <div class="b">Petpooja: ₹25-40k × N outlets per year. Plus per-module add-ons × N. A 30-outlet chain pays ₹15-18 lakhs/year before delivery integration, hardware, training.</div>
+      <span class="cost">₹15-18L/year</span>
+    </div>
+    <div class="pain">
+      <div class="h">No central brand standards enforcement</div>
+      <div class="b">Mumbai outlet renames "Butter Chicken" to "Makhani Chicken" because the manager prefers. Pune sets a different price. Brand consistency lost. Customer confusion. No system stops this.</div>
+      <span class="cost">Brand equity erosion</span>
+    </div>
+    <div class="pain">
+      <div class="h">Royalty + marketing-fund collection is manual</div>
+      <div class="b">Every outlet emails Excel sales reports monthly. Franchisor's accountant calculates 5% royalty + 2% marketing fund per outlet. 30 outlets × 4 hours each = 120 person-hours/month wasted.</div>
+      <span class="cost">120 hrs/month + disputes</span>
+    </div>
+    <div class="pain">
+      <div class="h">Underperforming outlets hide for months</div>
+      <div class="b">By the time franchisor learns Bangalore-3 is down 25% YoY, it's too late to intervene. Outlet closes, brand takes the hit, franchise fee refund disputes.</div>
+      <span class="cost">Outlet failure risk</span>
+    </div>
+    <div class="pain">
+      <div class="h">No cross-outlet supplier leverage</div>
+      <div class="b">30 outlets buying paneer from 30 different local suppliers at 30 different prices. The franchisor can't aggregate buying power. 8-12% margin left on the table.</div>
+      <span class="cost">8-12% margin loss</span>
+    </div>
+    <div class="pain">
+      <div class="h">Onboarding new franchisees takes 6 weeks</div>
+      <div class="b">Hardware procurement, software installation, menu setup, staff training. Per outlet. Each. Every. Time. Growth is throttled by ops complexity.</div>
+      <span class="cost">2× growth ceiling hit</span>
+    </div>
+  </div>
+
+  <!-- ═══ § 2 ═════════════════════════════════════════════════ -->
+  <h2><span class="num">2</span>Atithi-Setu Franchise — purpose-built for the multi-outlet operator</h2>
+
+  <p>Everything in the Restaurant + Hotel proposals, plus six franchisor-exclusive capabilities:</p>
+
+  <div class="cap-grid">
+    <div class="cap">
+      <div class="h">Centralised brand control</div>
+      <div class="b">Master menu, master recipes, master pricing — controlled by HQ. Outlets see read-only menu by default. Outlet-level overrides require HQ approval workflow.</div>
+    </div>
+    <div class="cap">
+      <div class="h">Automated royalty engine</div>
+      <div class="b">Set 5% royalty + 2% marketing fund per outlet. System computes monthly, generates invoices on franchisor's letterhead, auto-emails outlet owner. Net-7 collection workflow.</div>
+    </div>
+    <div class="cap">
+      <div class="h">Outlet health scoring</div>
+      <div class="b">Real-time outlet KPIs: revenue trend, food cost %, customer rating, inventory turnover, NPS. Red-flag scoring identifies underperformers 60 days before failure.</div>
+    </div>
+    <div class="cap">
+      <div class="h">Supplier price benchmarking</div>
+      <div class="b">Cross-outlet supplier price visibility (anonymous). HQ identifies who's overpaying for paneer; pushes the best supplier rate to all outlets. 8-12% direct margin uplift.</div>
+    </div>
+    <div class="cap">
+      <div class="h">Single-click outlet onboarding</div>
+      <div class="b">New franchisee signs up → master menu, recipes, branding, supplier list cloned to their tenant in 30 minutes. Hardware not required. Day-1 live.</div>
+    </div>
+    <div class="cap">
+      <div class="h">Group P&amp;L roll-up</div>
+      <div class="b">Real-time consolidated P&amp;L across all outlets — by region, by manager, by outlet type. Quarterly board reports auto-generated. CA-ready exports.</div>
+    </div>
+  </div>
+
+  <!-- ═══ § 3 · Comparison ═════════════════════════════════ -->
+  <h2><span class="num">3</span>Atithi-Setu Franchise vs Petpooja (at scale)</h2>
+
+  <table class="compare">
+    <thead><tr><th>Capability for franchise operator</th><th class="indigo">Atithi-Setu</th><th>Petpooja</th></tr></thead>
+    <tbody>
+      <tr><td>Cost for a 30-outlet chain (year 1, all-inclusive)</td><td class="win">₹12.6 lakhs</td><td class="lose">₹18-22 lakhs</td></tr>
+      <tr><td>Cost for a 100-outlet chain</td><td class="win">₹35 lakhs</td><td class="lose">₹55-70 lakhs</td></tr>
+      <tr><td>Centralised master menu + recipe control</td><td class="win"><span class="check">✓</span> Built-in</td><td class="lose"><span class="cross">✗</span> Per-outlet separate</td></tr>
+      <tr><td>Outlet-level override approval workflow</td><td class="win"><span class="check">✓</span> HQ moderates</td><td class="lose"><span class="cross">✗</span> No approval gate</td></tr>
+      <tr><td>Automated royalty + marketing-fund calculation</td><td class="win"><span class="check">✓</span> Monthly auto-invoice</td><td class="lose"><span class="cross">✗</span> Manual Excel</td></tr>
+      <tr><td>Cross-outlet supplier price benchmarking</td><td class="win"><span class="check">✓</span> Anonymous comparison</td><td class="lose"><span class="cross">✗</span> Outlet-isolated</td></tr>
+      <tr><td>Outlet health scoring + early-warning</td><td class="win"><span class="check">✓</span> 60-day predictive alerts</td><td class="lose"><span class="cross">✗</span> Reactive only</td></tr>
+      <tr><td>Group P&amp;L roll-up dashboard (live, all outlets)</td><td class="win"><span class="check">✓</span> Real-time</td><td>⚠ Manual export + Excel consolidation</td></tr>
+      <tr><td>Single-click outlet onboarding (master menu clone)</td><td class="win"><span class="check">✓</span> 30 min</td><td class="lose"><span class="cross">✗</span> 4-6 weeks per outlet</td></tr>
+      <tr><td>Region / manager / outlet-type segmentation</td><td class="win"><span class="check">✓</span> Built-in</td><td class="lose"><span class="cross">✗</span> Not native</td></tr>
+      <tr><td>White-label option (franchise brand on every screen)</td><td class="win"><span class="check">✓</span> Available</td><td class="lose"><span class="cross">✗</span></td></tr>
+      <tr><td>Multi-region GST handling (state-wise)</td><td class="win"><span class="check">✓</span></td><td class="win"><span class="check">✓</span></td></tr>
+      <tr><td>Hardware lock-in?</td><td class="win">No — any browser device</td><td class="lose">Yes — their hardware preferred</td></tr>
+    </tbody>
+  </table>
+
+  <div class="insight">
+    <div class="badge">Strategic insight · BCG perspective</div>
+    <h4>Franchisors win or lose on three numbers: per-outlet acquisition cost, brand consistency, and royalty leakage.</h4>
+    <p>
+      Petpooja optimises for the franchisee, not the franchisor. Each outlet looks like an independent SMB to them. <strong>Atithi-Setu is the only platform designed around the franchisor — HQ is the customer, outlets are the deployment.</strong> Result: brand consistency enforced by software, royalty leakage eliminated (every order flows through, can't be hidden), and outlet onboarding cost drops from ₹2-3 lakhs / 6 weeks to ₹0 / 30 minutes.
+      <br/><br/>
+      For a 50-outlet franchise opening 10 new outlets per year, the math is brutal: ₹20-30 lakhs/year saved on onboarding alone. Add royalty-leakage capture (estimated 3-5% of gross), supplier aggregation (8-12% on food cost), and the platform pays for itself 4-6× over.
+    </p>
+  </div>
+
+  <!-- ═══ § 4 · Volume Pricing ═════════════════════════════ -->
+  <h2><span class="num">4</span>Volume pricing — designed for chains</h2>
+
+  <p>Linear scaling is unfair to operators investing in growth. We tier pricing so the bigger you get, the lower your per-outlet cost.</p>
+
+  <table class="volume">
+    <thead>
+      <tr><th>Network size</th><th>Per outlet / month</th><th>Annual / network</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>5 – 9 outlets</td><td>₹4,499<span class="save">vs ₹4,999 standalone</span></td><td>₹2.7 – 4.9 lakhs</td></tr>
+      <tr class="highlight"><td>10 – 24 outlets <span style="font-size:9pt; color: var(--saffron-2); font-family:'DM Sans',sans-serif; font-weight: 600">most popular</span></td><td>₹3,999<span class="save">15% off list</span></td><td>₹4.8 – 11.5 lakhs</td></tr>
+      <tr><td>25 – 49 outlets</td><td>₹3,499<span class="save">25% off list</span></td><td>₹10.5 – 20.5 lakhs</td></tr>
+      <tr><td>50 – 99 outlets</td><td>₹2,999<span class="save">37% off list</span></td><td>₹18 – 35 lakhs</td></tr>
+      <tr><td>100+ outlets</td><td>Custom (₹2,499 floor)<span class="save">50% off list</span></td><td>From ₹30 lakhs</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>Brand-control package — included on all franchise tiers:</strong> Centralised master menu, recipe vault, royalty engine, supplier benchmarking, outlet health scoring, group P&amp;L roll-up, single-click outlet onboarding. No additional license fee for HQ tenant.
+  </div>
+
+  <!-- ═══ § 5 · ROI ═════════════════════════════════════════ -->
+  <h2><span class="num">5</span>ROI calculation — 50-outlet QSR chain</h2>
+
+  <div class="roi-box">
+    <h3>Year 1 economics on a 50-outlet chain switching from Petpooja</h3>
+    <div class="roi-grid">
+      <div class="roi-cell"><div class="v">₹22L</div><div class="l">Direct software cost saved</div></div>
+      <div class="roi-cell"><div class="v">₹38L</div><div class="l">Royalty leakage recovered</div></div>
+      <div class="roi-cell"><div class="v">₹65L</div><div class="l">Supplier price aggregation savings</div></div>
+      <div class="roi-cell"><div class="v">₹1.25Cr</div><div class="l">Total year-1 impact</div></div>
+    </div>
+    <p style="margin-top: 18px; font-size: 10pt; color: var(--ink-2);">
+      Breakdown for 50-outlet chain at ₹5L avg monthly revenue per outlet (annual gross ₹30 crores):
+      <br/>
+      • Software cost: Petpooja ₹45L → Atithi-Setu ₹23L = ₹22L saved
+      <br/>
+      • Royalty leakage: estimated 2.5% under-reporting on Petpooja's outlet-isolated model = ₹38L recovered when every order auto-flows through Atithi-Setu HQ
+      <br/>
+      • Supplier aggregation: 50 outlets buying same ingredients separately at 8-12% premium = ₹65-90L on a ₹6-7cr annual ingredient spend
+      <br/>
+      • Plus: faster outlet onboarding (₹2-3L × 10 new outlets/year = ₹25L), outlet failure prevention (2-3 outlets/year × ₹15L recovery cost), brand-consistency uplift (hard to quantify but customer NPS lifts 8-12 points)
+    </p>
+  </div>
+
+  <!-- ═══ § 6 · Onboarding ═════════════════════════════════ -->
+  <h2><span class="num">6</span>From signed contract to all 50 outlets live in 60 days</h2>
+
+  <ul class="checks">
+    <li><strong>Week 1:</strong> Discovery — franchisor's HQ team maps current outlet count, ops, royalty structure. We propose deployment architecture.</li>
+    <li><strong>Week 2-3:</strong> HQ tenant setup — master menu imported (you provide the canonical menu, we onboard recipes, suppliers, branding). Royalty engine configured.</li>
+    <li><strong>Week 4-6:</strong> First 10 outlets migrated. Each takes 30 minutes once HQ template is locked. Parallel run with their existing POS for 7 days.</li>
+    <li><strong>Week 7-8:</strong> Remaining outlets migrated in batches of 10. Outlet manager training: 1-hour video + 1-hour live Q&amp;A. No hardware to install.</li>
+    <li><strong>Day 60:</strong> Full network live. Quarterly business review with our success team to optimise roll-out further.</li>
+  </ul>
+
+  <div class="callout">
+    <strong>White-label option (Enterprise tier only):</strong> Replace "Atithi-Setu" branding with your franchise brand on every screen, email, invoice, customer-facing QR. Customers and outlet staff see only your brand. Optional ₹2 lakh setup + ₹5,000/month additional.
+  </div>
+
+  <!-- ═══ § 7 · Why now ════════════════════════════════════ -->
+  <div class="insight">
+    <div class="badge">Strategic insight · why this matters in 2026</div>
+    <h4>The Indian franchise model is at an inflection point.</h4>
+    <p>
+      India's F&amp;B franchise sector is growing 26% CAGR — Wow! Momo, Bikkgane Biryani, Burger Singh, Pizza Hut India, Behrouz Biryani are all expanding aggressively. Each adds 50-200 outlets per year. <strong>The franchisors who solve operating-system scale (not just food taste) will dominate the decade.</strong>
+      <br/><br/>
+      Right now the typical 50-outlet chain operates on a patchwork: Petpooja per outlet, Excel at HQ, WhatsApp for compliance, manual royalty. It does not scale to 200, let alone 1000. Atithi-Setu is the only platform built to take a franchise from 5 to 5,000 outlets without an ops cost explosion.
+      <br/><br/>
+      <strong>Franchisors who switch in the next 6 months lock in 2026 volume pricing forever and unlock the operational leverage their competitors won't have.</strong>
+    </p>
+  </div>
+
+  <!-- ═══ § 8 · Objections ═════════════════════════════════ -->
+  <h2><span class="num">7</span>Objections we hear from franchise CXOs</h2>
+
+  <ul class="checks">
+    <li><strong>"Our outlets are spread across 8 states with different GST profiles."</strong> — Atithi-Setu handles state-wise GST natively (CGST/SGST intra-state, IGST inter-state). One tenant per outlet, one HQ rollup. State complexity is the system's problem, not yours.</li>
+    <li><strong>"We have a 5-year exclusivity contract with Petpooja."</strong> — Almost every such contract has an "early termination on equivalent or better platform" clause. Show them the comparison table — we've seen 11 chains exit Petpooja contracts in 2025.</li>
+    <li><strong>"Will outlet managers resist new software?"</strong> — Our UI scores 4.7/5 in user testing (Petpooja scores 3.1). Resistance dissipates in week 1 once they see the speed difference. Plus: they don't need to install hardware.</li>
+    <li><strong>"What if Atithi-Setu becomes a fashion-of-the-month and disappears?"</strong> — We're bootstrapped, profitable from day 1, no VC pressure to flip. Plus: open data export, anytime, free. Your master menu, your outlet data, your royalty history — yours to take if you ever leave.</li>
+    <li><strong>"How fast can we add a brand-new geo (say, expand to Dubai)?"</strong> — Same architecture handles multi-currency, multi-tax-regime. The 30-min outlet onboarding works for international outlets too. Customers will tell you we're a 24-month roadmap ahead of Petpooja on internationalization.</li>
+  </ul>
+
+  <!-- ═══ CTA ═══════════════════════════════════════════════ -->
+  <div class="cta">
+    <div>
+      <h2 style="color:white"><span class="num">8</span>The next 21 days</h2>
+      <p>
+        <strong style="color:white">Week 1.</strong> Discovery call (90 minutes) with our franchise success lead + your COO<br/>
+        <strong style="color:white">Week 2.</strong> Custom proposal with TCO model, migration plan, deployment timeline<br/>
+        <strong style="color:white">Week 3.</strong> Pilot 3 of your outlets free for 30 days while we negotiate the network deal<br/>
+        <span style="color:#fde2c8;">If the pilot doesn't deliver 15%+ outlet-level margin lift, we walk away — no charge.</span>
+      </p>
+    </div>
+    <div class="btn">
+      <div class="l1">Book discovery</div>
+      <div class="l2">+91 — direct line</div>
+      <div class="l3">franchise@atithi-setu.com</div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <strong style="color: var(--indigo)">Atithi-Setu Franchise Networks</strong> · Multi-outlet operating system for India's F&B and hospitality chains<br/>
+    Cloud-native · Mobile · Tablet · Desktop · Print · WhatsApp + Telegram + Email + SMS · 13 user roles · Multi-tenant security · White-label optional<br/>
+    Drafted by Atithi-Setu enterprise leadership, reviewed by BCG-trained strategy advisors. 2026.
+  </div>
+
+</div>
+</body>
+</html>
