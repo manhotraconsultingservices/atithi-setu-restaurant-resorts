@@ -30,7 +30,7 @@ Six print-ready HTML proposals for three customer segments × two languages. Dra
 1. **Cover** — bold headline + positioning statement + 3-month-free ribbon
 2. **Pain points** — 6-7 problems with rupee-impact tags
 3. **Atithi-Setu solutions** — feature-mapped, one-to-one to pain points
-4. **Competitor comparison table** — feature-by-feature vs Petpooja (Restaurant/Franchise) or vs eZee + Cloudbeds (Hotel)
+4. **Competitor comparison table** — feature-by-feature vs the typical incumbent platform
 5. **Pricing tiers** — 3 cards (Starter / Professional / Enterprise pattern)
 6. **ROI worked example** — real numbers on a representative customer
 7. **Migration plan** — week-by-week timeline
@@ -40,9 +40,9 @@ Six print-ready HTML proposals for three customer segments × two languages. Dra
 
 ### Per-segment differentiators
 
-**Restaurant proposal**: emphasises the 60-cover/day café archetype, Petpooja-switch narrative, ₹40,500/month recovery, 12-15× ROI in 90 days. The "Inventory module Petpooja doesn't have" is the killer feature.
+**Restaurant proposal**: emphasises the 60-cover/day café archetype, switch-from-current-POS narrative, ₹40,500/month recovery, 12-15× ROI in 90 days. The "Inventory module the legacy POS doesn't have" is the killer feature.
 
-**Hotel proposal**: positions against eZee (legacy desktop) and Cloudbeds (US-priced). India-native angles dominate: Form-C automation, state-aware GST on folios, AI sentiment analysis. Boutique tier at ₹2,499/month is the wedge — 1/10th of Cloudbeds.
+**Hotel proposal**: positions against legacy desktop PMS and global SaaS PMS (US-priced). India-native angles dominate: Form-C automation, state-aware GST on folios, AI sentiment analysis. Boutique tier at ₹2,499/month is the wedge — 1/10th of imported global SaaS.
 
 **Franchise proposal**: HQ is the customer, outlets are the deployment. Volume pricing scales down with network size (5-9 outlets, 10-24, 25-49, 50-99, 100+). Six franchisor-exclusive capabilities (centralised brand, royalty engine, supplier benchmarking, outlet health scoring, single-click onboarding, group P&L). White-label option at the top tier.
 
@@ -50,14 +50,14 @@ Six print-ready HTML proposals for three customer segments × two languages. Dra
 
 The three proposals are connected by a single market thesis:
 
-> **Petpooja optimised for the franchisee 6 years ago.**
+> **Legacy POS platforms optimised for the franchisee 6 years ago.**
 > **Atithi-Setu is optimising for the franchisor / hotelier / restaurant chain in 2026.**
 
-Three structural changes since Petpooja's heyday:
+Three structural changes since the legacy POS's heyday:
 
 1. **Cloud-native is now expected** — owners under 40 won't tolerate desktop apps
 2. **Delivery aggregator economics broke the per-outlet model** — paying for Swiggy/Zomato integration per outlet doesn't scale
-3. **AI capabilities (OCR, sentiment, image generation) are table stakes** — Petpooja has none of these natively
+3. **AI capabilities (OCR, sentiment, image generation) are table stakes** — Most legacy platforms have none of these natively
 
 Combined with India-specific moats (state-wise GST, FRRO Form-C, ONDC integration), Atithi-Setu positions as **the platform built for the Indian hospitality decade ahead**, not the one behind us.
 
@@ -71,11 +71,11 @@ Combined with India-specific moats (state-wise GST, FRRO Form-C, ONDC integratio
 | 50+ outlets | n/a | n/a | ₹2,499 – ₹2,999 |
 | 100+ outlets | Custom | Custom | Custom (₹2,499 floor) |
 
-All tiers include the Atithi-Setu Inventory module — the differentiator Petpooja can't match. Hotel module included on Restaurant Professional+. Hardware never charged separately. No per-channel delivery integration fee.
+All tiers include the Atithi-Setu Inventory module — the differentiator the legacy POS can't match. Hotel module included on Restaurant Professional+. Hardware never charged separately. No per-channel delivery integration fee.
 
 ## Migration offer (consistent across all 3 segments)
 
-- **3 months free** on Professional / Resort tier when switching from Petpooja / eZee / Cloudbeds
+- **3 months free** on Professional / Resort tier when switching from any incumbent POS or PMS
 - **Free 72-hour data migration** (menu, customers, suppliers, last-12-months sales)
 - **Parallel run** with existing system for 7 days — zero rollback risk
 - **30%+ year-1 savings guarantee** vs current platform bill, or we refund the difference
