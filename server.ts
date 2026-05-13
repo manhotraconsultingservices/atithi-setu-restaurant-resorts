@@ -12234,7 +12234,7 @@ async function startServer() {
         return res.status(403).json({ error: "Forbidden" });
       }
       const row: any = await centralDb.get(
-        `SELECT id, name, subscription_plan, subscription_due_date, grace_period_days,
+        `SELECT id, name, is_active, subscription_plan, subscription_due_date, grace_period_days,
                 access_revoked, access_revoked_at, access_revoked_reason,
                 last_payment_date
            FROM restaurants WHERE id = ?`,
@@ -12243,9 +12243,13 @@ async function startServer() {
       if (!row) return res.status(404).json({ error: "Tenant not found" });
       const days = _daysUntilDue(row.subscription_due_date);
       const status = _billingStatusOf(row);
+      // tenant_inactive trumps everything else for the frontend lock screen
+      const tenantInactive = Number(row.is_active) === 0;
       res.json({
         tenant_id: row.id,
         tenant_name: row.name,
+        is_active: !tenantInactive,
+        tenant_inactive: tenantInactive,
         subscription_plan: row.subscription_plan,
         subscription_due_date: row.subscription_due_date,
         grace_period_days: row.grace_period_days ?? 7,
@@ -12254,7 +12258,7 @@ async function startServer() {
         access_revoked: Number(row.access_revoked) === 1,
         access_revoked_at: row.access_revoked_at,
         access_revoked_reason: row.access_revoked_reason,
-        billing_status: status,
+        billing_status: tenantInactive ? 'INACTIVE' : status,
         billing_contact: {
           email: 'billing@atithi-setu.com',
           whatsapp: '+91 70111 89371',

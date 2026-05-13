@@ -370,6 +370,52 @@ export default function App() {
           }
         } catch {}
       }
+      // Tenant fully deactivated — surface this immediately so the user
+      // can't keep poking the deactivated dashboard. Mark a global flag
+      // (BillingNotice will pick it up on next render) and show a clear
+      // toast pointing the user to sign out + contact billing.
+      if (res.status === 403) {
+        try {
+          const clone = res.clone();
+          const data = await clone.json().catch(() => null);
+          if (data?.code === 'TENANT_INACTIVE') {
+            const w = window as any;
+            if (!w.__atithiTenantInactiveHandled) {
+              w.__atithiTenantInactiveHandled = true;
+              document.body.classList.add('atithi-tenant-inactive');
+              // Render a non-throttled lock-screen-style toast pointing
+              // the user to the BillingNotice fullscreen overlay.
+              const toast = document.createElement('div');
+              toast.style.cssText = [
+                'position:fixed','top:0','left:0','right:0','bottom:0',
+                'z-index:99998','background:rgba(26,18,8,0.85)','backdrop-filter:blur(4px)',
+                'display:flex','align-items:center','justify-content:center','padding:16px',
+              ].join(';');
+              toast.innerHTML = `
+                <div style="background:white;border-radius:24px;padding:32px;max-width:480px;text-align:center;font-family:DM Sans,system-ui,sans-serif;box-shadow:0 24px 60px rgba(0,0,0,0.35);">
+                  <div style="width:64px;height:64px;border-radius:50%;background:#fee2e2;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:32px;">⏸</div>
+                  <h2 style="font-size:22px;font-weight:800;margin:0 0 8px;color:#1a1208;">Service inactive</h2>
+                  <p style="color:#6b5d52;font-size:14px;margin:0 0 8px;">Your account access has been paused by our team.</p>
+                  <p style="color:#9c8e85;font-size:13px;margin:0 0 20px;"><strong style="color:#059669;">Your data is safe</strong> and will be restored on reactivation.</p>
+                  <div style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:14px;padding:14px;margin:0 0 16px;text-align:left;font-size:13px;">
+                    <div style="font-weight:800;color:#059669;font-size:11px;letter-spacing:1px;margin-bottom:6px;">REACTIVATE SERVICE</div>
+                    📧 <strong>billing@atithi-setu.com</strong><br>
+                    💬 WhatsApp <strong>+91 70111 89371</strong>
+                  </div>
+                  <button id="atithi-signout-btn" style="width:100%;padding:12px;background:#1a1208;color:white;border:none;border-radius:16px;font-weight:800;font-size:14px;cursor:pointer;">Sign out</button>
+                </div>`;
+              document.body.appendChild(toast);
+              const btn = toast.querySelector('#atithi-signout-btn');
+              if (btn) {
+                (btn as HTMLButtonElement).onclick = () => {
+                  try { localStorage.clear(); } catch {}
+                  window.location.href = '/';
+                };
+              }
+            }
+          }
+        } catch {}
+      }
       return res;
     };
     window.fetch = patched as typeof window.fetch;
@@ -1811,6 +1857,52 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
   }, [status?.access_revoked]);
 
   if (!status) return null;
+
+  // Tenant deactivated — full-screen hard lock. The admin has paused the
+  // entire restaurant, not just billing. No read, no write, no escape. The
+  // owner can only sign out and contact support. Server backs this up by
+  // returning 403 TENANT_INACTIVE on every API call.
+  if (status.tenant_inactive || status.is_active === false) {
+    return (
+      <div className="fixed inset-0 z-[9999] bg-[#1a1208]/95 backdrop-blur-sm flex items-center justify-center p-4">
+        <div className="bg-white rounded-[28px] shadow-2xl max-w-xl w-full p-8 md:p-10 text-center">
+          <div className="w-16 h-16 mx-auto rounded-full bg-red-100 flex items-center justify-center mb-5">
+            <X size={32} className="text-red-600" />
+          </div>
+          <h1 className="text-2xl md:text-3xl font-bold font-serif mb-3 text-[#1a1208]">
+            Service inactive
+          </h1>
+          <p className="text-[#6b5d52] mb-2">
+            Your account access has been paused by our team.
+          </p>
+          <p className="text-sm text-[#9c8e85] mb-6">
+            <strong className="text-emerald-700">Your data is safe.</strong> All menus, orders, customer records, and reports are preserved and will be restored the moment your account is reactivated.
+          </p>
+          <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5 mb-6 text-left">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 mb-2">To reactivate service</div>
+            <div className="text-sm text-[#1a1208] space-y-1.5">
+              <div>📧 Email <strong>{status.billing_contact?.email || 'billing@atithi-setu.com'}</strong></div>
+              <div>💬 WhatsApp <strong>{status.billing_contact?.whatsapp || '+91 70111 89371'}</strong></div>
+              <div className="text-xs text-[#6b5d52] mt-2 italic">We typically respond within 2 hours during IST business hours.</div>
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              try { localStorage.clear(); } catch {}
+              window.location.href = '/';
+            }}
+            data-allow-readonly
+            className="w-full bg-[#1a1208] hover:bg-[#3d3128] text-white py-3 rounded-2xl font-bold transition-colors mb-3"
+          >
+            Sign out
+          </button>
+          <p className="text-xs text-[#9c8e85]">
+            {status.tenant_name && <>Account: <strong>{status.tenant_name}</strong></>}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // Read-only mode — admin has revoked write access.
   // Owner can still view all data; mutations are blocked server-side.
