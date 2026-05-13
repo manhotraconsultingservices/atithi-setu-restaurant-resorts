@@ -548,40 +548,64 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
     // skip for whitelisted paths (login/billing-status), skip for SYSTEM tenant,
     // skip for read-only HTTP methods (GET/HEAD/OPTIONS) — owners keep read
     // access even after revocation; only mutations are blocked.
+    //
+    // CRITICAL: we resolve the tenant id from BOTH the JWT and the URL path.
+    // Many routes don't put the tenant in the JWT (temp tokens, multi-tenant
+    // users) and rely on the :id URL param. If a request affects a tenant
+    // whose access is revoked — regardless of which source we found it from
+    // — we block it.
     const role = decoded?.role;
     const isAdminUser = role === 'SUPER_ADMIN' || role === 'CTO';
-    const tenantId = decoded?.restaurantId;
     const path = req.originalUrl || req.url || '';
     const method = (req.method || 'GET').toUpperCase();
     const isWhitelisted = ALWAYS_ALLOWED_WHEN_REVOKED.some(rx => rx.test(path));
     const isReadOnly = READ_ONLY_METHODS.has(method);
 
-    if (!isAdminUser && tenantId && tenantId !== 'SYSTEM' && !isWhitelisted && !isReadOnly) {
-      try {
-        const row: any = await centralDb.get(
-          "SELECT access_revoked, access_revoked_reason FROM restaurants WHERE id = ?",
-          [tenantId]
-        );
-        if (row && Number(row.access_revoked) === 1) {
-          return res.status(402).json({
-            error: "Read-only mode",
-            code: "ACCESS_REVOKED_READ_ONLY",
-            reason: row.access_revoked_reason || "Subscription payment overdue",
-            message:
-              "Your account is currently in read-only mode while we process your subscription payment. " +
-              "You can continue to view, export, and download your data. Creating, editing, and deleting " +
-              "are paused until the account is restored. Please contact our billing team to resolve.",
-            contact: {
-              email: "billing@atithi-setu.com",
-              whatsapp: "+91 70111 89371",
-            },
-          });
+    if (!isAdminUser && !isWhitelisted && !isReadOnly) {
+      // Source 1: JWT (e.g. {restaurantId: 'RESTO-1003'})
+      const tenantFromJwt: string | undefined = decoded?.restaurantId;
+      // Source 2: URL path — match /api/restaurant/:id/... and similar patterns
+      let tenantFromUrl: string | undefined;
+      const m = path.match(/\/api\/restaurant\/([^/?#]+)/i)
+            || path.match(/\/api\/tenants?\/([^/?#]+)/i);
+      if (m && m[1] && m[1] !== 'SYSTEM') tenantFromUrl = m[1];
+
+      // Collect every distinct tenant id this request touches, then check
+      // each one. A revoked tenant id from EITHER source blocks the request.
+      const tenantsToCheck = new Set<string>();
+      if (tenantFromJwt && tenantFromJwt !== 'SYSTEM') tenantsToCheck.add(tenantFromJwt);
+      if (tenantFromUrl && tenantFromUrl !== 'SYSTEM') tenantsToCheck.add(tenantFromUrl);
+
+      if (tenantsToCheck.size > 0) {
+        try {
+          const ids = [...tenantsToCheck];
+          const placeholders = ids.map(() => '?').join(',');
+          const rows: any[] = await centralDb.query(
+            `SELECT id, access_revoked, access_revoked_reason FROM restaurants WHERE id IN (${placeholders})`,
+            ids
+          );
+          const blocked = rows.find((r: any) => Number(r.access_revoked) === 1);
+          if (blocked) {
+            return res.status(402).json({
+              error: "Read-only mode",
+              code: "ACCESS_REVOKED_READ_ONLY",
+              tenant_id: blocked.id,
+              reason: blocked.access_revoked_reason || "Subscription payment overdue",
+              message:
+                "Your account is currently in read-only mode while we process your subscription payment. " +
+                "You can continue to view, export, and download your data. Creating, editing, and deleting " +
+                "are paused until the account is restored. Please contact our billing team to resolve.",
+              contact: {
+                email: "billing@atithi-setu.com",
+                whatsapp: "+91 70111 89371",
+              },
+            });
+          }
+        } catch (err) {
+          // Don't fail open on DB errors — log and continue. The hourly banner
+          // and the frontend interceptor will still surface real revocations.
+          console.error("Access-revoked check failed:", err);
         }
-      } catch (err) {
-        // Don't fail open on DB errors — log and continue (we don't want
-        // a DB hiccup to lock out every tenant). The hourly banner will
-        // surface real revocations on the next poll.
-        console.error("Access-revoked check failed:", err);
       }
     }
     next();
@@ -892,6 +916,58 @@ async function startServer() {
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
+
+  // ─────────────────────────────────────────────────────────────────────
+  // GLOBAL TENANT READ-ONLY GUARD
+  // ─────────────────────────────────────────────────────────────────────
+  // Many tenant-scoped routes are intentionally unauthenticated for guest
+  // flows (QR ordering, in-room service, public booking). These paths
+  // bypass authenticate() and therefore the access-revocation check there.
+  // To make read-only mode airtight, we run a second check at the app
+  // level on every /api/restaurant/:id/* mutation, using the tenant id
+  // from the URL. Admin paths and read-only HTTP methods are skipped.
+  //
+  // The two checks (authenticate + this) are complementary — both must
+  // be in place. Removing either leaves a hole.
+  app.use(async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const method = (req.method || 'GET').toUpperCase();
+      if (READ_ONLY_METHODS.has(method)) return next();
+      const path = req.originalUrl || req.url || '';
+      // Skip auth/admin/billing-status/uploads
+      if (ALWAYS_ALLOWED_WHEN_REVOKED.some(rx => rx.test(path))) return next();
+      // Only enforce on /api/restaurant/:id/* and /api/tenants/:id/*
+      const m = path.match(/\/api\/restaurant\/([^/?#]+)/i)
+            || path.match(/\/api\/tenants?\/([^/?#]+)/i);
+      if (!m || !m[1] || m[1] === 'SYSTEM') return next();
+      const tenantId = m[1];
+      const row: any = await centralDb.get(
+        "SELECT access_revoked, access_revoked_reason FROM restaurants WHERE id = ?",
+        [tenantId]
+      ).catch(() => null);
+      if (row && Number(row.access_revoked) === 1) {
+        return res.status(402).json({
+          error: "Read-only mode",
+          code: "ACCESS_REVOKED_READ_ONLY",
+          tenant_id: tenantId,
+          reason: row.access_revoked_reason || "Subscription payment overdue",
+          message:
+            "This account is currently in read-only mode while the subscription payment is being processed. " +
+            "Viewing, exporting, and downloading data are still available. Creating, editing, and deleting " +
+            "are paused until the account is restored.",
+          contact: {
+            email: "billing@atithi-setu.com",
+            whatsapp: "+91 70111 89371",
+          },
+        });
+      }
+    } catch (err) {
+      // Never fail closed on the global guard — DB hiccup shouldn't take
+      // every tenant down. The per-route authenticate() check is a backup.
+      console.error("[readonly-guard] check failed:", err);
+    }
+    next();
+  });
 
   // Admin: Get Users
   app.get("/api/admin/users", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
