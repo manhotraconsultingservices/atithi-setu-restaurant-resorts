@@ -980,10 +980,26 @@ export default function App() {
   }, []);
 
   const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('restaurantId');
-    localStorage.removeItem('role');
-    localStorage.removeItem('userName');
+    // STEP 1 — wipe every auth artefact. localStorage.clear() is the safest
+    // because partial removals miss anything a future feature stashes.
+    // We do this BEFORE React state to avoid any race where a re-render
+    // tries to fetch with a stale token.
+    try {
+      localStorage.removeItem('token');
+      localStorage.removeItem('restaurantId');
+      localStorage.removeItem('role');
+      localStorage.removeItem('userName');
+      // Also wipe anything else we've stashed under our namespace, but keep
+      // the session_revoked marker if some downstream screen wants it.
+      const keep = localStorage.getItem('atithi_session_revoked');
+      localStorage.clear();
+      if (keep) localStorage.setItem('atithi_session_revoked', keep);
+    } catch {}
+    // Wipe sessionStorage too — cookies the server set under the subdomain
+    // can also live here for some auth flows.
+    try { sessionStorage.clear(); } catch {}
+
+    // STEP 2 — reset React state for the in-flight render cycle.
     setToken(null);
     setRestaurantId(null);
     setRole(null);
@@ -996,14 +1012,27 @@ export default function App() {
     setOwnerAuthError('');
     setAvailableRestaurants([]);
     setTempOwnerToken(null);
-    // If we're on the /internal admin portal, stay there; otherwise go to landing
-    const stayOnInternal = (window.location.pathname || '').toLowerCase().replace(/\/$/, '') === '/internal';
-    if (stayOnInternal) {
-      setAuthMode('LOGIN');
-      setInitialAuthRole('SUPER_ADMIN');
-      setView('AUTH');
+
+    // STEP 3 — hard navigation. React state changes alone can get stuck if
+    // anything in the tree (BillingNotice, fetch interceptor, useEffect with
+    // cached deps) re-introduces state. A page reload guarantees a clean
+    // slate. Logic:
+    //   • /internal admin portal → stay there, just reload
+    //   • tenant subdomain        → reload current URL (eager guard will
+    //                                pick up tenant-inactive on next mount)
+    //   • apex / anywhere else    → navigate to /
+    const path = (window.location.pathname || '').toLowerCase().replace(/\/$/, '');
+    const onInternal = path === '/internal';
+    if (onInternal) {
+      // Stay on /internal but reload to clear React state
+      window.location.reload();
     } else {
-      setView('LANDING');
+      // Force navigation to root of current host. This:
+      //   1. discards any URL params (like ?token= handoffs)
+      //   2. forces a fresh tenant-by-slug fetch on remount
+      //   3. lets the eager guard show the "Service inactive" screen
+      //      automatically if the tenant is no longer active
+      window.location.href = '/';
     }
   };
 

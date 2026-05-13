@@ -12321,7 +12321,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'billing-v8-is_active-tri-state-fix',
+    commit_marker: 'billing-v9-hard-signout',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -12329,6 +12329,7 @@ async function startServer() {
       'cached-token-eager-guard',
       'harmonized-messaging',
       'is_active-tri-state-aware',   // 0=pending, 1=active, 2=suspended — all states handled
+      'hard-signout-navigation',     // logout forces window.location.href = '/'
     ],
     booted_at: new Date().toISOString(),
   };
