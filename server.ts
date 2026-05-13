@@ -12321,15 +12321,17 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'billing-v9-hard-signout',
+    commit_marker: 'billing-v10-signout-loop-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
       'tenant-inactive-block',
       'cached-token-eager-guard',
       'harmonized-messaging',
-      'is_active-tri-state-aware',   // 0=pending, 1=active, 2=suspended — all states handled
-      'hard-signout-navigation',     // logout forces window.location.href = '/'
+      'is_active-tri-state-aware',   // 0=pending, 1=active, 2=suspended
+      'hard-signout-navigation',
+      'interceptor-toast-token-gated', // anonymous users see React screen, not overlay loop
+      'signout-reload-fallback',       // location.reload() when href='/' is a no-op
     ],
     booted_at: new Date().toISOString(),
   };

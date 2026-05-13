@@ -370,15 +370,23 @@ export default function App() {
           }
         } catch {}
       }
-      // Tenant fully deactivated — surface this immediately so the user
-      // can't keep poking the deactivated dashboard. Mark a global flag
-      // (BillingNotice will pick it up on next render) and show a clear
-      // toast pointing the user to sign out + contact billing.
+      // Tenant fully deactivated — surface this immediately for an
+      // AUTHENTICATED user whose tenant just got paused. We gate on
+      // localStorage.token because:
+      //   • If a user is anonymous (no token) and lands on a deactivated
+      //     subdomain, the React subdomain login flow ALREADY renders a
+      //     proper "Service inactive" screen via the eager by-slug guard.
+      //     A second overlay on top would just hide it.
+      //   • Without this gate, after Sign Out the page reloads, by-slug
+      //     fetches again, returns 403 again, and this toast re-paints —
+      //     the user gets stuck in a loop where Sign Out appears broken.
       if (res.status === 403) {
         try {
           const clone = res.clone();
           const data = await clone.json().catch(() => null);
           if (data?.code === 'TENANT_INACTIVE') {
+            const hasToken = (() => { try { return !!localStorage.getItem('token'); } catch { return false; } })();
+            if (!hasToken) return res;     // anonymous → React tree handles it
             const w = window as any;
             if (!w.__atithiTenantInactiveHandled) {
               w.__atithiTenantInactiveHandled = true;
@@ -386,6 +394,7 @@ export default function App() {
               // Render a non-throttled lock-screen-style toast pointing
               // the user to the BillingNotice fullscreen overlay.
               const toast = document.createElement('div');
+              toast.id = 'atithi-tenant-inactive-overlay';
               toast.style.cssText = [
                 'position:fixed','top:0','left:0','right:0','bottom:0',
                 'z-index:99998','background:rgba(26,18,8,0.85)','backdrop-filter:blur(4px)',
@@ -402,15 +411,24 @@ export default function App() {
                     📧 <strong>billing@atithi-setu.com</strong><br>
                     💬 WhatsApp <strong>+91 70111 89371</strong>
                   </div>
-                  <button id="atithi-signout-btn" style="width:100%;padding:12px;background:#1a1208;color:white;border:none;border-radius:16px;font-weight:800;font-size:14px;cursor:pointer;">Sign out</button>
+                  <button id="atithi-signout-btn" type="button" style="width:100%;padding:12px;background:#1a1208;color:white;border:none;border-radius:16px;font-weight:800;font-size:14px;cursor:pointer;pointer-events:auto;">Sign out</button>
                 </div>`;
               document.body.appendChild(toast);
               const btn = toast.querySelector('#atithi-signout-btn');
               if (btn) {
-                (btn as HTMLButtonElement).onclick = () => {
+                (btn as HTMLButtonElement).addEventListener('click', (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  // 1. Wipe all client-side state
                   try { localStorage.clear(); } catch {}
-                  window.location.href = '/';
-                };
+                  try { sessionStorage.clear(); } catch {}
+                  // 2. Remove the toast immediately so the underlying React
+                  //    tree is visible (in case navigation is slow)
+                  try { toast.remove(); } catch {}
+                  // 3. Force a fresh reload — more reliable than href='/'
+                  //    because the URL is already '/' so href= can be a no-op
+                  setTimeout(() => { window.location.reload(); }, 0);
+                });
               }
             }
           }
@@ -1016,24 +1034,29 @@ export default function App() {
     // STEP 3 — hard navigation. React state changes alone can get stuck if
     // anything in the tree (BillingNotice, fetch interceptor, useEffect with
     // cached deps) re-introduces state. A page reload guarantees a clean
-    // slate. Logic:
-    //   • /internal admin portal → stay there, just reload
-    //   • tenant subdomain        → reload current URL (eager guard will
-    //                                pick up tenant-inactive on next mount)
-    //   • apex / anywhere else    → navigate to /
+    // slate.
+    //
+    // Also: remove the tenant-inactive overlay toast if it's been painted by
+    // the fetch interceptor — otherwise on slow page loads the toast lingers.
+    try {
+      const t = document.getElementById('atithi-tenant-inactive-overlay');
+      if (t) t.remove();
+    } catch {}
+
     const path = (window.location.pathname || '').toLowerCase().replace(/\/$/, '');
     const onInternal = path === '/internal';
-    if (onInternal) {
-      // Stay on /internal but reload to clear React state
-      window.location.reload();
-    } else {
-      // Force navigation to root of current host. This:
-      //   1. discards any URL params (like ?token= handoffs)
-      //   2. forces a fresh tenant-by-slug fetch on remount
-      //   3. lets the eager guard show the "Service inactive" screen
-      //      automatically if the tenant is no longer active
-      window.location.href = '/';
-    }
+    // If we're already at the root (pathname is "/" or empty), href='/' is
+    // a no-op in some browsers. Force a reload instead. Use setTimeout to
+    // let React flush the state updates first so any in-flight render
+    // doesn't fight the navigation.
+    const atRoot = path === '' || path === '/';
+    setTimeout(() => {
+      if (onInternal || atRoot) {
+        window.location.reload();
+      } else {
+        window.location.href = '/';
+      }
+    }, 0);
   };
 
   // ─── TENANT SUBDOMAIN BRANCH ───────────────────────────────────────────────
@@ -1889,8 +1912,10 @@ export default function App() {
             </span>
           </div>
           <div className="h-8 w-px bg-[#cc5a16]/10 mx-2" />
-          <button 
-            onClick={handleLogout}
+          <button
+            type="button"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleLogout(); }}
+            data-allow-readonly
             className="bg-red-50 text-red-600 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-red-100 transition-colors"
           >
             <LogOut size={16} /> <span className="hidden sm:inline">Sign Out</span>
@@ -2018,9 +2043,19 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
               Contact billing
             </a>
             <button
-              onClick={() => {
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 try { localStorage.clear(); } catch {}
-                window.location.href = '/';
+                try { sessionStorage.clear(); } catch {}
+                // Remove the overlay toast if it's still present so the
+                // reload doesn't have anything to fight against
+                try {
+                  const t = document.getElementById('atithi-tenant-inactive-overlay');
+                  if (t) t.remove();
+                } catch {}
+                setTimeout(() => { window.location.reload(); }, 0);
               }}
               data-allow-readonly
               className="flex-1 bg-[#1a1208] hover:bg-[#3d3128] text-white py-3 rounded-2xl font-bold transition-colors"
