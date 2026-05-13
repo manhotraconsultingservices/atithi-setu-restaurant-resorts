@@ -12270,6 +12270,25 @@ async function startServer() {
     }
   });
 
+  // Build identifier — used to verify which commit is actually running in
+  // production. Bumped manually on every deploy-blocking change so curl
+  // /api/version against the live host immediately confirms the new code.
+  const BUILD_VERSION = {
+    commit_marker: 'billing-v7-d016d07-followup',
+    code_features: [
+      'subscription-billing',
+      'read-only-mode',
+      'tenant-inactive-block',
+      'cached-token-eager-guard',
+      'harmonized-messaging',
+    ],
+    booted_at: new Date().toISOString(),
+  };
+  console.log('[boot] Atithi-Setu build:', JSON.stringify(BUILD_VERSION));
+  app.get('/api/version', (_req: Request, res: Response) => {
+    res.json(BUILD_VERSION);
+  });
+
   // API 404 Handler - MUST be before SPA fallback
   app.use("/api/*", (req, res) => {
     res.status(404).json({ error: `API route not found: ${req.method} ${req.originalUrl}` });
