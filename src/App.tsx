@@ -298,6 +298,107 @@ export default function App() {
   const [tenantForgotMode, setTenantForgotMode] = useState(false);
   const [showTenantPassword, setShowTenantPassword] = useState(false);
 
+  // Global fetch interceptor for read-only mode.
+  // When window.__atithiReadOnly is true, block mutation requests
+  // (POST/PUT/PATCH/DELETE) before they hit the network, show a toast,
+  // and return a synthetic 402 so callers' existing error handling fires.
+  // Also intercepts real 402 responses from the server (in case the flag
+  // got out of sync) and surfaces the same toast.
+  useEffect(() => {
+    const origFetch = window.fetch.bind(window);
+    const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+    // Endpoints that must work even in read-only mode (auth, billing,
+    // admin console, uploads). Mirrors the server-side whitelist.
+    const ALLOWED_PATTERNS = [
+      /\/api\/auth\//, /\/api\/login/, /\/api\/logout/,
+      /\/api\/admin\//, /billing-status/, /\/uploads\//,
+    ];
+    const showReadOnlyToast = () => {
+      // Throttle: at most one toast every 5s
+      const w = window as any;
+      const now = Date.now();
+      if (w.__atithiReadOnlyLastToast && now - w.__atithiReadOnlyLastToast < 5000) return;
+      w.__atithiReadOnlyLastToast = now;
+      const toast = document.createElement('div');
+      toast.style.cssText = [
+        'position:fixed','top:96px','right:16px','z-index:99999',
+        'max-width:380px','padding:14px 16px','border-radius:14px',
+        'background:linear-gradient(135deg,#9f1239,#7a0e2a)','color:white',
+        'font-family:DM Sans,system-ui,sans-serif','font-size:13px',
+        'box-shadow:0 12px 32px rgba(159,18,57,0.4)','line-height:1.45',
+        'animation:slideInRight 0.25s ease-out',
+      ].join(';');
+      toast.innerHTML = `
+        <div style="font-weight:800;margin-bottom:4px;display:flex;align-items:center;gap:6px;">
+          <span style="font-size:16px;">🔒</span> Read-only mode
+        </div>
+        <div style="opacity:0.95;">
+          This change can't be saved while your subscription is past due. Contact
+          <strong>billing@atithi-setu.com</strong> or WhatsApp <strong>+91 70111 89371</strong> to restore service.
+        </div>`;
+      document.body.appendChild(toast);
+      setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity 0.3s'; }, 4500);
+      setTimeout(() => toast.remove(), 5000);
+    };
+    const patched = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = (init?.method || (input instanceof Request ? input.method : 'GET') || 'GET').toUpperCase();
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
+      const isReadOnlyClient = !!(window as any).__atithiReadOnly;
+      const isAllowed = ALLOWED_PATTERNS.some(rx => rx.test(url));
+      // Pre-emptive block: if we know we're in read-only mode and this
+      // is a mutation against an unrelated endpoint, short-circuit.
+      if (isReadOnlyClient && !READ_ONLY_METHODS.has(method) && !isAllowed) {
+        showReadOnlyToast();
+        return new Response(
+          JSON.stringify({
+            error: "Read-only mode",
+            code: "ACCESS_REVOKED_READ_ONLY",
+            message: "Your account is in read-only mode. Contact billing to restore service.",
+          }),
+          { status: 402, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      const res = await origFetch(input, init);
+      // Reactive: server returned 402 read-only — surface the toast
+      if (res.status === 402) {
+        try {
+          const clone = res.clone();
+          const data = await clone.json().catch(() => null);
+          if (data?.code === 'ACCESS_REVOKED_READ_ONLY' || data?.code === 'ACCESS_REVOKED') {
+            (window as any).__atithiReadOnly = true;
+            showReadOnlyToast();
+          }
+        } catch {}
+      }
+      return res;
+    };
+    window.fetch = patched as typeof window.fetch;
+    // Inject the slide-in keyframe + the disabled-styling CSS once
+    if (!document.getElementById('__atithi-readonly-css')) {
+      const style = document.createElement('style');
+      style.id = '__atithi-readonly-css';
+      style.textContent = `
+        @keyframes slideInRight { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        body.atithi-read-only [data-mutation],
+        body.atithi-read-only button[type="submit"]:not([data-allow-readonly]),
+        body.atithi-read-only .save-btn:not([data-allow-readonly]) {
+          opacity: 0.45 !important;
+          cursor: not-allowed !important;
+          pointer-events: none !important;
+          filter: grayscale(40%);
+        }
+        body.atithi-read-only input:not([data-allow-readonly]):not([type="search"]):not([type="checkbox"]):not([type="radio"]),
+        body.atithi-read-only textarea:not([data-allow-readonly]),
+        body.atithi-read-only select:not([data-allow-readonly]) {
+          background-color: #faf7f2 !important;
+          color: #6b5d52 !important;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+    return () => { window.fetch = origFetch; };
+  }, []);
+
   // On mount: if we have a tenant slug, load its branding info.
   // Also: if the URL has ?token=... (passed from apex after owner login),
   // accept that token and clean the URL.
@@ -1657,6 +1758,22 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
     const id = setInterval(fetchStatus, 60 * 60 * 1000);
     return () => clearInterval(id);
   }, [fetchStatus]);
+
+  // Sync the global read-only flag + body class. The fetch interceptor
+  // and CSS grayout rule key off this.
+  React.useEffect(() => {
+    const isRevoked = !!status?.access_revoked;
+    (window as any).__atithiReadOnly = isRevoked;
+    if (isRevoked) {
+      document.body.classList.add('atithi-read-only');
+    } else {
+      document.body.classList.remove('atithi-read-only');
+    }
+    return () => {
+      // Don't clear here — banner persists across re-renders; the flag
+      // only flips when the status changes.
+    };
+  }, [status?.access_revoked]);
 
   if (!status) return null;
 
@@ -18563,6 +18680,114 @@ function SuperAdminDashboard({ token }: { token: string }) {
       setBillingMsg({ type: 'err', text: 'Failed to restore access' });
     }
   };
+
+  // ─────────────────────────────────────────────────────────────────────
+  // CSV ageing export — client-side, no extra server endpoint.
+  // Columns chosen to match a standard accounts-receivable ageing report:
+  // tenant, plan, due_date, days_past_due, ageing bucket, status, last
+  // payment info, and admin notes.
+  // ─────────────────────────────────────────────────────────────────────
+  const exportBillingAgeingCsv = () => {
+    if (!billingRows || billingRows.length === 0) {
+      setBillingMsg({ type: 'err', text: 'No tenants to export' });
+      return;
+    }
+    const ageingBucket = (days: number | null) => {
+      if (days == null) return 'No due date';
+      if (days >= 0) return 'Current';
+      const past = Math.abs(days);
+      if (past <= 7) return '1–7 days overdue';
+      if (past <= 15) return '8–15 days overdue';
+      if (past <= 30) return '16–30 days overdue';
+      if (past <= 60) return '31–60 days overdue';
+      if (past <= 90) return '61–90 days overdue';
+      return '90+ days overdue';
+    };
+    const statusLabel = (s: string, revoked: any) => {
+      if (Number(revoked) === 1) return 'SUSPENDED (read-only)';
+      switch (s) {
+        case 'ACTIVE': return 'Active';
+        case 'OVERDUE_GRACE': return 'Overdue (in grace)';
+        case 'OVERDUE_PAST_GRACE': return 'Overdue (past grace)';
+        case 'NO_DUE_DATE': return 'No due date set';
+        default: return s || 'Unknown';
+      }
+    };
+    // Sort by most-overdue first; non-overdue and no-due-date go last.
+    const sorted = [...billingRows].sort((a: any, b: any) => {
+      const da = a.days_until_due;
+      const db = b.days_until_due;
+      if (da == null && db == null) return 0;
+      if (da == null) return 1;
+      if (db == null) return -1;
+      return da - db;
+    });
+    const headers = [
+      'Tenant ID', 'Tenant Name', 'Plan',
+      'Due Date', 'Days Past Due', 'Ageing Bucket', 'Status',
+      'Last Payment Date', 'Last Payment Amount (₹)', 'Last Payment Reference',
+      'Grace Period (days)', 'Access Revoked', 'Revoked At', 'Revoked Reason',
+      'Billing Notes',
+    ];
+    const escape = (v: any) => {
+      const s = v == null ? '' : String(v);
+      // RFC 4180: wrap in quotes if it contains comma, quote, or newline; double-up inner quotes
+      if (/[,"\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    };
+    const lines: string[] = [headers.join(',')];
+    for (const r of sorted) {
+      const daysPast = (r.days_until_due != null && r.days_until_due < 0) ? Math.abs(r.days_until_due) : 0;
+      lines.push([
+        r.id,
+        r.name,
+        r.subscription_plan || '',
+        r.subscription_due_date ? String(r.subscription_due_date).slice(0, 10) : '',
+        daysPast,
+        ageingBucket(r.days_until_due),
+        statusLabel(r.billing_status, r.access_revoked),
+        r.last_payment_date ? String(r.last_payment_date).slice(0, 10) : '',
+        r.last_payment_amount != null ? Number(r.last_payment_amount).toFixed(2) : '',
+        r.last_payment_reference || '',
+        r.grace_period_days ?? 7,
+        Number(r.access_revoked) === 1 ? 'YES' : 'NO',
+        r.access_revoked_at ? new Date(r.access_revoked_at).toISOString() : '',
+        r.access_revoked_reason || '',
+        r.billing_notes || '',
+      ].map(escape).join(','));
+    }
+    // Add a summary footer
+    const totals = {
+      tenants: billingRows.length,
+      active: billingRows.filter((r: any) => r.billing_status === 'ACTIVE').length,
+      overdueGrace: billingRows.filter((r: any) => r.billing_status === 'OVERDUE_GRACE').length,
+      pastGrace: billingRows.filter((r: any) => r.billing_status === 'OVERDUE_PAST_GRACE').length,
+      suspended: billingRows.filter((r: any) => Number(r.access_revoked) === 1).length,
+      totalOverdueDays: billingRows.reduce((sum: number, r: any) => sum + (r.days_until_due != null && r.days_until_due < 0 ? Math.abs(r.days_until_due) : 0), 0),
+    };
+    lines.push('');
+    lines.push('SUMMARY,,,,,,,,,,,,,,');
+    lines.push(`Total tenants,${totals.tenants},,,,,,,,,,,,,`);
+    lines.push(`Active,${totals.active},,,,,,,,,,,,,`);
+    lines.push(`Overdue (in grace),${totals.overdueGrace},,,,,,,,,,,,,`);
+    lines.push(`Overdue (past grace),${totals.pastGrace},,,,,,,,,,,,,`);
+    lines.push(`Suspended (read-only),${totals.suspended},,,,,,,,,,,,,`);
+    lines.push(`Total overdue-days (sum),${totals.totalOverdueDays},,,,,,,,,,,,,`);
+    lines.push(`Exported at,${new Date().toISOString()},,,,,,,,,,,,,`);
+
+    // BOM + CRLF for Excel-friendly opening
+    const csv = '﻿' + lines.join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const today = new Date().toISOString().slice(0, 10);
+    a.download = `atithi-setu_billing-ageing_${today}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+    setBillingMsg({ type: 'ok', text: `Exported ${billingRows.length} tenants to CSV` });
+  };
   const [isAddingUser, setIsAddingUser] = useState(false);
   const [newUser, setNewUser] = useState({ loginId: '', name: '', email: '', phone: '', password: '', role: 'SALES_REP' as UserRole });
   const [editingOwner, setEditingOwner] = useState<{ restaurantId: string; name: string; email: string; phone: string } | null>(null);
@@ -19779,13 +20004,25 @@ function SuperAdminDashboard({ token }: { token: string }) {
                   After the grace period, you can manually revoke access — service stays suspended until you restore it.
                 </p>
               </div>
-              <button
-                onClick={fetchTenantBilling}
-                disabled={billingLoading}
-                className="px-4 py-2 rounded-2xl text-sm font-bold bg-[#faf7f2] hover:bg-emerald-50 transition-colors disabled:opacity-50"
-              >
-                {billingLoading ? 'Loading…' : 'Refresh'}
-              </button>
+              <div className="flex gap-2 flex-wrap" data-allow-readonly>
+                <button
+                  onClick={exportBillingAgeingCsv}
+                  disabled={billingLoading || billingRows.length === 0}
+                  data-allow-readonly
+                  className="px-4 py-2 rounded-2xl text-sm font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                  title="Download accounts-receivable style ageing report (CSV)"
+                >
+                  <Download size={14} /> Export ageing CSV
+                </button>
+                <button
+                  onClick={fetchTenantBilling}
+                  disabled={billingLoading}
+                  data-allow-readonly
+                  className="px-4 py-2 rounded-2xl text-sm font-bold bg-[#faf7f2] hover:bg-emerald-50 transition-colors disabled:opacity-50"
+                >
+                  {billingLoading ? 'Loading…' : 'Refresh'}
+                </button>
+              </div>
             </div>
 
             {billingMsg && (
