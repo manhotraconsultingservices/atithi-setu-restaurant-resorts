@@ -730,6 +730,178 @@ export function buildNotificationContent(
           `<p><a href="#" style="color:#cc5a16">Open Settings → Integrations → ${data.channel} to rotate credentials.</a></p>`,
       };
 
+    /* ── Subscription billing ─────────────────────────────────────────── */
+
+    case 'PAYMENT_DUE_SOON': {
+      // Sent N days before due date (typically 3). Friendly, no urgency.
+      const dueDate = data.subscription_due_date
+        ? new Date(data.subscription_due_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
+        : 'soon';
+      const daysAhead = Number(data.days_until_due ?? 3);
+      const amount = data.amount_due ? `₹${Number(data.amount_due).toLocaleString('en-IN')}` : 'your subscription fee';
+      return {
+        subject: `Subscription renewal due ${daysAhead === 0 ? 'today' : `in ${daysAhead} day${daysAhead === 1 ? '' : 's'}`} — ${r}`,
+        text:
+          `Hi ${r} team,\n\n` +
+          `This is a friendly reminder that your Atithi-Setu subscription renewal is due ${daysAhead === 0 ? 'today' : `on ${dueDate}`}.\n\n` +
+          `Amount due: ${amount}\n` +
+          `Due date: ${dueDate}\n\n` +
+          `To avoid any service interruption, please complete payment by the due date.\n\n` +
+          `Need help or have questions?\n` +
+          `📧 billing@atithi-setu.com\n` +
+          `💬 WhatsApp +91 70111 89371\n\n` +
+          `Thank you for being part of Atithi-Setu.\n— The Atithi-Setu Billing Team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#0f766e;margin-top:0">Subscription renewal reminder</h2>` +
+          `<p>Hi <strong>${r}</strong> team,</p>` +
+          `<p>This is a friendly reminder that your Atithi-Setu subscription renewal is due ${daysAhead === 0 ? 'today' : `in <strong>${daysAhead} day${daysAhead === 1 ? '' : 's'}</strong>`}.</p>` +
+          `<table style="border-collapse:collapse;width:100%;margin:16px 0">` +
+          `<tr style="background:#f0fdf4"><td style="padding:10px 14px;border:1px solid #d1fae5;font-weight:600">Amount due</td><td style="padding:10px 14px;border:1px solid #d1fae5">${amount}</td></tr>` +
+          `<tr><td style="padding:10px 14px;border:1px solid #d1fae5;font-weight:600">Due date</td><td style="padding:10px 14px;border:1px solid #d1fae5">${dueDate}</td></tr>` +
+          `</table>` +
+          `<p>To avoid any service interruption, please complete payment by the due date.</p>` +
+          `<div style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:6px;padding:14px;margin:16px 0">` +
+          `<strong>Need help?</strong><br>` +
+          `📧 <a href="mailto:billing@atithi-setu.com">billing@atithi-setu.com</a><br>` +
+          `💬 WhatsApp <a href="https://wa.me/917011189371">+91 70111 89371</a>` +
+          `</div>` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— The Atithi-Setu Billing Team</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'PAYMENT_OVERDUE': {
+      // Sent daily once payment is past due but not yet revoked.
+      const dueDate = data.subscription_due_date
+        ? new Date(data.subscription_due_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
+        : 'a recent date';
+      const daysPast = Number(data.days_past_due ?? 0);
+      const daysUntilSuspension = Number(data.days_until_suspension ?? 0);
+      const isFinalNotice = daysUntilSuspension <= 1;
+      return {
+        subject: isFinalNotice
+          ? `Final notice — service will be limited to read-only soon (${r})`
+          : `Payment overdue — please complete payment to avoid service interruption (${r})`,
+        text:
+          `Hi ${r} team,\n\n` +
+          (isFinalNotice
+            ? `Final notice: your subscription payment was due on ${dueDate} and is now ${daysPast} days past due.\n\n` +
+              `If payment is not received within the next ${Math.max(daysUntilSuspension, 0)} day${daysUntilSuspension === 1 ? '' : 's'}, your account will be moved to read-only mode. ` +
+              `You will still be able to view, export and download your data, but creating, editing and deleting will be paused until payment is received.\n\n`
+            : `Our records show your subscription payment was due on ${dueDate} and is now ${daysPast} day${daysPast === 1 ? '' : 's'} past due.\n\n` +
+              `Service is continuing uninterrupted while we wait for payment. After ${daysUntilSuspension} more day${daysUntilSuspension === 1 ? '' : 's'}, the account may be moved to read-only mode.\n\n`) +
+          `Your data is safe and will remain accessible throughout.\n\n` +
+          `Please complete payment or contact us:\n` +
+          `📧 billing@atithi-setu.com\n` +
+          `💬 WhatsApp +91 70111 89371\n\n` +
+          `Thank you,\n— The Atithi-Setu Billing Team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:${isFinalNotice ? '#b91c1c' : '#b45309'};margin-top:0">${isFinalNotice ? 'Final notice — subscription overdue' : 'Subscription payment overdue'}</h2>` +
+          `<p>Hi <strong>${r}</strong> team,</p>` +
+          `<p>${isFinalNotice
+            ? `Final notice: your subscription payment was due on <strong>${dueDate}</strong> and is now <strong>${daysPast} days past due</strong>.`
+            : `Our records show your subscription payment was due on <strong>${dueDate}</strong> and is now <strong>${daysPast} day${daysPast === 1 ? '' : 's'} past due</strong>.`}</p>` +
+          `<div style="background:${isFinalNotice ? '#fef2f2' : '#fffbeb'};border:1px solid ${isFinalNotice ? '#fecaca' : '#fcd34d'};border-radius:6px;padding:14px;margin:16px 0">` +
+          (isFinalNotice
+            ? `<strong>What happens next:</strong><br>If payment is not received within the next <strong>${Math.max(daysUntilSuspension, 0)} day${daysUntilSuspension === 1 ? '' : 's'}</strong>, your account will be moved to <strong>read-only mode</strong>. You'll still be able to view, export and download your data; creating, editing and deleting will be paused until payment is received. <strong>Your data is safe.</strong>`
+            : `Service is continuing uninterrupted. After <strong>${daysUntilSuspension} more day${daysUntilSuspension === 1 ? '' : 's'}</strong> the account may be moved to read-only mode. Your data remains safe and accessible.`) +
+          `</div>` +
+          `<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:14px;margin:16px 0">` +
+          `<strong>To complete payment or get help:</strong><br>` +
+          `📧 <a href="mailto:billing@atithi-setu.com">billing@atithi-setu.com</a><br>` +
+          `💬 WhatsApp <a href="https://wa.me/917011189371">+91 70111 89371</a>` +
+          `</div>` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— The Atithi-Setu Billing Team</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'ACCESS_REVOKED': {
+      // Sent when admin manually revokes access (read-only mode begins).
+      const reason = data.reason || 'Subscription payment overdue';
+      return {
+        subject: `Your account is now in read-only mode — ${r}`,
+        text:
+          `Hi ${r} team,\n\n` +
+          `Your Atithi-Setu account has been moved to read-only mode while we process your subscription payment.\n\n` +
+          `What this means:\n` +
+          `✓ You can still view, export and download all your data\n` +
+          `✓ Reports and historical data remain accessible\n` +
+          `⏸ Creating, editing and deleting are paused\n\n` +
+          `Your data is safe. The moment payment is received, full access resumes — nothing is deleted or hidden.\n\n` +
+          `Reason: ${reason}\n\n` +
+          `To restore service, please reach out:\n` +
+          `📧 billing@atithi-setu.com\n` +
+          `💬 WhatsApp +91 70111 89371\n\n` +
+          `We typically respond within 2 hours during IST business hours.\n\n` +
+          `— The Atithi-Setu Billing Team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#b91c1c;margin-top:0">Account moved to read-only mode</h2>` +
+          `<p>Hi <strong>${r}</strong> team,</p>` +
+          `<p>Your Atithi-Setu account has been moved to <strong>read-only mode</strong> while we process your subscription payment.</p>` +
+          `<table style="border-collapse:collapse;width:100%;margin:16px 0">` +
+          `<tr style="background:#f0fdf4"><td style="padding:10px 14px;border:1px solid #d1fae5;width:60%">✓ View all data</td><td style="padding:10px 14px;border:1px solid #d1fae5;color:#059669;font-weight:600">Available</td></tr>` +
+          `<tr style="background:#f0fdf4"><td style="padding:10px 14px;border:1px solid #d1fae5">✓ Export &amp; download data</td><td style="padding:10px 14px;border:1px solid #d1fae5;color:#059669;font-weight:600">Available</td></tr>` +
+          `<tr style="background:#f0fdf4"><td style="padding:10px 14px;border:1px solid #d1fae5">✓ Reports and historical data</td><td style="padding:10px 14px;border:1px solid #d1fae5;color:#059669;font-weight:600">Available</td></tr>` +
+          `<tr style="background:#fef2f2"><td style="padding:10px 14px;border:1px solid #fecaca">⏸ Create / edit / delete</td><td style="padding:10px 14px;border:1px solid #fecaca;color:#b91c1c;font-weight:600">Paused</td></tr>` +
+          `</table>` +
+          `<div style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:6px;padding:14px;margin:16px 0">` +
+          `<strong style="color:#059669">Your data is safe.</strong> The moment payment is received, full access resumes — nothing is deleted or hidden.` +
+          `</div>` +
+          `<p style="background:#f9fafb;padding:10px 14px;border-radius:6px;color:#6b7280;font-size:13px"><strong>Reason:</strong> ${reason}</p>` +
+          `<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:14px;margin:16px 0">` +
+          `<strong>To restore service:</strong><br>` +
+          `📧 <a href="mailto:billing@atithi-setu.com">billing@atithi-setu.com</a><br>` +
+          `💬 WhatsApp <a href="https://wa.me/917011189371">+91 70111 89371</a><br>` +
+          `<span style="color:#6b7280;font-size:13px;margin-top:6px;display:inline-block">We typically respond within 2 hours during IST business hours.</span>` +
+          `</div>` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— The Atithi-Setu Billing Team</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'ACCESS_RESTORED': {
+      // Sent the moment admin clicks "Restore access".
+      const restoredAt = data.restored_at
+        ? new Date(data.restored_at).toLocaleString('en-IN', { dateStyle: 'long', timeStyle: 'short' })
+        : new Date().toLocaleString('en-IN', { dateStyle: 'long', timeStyle: 'short' });
+      return {
+        subject: `Welcome back — your account is fully active again (${r})`,
+        text:
+          `Hi ${r} team,\n\n` +
+          `Good news — your Atithi-Setu account is fully active again.\n\n` +
+          `Restored at: ${restoredAt}\n\n` +
+          `All features are now available. You can create, edit and manage your operations as normal. ` +
+          `Thank you for completing your payment and for being part of Atithi-Setu.\n\n` +
+          `Tip: keep your billing email and WhatsApp up to date in Settings → Account so you receive future reminders before due date.\n\n` +
+          `Questions or feedback?\n` +
+          `📧 billing@atithi-setu.com\n` +
+          `💬 WhatsApp +91 70111 89371\n\n` +
+          `— The Atithi-Setu Billing Team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#059669;margin-top:0">Welcome back — account fully active</h2>` +
+          `<p>Hi <strong>${r}</strong> team,</p>` +
+          `<p>Good news — your Atithi-Setu account is <strong>fully active again</strong>. All features are available immediately.</p>` +
+          `<div style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:6px;padding:14px;margin:16px 0">` +
+          `<strong style="color:#059669">Restored at:</strong> ${restoredAt}<br>` +
+          `<span style="color:#065f46">You can create, edit and manage your operations as normal.</span>` +
+          `</div>` +
+          `<p>Thank you for completing your payment and for being part of Atithi-Setu.</p>` +
+          `<p style="background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:12px 14px;color:#92400e;font-size:13px"><strong>Tip:</strong> keep your billing email and WhatsApp up to date in <em>Settings → Account</em> so you receive future reminders before the due date.</p>` +
+          `<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:14px;margin:16px 0">` +
+          `<strong>Questions or feedback:</strong><br>` +
+          `📧 <a href="mailto:billing@atithi-setu.com">billing@atithi-setu.com</a><br>` +
+          `💬 WhatsApp <a href="https://wa.me/917011189371">+91 70111 89371</a>` +
+          `</div>` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— The Atithi-Setu Billing Team</p>` +
+          `</div>`,
+      };
+    }
+
     /* ── Default fallback ─────────────────────────────────────────────── */
 
     default:

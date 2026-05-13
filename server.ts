@@ -11954,7 +11954,57 @@ async function startServer() {
     }
   });
 
-  // Admin: revoke a tenant's access (suspend service).
+  // Send a billing notification to a tenant's OWNER users on every available
+  // channel (email, WhatsApp/SMS). Bypasses the per-tenant notification_settings
+  // opt-in because billing is a contractual matter, not an operational alert
+  // the tenant can disable. Best-effort — never throws (returned promise
+  // always resolves) so the calling endpoint can respond fast.
+  async function notifyBilling(tenantId: string, eventName: string, data: any): Promise<{ sent: number; failed: number }> {
+    let sent = 0, failed = 0;
+    try {
+      // Resolve restaurant name if not supplied
+      if (!data.restaurantName) {
+        const r: any = await centralDb.get("SELECT name FROM restaurants WHERE id = ?", [tenantId]);
+        data = { ...data, restaurantName: r?.name || 'Atithi-Setu' };
+      }
+      // Fetch all OWNER + MANAGER users for this tenant
+      const owners: any[] = await centralDb.query(
+        "SELECT email, phone FROM users WHERE restaurant_id = ? AND role IN ('OWNER','MANAGER') AND is_active = 1",
+        [tenantId]
+      );
+      const emails = new Set<string>(); const phones = new Set<string>();
+      for (const u of owners) {
+        if (u.email) emails.add(u.email);
+        if (u.phone) phones.add(u.phone);
+      }
+      const content = buildNotificationContent(eventName, data);
+      // Email — every OWNER/MANAGER gets a copy
+      for (const e of emails) {
+        try { await sendEmail(e, content.subject, content.text, content.html); sent++; }
+        catch (err) { failed++; console.error(`[notifyBilling:${eventName}] email to ${e} failed:`, err); }
+      }
+      // WhatsApp — best-effort; SMS as a fallback
+      for (const p of phones) {
+        try { await sendWhatsApp(p, content.text); sent++; }
+        catch {
+          try { await sendSMS(p, content.text); sent++; }
+          catch (err) { failed++; console.error(`[notifyBilling:${eventName}] WhatsApp/SMS to ${p} failed:`, err); }
+        }
+      }
+      // Also fire the tenant-customisable triggerNotification flow so any
+      // tenant that has configured a custom template for this event (via
+      // notification_templates) also receives it through their normal path.
+      triggerNotification(tenantId, eventName, data).catch(err =>
+        console.error(`[notifyBilling:${eventName}] triggerNotification:`, err)
+      );
+      console.log(`[notifyBilling:${eventName}] tenant=${tenantId} sent=${sent} failed=${failed}`);
+    } catch (err) {
+      console.error(`[notifyBilling:${eventName}] fatal:`, err);
+    }
+    return { sent, failed };
+  }
+
+  // Admin: revoke a tenant's access (move to read-only mode).
   // Body: { reason?: string }
   app.post("/api/admin/tenants/:id/revoke-access", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try {
@@ -11971,14 +12021,18 @@ async function startServer() {
           WHERE id = ?`,
         [adminId, reason, tenantId]
       );
-      res.json({ success: true, access_revoked: true });
+      // Fire-and-forget the notification (don't block the response on email delivery)
+      notifyBilling(tenantId, 'ACCESS_REVOKED', { reason }).catch(err =>
+        console.error("Revoke notification failed:", err)
+      );
+      res.json({ success: true, access_revoked: true, notification: 'queued' });
     } catch (err) {
       console.error("Revoke access error:", err);
       res.status(500).json({ error: "Failed to revoke access" });
     }
   });
 
-  // Admin: restore a tenant's access (resume service).
+  // Admin: restore a tenant's access (resume normal operations).
   app.post("/api/admin/tenants/:id/restore-access", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try {
       const tenantId = req.params.id;
@@ -11991,7 +12045,11 @@ async function startServer() {
           WHERE id = ?`,
         [tenantId]
       );
-      res.json({ success: true, access_revoked: false });
+      // Fire-and-forget welcome-back notification
+      notifyBilling(tenantId, 'ACCESS_RESTORED', { restored_at: new Date().toISOString() }).catch(err =>
+        console.error("Restore notification failed:", err)
+      );
+      res.json({ success: true, access_revoked: false, notification: 'queued' });
     } catch (err) {
       console.error("Restore access error:", err);
       res.status(500).json({ error: "Failed to restore access" });
@@ -12553,6 +12611,139 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[inv-stocklow] Stock-low scan cron started — daily at 09:00 IST');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Subscription billing reminders ──────────────────────────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Daily at 09:30 IST scans every active tenant and decides what to send:
+  //   1. Due in exactly 3 days  → PAYMENT_DUE_SOON (one-time, friendly)
+  //   2. Due in exactly 1 day   → PAYMENT_DUE_SOON (one-time, gentler urgency)
+  //   3. Past due but in grace → PAYMENT_OVERDUE   (daily until resolved)
+  //   4. Past grace, not yet
+  //      revoked                → PAYMENT_OVERDUE  (daily, "final notice" tone)
+  // Skipped if access_revoked=1 (we don't keep nagging a tenant we've already
+  // moved to read-only — that already triggered ACCESS_REVOKED).
+  //
+  // Dedup: a sent_billing_reminders table records (tenant_id, event, due_date,
+  // sent_on) so the cron is idempotent if it runs twice the same day, and so
+  // a tenant who paid + got their due date moved doesn't get the old reminder
+  // re-fired.
+  cron.schedule('30 9 * * *', async () => {
+    try {
+      console.log('[billing-reminder] 09:30 IST — scanning subscription due dates');
+      // Idempotency table (created lazily; tiny + central, not per-tenant)
+      await centralDb.exec(`
+        CREATE TABLE IF NOT EXISTS sent_billing_reminders (
+          id SERIAL PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          event_name TEXT NOT NULL,
+          due_date DATE,
+          sent_on DATE NOT NULL DEFAULT CURRENT_DATE,
+          UNIQUE (tenant_id, event_name, due_date, sent_on)
+        )
+      `).catch(() => {});
+
+      const rows: any[] = await centralDb.query(`
+        SELECT id, name, subscription_due_date, grace_period_days, access_revoked
+          FROM restaurants
+         WHERE is_active = 1
+           AND id <> 'SYSTEM'
+           AND subscription_due_date IS NOT NULL
+           AND access_revoked = 0
+      `);
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      let dueSoonSent = 0, overdueSent = 0, skipped = 0;
+
+      for (const r of rows) {
+        try {
+          const due = new Date(r.subscription_due_date);
+          due.setHours(0, 0, 0, 0);
+          const daysUntilDue = Math.round((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+          const grace = Number(r.grace_period_days ?? 7);
+          const dueDateStr = due.toISOString().slice(0, 10);
+
+          // Helper: insert dedup row; returns true if we should send (not already sent today)
+          const claim = async (eventName: string): Promise<boolean> => {
+            try {
+              const ins = await centralDb.run(
+                `INSERT INTO sent_billing_reminders (tenant_id, event_name, due_date, sent_on)
+                 VALUES (?, ?, ?, CURRENT_DATE)
+                 ON CONFLICT DO NOTHING`,
+                [r.id, eventName, dueDateStr]
+              );
+              // PostgreSQL ON CONFLICT DO NOTHING returns 0 affected rows on dup
+              const changed = (ins as any)?.rowCount ?? (ins as any)?.changes ?? 1;
+              return Number(changed) > 0;
+            } catch {
+              // Fallback: assume not-yet-sent if the table lookup fails
+              return true;
+            }
+          };
+
+          // 1 & 2: due soon (3 days or 1 day out — fire once per due_date)
+          if (daysUntilDue === 3 || daysUntilDue === 1) {
+            if (await claim('PAYMENT_DUE_SOON')) {
+              await notifyBilling(r.id, 'PAYMENT_DUE_SOON', {
+                subscription_due_date: dueDateStr,
+                days_until_due: daysUntilDue,
+              });
+              dueSoonSent++;
+            } else { skipped++; }
+            continue;
+          }
+          // Due today — treat as a stronger "due soon" reminder
+          if (daysUntilDue === 0) {
+            if (await claim('PAYMENT_DUE_TODAY')) {
+              await notifyBilling(r.id, 'PAYMENT_DUE_SOON', {
+                subscription_due_date: dueDateStr,
+                days_until_due: 0,
+              });
+              dueSoonSent++;
+            } else { skipped++; }
+            continue;
+          }
+          // 3 & 4: past due — fire daily until access is revoked (or paid)
+          if (daysUntilDue < 0) {
+            const daysPast = Math.abs(daysUntilDue);
+            const daysUntilSuspension = Math.max(0, grace - daysPast);
+            // Use today's date as the dedup key so it fires once per day
+            const todayKey = today.toISOString().slice(0, 10);
+            try {
+              const ins = await centralDb.run(
+                `INSERT INTO sent_billing_reminders (tenant_id, event_name, due_date, sent_on)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT DO NOTHING`,
+                [r.id, 'PAYMENT_OVERDUE', todayKey, todayKey]
+              );
+              const changed = (ins as any)?.rowCount ?? (ins as any)?.changes ?? 1;
+              if (Number(changed) > 0) {
+                await notifyBilling(r.id, 'PAYMENT_OVERDUE', {
+                  subscription_due_date: dueDateStr,
+                  days_past_due: daysPast,
+                  days_until_suspension: daysUntilSuspension,
+                });
+                overdueSent++;
+              } else { skipped++; }
+            } catch (err) {
+              console.error(`[billing-reminder] overdue insert failed for ${r.id}:`, err);
+            }
+          }
+        } catch (err) {
+          console.error(`[billing-reminder] tenant ${r.id} failed:`, err);
+        }
+      }
+
+      // Cleanup: drop rows older than 90 days so the table stays tiny
+      await centralDb.run(
+        `DELETE FROM sent_billing_reminders WHERE sent_on < (CURRENT_DATE - INTERVAL '90 days')`
+      ).catch(() => {});
+
+      console.log(`[billing-reminder] done — due-soon: ${dueSoonSent} sent, overdue: ${overdueSent} sent, ${skipped} skipped (already sent today)`);
+    } catch (err) {
+      console.error('[billing-reminder] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[billing-reminder] Subscription billing reminder cron started — daily at 09:30 IST');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase 4 — Outbound delivery-platform sync queue worker ──────────────
