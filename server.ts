@@ -581,30 +581,50 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
           const ids = [...tenantsToCheck];
           const placeholders = ids.map(() => '?').join(',');
           const rows: any[] = await centralDb.query(
-            `SELECT id, access_revoked, access_revoked_reason FROM restaurants WHERE id IN (${placeholders})`,
+            `SELECT id, is_active, access_revoked, access_revoked_reason, name FROM restaurants WHERE id IN (${placeholders})`,
             ids
           );
-          const blocked = rows.find((r: any) => Number(r.access_revoked) === 1);
-          if (blocked) {
-            return res.status(402).json({
-              error: "Read-only mode",
-              code: "ACCESS_REVOKED_READ_ONLY",
-              tenant_id: blocked.id,
-              reason: blocked.access_revoked_reason || "Subscription payment overdue",
+          // (1) Hard block on deactivated tenants — every method, every path
+          //     scoped to that tenant. Admins are already exempt above.
+          const deactivated = rows.find((r: any) => Number(r.is_active) === 0);
+          if (deactivated) {
+            return res.status(403).json({
+              error: "Service inactive",
+              code: "TENANT_INACTIVE",
+              tenant_id: deactivated.id,
               message:
-                "Your account is currently in read-only mode while we process your subscription payment. " +
-                "You can continue to view, export, and download your data. Creating, editing, and deleting " +
-                "are paused until the account is restored. Please contact our billing team to resolve.",
+                `Service for ${deactivated.name || 'this restaurant'} is currently inactive. ` +
+                `Please contact our support team to restore access.`,
               contact: {
                 email: "billing@atithi-setu.com",
                 whatsapp: "+91 70111 89371",
               },
             });
           }
+          // (2) Read-only mode (access_revoked = 1) — only block mutations.
+          if (!isReadOnly) {
+            const blocked = rows.find((r: any) => Number(r.access_revoked) === 1);
+            if (blocked) {
+              return res.status(402).json({
+                error: "Read-only mode",
+                code: "ACCESS_REVOKED_READ_ONLY",
+                tenant_id: blocked.id,
+                reason: blocked.access_revoked_reason || "Subscription payment overdue",
+                message:
+                  "Your account is currently in read-only mode while we process your subscription payment. " +
+                  "You can continue to view, export, and download your data. Creating, editing, and deleting " +
+                  "are paused until the account is restored. Please contact our billing team to resolve.",
+                contact: {
+                  email: "billing@atithi-setu.com",
+                  whatsapp: "+91 70111 89371",
+                },
+              });
+            }
+          }
         } catch (err) {
           // Don't fail open on DB errors — log and continue. The hourly banner
           // and the frontend interceptor will still surface real revocations.
-          console.error("Access-revoked check failed:", err);
+          console.error("Tenant access check failed:", err);
         }
       }
     }
@@ -931,10 +951,8 @@ async function startServer() {
   // be in place. Removing either leaves a hole.
   app.use(async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const method = (req.method || 'GET').toUpperCase();
-      if (READ_ONLY_METHODS.has(method)) return next();
       const path = req.originalUrl || req.url || '';
-      // Skip auth/admin/billing-status/uploads
+      // Skip auth/admin/billing-status/uploads (these must work regardless)
       if (ALWAYS_ALLOWED_WHEN_REVOKED.some(rx => rx.test(path))) return next();
       // Only enforce on /api/restaurant/:id/* and /api/tenants/:id/*
       const m = path.match(/\/api\/restaurant\/([^/?#]+)/i)
@@ -942,9 +960,32 @@ async function startServer() {
       if (!m || !m[1] || m[1] === 'SYSTEM') return next();
       const tenantId = m[1];
       const row: any = await centralDb.get(
-        "SELECT access_revoked, access_revoked_reason FROM restaurants WHERE id = ?",
+        "SELECT is_active, access_revoked, access_revoked_reason, name FROM restaurants WHERE id = ?",
         [tenantId]
       ).catch(() => null);
+
+      // (1) DEACTIVATED tenant — hard block on EVERY method (read AND write).
+      //     A deactivated restaurant means the platform admin has shut it
+      //     down entirely. Nobody should be touching it until reactivation.
+      if (row && Number(row.is_active) === 0) {
+        return res.status(403).json({
+          error: "Service inactive",
+          code: "TENANT_INACTIVE",
+          tenant_id: tenantId,
+          message:
+            `Service for ${row.name || 'this restaurant'} is currently inactive. ` +
+            `Please contact our support team to restore access.`,
+          contact: {
+            email: "billing@atithi-setu.com",
+            whatsapp: "+91 70111 89371",
+          },
+        });
+      }
+
+      // (2) ACCESS REVOKED (read-only mode) — only block mutations.
+      //     Owner keeps read access until the admin fully restores them.
+      const method = (req.method || 'GET').toUpperCase();
+      if (READ_ONLY_METHODS.has(method)) return next();
       if (row && Number(row.access_revoked) === 1) {
         return res.status(402).json({
           error: "Read-only mode",
@@ -964,7 +1005,7 @@ async function startServer() {
     } catch (err) {
       // Never fail closed on the global guard — DB hiccup shouldn't take
       // every tenant down. The per-route authenticate() check is a backup.
-      console.error("[readonly-guard] check failed:", err);
+      console.error("[tenant-guard] check failed:", err);
     }
     next();
   });
@@ -1693,9 +1734,26 @@ async function startServer() {
       // 1. Check centralDb first (OWNER / SUPER_ADMIN / CTO / SALES_REP)
       const centralUser = await centralDb.get("SELECT * FROM users WHERE login_id = ?", [loginId]);
       if (centralUser) {
-        if (centralUser.is_active === 0) return res.status(403).json({ error: "Account is deactivated" });
+        if (centralUser.is_active === 0) return res.status(403).json({ error: "Your account has been deactivated. Please contact support." });
         const isMatch = await bcrypt.compare(password, centralUser.password);
-        if (!isMatch) return res.status(401).json({ error: "Invalid credentials" });
+        if (!isMatch) return res.status(401).json({ error: "Incorrect email or password. Please try again." });
+
+        // Block login when the user's restaurant is deactivated (admin paused
+        // the tenant). SUPER_ADMIN / CTO are not bound to a specific tenant
+        // and stay exempt so they can still manage the platform.
+        const isPlatformAdmin = centralUser.role === 'SUPER_ADMIN' || centralUser.role === 'CTO';
+        if (!isPlatformAdmin && centralUser.restaurant_id && centralUser.restaurant_id !== 'SYSTEM') {
+          const r: any = await centralDb.get(
+            "SELECT is_active, name FROM restaurants WHERE id = ?",
+            [centralUser.restaurant_id]
+          );
+          if (r && Number(r.is_active) === 0) {
+            return res.status(403).json({
+              error: `Service for ${r.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
+              code: 'TENANT_INACTIVE',
+            });
+          }
+        }
 
         const token = jwt.sign(
           { id: centralUser.id, restaurantId: centralUser.restaurant_id, role: centralUser.role },
@@ -1707,17 +1765,29 @@ async function startServer() {
 
       // 2. If not found in centralDb, check tenant attendance_staff (CHEF / WAITER)
       if (restaurantId && restaurantId !== 'SYSTEM') {
+        // Block staff login when the restaurant is deactivated.
+        const r: any = await centralDb.get(
+          "SELECT is_active, name FROM restaurants WHERE id = ?",
+          [restaurantId]
+        );
+        if (r && Number(r.is_active) === 0) {
+          return res.status(403).json({
+            error: `Service for ${r.name || 'this restaurant'} is currently inactive. Please ask your owner to contact our support team to restore access.`,
+            code: 'TENANT_INACTIVE',
+          });
+        }
+
         const tenantDb = await getTenantDb(restaurantId);
         const staffUser = await tenantDb.get(
           "SELECT * FROM attendance_staff WHERE login_id = ?",
           [loginId]
         );
         if (staffUser) {
-          if (staffUser.is_active === 0) return res.status(403).json({ error: "Account is deactivated" });
-          if (!staffUser.password) return res.status(401).json({ error: "No password set for this account. Ask your manager to set one." });
+          if (staffUser.is_active === 0) return res.status(403).json({ error: "Your account has been deactivated. Please contact your manager." });
+          if (!staffUser.password) return res.status(401).json({ error: "No password is set for this account. Please ask your manager to set one." });
 
           const isMatch = await bcrypt.compare(password, staffUser.password);
-          if (!isMatch) return res.status(401).json({ error: "Invalid credentials" });
+          if (!isMatch) return res.status(401).json({ error: "Incorrect login ID or password. Please try again." });
 
           const token = jwt.sign(
             { id: staffUser.id, restaurantId, role: staffUser.role },
@@ -2219,10 +2289,17 @@ async function startServer() {
         if (!legacyMatch) {
           return res.status(401).json({ error: "Incorrect password" });
         }
-        const restaurant = await centralDb.get(
-          `SELECT id, name, city, slug FROM restaurants WHERE id = ?`,
+        const restaurant: any = await centralDb.get(
+          `SELECT id, name, city, slug, is_active FROM restaurants WHERE id = ?`,
           [legacyUser.restaurant_id]
         );
+        // Block login when restaurant is deactivated
+        if (restaurant && Number(restaurant.is_active) === 0) {
+          return res.status(403).json({
+            error: `Service for ${restaurant.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
+            code: 'TENANT_INACTIVE',
+          });
+        }
         const jwtToken = jwt.sign(
           { id: legacyUser.id, restaurantId: legacyUser.restaurant_id, role: legacyUser.role, userName: legacyUser.name },
           JWT_SECRET,
@@ -2631,6 +2708,18 @@ async function startServer() {
 
       if (!access) {
         return res.status(403).json({ error: "You don't have access to this restaurant" });
+      }
+
+      // Block selection when the restaurant has been deactivated by admin.
+      const r: any = await centralDb.get(
+        "SELECT is_active, name FROM restaurants WHERE id = ?",
+        [restaurant_id]
+      );
+      if (r && Number(r.is_active) === 0) {
+        return res.status(403).json({
+          error: `Service for ${r.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
+          code: 'TENANT_INACTIVE',
+        });
       }
 
       const jwtToken = jwt.sign(

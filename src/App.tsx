@@ -441,6 +441,33 @@ export default function App() {
       .finally(() => setTenantLoading(false));
   }, [tenantSlug]);
 
+  // Defensive parser: many production stacks (Cloudflare → Nginx → backend)
+  // can return an HTML error page when the backend is unreachable or returns
+  // a non-2xx status the proxy intercepts. await res.json() then throws the
+  // ugly "Unexpected token '<'" error. parseLoginResponse maps every
+  // outcome to a clean user-facing message.
+  const parseLoginResponse = async (
+    res: Response,
+    fallbackError = 'Login failed. Please try again.',
+  ): Promise<any> => {
+    const text = await res.text().catch(() => '');
+    let data: any = null;
+    try { data = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
+    if (res.ok && data) return data;
+    // res.ok but no JSON — unusual, but treat as success-without-payload
+    if (res.ok) return {};
+    // Non-2xx — prefer server-supplied error message; otherwise generate a
+    // sensible one based on the HTTP status.
+    const serverMessage = data?.error || data?.message;
+    if (serverMessage) throw new Error(serverMessage);
+    if (res.status === 401) throw new Error('Incorrect email or password. Please try again.');
+    if (res.status === 403) throw new Error("This account doesn't have access. Contact support if you think this is a mistake.");
+    if (res.status === 404) throw new Error('We could not find your account. Please check the details and try again.');
+    if (res.status === 429) throw new Error('Too many login attempts. Please wait a minute and try again.');
+    if (res.status >= 500) throw new Error('Our server is temporarily unavailable. Please try again in a moment.');
+    throw new Error(fallbackError);
+  };
+
   // Handler for the unified tenant-login form (shown on subdomain).
   const handleTenantLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -448,17 +475,21 @@ export default function App() {
     setTenantLoginLoading(true);
     setTenantLoginError('');
     try {
-      const res = await fetch('/api/auth/tenant-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          slug: tenant.slug,
-          identifier: tenantIdentifier.trim(),
-          password: tenantPassword,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Login failed');
+      let res: Response;
+      try {
+        res = await fetch('/api/auth/tenant-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            slug: tenant.slug,
+            identifier: tenantIdentifier.trim(),
+            password: tenantPassword,
+          }),
+        });
+      } catch {
+        throw new Error("Couldn't reach our server. Please check your internet connection and try again.");
+      }
+      const data = await parseLoginResponse(res);
 
       localStorage.setItem('token', data.token);
       localStorage.setItem('role', data.role);
@@ -482,13 +513,17 @@ export default function App() {
     if (!forgotEmail.trim()) { setTenantLoginError('Please enter your email address'); return; }
     try {
       setTenantLoginLoading(true);
-      const res = await fetch('/api/auth/forgot-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: forgotEmail.trim() })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to send reset email');
+      let res: Response;
+      try {
+        res = await fetch('/api/auth/forgot-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: forgotEmail.trim() })
+        });
+      } catch {
+        throw new Error("Couldn't reach our server. Please check your internet connection and try again.");
+      }
+      await parseLoginResponse(res, 'Failed to send reset email');
       setForgotSent(true);
     } catch (err: any) {
       setTenantLoginError(err.message || 'Failed to send reset email');
