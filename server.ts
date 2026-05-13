@@ -584,17 +584,20 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
             `SELECT id, is_active, access_revoked, access_revoked_reason, name FROM restaurants WHERE id IN (${placeholders})`,
             ids
           );
-          // (1) Hard block on deactivated tenants — every method, every path
+          // (1) Hard block on not-active tenants — every method, every path
           //     scoped to that tenant. Admins are already exempt above.
-          const deactivated = rows.find((r: any) => Number(r.is_active) === 0);
-          if (deactivated) {
+          //     is_active != 1 means either pending (0) or suspended (2).
+          const notActive = rows.find((r: any) => Number(r.is_active) !== 1);
+          if (notActive) {
+            const isPending = Number(notActive.is_active) === 0;
             return res.status(403).json({
-              error: "Service inactive",
-              code: "TENANT_INACTIVE",
-              tenant_id: deactivated.id,
-              message:
-                `Service for ${deactivated.name || 'this restaurant'} is currently inactive. ` +
-                `Please contact our support team to restore access.`,
+              error: isPending ? "Pending activation" : "Service inactive",
+              code: isPending ? "TENANT_PENDING" : "TENANT_INACTIVE",
+              tenant_id: notActive.id,
+              message: isPending
+                ? `${notActive.name || 'This restaurant'} is pending admin approval.`
+                : `Service for ${notActive.name || 'this restaurant'} is currently inactive. ` +
+                  `Please contact our support team to restore access.`,
               contact: {
                 email: "billing@atithi-setu.com",
                 whatsapp: "+91 70111 89371",
@@ -964,17 +967,20 @@ async function startServer() {
         [tenantId]
       ).catch(() => null);
 
-      // (1) DEACTIVATED tenant — hard block on EVERY method (read AND write).
-      //     A deactivated restaurant means the platform admin has shut it
-      //     down entirely. Nobody should be touching it until reactivation.
-      if (row && Number(row.is_active) === 0) {
+      // (1) NOT-ACTIVE tenant — hard block on EVERY method (read AND write).
+      //     is_active values: 0=pending, 1=active, 2=admin-suspended.
+      //     Anything other than 1 means the platform admin hasn't (or has
+      //     stopped) authorised this tenant. Nobody touches it until 1.
+      if (row && Number(row.is_active) !== 1) {
+        const isPending = Number(row.is_active) === 0;
         return res.status(403).json({
-          error: "Service inactive",
-          code: "TENANT_INACTIVE",
+          error: isPending ? "Pending activation" : "Service inactive",
+          code: isPending ? "TENANT_PENDING" : "TENANT_INACTIVE",
           tenant_id: tenantId,
-          message:
-            `Service for ${row.name || 'this restaurant'} is currently inactive. ` +
-            `Please contact our support team to restore access.`,
+          message: isPending
+            ? `${row.name || 'This restaurant'} is pending admin approval. You'll be notified once activated.`
+            : `Service for ${row.name || 'this restaurant'} is currently inactive. ` +
+              `Please contact our support team to restore access.`,
           contact: {
             email: "billing@atithi-setu.com",
             whatsapp: "+91 70111 89371",
@@ -1738,19 +1744,23 @@ async function startServer() {
         const isMatch = await bcrypt.compare(password, centralUser.password);
         if (!isMatch) return res.status(401).json({ error: "Incorrect email or password. Please try again." });
 
-        // Block login when the user's restaurant is deactivated (admin paused
-        // the tenant). SUPER_ADMIN / CTO are not bound to a specific tenant
-        // and stay exempt so they can still manage the platform.
+        // Block login when the user's restaurant is not active.
+        // is_active values: 0=pending, 1=active, 2=admin-suspended.
+        // SUPER_ADMIN / CTO are not bound to a specific tenant and stay
+        // exempt so they can still manage the platform.
         const isPlatformAdmin = centralUser.role === 'SUPER_ADMIN' || centralUser.role === 'CTO';
         if (!isPlatformAdmin && centralUser.restaurant_id && centralUser.restaurant_id !== 'SYSTEM') {
           const r: any = await centralDb.get(
             "SELECT is_active, name FROM restaurants WHERE id = ?",
             [centralUser.restaurant_id]
           );
-          if (r && Number(r.is_active) === 0) {
+          if (r && Number(r.is_active) !== 1) {
+            const isPending = Number(r.is_active) === 0;
             return res.status(403).json({
-              error: `Service for ${r.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
-              code: 'TENANT_INACTIVE',
+              error: isPending
+                ? `${r.name || 'This restaurant'} is pending admin approval. You'll be notified once activated.`
+                : `Service for ${r.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
+              code: isPending ? 'TENANT_PENDING' : 'TENANT_INACTIVE',
             });
           }
         }
@@ -1765,15 +1775,18 @@ async function startServer() {
 
       // 2. If not found in centralDb, check tenant attendance_staff (CHEF / WAITER)
       if (restaurantId && restaurantId !== 'SYSTEM') {
-        // Block staff login when the restaurant is deactivated.
+        // Block staff login when the restaurant is not active (any state != 1).
         const r: any = await centralDb.get(
           "SELECT is_active, name FROM restaurants WHERE id = ?",
           [restaurantId]
         );
-        if (r && Number(r.is_active) === 0) {
+        if (r && Number(r.is_active) !== 1) {
+          const isPending = Number(r.is_active) === 0;
           return res.status(403).json({
-            error: `Service for ${r.name || 'this restaurant'} is currently inactive. Please ask your owner to contact our support team to restore access.`,
-            code: 'TENANT_INACTIVE',
+            error: isPending
+              ? `${r.name || 'This restaurant'} is pending admin approval. Please ask your owner.`
+              : `Service for ${r.name || 'this restaurant'} is currently inactive. Please ask your owner to contact our support team to restore access.`,
+            code: isPending ? 'TENANT_PENDING' : 'TENANT_INACTIVE',
           });
         }
 
@@ -2293,11 +2306,14 @@ async function startServer() {
           `SELECT id, name, city, slug, is_active FROM restaurants WHERE id = ?`,
           [legacyUser.restaurant_id]
         );
-        // Block login when restaurant is deactivated
-        if (restaurant && Number(restaurant.is_active) === 0) {
+        // Block login when restaurant is not active (any state != 1)
+        if (restaurant && Number(restaurant.is_active) !== 1) {
+          const isPending = Number(restaurant.is_active) === 0;
           return res.status(403).json({
-            error: `Service for ${restaurant.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
-            code: 'TENANT_INACTIVE',
+            error: isPending
+              ? `${restaurant.name || 'This restaurant'} is pending admin approval. You'll be notified once activated.`
+              : `Service for ${restaurant.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
+            code: isPending ? 'TENANT_PENDING' : 'TENANT_INACTIVE',
           });
         }
         const jwtToken = jwt.sign(
@@ -2338,11 +2354,16 @@ async function startServer() {
 
       if (restaurants.length === 1) {
         const r = restaurants[0];
-        // Block access if restaurant is pending admin approval
-        if (r.is_active === 0) {
+        // Block access if restaurant is not active (any state != 1)
+        if (Number(r.is_active) !== 1) {
+          const isPending = Number(r.is_active) === 0;
           return res.status(403).json({
-            error: "Your account is pending admin approval. You will receive an email once your account is activated.",
-            pending: true
+            error: isPending
+              ? "Your account is pending admin approval. You will receive an email once your account is activated."
+              : `Service for ${r.restaurant_name || 'your restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
+            pending: isPending,
+            inactive: !isPending,
+            code: isPending ? 'TENANT_PENDING' : 'TENANT_INACTIVE',
           });
         }
         const jwtToken = jwt.sign(
@@ -2395,8 +2416,19 @@ async function startServer() {
         [slug]
       );
       if (!r) return res.status(404).json({ error: "Restaurant not found" });
-      if (!r.is_active) {
-        return res.status(403).json({ error: "This restaurant is pending activation", pending: true });
+      // is_active values: 0=pending, 1=active, 2=admin-suspended. Anything
+      // other than 1 blocks public access — frontend will detect the 403
+      // and clear cached tokens / show "Service inactive" screen.
+      const activeState = Number(r.is_active);
+      if (activeState !== 1) {
+        if (activeState === 0) {
+          return res.status(403).json({ error: "This restaurant is pending activation", pending: true, code: 'TENANT_PENDING' });
+        }
+        return res.status(403).json({
+          error: "Service for this restaurant is currently inactive. Please contact billing@atithi-setu.com to restore access.",
+          inactive: true,
+          code: 'TENANT_INACTIVE',
+        });
       }
       res.json({
         slug: r.slug,
@@ -2436,8 +2468,18 @@ async function startServer() {
         [cleanSlug]
       );
       if (!rest) return res.status(404).json({ error: "Restaurant not found" });
-      if (!rest.is_active) {
-        return res.status(403).json({ error: "Restaurant is pending activation", pending: true });
+      // is_active values: 0=pending, 1=active, 2=admin-suspended. Block any
+      // state other than active.
+      const restActive = Number(rest.is_active);
+      if (restActive !== 1) {
+        if (restActive === 0) {
+          return res.status(403).json({ error: "Restaurant is pending activation. Please wait for admin approval.", pending: true, code: 'TENANT_PENDING' });
+        }
+        return res.status(403).json({
+          error: `Service for ${rest.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
+          inactive: true,
+          code: 'TENANT_INACTIVE',
+        });
       }
 
       const restaurantId: string = rest.id;
@@ -2710,15 +2752,18 @@ async function startServer() {
         return res.status(403).json({ error: "You don't have access to this restaurant" });
       }
 
-      // Block selection when the restaurant has been deactivated by admin.
+      // Block selection when the restaurant is not active (any state != 1).
       const r: any = await centralDb.get(
         "SELECT is_active, name FROM restaurants WHERE id = ?",
         [restaurant_id]
       );
-      if (r && Number(r.is_active) === 0) {
+      if (r && Number(r.is_active) !== 1) {
+        const isPending = Number(r.is_active) === 0;
         return res.status(403).json({
-          error: `Service for ${r.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
-          code: 'TENANT_INACTIVE',
+          error: isPending
+            ? `${r.name || 'This restaurant'} is pending admin approval. You'll be notified once activated.`
+            : `Service for ${r.name || 'this restaurant'} is currently inactive. Please contact our support team at billing@atithi-setu.com to restore access.`,
+          code: isPending ? 'TENANT_PENDING' : 'TENANT_INACTIVE',
         });
       }
 
@@ -12243,8 +12288,10 @@ async function startServer() {
       if (!row) return res.status(404).json({ error: "Tenant not found" });
       const days = _daysUntilDue(row.subscription_due_date);
       const status = _billingStatusOf(row);
-      // tenant_inactive trumps everything else for the frontend lock screen
-      const tenantInactive = Number(row.is_active) === 0;
+      // tenant_inactive trumps everything else for the frontend lock screen.
+      // is_active values: 0=pending, 1=active, 2=admin-suspended. Anything
+      // other than 1 = inactive from the user's perspective.
+      const tenantInactive = Number(row.is_active) !== 1;
       res.json({
         tenant_id: row.id,
         tenant_name: row.name,
@@ -12274,13 +12321,14 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'billing-v7-d016d07-followup',
+    commit_marker: 'billing-v8-is_active-tri-state-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
       'tenant-inactive-block',
       'cached-token-eager-guard',
       'harmonized-messaging',
+      'is_active-tri-state-aware',   // 0=pending, 1=active, 2=suspended — all states handled
     ],
     booted_at: new Date().toISOString(),
   };
