@@ -479,13 +479,62 @@ export default function App() {
     fetch(`/api/tenant/by-slug/${encodeURIComponent(tenantSlug)}`)
       .then(async r => {
         const body = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(body.error || 'Restaurant not found');
+        if (!r.ok) {
+          // EAGER CACHED-TOKEN GUARD
+          // The public tenant-info endpoint already returns 403 with
+          // pending:true (or 404) when a restaurant is inactive/missing.
+          // If the browser has a cached JWT from a previous session, we
+          // must wipe it now — otherwise the user would land in the
+          // dashboard, see broken data, and not understand why.
+          // Stored in localStorage for the post-reload login page to
+          // surface the right message.
+          if (r.status === 403 || r.status === 404) {
+            try {
+              const hadToken = !!localStorage.getItem('token');
+              localStorage.clear();
+              localStorage.setItem(
+                'atithi_session_revoked',
+                JSON.stringify({
+                  at: Date.now(),
+                  tenantSlug,
+                  reason: body.pending
+                    ? 'pending_activation'
+                    : (r.status === 403 ? 'inactive' : 'not_found'),
+                })
+              );
+              if (hadToken) {
+                // Trigger a one-time reload so React state resets and
+                // the login page picks up the revocation marker.
+                window.location.reload();
+                return;
+              }
+            } catch {}
+          }
+          throw new Error(body.error || 'Restaurant not found');
+        }
         return body;
       })
       .then((data: TenantInfo) => { setTenant(data); setTenantError(null); })
       .catch((err: any) => { setTenant(null); setTenantError(err.message || 'Failed to load restaurant'); })
       .finally(() => setTenantLoading(false));
   }, [tenantSlug]);
+
+  // Surface the revocation reason set by the eager guard above, so the
+  // "Restaurant Not Found / Pending" screen shows the friendly message
+  // immediately after auto-logout rather than the generic error.
+  const sessionRevoked: { reason: string; tenantSlug: string; at: number } | null = (() => {
+    try {
+      const raw = localStorage.getItem('atithi_session_revoked');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      // Expire markers older than 1 hour so they don't haunt later visits
+      if (Date.now() - Number(parsed.at || 0) > 3600_000) {
+        localStorage.removeItem('atithi_session_revoked');
+        return null;
+      }
+      return parsed;
+    } catch { return null; }
+  })();
 
   // Defensive parser: many production stacks (Cloudflare → Nginx → backend)
   // can return an HTML error page when the backend is unreachable or returns
@@ -1009,24 +1058,68 @@ export default function App() {
       );
     }
 
-    // Tenant not found (bad subdomain)
+    // Tenant not found OR tenant inactive — different copy per case.
+    // sessionRevoked is set by the eager guard when the subdomain's
+    // /by-slug endpoint returns 403 and the browser had a cached token.
     if (!tenant) {
+      const isInactive = sessionRevoked?.reason === 'inactive' || sessionRevoked?.reason === 'pending_activation';
       return (
         <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center p-6">
           <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-10 text-center border-t-[3px] border-[#b8860b]">
-            <div className="w-16 h-16 rounded-full bg-[#fdf0f0] flex items-center justify-center mx-auto mb-5">
-              <X size={32} className="text-[#c13b3b]" />
+            <div className={cn(
+              "w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5",
+              isInactive ? "bg-red-100" : "bg-[#fdf0f0]"
+            )}>
+              {isInactive
+                ? <Clock size={32} className="text-red-600" />
+                : <X size={32} className="text-[#c13b3b]" />}
             </div>
-            <h1 className="text-2xl font-serif font-bold text-[#1a1208] mb-2">Restaurant Not Found</h1>
-            <p className="text-[#6b5d52] text-sm mb-6">
-              {tenantError || `No restaurant exists at "${tenantSlug}.atithi-setu.com".`}
-            </p>
-            <a
-              href="https://atithi-setu.com"
-              className="inline-block px-6 py-3 bg-[#cc5a16] text-white rounded-2xl font-semibold text-sm hover:bg-[#a84612] transition-all"
-            >
-              Go to Atithi Setu
-            </a>
+            <h1 className="text-2xl font-serif font-bold text-[#1a1208] mb-2">
+              {isInactive ? 'Service inactive' : 'Restaurant Not Found'}
+            </h1>
+            {isInactive ? (
+              <>
+                <p className="text-[#6b5d52] text-sm mb-2">
+                  Your account access has been paused while we process your subscription.
+                </p>
+                <p className="text-[#9c8e85] text-xs mb-5">
+                  <strong className="text-emerald-700">Your data is safe</strong> and will be restored the moment your account is reactivated.
+                </p>
+                <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 mb-5 text-left">
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 mb-2">To restore service</div>
+                  <div className="text-sm text-[#1a1208] space-y-1">
+                    <div>📧 <strong>billing@atithi-setu.com</strong></div>
+                    <div>💬 WhatsApp <strong>+91 70111 89371</strong></div>
+                    <div className="text-xs text-[#6b5d52] mt-1.5 italic">We typically respond within 2 hours during IST business hours.</div>
+                  </div>
+                </div>
+                <a
+                  href={`https://wa.me/917011189371?text=${encodeURIComponent(`Hi, I need to restore service for my Atithi-Setu account on ${tenantSlug}.atithi-setu.com`)}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="inline-block px-6 py-3 bg-red-600 text-white rounded-2xl font-semibold text-sm hover:bg-red-700 transition-all mr-2 mb-2"
+                >
+                  Contact billing
+                </a>
+                <a
+                  href="https://atithi-setu.com"
+                  className="inline-block px-6 py-3 bg-[#faf7f2] text-[#1a1208] rounded-2xl font-semibold text-sm hover:bg-[#f3ece0] transition-all mb-2"
+                >
+                  Go to homepage
+                </a>
+              </>
+            ) : (
+              <>
+                <p className="text-[#6b5d52] text-sm mb-6">
+                  {tenantError || `No restaurant exists at "${tenantSlug}.atithi-setu.com".`}
+                </p>
+                <a
+                  href="https://atithi-setu.com"
+                  className="inline-block px-6 py-3 bg-[#cc5a16] text-white rounded-2xl font-semibold text-sm hover:bg-[#a84612] transition-all"
+                >
+                  Go to Atithi Setu
+                </a>
+              </>
+            )}
           </div>
         </div>
       );
@@ -1859,44 +1952,54 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
   if (!status) return null;
 
   // Tenant deactivated — full-screen hard lock. The admin has paused the
-  // entire restaurant, not just billing. No read, no write, no escape. The
-  // owner can only sign out and contact support. Server backs this up by
-  // returning 403 TENANT_INACTIVE on every API call.
+  // entire restaurant. No read, no write, no escape. Owner can only sign
+  // out and contact billing. Messaging matches the due-date expiry copy
+  // (same voice, same contact paths, same "your data is safe" reassurance).
   if (status.tenant_inactive || status.is_active === false) {
     return (
       <div className="fixed inset-0 z-[9999] bg-[#1a1208]/95 backdrop-blur-sm flex items-center justify-center p-4">
         <div className="bg-white rounded-[28px] shadow-2xl max-w-xl w-full p-8 md:p-10 text-center">
           <div className="w-16 h-16 mx-auto rounded-full bg-red-100 flex items-center justify-center mb-5">
-            <X size={32} className="text-red-600" />
+            <Clock size={32} className="text-red-600" />
           </div>
           <h1 className="text-2xl md:text-3xl font-bold font-serif mb-3 text-[#1a1208]">
             Service inactive
           </h1>
           <p className="text-[#6b5d52] mb-2">
-            Your account access has been paused by our team.
+            Your account access has been paused while we process your subscription.
           </p>
           <p className="text-sm text-[#9c8e85] mb-6">
-            <strong className="text-emerald-700">Your data is safe.</strong> All menus, orders, customer records, and reports are preserved and will be restored the moment your account is reactivated.
+            <strong className="text-emerald-700">Your data is safe</strong> and will be restored the moment your account is reactivated. All menus, orders, customer records, and reports are preserved.
           </p>
           <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5 mb-6 text-left">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 mb-2">To reactivate service</div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 mb-2">To restore service</div>
             <div className="text-sm text-[#1a1208] space-y-1.5">
-              <div>📧 Email <strong>{status.billing_contact?.email || 'billing@atithi-setu.com'}</strong></div>
+              <div>📧 <strong>{status.billing_contact?.email || 'billing@atithi-setu.com'}</strong></div>
               <div>💬 WhatsApp <strong>{status.billing_contact?.whatsapp || '+91 70111 89371'}</strong></div>
               <div className="text-xs text-[#6b5d52] mt-2 italic">We typically respond within 2 hours during IST business hours.</div>
             </div>
           </div>
-          <button
-            onClick={() => {
-              try { localStorage.clear(); } catch {}
-              window.location.href = '/';
-            }}
-            data-allow-readonly
-            className="w-full bg-[#1a1208] hover:bg-[#3d3128] text-white py-3 rounded-2xl font-bold transition-colors mb-3"
-          >
-            Sign out
-          </button>
-          <p className="text-xs text-[#9c8e85]">
+          <div className="flex gap-2">
+            <a
+              href={`https://wa.me/917011189371?text=${encodeURIComponent(`Hi, I need to restore service for my Atithi-Setu account: ${status.tenant_name || 'restaurant'}`)}`}
+              target="_blank" rel="noopener noreferrer"
+              data-allow-readonly
+              className="flex-1 bg-red-600 hover:bg-red-700 text-white py-3 rounded-2xl font-bold transition-colors text-center"
+            >
+              Contact billing
+            </a>
+            <button
+              onClick={() => {
+                try { localStorage.clear(); } catch {}
+                window.location.href = '/';
+              }}
+              data-allow-readonly
+              className="flex-1 bg-[#1a1208] hover:bg-[#3d3128] text-white py-3 rounded-2xl font-bold transition-colors"
+            >
+              Sign out
+            </button>
+          </div>
+          <p className="text-xs text-[#9c8e85] mt-3">
             {status.tenant_name && <>Account: <strong>{status.tenant_name}</strong></>}
           </p>
         </div>
