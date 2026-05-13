@@ -515,8 +515,27 @@ interface AuthRequest extends Request {
   };
 }
 
+// When a tenant's access is revoked, they enter READ-ONLY mode:
+//  - GET / HEAD / OPTIONS requests continue to work (owner can read &
+//    download their data, run reports, view history)
+//  - POST / PUT / PATCH / DELETE are blocked with a 402 explaining
+//    payment is needed
+// Auth and billing-status endpoints stay callable regardless of method so
+// the owner can log in, see status, and (after admin restores access)
+// resume normal operation without re-authenticating.
+const ALWAYS_ALLOWED_WHEN_REVOKED: RegExp[] = [
+  /^\/api\/auth\//,
+  /^\/api\/login/,
+  /^\/api\/logout/,
+  /^\/api\/admin\//,
+  /\/billing-status$/,
+  /^\/api\/restaurant\/[^/]+\/billing-status$/,
+  /\/uploads\//,
+];
+const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 // Middleware
-const authenticate = (req: AuthRequest, res: Response, next: NextFunction) => {
+const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: "No token provided" });
 
@@ -524,6 +543,47 @@ const authenticate = (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     req.user = decoded;
+
+    // Access-revocation check. Skip for admins (they need to manage tenants),
+    // skip for whitelisted paths (login/billing-status), skip for SYSTEM tenant,
+    // skip for read-only HTTP methods (GET/HEAD/OPTIONS) — owners keep read
+    // access even after revocation; only mutations are blocked.
+    const role = decoded?.role;
+    const isAdminUser = role === 'SUPER_ADMIN' || role === 'CTO';
+    const tenantId = decoded?.restaurantId;
+    const path = req.originalUrl || req.url || '';
+    const method = (req.method || 'GET').toUpperCase();
+    const isWhitelisted = ALWAYS_ALLOWED_WHEN_REVOKED.some(rx => rx.test(path));
+    const isReadOnly = READ_ONLY_METHODS.has(method);
+
+    if (!isAdminUser && tenantId && tenantId !== 'SYSTEM' && !isWhitelisted && !isReadOnly) {
+      try {
+        const row: any = await centralDb.get(
+          "SELECT access_revoked, access_revoked_reason FROM restaurants WHERE id = ?",
+          [tenantId]
+        );
+        if (row && Number(row.access_revoked) === 1) {
+          return res.status(402).json({
+            error: "Read-only mode",
+            code: "ACCESS_REVOKED_READ_ONLY",
+            reason: row.access_revoked_reason || "Subscription payment overdue",
+            message:
+              "Your account is currently in read-only mode while we process your subscription payment. " +
+              "You can continue to view, export, and download your data. Creating, editing, and deleting " +
+              "are paused until the account is restored. Please contact our billing team to resolve.",
+            contact: {
+              email: "billing@atithi-setu.com",
+              whatsapp: "+91 70111 89371",
+            },
+          });
+        }
+      } catch (err) {
+        // Don't fail open on DB errors — log and continue (we don't want
+        // a DB hiccup to lock out every tenant). The hourly banner will
+        // surface real revocations on the next poll.
+        console.error("Access-revoked check failed:", err);
+      }
+    }
     next();
   } catch (err) {
     res.status(401).json({ error: "Invalid token" });
@@ -2917,7 +2977,17 @@ async function startServer() {
         : markup_percent != null && markup_percent !== ''
           ? basePrice * (1 + Number(markup_percent) / 100)
           : basePrice * (1 + Number(cs?.default_markup_percent ?? 25) / 100);
-      if (basePrice > 0 && floorPct > 0) {
+      if (floorPct > 0) {
+        if (basePrice <= 0) {
+          // Without a base price we can't compute the floor — surface this so
+          // owners notice menu items missing prices rather than silently
+          // letting them bypass the floor.
+          return res.status(422).json({
+            error: `Cannot enforce min-margin floor: menu item has no in-house price. Set the menu item's price first, then configure the channel override.`,
+            base_price: 0,
+            floor_percent: floorPct,
+          });
+        }
         const floorPrice = basePrice * (1 + floorPct / 100);
         if (effective < floorPrice) {
           return res.status(422).json({
@@ -2987,6 +3057,49 @@ async function startServer() {
         targetIds = all.map((r: any) => r.id);
       }
       if (targetIds.length === 0) return res.json({ success: true, updated: 0 });
+
+      // Min-margin floor guard for bulk apply. Same semantics as the single-item
+      // endpoint at the top of the file — reject the whole bulk if any item
+      // would end up below cost+floor. The "hide" mode and explicit
+      // is_listed=0 case skip the check (we're not setting a price).
+      if (hide !== true) {
+        const cs: any = await db.get("SELECT * FROM channel_settings WHERE channel = ?", [ch]);
+        const floorPct = Number(cs?.min_margin_floor_percent ?? 0);
+        if (floorPct > 0) {
+          const placeholdersForItems = targetIds.map(() => '?').join(',');
+          const items: any[] = await db.query(
+            `SELECT id, name, price, price_full FROM menu WHERE id IN (${placeholdersForItems})`,
+            targetIds
+          );
+          const violations: Array<{ id: string; name: string; base_price: number; effective_price: number; floor_price: number }> = [];
+          for (const it of items) {
+            const basePrice = Number(it.price_full ?? it.price ?? 0);
+            if (basePrice <= 0) continue;
+            const effective = price_override != null && price_override !== ''
+              ? Number(price_override)
+              : markup_percent != null && markup_percent !== ''
+                ? basePrice * (1 + Number(markup_percent) / 100)
+                : basePrice * (1 + Number(cs?.default_markup_percent ?? 25) / 100);
+            const floorPrice = basePrice * (1 + floorPct / 100);
+            if (effective < floorPrice) {
+              violations.push({
+                id: it.id,
+                name: it.name,
+                base_price: basePrice,
+                effective_price: Math.round(effective * 100) / 100,
+                floor_price: Math.round(floorPrice * 100) / 100,
+              });
+            }
+          }
+          if (violations.length > 0) {
+            return res.status(422).json({
+              error: `${violations.length} item(s) would breach the min-margin floor of ${floorPct}%. Raise the markup/override or lower the floor in channel settings.`,
+              floor_percent: floorPct,
+              violations,
+            });
+          }
+        }
+      }
 
       let updated = 0;
       for (const itemId of targetIds) {
@@ -11713,6 +11826,220 @@ async function startServer() {
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to renew subscription" });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // SUBSCRIPTION BILLING & ACCESS CONTROL (admin-driven, per-tenant)
+  // ─────────────────────────────────────────────────────────────────────
+  // Helper — compute days-until-due (negative when past due)
+  const _daysUntilDue = (due: any): number | null => {
+    if (!due) return null;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const d = new Date(due);
+    d.setHours(0, 0, 0, 0);
+    return Math.round((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  };
+  const _billingStatusOf = (row: any): string => {
+    if (!row) return 'UNKNOWN';
+    if (Number(row.access_revoked) === 1) return 'SUSPENDED';
+    if (!row.subscription_due_date) return 'NO_DUE_DATE';
+    const days = _daysUntilDue(row.subscription_due_date);
+    if (days === null) return 'UNKNOWN';
+    const grace = Number(row.grace_period_days ?? 7);
+    if (days >= 0) return 'ACTIVE';
+    if (Math.abs(days) <= grace) return 'OVERDUE_GRACE';
+    return 'OVERDUE_PAST_GRACE';
+  };
+
+  // Admin: list all tenants with billing status
+  app.get("/api/admin/tenants/billing", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    try {
+      const rows: any[] = await centralDb.query(`
+        SELECT id, name, slug, is_active,
+               subscription_plan, subscription_due_date, grace_period_days,
+               subscription_expires_at,
+               access_revoked, access_revoked_at, access_revoked_by, access_revoked_reason,
+               last_payment_date, last_payment_amount, last_payment_reference,
+               billing_notes
+          FROM restaurants
+         WHERE id <> 'SYSTEM'
+         ORDER BY
+           CASE WHEN access_revoked = 1 THEN 0
+                WHEN subscription_due_date IS NOT NULL AND subscription_due_date < CURRENT_DATE THEN 1
+                ELSE 2 END,
+           subscription_due_date ASC NULLS LAST,
+           name ASC
+      `);
+      const enriched = rows.map((r: any) => ({
+        ...r,
+        days_until_due: _daysUntilDue(r.subscription_due_date),
+        billing_status: _billingStatusOf(r),
+      }));
+      res.json(enriched);
+    } catch (err) {
+      console.error("List tenant billing error:", err);
+      res.status(500).json({ error: "Failed to list tenant billing" });
+    }
+  });
+
+  // Admin: set/update a tenant's billing fields. Pass only what you want to change.
+  // Body shape (all optional):
+  //   {
+  //     subscription_plan: 'STARTER'|'PROFESSIONAL'|'MULTI_OUTLET'|...,
+  //     subscription_due_date: 'YYYY-MM-DD' | null,
+  //     grace_period_days: 7,
+  //     last_payment_date: 'YYYY-MM-DD' | null,
+  //     last_payment_amount: number | null,
+  //     last_payment_reference: string | null,
+  //     billing_notes: string | null
+  //   }
+  app.put("/api/admin/tenants/:id/billing", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantId = req.params.id;
+      if (tenantId === 'SYSTEM') return res.status(400).json({ error: "Cannot set billing on SYSTEM tenant" });
+      const allowed = [
+        'subscription_plan', 'subscription_due_date', 'grace_period_days',
+        'last_payment_date', 'last_payment_amount', 'last_payment_reference',
+        'billing_notes',
+      ];
+      const updates: Record<string, any> = {};
+      for (const k of allowed) {
+        if (k in req.body) updates[k] = req.body[k];
+      }
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid fields to update" });
+      }
+      // Validate grace period range
+      if (updates.grace_period_days != null) {
+        const g = Number(updates.grace_period_days);
+        if (!Number.isFinite(g) || g < 0 || g > 90) {
+          return res.status(400).json({ error: "grace_period_days must be in [0, 90]" });
+        }
+        updates.grace_period_days = Math.round(g);
+      }
+      // Validate amount
+      if (updates.last_payment_amount != null) {
+        const a = Number(updates.last_payment_amount);
+        if (!Number.isFinite(a) || a < 0) {
+          return res.status(400).json({ error: "last_payment_amount must be non-negative" });
+        }
+      }
+      // Build SET clause
+      const setParts: string[] = [];
+      const params: any[] = [];
+      for (const [k, v] of Object.entries(updates)) {
+        setParts.push(`${k} = ?`);
+        params.push(v === '' ? null : v);
+      }
+      params.push(tenantId);
+      await centralDb.run(`UPDATE restaurants SET ${setParts.join(', ')} WHERE id = ?`, params);
+      const updated: any = await centralDb.get(
+        `SELECT id, name, subscription_plan, subscription_due_date, grace_period_days,
+                access_revoked, last_payment_date, last_payment_amount,
+                last_payment_reference, billing_notes
+           FROM restaurants WHERE id = ?`,
+        [tenantId]
+      );
+      res.json({
+        success: true,
+        ...updated,
+        days_until_due: _daysUntilDue(updated?.subscription_due_date),
+        billing_status: _billingStatusOf(updated),
+      });
+    } catch (err) {
+      console.error("Update tenant billing error:", err);
+      res.status(500).json({ error: "Failed to update billing" });
+    }
+  });
+
+  // Admin: revoke a tenant's access (suspend service).
+  // Body: { reason?: string }
+  app.post("/api/admin/tenants/:id/revoke-access", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantId = req.params.id;
+      if (tenantId === 'SYSTEM') return res.status(400).json({ error: "Cannot revoke SYSTEM tenant" });
+      const adminId = req.user?.id || req.user?.email || 'unknown-admin';
+      const reason = String(req.body?.reason || 'Subscription payment overdue').slice(0, 500);
+      await centralDb.run(
+        `UPDATE restaurants
+            SET access_revoked = 1,
+                access_revoked_at = CURRENT_TIMESTAMP,
+                access_revoked_by = ?,
+                access_revoked_reason = ?
+          WHERE id = ?`,
+        [adminId, reason, tenantId]
+      );
+      res.json({ success: true, access_revoked: true });
+    } catch (err) {
+      console.error("Revoke access error:", err);
+      res.status(500).json({ error: "Failed to revoke access" });
+    }
+  });
+
+  // Admin: restore a tenant's access (resume service).
+  app.post("/api/admin/tenants/:id/restore-access", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantId = req.params.id;
+      await centralDb.run(
+        `UPDATE restaurants
+            SET access_revoked = 0,
+                access_revoked_at = NULL,
+                access_revoked_by = NULL,
+                access_revoked_reason = NULL
+          WHERE id = ?`,
+        [tenantId]
+      );
+      res.json({ success: true, access_revoked: false });
+    } catch (err) {
+      console.error("Restore access error:", err);
+      res.status(500).json({ error: "Failed to restore access" });
+    }
+  });
+
+  // Tenant-facing: fetch own billing status (called hourly by the banner).
+  // Returns minimal info — no admin-only fields like revoked_by.
+  app.get("/api/restaurant/:id/billing-status", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantId = req.params.id;
+      // Authorisation — anyone authenticated for this tenant or an admin can read.
+      const role = req.user?.role;
+      const ownTenant = req.user?.restaurantId;
+      const isAdminRole = role === 'SUPER_ADMIN' || role === 'CTO';
+      if (!isAdminRole && ownTenant !== tenantId) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const row: any = await centralDb.get(
+        `SELECT id, name, subscription_plan, subscription_due_date, grace_period_days,
+                access_revoked, access_revoked_at, access_revoked_reason,
+                last_payment_date
+           FROM restaurants WHERE id = ?`,
+        [tenantId]
+      );
+      if (!row) return res.status(404).json({ error: "Tenant not found" });
+      const days = _daysUntilDue(row.subscription_due_date);
+      const status = _billingStatusOf(row);
+      res.json({
+        tenant_id: row.id,
+        tenant_name: row.name,
+        subscription_plan: row.subscription_plan,
+        subscription_due_date: row.subscription_due_date,
+        grace_period_days: row.grace_period_days ?? 7,
+        days_until_due: days,
+        last_payment_date: row.last_payment_date,
+        access_revoked: Number(row.access_revoked) === 1,
+        access_revoked_at: row.access_revoked_at,
+        access_revoked_reason: row.access_revoked_reason,
+        billing_status: status,
+        billing_contact: {
+          email: 'billing@atithi-setu.com',
+          whatsapp: '+91 70111 89371',
+        },
+      });
+    } catch (err) {
+      console.error("Get billing status error:", err);
+      res.status(500).json({ error: "Failed to get billing status" });
     }
   });
 

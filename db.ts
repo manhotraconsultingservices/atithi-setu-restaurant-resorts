@@ -142,6 +142,27 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS checkout_mode TEXT DEFAULT 'postpaid'
   `);
 
+  // Migration: per-tenant subscription billing & access control.
+  // - subscription_due_date: when the next payment is due (admin-set)
+  // - grace_period_days: buffer after due date before access is revoked
+  // - access_revoked / access_revoked_at / access_revoked_by: admin-controlled
+  //   hard block on tenant access. Set manually from the admin Billing tab.
+  // - last_payment_date / last_payment_amount: most recent recorded payment
+  // - billing_notes: free-form admin notes (invoice numbers, payment refs)
+  await centralDb.exec(`
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS subscription_due_date DATE;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS grace_period_days INT DEFAULT 7;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS access_revoked INT DEFAULT 0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS access_revoked_at TIMESTAMP;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS access_revoked_by TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS access_revoked_reason TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS last_payment_date DATE;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS last_payment_amount DOUBLE PRECISION;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS last_payment_reference TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS billing_notes TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS subscription_plan TEXT
+  `);
+
   // Migration: unique index on locations (safe to run multiple times)
   await centralDb.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_locations_state_city ON locations (state, city)`

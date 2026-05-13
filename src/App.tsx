@@ -1594,6 +1594,11 @@ export default function App() {
         </div>
       </nav>
 
+      {/* Billing banner / lock screen for non-admin tenants. Polls hourly. */}
+      {restaurantId && restaurantId !== 'SYSTEM' && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && (
+        <BillingNotice restaurantId={restaurantId} token={token!} />
+      )}
+
       <main className="max-w-7xl mx-auto p-3 sm:p-4 md:p-6 xl:p-8">
         {role === 'SUPER_ADMIN' && <SuperAdminDashboard token={token!} />}
         {role === 'CTO' && <CTODashboard token={token!} />}
@@ -1615,6 +1620,176 @@ export default function App() {
             : <CustomerInterface restaurantId={restaurantId!} />
         )}
       </main>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// BillingNotice — hourly polling banner + full-screen lock when revoked.
+// Messaging follows industry-standard SaaS billing patterns:
+// - never threatening, always solution-oriented
+// - mentions data is safe
+// - provides concrete contact paths
+// ─────────────────────────────────────────────────────────────────────
+function BillingNotice({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [status, setStatus] = React.useState<any>(null);
+  const [bannerDismissedUntil, setBannerDismissedUntil] = React.useState<number>(() => {
+    try { return Number(localStorage.getItem(`billing_banner_dismissed_${restaurantId}`) || 0); } catch { return 0; }
+  });
+
+  const fetchStatus = React.useCallback(async () => {
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/billing-status`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setStatus(data);
+      }
+    } catch (err) {
+      console.warn('Billing status fetch failed:', err);
+    }
+  }, [restaurantId, token]);
+
+  React.useEffect(() => {
+    fetchStatus();
+    // Hourly poll. 60 × 60 × 1000 = 3,600,000 ms.
+    const id = setInterval(fetchStatus, 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [fetchStatus]);
+
+  if (!status) return null;
+
+  // Read-only mode — admin has revoked write access.
+  // Owner can still view all data; mutations are blocked server-side.
+  // Banner stays pinned at the top until the admin restores access.
+  if (status.access_revoked) {
+    return (
+      <div className="bg-gradient-to-r from-red-50 via-red-50 to-amber-50 border-b-2 border-red-300 shadow-sm">
+        <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 xl:px-8 py-3">
+          <div className="flex flex-col md:flex-row md:items-center gap-3">
+            <div className="shrink-0 w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+              <Clock size={20} className="text-red-700" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-bold text-red-900 text-sm md:text-base flex items-center gap-2 flex-wrap">
+                <span>Read-only mode</span>
+                <span className="px-2 py-0.5 rounded-full bg-red-200 text-red-800 text-[10px] font-bold uppercase tracking-wider">Subscription past due</span>
+              </div>
+              <div className="text-xs md:text-sm text-red-900/90 mt-0.5">
+                Your account is in read-only mode while we process your subscription payment.
+                You can <strong>view, export and download</strong> all data, but creating, editing and deleting are paused.
+                <strong className="text-emerald-700"> Your data is safe.</strong> Restore service by contacting <strong>billing@atithi-setu.com</strong> or WhatsApp <strong>+91 70111 89371</strong>.
+                {status.access_revoked_reason && (
+                  <span className="block mt-1 italic text-red-700/80">Reason: {status.access_revoked_reason}</span>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <a
+                href={`https://wa.me/917011189371?text=${encodeURIComponent(`Hi, I need to restore service for my Atithi-Setu account: ${status.tenant_name || restaurantId}`)}`}
+                target="_blank" rel="noopener noreferrer"
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-600 text-white hover:bg-red-700 transition-colors whitespace-nowrap"
+              >
+                Restore service
+              </a>
+              <a
+                href="mailto:billing@atithi-setu.com?subject=Restore%20service%20—%20Atithi-Setu%20account"
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-100 text-red-800 hover:bg-red-200 transition-colors whitespace-nowrap"
+              >
+                Email billing
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Soft banner — past due but admin hasn't revoked yet.
+  const isPastDue =
+    status.billing_status === 'OVERDUE_GRACE' ||
+    status.billing_status === 'OVERDUE_PAST_GRACE';
+
+  if (!isPastDue) return null;
+
+  // Banner can be dismissed for the hour. localStorage stores the
+  // timestamp until which it should stay hidden.
+  const now = Date.now();
+  if (bannerDismissedUntil > now) return null;
+
+  const daysPast = Math.abs(status.days_until_due || 0);
+  const grace = Number(status.grace_period_days || 7);
+  const isPastGrace = status.billing_status === 'OVERDUE_PAST_GRACE';
+  const daysUntilSuspension = Math.max(0, grace - daysPast);
+  const dueDate = status.subscription_due_date
+    ? new Date(status.subscription_due_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+    : 'a recent date';
+
+  const dismissForOneHour = () => {
+    const until = Date.now() + 60 * 60 * 1000;
+    setBannerDismissedUntil(until);
+    try { localStorage.setItem(`billing_banner_dismissed_${restaurantId}`, String(until)); } catch {}
+  };
+
+  return (
+    <div className={cn(
+      "border-b shadow-sm",
+      isPastGrace ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"
+    )}>
+      <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 xl:px-8 py-3">
+        <div className="flex flex-col md:flex-row md:items-center gap-3">
+          <div className={cn(
+            "shrink-0 w-9 h-9 rounded-full flex items-center justify-center",
+            isPastGrace ? "bg-red-100" : "bg-amber-100"
+          )}>
+            <Clock size={18} className={isPastGrace ? "text-red-700" : "text-amber-700"} />
+          </div>
+          <div className="flex-1 min-w-0">
+            {isPastGrace ? (
+              <>
+                <div className="font-bold text-red-900 text-sm md:text-base">
+                  Final notice — your subscription is {daysPast} days past due
+                </div>
+                <div className="text-xs md:text-sm text-red-800 mt-0.5">
+                  Payment was due on <strong>{dueDate}</strong>. To avoid service interruption, please complete payment and contact our billing team at <strong>billing@atithi-setu.com</strong> or WhatsApp <strong>+91 70111 89371</strong>.
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="font-bold text-amber-900 text-sm md:text-base">
+                  Subscription payment is past due
+                </div>
+                <div className="text-xs md:text-sm text-amber-800 mt-0.5">
+                  Payment was due on <strong>{dueDate}</strong>. Service will continue uninterrupted for {daysUntilSuspension} more {daysUntilSuspension === 1 ? 'day' : 'days'} while you arrange payment. Reach us at <strong>billing@atithi-setu.com</strong> or WhatsApp <strong>+91 70111 89371</strong>.
+                </div>
+              </>
+            )}
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <a
+              href={`https://wa.me/917011189371?text=${encodeURIComponent(`Hi, I need help with my Atithi-Setu subscription. Account: ${status.tenant_name || restaurantId}`)}`}
+              target="_blank" rel="noopener noreferrer"
+              className={cn(
+                "px-4 py-1.5 rounded-xl text-xs font-bold transition-colors",
+                isPastGrace ? "bg-red-600 text-white hover:bg-red-700" : "bg-amber-600 text-white hover:bg-amber-700"
+              )}
+            >
+              Contact billing
+            </a>
+            <button
+              onClick={dismissForOneHour}
+              className={cn(
+                "px-3 py-1.5 rounded-xl text-xs font-bold transition-colors",
+                isPastGrace ? "bg-red-100 text-red-700 hover:bg-red-200" : "bg-amber-100 text-amber-800 hover:bg-amber-200"
+              )}
+              title="Hide for 1 hour. Will reappear automatically until resolved."
+            >
+              Remind me later
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -18318,7 +18493,76 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
-  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS'>('RESTAURANTS');
+  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING'>('RESTAURANTS');
+
+  // Subscription billing state (admin Billing tab)
+  const [billingRows, setBillingRows] = useState<any[]>([]);
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingEdit, setBillingEdit] = useState<Record<string, any>>({});
+  const [billingMsg, setBillingMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const fetchTenantBilling = async () => {
+    setBillingLoading(true);
+    try {
+      const res = await fetch('/api/admin/tenants/billing', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (res.ok) setBillingRows(await res.json());
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setBillingLoading(false);
+    }
+  };
+  const saveTenantBilling = async (tenantId: string) => {
+    const draft = billingEdit[tenantId] || {};
+    try {
+      const res = await fetch(`/api/admin/tenants/${tenantId}/billing`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(draft),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setBillingMsg({ type: 'ok', text: `Saved billing for ${data.name || tenantId}` });
+        setBillingEdit(prev => { const copy = { ...prev }; delete copy[tenantId]; return copy; });
+        fetchTenantBilling();
+      } else {
+        setBillingMsg({ type: 'err', text: data.error || 'Save failed' });
+      }
+    } catch {
+      setBillingMsg({ type: 'err', text: 'Network error' });
+    }
+  };
+  const revokeTenantAccess = async (tenantId: string, tenantName: string) => {
+    const reason = prompt(`Revoke access for ${tenantName}?\n\nReason (shown to tenant):`, 'Subscription payment overdue');
+    if (reason === null) return;
+    try {
+      const res = await fetch(`/api/admin/tenants/${tenantId}/revoke-access`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ reason }),
+      });
+      if (res.ok) {
+        setBillingMsg({ type: 'ok', text: `Access revoked for ${tenantName}` });
+        fetchTenantBilling();
+      }
+    } catch {
+      setBillingMsg({ type: 'err', text: 'Failed to revoke access' });
+    }
+  };
+  const restoreTenantAccess = async (tenantId: string, tenantName: string) => {
+    if (!confirm(`Restore access for ${tenantName}?`)) return;
+    try {
+      const res = await fetch(`/api/admin/tenants/${tenantId}/restore-access`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setBillingMsg({ type: 'ok', text: `Access restored for ${tenantName}` });
+        fetchTenantBilling();
+      }
+    } catch {
+      setBillingMsg({ type: 'err', text: 'Failed to restore access' });
+    }
+  };
   const [isAddingUser, setIsAddingUser] = useState(false);
   const [newUser, setNewUser] = useState({ loginId: '', name: '', email: '', phone: '', password: '', role: 'SALES_REP' as UserRole });
   const [editingOwner, setEditingOwner] = useState<{ restaurantId: string; name: string; email: string; phone: string } | null>(null);
@@ -18756,6 +19000,15 @@ function SuperAdminDashboard({ token }: { token: string }) {
             )}
           >
             <Shield size={16} /> Role Access
+          </button>
+          <button
+            onClick={() => { setViewMode('BILLING'); fetchTenantBilling(); }}
+            className={cn(
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'BILLING' ? "bg-emerald-600 text-white shadow-md" : "text-[#1a1208] hover:bg-[#cc5a16]/5"
+            )}
+          >
+            <Clock size={16} /> Billing
           </button>
         </div>
       </div>
@@ -19513,6 +19766,192 @@ function SuperAdminDashboard({ token }: { token: string }) {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      ) : viewMode === 'BILLING' ? (
+        <div className="space-y-6">
+          <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 md:p-8">
+            <div className="flex flex-col md:flex-row md:items-center gap-3 mb-5">
+              <div className="flex-1">
+                <h3 className="text-xl font-bold flex items-center gap-2"><Clock size={20} className="text-emerald-600" /> Subscription billing</h3>
+                <p className="text-sm text-[#6b5d52] mt-1">
+                  Set the next payment due date per tenant. Tenants past the due date see an hourly reminder banner.
+                  After the grace period, you can manually revoke access — service stays suspended until you restore it.
+                </p>
+              </div>
+              <button
+                onClick={fetchTenantBilling}
+                disabled={billingLoading}
+                className="px-4 py-2 rounded-2xl text-sm font-bold bg-[#faf7f2] hover:bg-emerald-50 transition-colors disabled:opacity-50"
+              >
+                {billingLoading ? 'Loading…' : 'Refresh'}
+              </button>
+            </div>
+
+            {billingMsg && (
+              <div className={cn(
+                "mb-4 px-4 py-2 rounded-xl text-sm",
+                billingMsg.type === 'ok' ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-red-50 text-red-700 border border-red-200"
+              )}>
+                {billingMsg.text}
+              </div>
+            )}
+
+            {billingLoading ? (
+              <div className="flex justify-center py-12"><div className="w-8 h-8 border-2 border-emerald-300 border-t-emerald-600 rounded-full animate-spin" /></div>
+            ) : billingRows.length === 0 ? (
+              <div className="text-center py-12 text-[#9c8e85] italic">No tenants yet. Onboard a restaurant first.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[10px] uppercase tracking-widest text-[#9c8e85] border-b border-[#e8dfd0]">
+                      <th className="py-3 pr-3">Tenant</th>
+                      <th className="py-3 px-3">Plan</th>
+                      <th className="py-3 px-3">Due date</th>
+                      <th className="py-3 px-3">Grace</th>
+                      <th className="py-3 px-3">Status</th>
+                      <th className="py-3 px-3">Last payment</th>
+                      <th className="py-3 px-3">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {billingRows.map((r: any) => {
+                      const edit = billingEdit[r.id] || {};
+                      const due = edit.subscription_due_date ?? r.subscription_due_date ?? '';
+                      const grace = edit.grace_period_days ?? r.grace_period_days ?? 7;
+                      const plan = edit.subscription_plan ?? r.subscription_plan ?? '';
+                      const lastDate = edit.last_payment_date ?? r.last_payment_date ?? '';
+                      const lastAmt = edit.last_payment_amount ?? r.last_payment_amount ?? '';
+                      const lastRef = edit.last_payment_reference ?? r.last_payment_reference ?? '';
+                      const notes = edit.billing_notes ?? r.billing_notes ?? '';
+                      const dirty = !!billingEdit[r.id];
+                      const statusBadge = (() => {
+                        if (r.access_revoked) return <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-wider">SUSPENDED</span>;
+                        switch (r.billing_status) {
+                          case 'ACTIVE': return <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase tracking-wider">Active</span>;
+                          case 'OVERDUE_GRACE': return <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-wider">Grace ({Math.abs(r.days_until_due || 0)}d past)</span>;
+                          case 'OVERDUE_PAST_GRACE': return <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-wider">Past grace ({Math.abs(r.days_until_due || 0)}d)</span>;
+                          case 'NO_DUE_DATE': return <span className="px-2 py-0.5 rounded-full bg-[#faf7f2] text-[#6b5d52] text-[10px] font-bold uppercase tracking-wider">No due date</span>;
+                          default: return <span className="px-2 py-0.5 rounded-full bg-[#faf7f2] text-[#6b5d52] text-[10px] font-bold uppercase tracking-wider">{r.billing_status || 'Unknown'}</span>;
+                        }
+                      })();
+                      const updateDraft = (field: string, value: any) => {
+                        setBillingEdit(prev => ({ ...prev, [r.id]: { ...prev[r.id], [field]: value } }));
+                      };
+                      return (
+                        <tr key={r.id} className="border-b border-[#f5ece0] hover:bg-[#faf7f2]/50">
+                          <td className="py-3 pr-3">
+                            <div className="font-semibold">{r.name}</div>
+                            <div className="text-[11px] text-[#9c8e85] font-mono">{r.id}</div>
+                            {r.access_revoked_reason && r.access_revoked === 1 && (
+                              <div className="text-[11px] text-red-600 mt-1 italic">"{r.access_revoked_reason}"</div>
+                            )}
+                          </td>
+                          <td className="py-3 px-3">
+                            <select
+                              value={plan}
+                              onChange={e => updateDraft('subscription_plan', e.target.value)}
+                              className="bg-[#faf7f2] rounded-lg px-2 py-1 text-xs font-semibold border-none outline-none"
+                            >
+                              <option value="">—</option>
+                              <option value="STARTER">Starter</option>
+                              <option value="PROFESSIONAL">Professional</option>
+                              <option value="MULTI_OUTLET">Multi-outlet</option>
+                              <option value="BOUTIQUE">Boutique (hotel)</option>
+                              <option value="RESORT">Resort (hotel)</option>
+                              <option value="CHAIN">Chain (hotel)</option>
+                            </select>
+                          </td>
+                          <td className="py-3 px-3">
+                            <input
+                              type="date"
+                              value={due ? String(due).slice(0, 10) : ''}
+                              onChange={e => updateDraft('subscription_due_date', e.target.value || null)}
+                              className="bg-[#faf7f2] rounded-lg px-2 py-1 text-xs border-none outline-none"
+                            />
+                          </td>
+                          <td className="py-3 px-3">
+                            <input
+                              type="number" min={0} max={90}
+                              value={grace}
+                              onChange={e => updateDraft('grace_period_days', Number(e.target.value))}
+                              className="bg-[#faf7f2] rounded-lg px-2 py-1 text-xs w-16 border-none outline-none"
+                            />
+                            <span className="text-[10px] text-[#9c8e85] ml-1">days</span>
+                          </td>
+                          <td className="py-3 px-3">{statusBadge}</td>
+                          <td className="py-3 px-3">
+                            <input
+                              type="date"
+                              value={lastDate ? String(lastDate).slice(0, 10) : ''}
+                              onChange={e => updateDraft('last_payment_date', e.target.value || null)}
+                              className="bg-[#faf7f2] rounded-lg px-2 py-1 text-xs w-32 border-none outline-none mb-1"
+                            />
+                            <div className="flex gap-1">
+                              <input
+                                type="number" min={0} placeholder="₹ amount"
+                                value={lastAmt}
+                                onChange={e => updateDraft('last_payment_amount', e.target.value === '' ? null : Number(e.target.value))}
+                                className="bg-[#faf7f2] rounded-lg px-2 py-1 text-xs w-24 border-none outline-none"
+                              />
+                              <input
+                                type="text" placeholder="Ref / Invoice"
+                                value={lastRef}
+                                onChange={e => updateDraft('last_payment_reference', e.target.value)}
+                                className="bg-[#faf7f2] rounded-lg px-2 py-1 text-xs w-28 border-none outline-none"
+                              />
+                            </div>
+                            <input
+                              type="text" placeholder="Notes"
+                              value={notes}
+                              onChange={e => updateDraft('billing_notes', e.target.value)}
+                              className="bg-[#faf7f2] rounded-lg px-2 py-1 text-xs w-full border-none outline-none mt-1"
+                            />
+                          </td>
+                          <td className="py-3 px-3 align-top">
+                            <div className="flex flex-col gap-1">
+                              <button
+                                onClick={() => saveTenantBilling(r.id)}
+                                disabled={!dirty}
+                                className={cn(
+                                  "px-3 py-1 rounded-lg text-xs font-bold transition-colors",
+                                  dirty ? "bg-emerald-600 text-white hover:bg-emerald-700" : "bg-[#faf7f2] text-[#9c8e85] cursor-not-allowed"
+                                )}
+                              >
+                                {dirty ? 'Save' : 'Saved'}
+                              </button>
+                              {r.access_revoked === 1 ? (
+                                <button
+                                  onClick={() => restoreTenantAccess(r.id, r.name)}
+                                  className="px-3 py-1 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                                >
+                                  Restore access
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => revokeTenantAccess(r.id, r.name)}
+                                  className="px-3 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 hover:bg-red-100"
+                                >
+                                  Revoke access
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="mt-5 p-4 bg-amber-50 rounded-2xl border border-amber-200 text-xs text-amber-900 leading-relaxed">
+              <strong>How this works:</strong> Set a due date per tenant. From the day after, the tenant sees an hourly reminder banner.
+              After {`{grace_period_days}`} days past due, the banner escalates with a final-notice tone but service stays available.
+              You decide when to <strong>revoke access</strong> manually — that's a hard suspension. Service resumes the moment you click <strong>Restore access</strong>.
+              Tenant data is preserved during suspension and remains accessible after restoration.
+            </div>
           </div>
         </div>
       ) : null}
