@@ -76,32 +76,41 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // A tenant whose role permissions were saved before these tabs existed has
 // an `allowedTabs` list that simply doesn't mention them. Without special
 // handling those tabs would vanish for that tenant until an admin re-saves.
-//
-// These tabs ARE listed in the Super Admin → Role Access UI (so admins can
-// control them) — the grandfather logic in isTabVisible() only kicks in for
-// "legacy" permission sets that contain NONE of these IDs. The moment an
-// admin re-saves through the updated UI, their explicit choices win.
 const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY']);
 
+// Sentinel appended by savePermissions() to every PARTIAL restriction list.
+// Its presence is a deterministic "this list was configured through the
+// up-to-date Role Access UI, with full knowledge of every current tab"
+// signal. It is NOT a real tab — it never appears in RESTAURANT_TABS /
+// HOTEL_TABS, is stripped before the admin grid renders, and is ignored by
+// every consumer except isTabVisible(). This replaces the old (broken)
+// "did the list mention any new tab?" heuristic, which could not tell a
+// legacy list apart from an admin who deliberately unchecked every new tab.
+const PERMS_V2_MARKER = '__perm_v2__';
+
 // Decide whether a dashboard tab should be visible for a tenant, given the
-// tenant's saved allowedTabs list (null/[] = no restriction).
-//   • allowedTabs null/empty            → everything visible
-//   • tab explicitly present            → visible
-//   • tab absent, but it's a newly-added tab AND the saved list looks
-//     "legacy" (mentions none of the newly-added tabs) → grandfather it
-//     visible (the admin never had a chance to choose it)
-//   • tab absent on a list that HAS been re-saved through the updated UI
-//     → hidden (the admin deliberately excluded it)
-// Known limitation: if an admin deliberately excludes EVERY newly-added tab
-// at once, that list reads as "legacy" and the tabs are grandfathered back.
-// Re-saving with at least one newly-added tab checked resolves it.
+// tenant's saved allowedTabs list.
+//   • allowedTabs null / empty       → no restriction → everything visible
+//   • tab explicitly present         → visible
+//   • tab absent + list has the v2
+//     marker                         → hidden (admin saw this tab in the
+//                                       Role Access UI and excluded it)
+//   • tab absent + NO v2 marker
+//     (legacy list saved before the
+//     tab existed):
+//       - newly-added tab            → visible (grandfathered until re-save)
+//       - any other tab              → hidden
 function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boolean {
   if (!allowedTabs || allowedTabs.length === 0) return true;
   if (allowedTabs.includes(id)) return true;
-  if (ALWAYS_VISIBLE_TABS.has(id)) {
-    const sawAnyNewTab = [...ALWAYS_VISIBLE_TABS].some(t => allowedTabs.includes(t));
-    return !sawAnyNewTab; // legacy perms → grandfather; updated perms → respect exclusion
+  // The tab is NOT in the saved list. Was the list configured with full
+  // knowledge of every current tab, or is it a pre-INVENTORY/DELIVERY list?
+  if (allowedTabs.includes(PERMS_V2_MARKER)) {
+    return false; // deliberate, fully-informed exclusion → respect it
   }
+  // Legacy list — grandfather only the genuinely-new tabs so owners don't
+  // lose them until an admin re-saves. Everything else stays excluded.
+  if (ALWAYS_VISIBLE_TABS.has(id)) return true;
   return false;
 }
 
@@ -19240,27 +19249,34 @@ function SuperAdminDashboard({ token }: { token: string }) {
       });
       if (res.ok) {
         const data = await res.json();
-        // Tabs added AFTER the Role Access feature shipped. A tenant whose
-        // permissions were saved before these existed has a "legacy" list
-        // that doesn't mention them. We default those to CHECKED in the grid
-        // so the admin's first re-save doesn't silently strip a feature the
-        // owner could already see (matches the runtime grandfather logic).
+        // Tabs added AFTER the Role Access feature shipped. A "legacy"
+        // permission list (saved before they existed) carries no
+        // PERMS_V2_MARKER — for those we default the newly-added tabs to
+        // CHECKED in the grid so the admin's first re-save doesn't silently
+        // strip a feature the owner could already see. A list that DOES
+        // carry the marker was configured with full knowledge of every
+        // current tab, so we honour it verbatim.
         const NEWLY_ADDED_TABS = ['INVENTORY', 'DELIVERY'];
         const normalized: Record<string, string[]> = {};
         for (const role of PERM_ROLES) {
-          const saved: string[] = data[role] || [];
+          // Strip the marker — permData must only ever contain real tab IDs
+          // so the checkbox grid, the All/None length math, and
+          // togglePermTab all stay correct.
+          const saved: string[] = (data[role] || []).filter((t: string) => t !== PERMS_V2_MARKER);
+          const isV2 = (data[role] || []).includes(PERMS_V2_MARKER);
           if (saved.length === 0) {
             // No restriction saved → everything checked.
             normalized[role] = [...ALL_TABS];
+          } else if (isV2) {
+            // Configured through the up-to-date UI → honour it exactly.
+            normalized[role] = saved;
           } else {
-            // Explicit restriction. If this is a legacy list (mentions none
-            // of the newly-added tabs), merge those in as allowed so the
-            // owner doesn't lose access on the admin's next save. Once the
-            // list mentions at least one, treat it as already up-to-date.
-            const sawAnyNew = NEWLY_ADDED_TABS.some(t => saved.includes(t));
-            normalized[role] = sawAnyNew
-              ? saved
-              : [...saved, ...NEWLY_ADDED_TABS.filter(t => ALL_TABS.includes(t))];
+            // Legacy list — grandfather the newly-added tabs as CHECKED so
+            // the admin's first re-save doesn't strip them by accident.
+            normalized[role] = [
+              ...saved,
+              ...NEWLY_ADDED_TABS.filter(t => ALL_TABS.includes(t) && !saved.includes(t)),
+            ];
           }
         }
         setPermData(normalized);
@@ -19274,11 +19290,26 @@ function SuperAdminDashboard({ token }: { token: string }) {
     setPermSaving(true);
     setPermMsg(null);
     try {
-      // Convert: if all tabs selected → save empty array (means no restriction)
+      // Convert per role:
+      //   • all tabs checked  → save []  (means "no restriction")
+      //   • none checked      → save []  (long-standing behaviour — the
+      //                          backend treats [] as "no restriction", so
+      //                          the None button has always meant "all
+      //                          visible"; we deliberately do NOT change it)
+      //   • partial selection → save [chosen tabs..., PERMS_V2_MARKER]
+      //     The marker stamps the list as "configured with full knowledge
+      //     of every current tab" so the runtime respects exclusions of
+      //     INVENTORY / DELIVERY exactly, instead of grandfathering them.
       const toSave: Record<string, string[]> = {};
       for (const role of PERM_ROLES) {
-        const tabs = permData[role] || [];
-        toSave[role] = tabs.length === ALL_TABS.length ? [] : tabs;
+        // permData is always marker-free (fetchPermissions strips it); the
+        // filter here is purely defensive.
+        const tabs = (permData[role] || []).filter(t => t !== PERMS_V2_MARKER);
+        if (tabs.length === ALL_TABS.length || tabs.length === 0) {
+          toSave[role] = [];
+        } else {
+          toSave[role] = [...tabs, PERMS_V2_MARKER];
+        }
       }
       const res = await fetch(`/api/admin/restaurant/${permSelectedRestaurant}/role-permissions`, {
         method: 'POST',
@@ -20210,9 +20241,10 @@ function SuperAdminDashboard({ token }: { token: string }) {
                 <div className="mb-4 px-4 py-3 rounded-2xl text-xs flex items-center gap-3 border bg-[#0f766e]/8 border-[#0f766e]/20 text-[#6b5d52]">
                   <span className="text-lg">🆕</span>
                   <div>
-                    <strong className="text-[#0f766e]">Inventory &amp; Delivery Partners</strong> tabs are now part of this list.
-                    For tenants whose permissions were saved before these existed, both tabs stay visible to the owner
-                    until you re-save here — your saved choices then take effect immediately. Toggle &amp; <strong>Save Permissions</strong> to apply.
+                    <strong className="text-[#0f766e]">Inventory &amp; Delivery Partners</strong> tabs are controllable here.
+                    For tenants configured before these tabs existed, both stay visible to the owner until you click
+                    <strong> Save Permissions</strong> once — after that, every checkbox on this screen (including
+                    un-checking <em>both</em> new tabs) takes effect exactly as set.
                   </div>
                 </div>
 
