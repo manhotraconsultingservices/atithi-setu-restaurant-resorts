@@ -1989,10 +1989,14 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
 
   // Sync the global read-only flag + body class. The fetch interceptor
   // and CSS grayout rule key off this.
+  // read_only is TRUE when EITHER:
+  //   (a) access_revoked = 1            → admin manually revoked
+  //   (b) past due date + grace period  → automatic (server-enforced)
+  // We fall back to access_revoked for older API responses.
   React.useEffect(() => {
-    const isRevoked = !!status?.access_revoked;
-    (window as any).__atithiReadOnly = isRevoked;
-    if (isRevoked) {
+    const isReadOnly = !!(status?.read_only ?? status?.access_revoked);
+    (window as any).__atithiReadOnly = isReadOnly;
+    if (isReadOnly) {
       document.body.classList.add('atithi-read-only');
     } else {
       document.body.classList.remove('atithi-read-only');
@@ -2001,7 +2005,7 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
       // Don't clear here — banner persists across re-renders; the flag
       // only flips when the status changes.
     };
-  }, [status?.access_revoked]);
+  }, [status?.read_only, status?.access_revoked]);
 
   if (!status) return null;
 
@@ -2071,10 +2075,15 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
     );
   }
 
-  // Read-only mode — admin has revoked write access.
-  // Owner can still view all data; mutations are blocked server-side.
-  // Banner stays pinned at the top until the admin restores access.
-  if (status.access_revoked) {
+  // Read-only mode — write access is blocked. Two independent triggers,
+  // both surfaced with the same persistent red banner:
+  //   (a) access_revoked = 1            → admin manually revoked
+  //   (b) past due date + grace period  → automatic (server-enforced)
+  // Owner can still view/export/download; mutations 402 server-side.
+  // (status.read_only falls back to access_revoked for older API responses.)
+  if (status.read_only ?? status.access_revoked) {
+    const roReason = status.read_only_reason || status.access_revoked_reason
+      || 'Subscription payment overdue';
     return (
       <div className="bg-gradient-to-r from-red-50 via-red-50 to-amber-50 border-b-2 border-red-300 shadow-sm">
         <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 xl:px-8 py-3">
@@ -2089,10 +2098,10 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
               </div>
               <div className="text-xs md:text-sm text-red-900/90 mt-0.5">
                 Your account is in read-only mode while we process your subscription payment.
-                You can <strong>view, export and download</strong> all data, but creating, editing and deleting are paused.
+                You can <strong>view, export and download</strong> all data, but creating, editing and deleting — including new bills and invoices — are paused.
                 <strong className="text-emerald-700"> Your data is safe.</strong> Restore service by contacting <strong>billing@atithi-setu.com</strong> or WhatsApp <strong>+91 70111 89371</strong>.
-                {status.access_revoked_reason && (
-                  <span className="block mt-1 italic text-red-700/80">Reason: {status.access_revoked_reason}</span>
+                {roReason && (
+                  <span className="block mt-1 italic text-red-700/80">Reason: {roReason}</span>
                 )}
               </div>
             </div>
@@ -2117,10 +2126,11 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
     );
   }
 
-  // Soft banner — past due but admin hasn't revoked yet.
-  const isPastDue =
-    status.billing_status === 'OVERDUE_GRACE' ||
-    status.billing_status === 'OVERDUE_PAST_GRACE';
+  // Soft amber banner — past due but STILL WITHIN the grace period
+  // (account is fully functional, this is just an early warning).
+  // OVERDUE_PAST_GRACE is no longer handled here — once grace ends the
+  // account flips to the read-only banner above, server-enforced.
+  const isPastDue = status.billing_status === 'OVERDUE_GRACE';
 
   if (!isPastDue) return null;
 
@@ -2129,10 +2139,11 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
   const now = Date.now();
   if (bannerDismissedUntil > now) return null;
 
+  // Within grace period — the account is still fully functional. This is
+  // an early-warning amber banner. (Past-grace = read-only, handled above.)
   const daysPast = Math.abs(status.days_until_due || 0);
   const grace = Number(status.grace_period_days || 7);
-  const isPastGrace = status.billing_status === 'OVERDUE_PAST_GRACE';
-  const daysUntilSuspension = Math.max(0, grace - daysPast);
+  const daysUntilReadOnly = Math.max(0, grace - daysPast);
   const dueDate = status.subscription_due_date
     ? new Date(status.subscription_due_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
     : 'a recent date';
@@ -2144,56 +2155,34 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
   };
 
   return (
-    <div className={cn(
-      "border-b shadow-sm",
-      isPastGrace ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"
-    )}>
+    <div className="border-b shadow-sm bg-amber-50 border-amber-200">
       <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 xl:px-8 py-3">
         <div className="flex flex-col md:flex-row md:items-center gap-3">
-          <div className={cn(
-            "shrink-0 w-9 h-9 rounded-full flex items-center justify-center",
-            isPastGrace ? "bg-red-100" : "bg-amber-100"
-          )}>
-            <Clock size={18} className={isPastGrace ? "text-red-700" : "text-amber-700"} />
+          <div className="shrink-0 w-9 h-9 rounded-full flex items-center justify-center bg-amber-100">
+            <Clock size={18} className="text-amber-700" />
           </div>
           <div className="flex-1 min-w-0">
-            {isPastGrace ? (
-              <>
-                <div className="font-bold text-red-900 text-sm md:text-base">
-                  Final notice — your subscription is {daysPast} days past due
-                </div>
-                <div className="text-xs md:text-sm text-red-800 mt-0.5">
-                  Payment was due on <strong>{dueDate}</strong>. To avoid service interruption, please complete payment and contact our billing team at <strong>billing@atithi-setu.com</strong> or WhatsApp <strong>+91 70111 89371</strong>.
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="font-bold text-amber-900 text-sm md:text-base">
-                  Subscription payment is past due
-                </div>
-                <div className="text-xs md:text-sm text-amber-800 mt-0.5">
-                  Payment was due on <strong>{dueDate}</strong>. Service will continue uninterrupted for {daysUntilSuspension} more {daysUntilSuspension === 1 ? 'day' : 'days'} while you arrange payment. Reach us at <strong>billing@atithi-setu.com</strong> or WhatsApp <strong>+91 70111 89371</strong>.
-                </div>
-              </>
-            )}
+            <div className="font-bold text-amber-900 text-sm md:text-base">
+              Subscription payment is past due
+            </div>
+            <div className="text-xs md:text-sm text-amber-800 mt-0.5">
+              Payment was due on <strong>{dueDate}</strong>. Your account stays fully active for{' '}
+              <strong>{daysUntilReadOnly} more {daysUntilReadOnly === 1 ? 'day' : 'days'}</strong> — after that it moves to
+              read-only mode (you'll still be able to view and export, but new bills and edits will be paused).
+              Complete payment or reach us at <strong>billing@atithi-setu.com</strong> / WhatsApp <strong>+91 70111 89371</strong>.
+            </div>
           </div>
           <div className="flex gap-2 shrink-0">
             <a
               href={`https://wa.me/917011189371?text=${encodeURIComponent(`Hi, I need help with my Atithi-Setu subscription. Account: ${status.tenant_name || restaurantId}`)}`}
               target="_blank" rel="noopener noreferrer"
-              className={cn(
-                "px-4 py-1.5 rounded-xl text-xs font-bold transition-colors",
-                isPastGrace ? "bg-red-600 text-white hover:bg-red-700" : "bg-amber-600 text-white hover:bg-amber-700"
-              )}
+              className="px-4 py-1.5 rounded-xl text-xs font-bold transition-colors bg-amber-600 text-white hover:bg-amber-700"
             >
               Contact billing
             </a>
             <button
               onClick={dismissForOneHour}
-              className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-bold transition-colors",
-                isPastGrace ? "bg-red-100 text-red-700 hover:bg-red-200" : "bg-amber-100 text-amber-800 hover:bg-amber-200"
-              )}
+              className="px-3 py-1.5 rounded-xl text-xs font-bold transition-colors bg-amber-100 text-amber-800 hover:bg-amber-200"
               title="Hide for 1 hour. Will reappear automatically until resolved."
             >
               Remind me later

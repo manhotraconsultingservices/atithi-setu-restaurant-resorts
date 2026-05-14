@@ -534,6 +534,32 @@ const ALWAYS_ALLOWED_WHEN_REVOKED: RegExp[] = [
 ];
 const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+// Returns true when a tenant is past its subscription due date PLUS the
+// configured grace period. At that point the account is AUTOMATICALLY put
+// into read-only mode (mutations blocked) — no admin action required.
+// This is distinct from `access_revoked` (which is a manual admin override).
+// To un-block a past-grace tenant the admin simply extends
+// subscription_due_date to a future date, or records a payment.
+// Pure date math, no DB — safe to call inside hot middleware paths.
+function isTenantPastGrace(row: { subscription_due_date?: any; grace_period_days?: any } | null | undefined): boolean {
+  if (!row || !row.subscription_due_date) return false;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const due = new Date(row.subscription_due_date); due.setHours(0, 0, 0, 0);
+  if (isNaN(due.getTime())) return false;
+  const daysPast = Math.round((today.getTime() - due.getTime()) / 86400000);
+  if (daysPast <= 0) return false;                 // not even past due
+  const grace = Number(row.grace_period_days ?? 7);
+  return daysPast > (Number.isFinite(grace) ? grace : 7);
+}
+// Days past the due date (0 when not yet due / no due date set).
+function daysPastDue(row: { subscription_due_date?: any } | null | undefined): number {
+  if (!row || !row.subscription_due_date) return 0;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const due = new Date(row.subscription_due_date); due.setHours(0, 0, 0, 0);
+  if (isNaN(due.getTime())) return 0;
+  return Math.max(0, Math.round((today.getTime() - due.getTime()) / 86400000));
+}
+
 // Middleware
 const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
@@ -581,7 +607,9 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
           const ids = [...tenantsToCheck];
           const placeholders = ids.map(() => '?').join(',');
           const rows: any[] = await centralDb.query(
-            `SELECT id, is_active, access_revoked, access_revoked_reason, name FROM restaurants WHERE id IN (${placeholders})`,
+            `SELECT id, is_active, access_revoked, access_revoked_reason, name,
+                    subscription_due_date, grace_period_days
+               FROM restaurants WHERE id IN (${placeholders})`,
             ids
           );
           // (1) Hard block on not-active tenants — every method, every path
@@ -604,19 +632,39 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
               },
             });
           }
-          // (2) Read-only mode (access_revoked = 1) — only block mutations.
+          // (2) Read-only mode — only block mutations. Two triggers:
+          //     (a) access_revoked = 1            → admin manually revoked
+          //     (b) past due date + grace period  → automatic, no admin action
           if (!isReadOnly) {
-            const blocked = rows.find((r: any) => Number(r.access_revoked) === 1);
-            if (blocked) {
+            const revoked = rows.find((r: any) => Number(r.access_revoked) === 1);
+            if (revoked) {
               return res.status(402).json({
                 error: "Read-only mode",
                 code: "ACCESS_REVOKED_READ_ONLY",
-                tenant_id: blocked.id,
-                reason: blocked.access_revoked_reason || "Subscription payment overdue",
+                tenant_id: revoked.id,
+                reason: revoked.access_revoked_reason || "Subscription payment overdue",
                 message:
                   "Your account is currently in read-only mode while we process your subscription payment. " +
                   "You can continue to view, export, and download your data. Creating, editing, and deleting " +
                   "are paused until the account is restored. Please contact our billing team to resolve.",
+                contact: {
+                  email: "billing@atithi-setu.com",
+                  whatsapp: "+91 70111 89371",
+                },
+              });
+            }
+            const pastGrace = rows.find((r: any) => isTenantPastGrace(r));
+            if (pastGrace) {
+              const dpd = daysPastDue(pastGrace);
+              return res.status(402).json({
+                error: "Read-only mode",
+                code: "ACCESS_REVOKED_READ_ONLY",
+                tenant_id: pastGrace.id,
+                reason: `Subscription payment is ${dpd} day${dpd === 1 ? '' : 's'} overdue (past grace period)`,
+                message:
+                  `Your subscription is ${dpd} day${dpd === 1 ? '' : 's'} past due and the grace period has ended. ` +
+                  "Your account is now in read-only mode — you can still view, export and download your data, " +
+                  "but creating, editing and deleting are paused until payment is received.",
                 contact: {
                   email: "billing@atithi-setu.com",
                   whatsapp: "+91 70111 89371",
@@ -963,7 +1011,9 @@ async function startServer() {
       if (!m || !m[1] || m[1] === 'SYSTEM') return next();
       const tenantId = m[1];
       const row: any = await centralDb.get(
-        "SELECT is_active, access_revoked, access_revoked_reason, name FROM restaurants WHERE id = ?",
+        `SELECT is_active, access_revoked, access_revoked_reason, name,
+                subscription_due_date, grace_period_days
+           FROM restaurants WHERE id = ?`,
         [tenantId]
       ).catch(() => null);
 
@@ -988,8 +1038,10 @@ async function startServer() {
         });
       }
 
-      // (2) ACCESS REVOKED (read-only mode) — only block mutations.
-      //     Owner keeps read access until the admin fully restores them.
+      // (2) READ-ONLY mode — only block mutations. Owner keeps read access.
+      //     Two independent triggers:
+      //       (a) access_revoked = 1           → admin manually revoked
+      //       (b) past due date + grace period → automatic, no admin action
       const method = (req.method || 'GET').toUpperCase();
       if (READ_ONLY_METHODS.has(method)) return next();
       if (row && Number(row.access_revoked) === 1) {
@@ -1002,6 +1054,23 @@ async function startServer() {
             "This account is currently in read-only mode while the subscription payment is being processed. " +
             "Viewing, exporting, and downloading data are still available. Creating, editing, and deleting " +
             "are paused until the account is restored.",
+          contact: {
+            email: "billing@atithi-setu.com",
+            whatsapp: "+91 70111 89371",
+          },
+        });
+      }
+      if (row && isTenantPastGrace(row)) {
+        const dpd = daysPastDue(row);
+        return res.status(402).json({
+          error: "Read-only mode",
+          code: "ACCESS_REVOKED_READ_ONLY",
+          tenant_id: tenantId,
+          reason: `Subscription payment is ${dpd} day${dpd === 1 ? '' : 's'} overdue (past grace period)`,
+          message:
+            `Your subscription is ${dpd} day${dpd === 1 ? '' : 's'} past due and the grace period has ended. ` +
+            "Your account is now in read-only mode — viewing, exporting and downloading still work, " +
+            "but creating, editing and deleting (including new bills/invoices) are paused until payment is received.",
           contact: {
             email: "billing@atithi-setu.com",
             whatsapp: "+91 70111 89371",
@@ -12292,6 +12361,15 @@ async function startServer() {
       // is_active values: 0=pending, 1=active, 2=admin-suspended. Anything
       // other than 1 = inactive from the user's perspective.
       const tenantInactive = Number(row.is_active) !== 1;
+      // read-only mode has TWO triggers — keep the frontend in sync with the
+      // server-side middleware so the banner + fetch-interceptor match what
+      // the API actually enforces:
+      //   (a) access_revoked = 1            → admin manually revoked
+      //   (b) past due date + grace period  → automatic
+      const pastGrace = isTenantPastGrace(row);
+      const accessRevoked = Number(row.access_revoked) === 1;
+      const readOnly = accessRevoked || pastGrace;
+      const dpd = daysPastDue(row);
       res.json({
         tenant_id: row.id,
         tenant_name: row.name,
@@ -12301,10 +12379,16 @@ async function startServer() {
         subscription_due_date: row.subscription_due_date,
         grace_period_days: row.grace_period_days ?? 7,
         days_until_due: days,
+        days_past_due: dpd,
         last_payment_date: row.last_payment_date,
-        access_revoked: Number(row.access_revoked) === 1,
+        access_revoked: accessRevoked,
         access_revoked_at: row.access_revoked_at,
         access_revoked_reason: row.access_revoked_reason,
+        past_grace: pastGrace,
+        read_only: readOnly,
+        read_only_reason: accessRevoked
+          ? (row.access_revoked_reason || 'Subscription payment overdue')
+          : (pastGrace ? `Subscription payment is ${dpd} day${dpd === 1 ? '' : 's'} overdue (past grace period)` : null),
         billing_status: tenantInactive ? 'INACTIVE' : status,
         billing_contact: {
           email: 'billing@atithi-setu.com',
@@ -12321,7 +12405,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'billing-v10-signout-loop-fix',
+    commit_marker: 'billing-v11-auto-readonly-past-grace',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -12330,8 +12414,9 @@ async function startServer() {
       'harmonized-messaging',
       'is_active-tri-state-aware',   // 0=pending, 1=active, 2=suspended
       'hard-signout-navigation',
-      'interceptor-toast-token-gated', // anonymous users see React screen, not overlay loop
-      'signout-reload-fallback',       // location.reload() when href='/' is a no-op
+      'interceptor-toast-token-gated',
+      'signout-reload-fallback',
+      'auto-readonly-past-grace',    // past due date + grace = auto read-only, no admin action
     ],
     booted_at: new Date().toISOString(),
   };
