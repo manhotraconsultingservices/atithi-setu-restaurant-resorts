@@ -12405,7 +12405,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'billing-v11-auto-readonly-past-grace',
+    commit_marker: 'billing-v12-role-access-inventory-delivery',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -12417,6 +12417,7 @@ async function startServer() {
       'interceptor-toast-token-gated',
       'signout-reload-fallback',
       'auto-readonly-past-grace',    // past due date + grace = auto read-only, no admin action
+      'role-access-inventory-delivery', // INVENTORY + DELIVERY now controllable in Role Access
     ],
     booted_at: new Date().toISOString(),
   };

@@ -72,12 +72,38 @@ import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
 import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, ItemSize, TableSession, LiveTableView, TableStatus, MenuDisplayMode } from './types';
 
-// Tab IDs that bypass the per-user allowedTabs permission filter.
-// Used for new tabs added after a tenant's allowedTabs was last saved — without
-// the bypass, those tabs would never appear until a SUPER_ADMIN manually
-// re-saves the role permissions for every restaurant. Owners and managers
-// expect new platform features to appear automatically.
+// Tab IDs that were added AFTER the Role-Based Tab Access feature shipped.
+// A tenant whose role permissions were saved before these tabs existed has
+// an `allowedTabs` list that simply doesn't mention them. Without special
+// handling those tabs would vanish for that tenant until an admin re-saves.
+//
+// These tabs ARE listed in the Super Admin → Role Access UI (so admins can
+// control them) — the grandfather logic in isTabVisible() only kicks in for
+// "legacy" permission sets that contain NONE of these IDs. The moment an
+// admin re-saves through the updated UI, their explicit choices win.
 const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY']);
+
+// Decide whether a dashboard tab should be visible for a tenant, given the
+// tenant's saved allowedTabs list (null/[] = no restriction).
+//   • allowedTabs null/empty            → everything visible
+//   • tab explicitly present            → visible
+//   • tab absent, but it's a newly-added tab AND the saved list looks
+//     "legacy" (mentions none of the newly-added tabs) → grandfather it
+//     visible (the admin never had a chance to choose it)
+//   • tab absent on a list that HAS been re-saved through the updated UI
+//     → hidden (the admin deliberately excluded it)
+// Known limitation: if an admin deliberately excludes EVERY newly-added tab
+// at once, that list reads as "legacy" and the tabs are grandfathered back.
+// Re-saving with at least one newly-added tab checked resolves it.
+function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boolean {
+  if (!allowedTabs || allowedTabs.length === 0) return true;
+  if (allowedTabs.includes(id)) return true;
+  if (ALWAYS_VISIBLE_TABS.has(id)) {
+    const sawAnyNewTab = [...ALWAYS_VISIBLE_TABS].some(t => allowedTabs.includes(t));
+    return !sawAnyNewTab; // legacy perms → grandfather; updated perms → respect exclusion
+  }
+  return false;
+}
 
 // ─── CSV helpers — shared by inventory module ─────────────────────────────────
 // downloadCsv / parseCsv used by Ingredients, Suppliers, POs, GRNs sub-views
@@ -7391,16 +7417,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ['ATTENDANCE', 'Attendance'], ['FEEDBACK', 'Feedback'],
             ['SUBSCRIPTION', 'Subscription'], ['NOTIFICATIONS', 'Notifications'],
             ['SETTINGS', 'Brand & Settings'],
-          ] as [string, string][]).filter(([id]) => {
-            // Respect allowedTabs for all tabs, including hotel tabs.
-            // If allowedTabs is null (legacy tenants with no saved role permission),
-            // the hotel tab still shows because `!allowedTabs` is true.
-            // ALWAYS_VISIBLE_TABS bypasses the filter — used for new tabs added
-            // after a tenant's allowedTabs was last saved (would otherwise hide
-            // forever until the admin manually re-saves the role permissions).
-            if (ALWAYS_VISIBLE_TABS.has(id)) return true;
-            return !allowedTabs || allowedTabs.includes(id);
-          }).map(([id, label]) => (
+          ] as [string, string][]).filter(([id]) => isTabVisible(id, allowedTabs)).map(([id, label]) => (
             <button
               key={id}
               onClick={() => { setActiveTab(id); setMobileNavOpen(false); }}
@@ -7440,10 +7457,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // Hotel tabs are always shown when hotel is enabled — bypass the stored allowedTabs
           // permission list (which predates the hotel module and doesn't include these IDs).
           if (['ROOMS','SERVICES','SERVICE_REQUESTS'].includes(id)) return true;
-          // INVENTORY is similarly always shown — added 2026-05, after tenants' allowedTabs
-          // were last saved. See ALWAYS_VISIBLE_TABS comment above.
-          if (ALWAYS_VISIBLE_TABS.has(id)) return true;
-          return !allowedTabs || allowedTabs.includes(id);
+          // INVENTORY / DELIVERY grandfathered for legacy permission sets; once an
+          // admin re-saves via Role Access their explicit choice wins. See isTabVisible().
+          return isTabVisible(id, allowedTabs);
         }).map(([id, label]) => (
           <button
             key={id}
@@ -7460,7 +7476,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         ))}
       </div>
 
-      {allowedTabs && !ALWAYS_VISIBLE_TABS.has(activeTab) && !allowedTabs.includes(activeTab) ? (
+      {allowedTabs && !isTabVisible(activeTab, allowedTabs) ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <div className="w-16 h-16 rounded-full bg-red-50 flex items-center justify-center">
             <Lock size={28} className="text-red-400" />
@@ -19190,9 +19206,13 @@ function SuperAdminDashboard({ token }: { token: string }) {
     } catch { /* ignore */ }
   };
 
-  // Base restaurant-only tabs (shown for every restaurant)
+  // Base restaurant-only tabs (shown for every restaurant).
+  // Order mirrors the owner dashboard's horizontal nav bar so the Role
+  // Access grid reads the same way the owner sees their tabs.
+  // INVENTORY + DELIVERY were added 2026-05 — see ALWAYS_VISIBLE_TABS /
+  // isTabVisible() for how legacy permission sets are grandfathered.
   const RESTAURANT_TABS = [
-    'MONITOR', 'MENU', 'REPORTS', 'QR', 'BOOKINGS',
+    'MONITOR', 'MENU', 'INVENTORY', 'DELIVERY', 'REPORTS', 'QR', 'BOOKINGS',
     'STAFF', 'ORDERS', 'INVOICES', 'ATTENDANCE',
     'FEEDBACK', 'SUBSCRIPTION', 'NOTIFICATIONS', 'SETTINGS'
   ];
@@ -19220,10 +19240,28 @@ function SuperAdminDashboard({ token }: { token: string }) {
       });
       if (res.ok) {
         const data = await res.json();
-        // Default: all tabs allowed (empty array = full access)
+        // Tabs added AFTER the Role Access feature shipped. A tenant whose
+        // permissions were saved before these existed has a "legacy" list
+        // that doesn't mention them. We default those to CHECKED in the grid
+        // so the admin's first re-save doesn't silently strip a feature the
+        // owner could already see (matches the runtime grandfather logic).
+        const NEWLY_ADDED_TABS = ['INVENTORY', 'DELIVERY'];
         const normalized: Record<string, string[]> = {};
         for (const role of PERM_ROLES) {
-          normalized[role] = data[role] && data[role].length > 0 ? data[role] : [...ALL_TABS];
+          const saved: string[] = data[role] || [];
+          if (saved.length === 0) {
+            // No restriction saved → everything checked.
+            normalized[role] = [...ALL_TABS];
+          } else {
+            // Explicit restriction. If this is a legacy list (mentions none
+            // of the newly-added tabs), merge those in as allowed so the
+            // owner doesn't lose access on the admin's next save. Once the
+            // list mentions at least one, treat it as already up-to-date.
+            const sawAnyNew = NEWLY_ADDED_TABS.some(t => saved.includes(t));
+            normalized[role] = sawAnyNew
+              ? saved
+              : [...saved, ...NEWLY_ADDED_TABS.filter(t => ALL_TABS.includes(t))];
+          }
         }
         setPermData(normalized);
       }
@@ -20165,6 +20203,16 @@ function SuperAdminDashboard({ token }: { token: string }) {
                         Hotel-related tabs (Rooms, Folios, Compliance, etc.) are hidden here because this property has not enabled the Hotel module. The owner can enable it under <em>Brand &amp; Settings → Property Type</em>.
                       </>
                     )}
+                  </div>
+                </div>
+
+                {/* New-tabs note — Inventory & Delivery are now controllable here */}
+                <div className="mb-4 px-4 py-3 rounded-2xl text-xs flex items-center gap-3 border bg-[#0f766e]/8 border-[#0f766e]/20 text-[#6b5d52]">
+                  <span className="text-lg">🆕</span>
+                  <div>
+                    <strong className="text-[#0f766e]">Inventory &amp; Delivery Partners</strong> tabs are now part of this list.
+                    For tenants whose permissions were saved before these existed, both tabs stay visible to the owner
+                    until you re-save here — your saved choices then take effect immediately. Toggle &amp; <strong>Save Permissions</strong> to apply.
                   </div>
                 </div>
 
