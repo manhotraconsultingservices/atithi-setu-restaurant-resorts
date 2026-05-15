@@ -730,6 +730,67 @@ export function buildNotificationContent(
           `<p><a href="#" style="color:#cc5a16">Open Settings → Integrations → ${data.channel} to rotate credentials.</a></p>`,
       };
 
+    /* ── Loyalty (tier-based) ─────────────────────────────────────────── */
+
+    case 'LOYALTY_TIER_UPGRADED': {
+      // Customer just crossed a tier threshold. WhatsApp + email.
+      const name = data.customerName || data.name || 'Valued customer';
+      const tier = data.tierName || 'a new tier';
+      const pct = Number(data.discountPercent || 0);
+      const totalSpent = Number(data.totalSpent || 0);
+      return {
+        subject: `🎉 Welcome to ${tier} at ${r}!`,
+        text:
+          `Hi ${name},\n\n` +
+          `Great news — you've just been upgraded to ${tier} at ${r}.\n\n` +
+          (pct > 0 ? `From your next visit, you'll automatically save ${pct}% on every order. ` : ``) +
+          (data.perks ? `Plus: ${data.perks}\n\n` : `\n\n`) +
+          `Lifetime spend so far: ₹${totalSpent.toLocaleString('en-IN')}\n\n` +
+          `Thank you for being a loyal customer — see you again soon.\n` +
+          `— The ${r} team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">🎉 Welcome to ${tier}!</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>You've just been upgraded to <strong>${tier}</strong> at <strong>${r}</strong>.</p>` +
+          (pct > 0 ? `<div style="background:#fef0e4;border:1px solid #fcd34d;border-radius:8px;padding:14px;margin:16px 0;text-align:center"><strong style="color:#cc5a16;font-size:22px">${pct}% OFF</strong><br><span style="color:#3d3128">automatically applied to every order, forever.</span></div>` : ``) +
+          (data.perks ? `<p style="background:#f9fafb;padding:12px;border-radius:6px;color:#3d3128"><strong>Perks:</strong> ${data.perks}</p>` : ``) +
+          `<p style="color:#6b5d52;font-size:13px">Lifetime spend so far: <strong>₹${totalSpent.toLocaleString('en-IN')}</strong></p>` +
+          `<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">Thank you for being a loyal customer — see you again soon.<br>— The ${r} team</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'LOYALTY_REWARD_AVAILABLE': {
+      // Generic "you have a discount ready" reminder. Used by phase 1.5
+      // birthday rewards / re-engagement campaigns; safe to leave unused
+      // until the owner wires up a custom trigger via notification_settings.
+      const name = data.customerName || data.name || 'Valued customer';
+      const tier = data.tierName || 'Loyalty';
+      const pct = Number(data.discountPercent || 0);
+      return {
+        subject: `${tier} reward ready at ${r}`,
+        text:
+          `Hi ${name},\n\n` +
+          (pct > 0
+            ? `Your ${tier} discount of ${pct}% is ready to use on your next order at ${r}.\n\n`
+            : `Your ${tier} reward is ready to use on your next visit to ${r}.\n\n`) +
+          (data.message || `Just visit us — the discount is applied automatically when you order.`) +
+          `\n\n— The ${r} team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">${tier} reward ready</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          (pct > 0
+            ? `<p>Your <strong>${tier} discount of ${pct}%</strong> is ready to use on your next order at <strong>${r}</strong>.</p>`
+            : `<p>Your <strong>${tier} reward</strong> is ready to use on your next visit to <strong>${r}</strong>.</p>`) +
+          `<p style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:6px;padding:12px;color:#065f46;font-size:14px">${data.message || `Just visit us — the discount is applied automatically when you order.`}</p>` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— The ${r} team</p>` +
+          `</div>`,
+      };
+    }
+
     /* ── Subscription billing ─────────────────────────────────────────── */
 
     case 'PAYMENT_DUE_SOON': {

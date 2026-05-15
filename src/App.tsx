@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Utensils, 
@@ -76,7 +76,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // A tenant whose role permissions were saved before these tabs existed has
 // an `allowedTabs` list that simply doesn't mention them. Without special
 // handling those tabs would vanish for that tenant until an admin re-saves.
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY']);
 
 // Sentinel appended by savePermissions() to every PARTIAL restriction list.
 // Its presence is a deterministic "this list was configured through the
@@ -5041,6 +5041,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'FEEDBACK' | 'SUBSCRIPTION' | 'BOOKINGS' | 'MONITOR'
     | 'INVENTORY'                                 // inventory module
     | 'DELIVERY'                                  // multi-platform delivery integration
+    | 'LOYALTY'                                   // tier-based customer loyalty (Phase 1)
     | 'ROOMS' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE'  // hospitality Phase 2 & 3
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
@@ -7390,7 +7391,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <span className="text-sm font-bold text-[#1a1208]">
           {({
             MENU: 'Menu Management', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', REPORTS: 'Analytics & Reports', QR: 'QR Management',
-            BOOKINGS: 'Bookings', STAFF: 'Staff Management', ORDERS: 'Orders', INVOICES: 'Invoices',
+            BOOKINGS: 'Bookings', LOYALTY: 'Loyalty Program', STAFF: 'Staff Management', ORDERS: 'Orders', INVOICES: 'Invoices',
             ATTENDANCE: 'Attendance', FEEDBACK: 'Feedback',
             SUBSCRIPTION: 'Subscription', NOTIFICATIONS: 'Notifications',
             SETTINGS: 'Brand & Settings', MONITOR: 'Command & Control'
@@ -7422,6 +7423,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['COMPLIANCE','Compliance'],
               ['CONCIERGE_FAQ','Concierge FAQ'],
             ] as [string,string][] : []),
+            ['LOYALTY', 'Loyalty Program'],
             ['STAFF', 'Staff Management'], ['ORDERS', 'Orders'], ['INVOICES', 'Invoices'],
             ['ATTENDANCE', 'Attendance'], ['FEEDBACK', 'Feedback'],
             ['SUBSCRIPTION', 'Subscription'], ['NOTIFICATIONS', 'Notifications'],
@@ -7458,6 +7460,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['COMPLIANCE','Compliance'],
               ['CONCIERGE_FAQ','Concierge FAQ'],
             ] as [string,string][] : []),
+          ['LOYALTY', 'Loyalty Program'],
           ['STAFF', 'Staff Management'], ['ORDERS', 'Orders'], ['INVOICES', 'Invoices'],
           ['ATTENDANCE', 'Attendance'], ['FEEDBACK', 'Feedback'],
           ['SUBSCRIPTION', 'Subscription'], ['NOTIFICATIONS', 'Notifications'],
@@ -10726,6 +10729,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : activeTab === 'BOOKINGS' ? (
         <BookingsManagement restaurantId={restaurantId} token={token} />
+      ) : activeTab === 'LOYALTY' ? (
+        <LoyaltyManagement restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'REPORTS' ? (
         <AnalyticsDashboard
           restaurantId={restaurantId}
@@ -19222,7 +19227,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // isTabVisible() for how legacy permission sets are grandfathered.
   const RESTAURANT_TABS = [
     'MONITOR', 'MENU', 'INVENTORY', 'DELIVERY', 'REPORTS', 'QR', 'BOOKINGS',
-    'STAFF', 'ORDERS', 'INVOICES', 'ATTENDANCE',
+    'LOYALTY', 'STAFF', 'ORDERS', 'INVOICES', 'ATTENDANCE',
     'FEEDBACK', 'SUBSCRIPTION', 'NOTIFICATIONS', 'SETTINGS'
   ];
   // Hotel-only tabs (shown only when the selected restaurant has property_type IN ('HOTEL','BOTH'))
@@ -21015,6 +21020,24 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
   const [isRequestingBill, setIsRequestingBill] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  // ── Loyalty preview (Phase 1) ─────────────────────────────────────────────
+  // When a returning customer types their phone, fetch their tier + applicable
+  // discount so we can show "Welcome back, you're a Silver member — 5% off".
+  // Purely informational here: the actual discount is applied by staff at bill
+  // time in the dashboard (loyalty_redemptions). The order-creation hook on
+  // the backend updates tier + lifetime spend regardless.
+  type LoyaltyPreview = {
+    tier_id: string | null;
+    tier_name: string | null;
+    discount_percent: number;
+    discount_amount: number;
+    final_total: number;
+    next_tier_name?: string | null;
+    next_tier_min_spend?: number | null;
+    total_spent?: number;
+    is_member?: boolean;
+  };
+  const [loyaltyInfo, setLoyaltyInfo] = useState<LoyaltyPreview | null>(null);
 
   useEffect(() => { loadData(); }, []);
 
@@ -21067,6 +21090,28 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
   const sessionTotal = sessionOrders.reduce((s: number, o: any) => s + Number(o.totalAmount || 0), 0);
   const gstRate = restaurant?.is_gst_enabled ? (restaurant.gst_percentage ?? 0) : 0;
   const sessionGst = sessionOrders.reduce((s: number, o: any) => s + Number(o.gst_amount ?? o.gstAmount ?? 0), 0);
+
+  // Debounced loyalty lookup: kicks in when the customer enters 7+ digits.
+  // Re-runs whenever the cart total or phone changes so the preview tracks
+  // the running bill. Tier upgrade itself happens server-side in _loyaltyHook
+  // when the order is placed.
+  useEffect(() => {
+    const phone = (session?.customer_phone || customerPhone).replace(/\D/g, '');
+    if (phone.length < 7) { setLoyaltyInfo(null); return; }
+    const previewTotal = Math.max(0, cartTotal + (sessionTotal || 0));
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `/api/restaurant/${restaurantId}/loyalty/customers/${encodeURIComponent(phone)}/preview-discount?total=${previewTotal}`
+        );
+        if (!res.ok) { setLoyaltyInfo(null); return; }
+        const data = await res.json();
+        setLoyaltyInfo(data);
+      } catch { setLoyaltyInfo(null); }
+    }, 400);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerPhone, session?.customer_phone, cartTotal, sessionTotal, restaurantId]);
 
   const placeOrder = async () => {
     if (!session || session.status !== 'open') { setError('Session is not active.'); return; }
@@ -21165,6 +21210,30 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
                 className="bg-[#faf7f2] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
             </div>
           )}
+          {/* Loyalty welcome banner — appears when the entered phone matches a
+              known customer with an active tier. Purely informational. */}
+          {loyaltyInfo?.is_member && loyaltyInfo.tier_name && (
+            <div className="mx-4 mt-3 mb-1 p-3 rounded-2xl bg-gradient-to-r from-amber-50 to-orange-50 border border-orange-200 flex items-start gap-3">
+              <Sparkles size={18} className="text-orange-600 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-bold text-orange-900">
+                  Welcome back{customerName ? `, ${customerName}` : ''}! You're a{' '}
+                  <span className="font-extrabold">{loyaltyInfo.tier_name}</span> member.
+                </p>
+                {loyaltyInfo.discount_percent > 0 && (
+                  <p className="text-xs text-orange-700 mt-0.5">
+                    Enjoy <span className="font-bold">{loyaltyInfo.discount_percent}% off</span> on this order
+                    {loyaltyInfo.discount_amount > 0 && <> · saves ₹{loyaltyInfo.discount_amount.toFixed(0)}</>}
+                  </p>
+                )}
+                {loyaltyInfo.next_tier_name && loyaltyInfo.next_tier_min_spend != null && loyaltyInfo.total_spent != null && (
+                  <p className="text-[11px] text-orange-700/80 mt-1">
+                    Spend ₹{Math.max(0, loyaltyInfo.next_tier_min_spend - loyaltyInfo.total_spent).toFixed(0)} more to reach {loyaltyInfo.next_tier_name}.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
           {/* Menu items */}
           <div className="divide-y divide-[#cc5a16]/5">
             {filteredMenu.filter(m => m.available).map(item => {
@@ -21254,7 +21323,26 @@ function WaiterOrderPanel({ restaurantId, tableId, tableName, onClose }: {
               <div className="bg-white rounded-2xl border border-[#cc5a16]/10 px-4 py-4 space-y-2 text-sm">
                 <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="font-mono">₹{(sessionTotal - sessionGst).toFixed(2)}</span></div>
                 {sessionGst > 0 && <div className="flex justify-between text-[#6b5d52]"><span>GST ({gstRate}%)</span><span className="font-mono">₹{sessionGst.toFixed(2)}</span></div>}
-                <div className="flex justify-between font-bold text-lg border-t border-[#cc5a16]/10 pt-2"><span>Total</span><span className="font-mono text-[#cc5a16]">₹{sessionTotal.toFixed(2)}</span></div>
+                {loyaltyInfo?.is_member && loyaltyInfo.discount_percent > 0 && (
+                  <div className="flex justify-between text-orange-700">
+                    <span className="flex items-center gap-1"><Sparkles size={12} />{loyaltyInfo.tier_name} discount ({loyaltyInfo.discount_percent}%)</span>
+                    <span className="font-mono">−₹{loyaltyInfo.discount_amount.toFixed(2)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between font-bold text-lg border-t border-[#cc5a16]/10 pt-2">
+                  <span>Total</span>
+                  <span className="font-mono text-[#cc5a16]">
+                    ₹{(loyaltyInfo?.is_member && loyaltyInfo.discount_amount > 0
+                      ? Math.max(0, sessionTotal - loyaltyInfo.discount_amount)
+                      : sessionTotal
+                    ).toFixed(2)}
+                  </span>
+                </div>
+                {loyaltyInfo?.is_member && loyaltyInfo.discount_amount > 0 && (
+                  <p className="text-[10px] text-[#9c8e85] italic">
+                    Loyalty discount will be applied by staff at checkout.
+                  </p>
+                )}
               </div>
               {/* Request bill / status */}
               {session?.status === 'open' && (
@@ -24057,6 +24145,765 @@ function CustomerReservationView({ restaurantId, onBack }: { restaurantId: strin
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// LOYALTY MANAGEMENT (Phase 1 — tier-based: Bronze / Silver / Gold)
+// ─────────────────────────────────────────────────────────────────────────
+// Three sub-views:
+//   1. TIERS     — owner configures thresholds, discount %, perks
+//   2. CUSTOMERS — paginated list of all loyalty customers + detail drawer
+//   3. ANALYTICS — KPI cards + per-tier charts
+// All data per-tenant (server-side getTenantDb scoping).
+function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; token: string }) {
+  type SubTab = 'TIERS' | 'CUSTOMERS' | 'ANALYTICS';
+  const [subTab, setSubTab] = useState<SubTab>('TIERS');
+
+  // Tiers
+  const [tiers, setTiers] = useState<any[]>([]);
+  const [tiersLoading, setTiersLoading] = useState(true);
+  const [editingTier, setEditingTier] = useState<any | null>(null);
+  const [tierMsg, setTierMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  // Customers
+  const [customers, setCustomers] = useState<any[]>([]);
+  const [customersTotal, setCustomersTotal] = useState(0);
+  const [customersLoading, setCustomersLoading] = useState(false);
+  const [customerSearch, setCustomerSearch] = useState('');
+  const [customerTierFilter, setCustomerTierFilter] = useState('');
+  const [customerSort, setCustomerSort] = useState<'spent' | 'recent' | 'orders' | 'name'>('spent');
+  const [customerPage, setCustomerPage] = useState(0);
+  const [selectedCustomer, setSelectedCustomer] = useState<any | null>(null);
+  const PAGE = 50;
+
+  // Analytics
+  const [analytics, setAnalytics] = useState<any | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
+  const authHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const fetchTiers = useCallback(async () => {
+    setTiersLoading(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/tiers`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setTiers(await res.json());
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setTiersLoading(false);
+    }
+  }, [restaurantId, token]);
+
+  const fetchCustomers = useCallback(async () => {
+    setCustomersLoading(true);
+    try {
+      const qs = new URLSearchParams({
+        limit: String(PAGE),
+        offset: String(customerPage * PAGE),
+        sort: customerSort,
+      });
+      if (customerSearch.trim()) qs.append('q', customerSearch.trim());
+      if (customerTierFilter) qs.append('tier', customerTierFilter);
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/customers?${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCustomers(data.customers || []);
+        setCustomersTotal(Number(data.total || 0));
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setCustomersLoading(false);
+    }
+  }, [restaurantId, token, customerPage, customerSort, customerSearch, customerTierFilter]);
+
+  const fetchAnalytics = useCallback(async () => {
+    setAnalyticsLoading(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/analytics`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setAnalytics(await res.json());
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }, [restaurantId, token]);
+
+  useEffect(() => { fetchTiers(); }, [fetchTiers]);
+  useEffect(() => { if (subTab === 'CUSTOMERS') fetchCustomers(); }, [subTab, fetchCustomers]);
+  useEffect(() => { if (subTab === 'ANALYTICS') fetchAnalytics(); }, [subTab, fetchAnalytics]);
+
+  // Save a tier (create or update)
+  const saveTier = async (tier: any) => {
+    const tierId = (tier.id || '').toUpperCase().trim();
+    if (!tierId) { setTierMsg({ type: 'err', text: 'Tier ID is required' }); return; }
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/tiers/${tierId}`, {
+        method: 'PUT', headers: authHeaders,
+        body: JSON.stringify({
+          name: tier.name,
+          min_lifetime_spend: Number(tier.min_lifetime_spend || 0),
+          discount_percent: Number(tier.discount_percent || 0),
+          perks: tier.perks || null,
+          is_enabled: tier.is_enabled !== false,
+          sort_order: Number(tier.sort_order || 0),
+        }),
+      });
+      if (res.ok) {
+        setTierMsg({ type: 'ok', text: `Saved ${tier.name}` });
+        setEditingTier(null);
+        fetchTiers();
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setTierMsg({ type: 'err', text: d.error || 'Save failed' });
+      }
+    } catch {
+      setTierMsg({ type: 'err', text: 'Network error' });
+    }
+  };
+
+  // Disable a tier (we never hard-delete to preserve history)
+  const disableTier = async (tierId: string, name: string) => {
+    if (!confirm(`Disable the ${name} tier? Customers currently on this tier will be recalculated to the next-eligible tier when they next order. Existing history is preserved.`)) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/tiers/${tierId}`, {
+        method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) { setTierMsg({ type: 'ok', text: `${name} disabled` }); fetchTiers(); }
+    } catch {
+      setTierMsg({ type: 'err', text: 'Failed to disable' });
+    }
+  };
+
+  // After threshold edits, the admin may want all existing customers to re-tier
+  const recomputeAllTiers = async () => {
+    if (!confirm('Recompute tiers for every customer based on current thresholds? This may shuffle customers between tiers. It will not affect any historical data.')) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/recompute-tiers`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const d = await res.json();
+        setTierMsg({ type: 'ok', text: `Recomputed ${d.customers_scanned} customers, ${d.customers_changed} changed tier` });
+      }
+    } catch {
+      setTierMsg({ type: 'err', text: 'Recompute failed' });
+    }
+  };
+
+  const fmtMoney = (n: number) => `₹${(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+
+  return (
+    <div className="space-y-5">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+        <div>
+          <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Loyalty Program</h2>
+          <p className="text-sm text-[#6b5d52] mt-1">
+            Tier-based rewards. Customers earn permanent discounts as their lifetime spend grows.
+          </p>
+        </div>
+        <div className="inline-flex bg-white rounded-2xl p-1 border border-[#cc5a16]/15">
+          {(['TIERS', 'CUSTOMERS', 'ANALYTICS'] as SubTab[]).map(s => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setSubTab(s)}
+              className={cn(
+                'px-5 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all',
+                subTab === s ? 'bg-[#cc5a16] text-white shadow' : 'text-[#6b5d52] hover:bg-[#cc5a16]/5'
+              )}
+            >
+              {s === 'TIERS' ? 'Tiers' : s === 'CUSTOMERS' ? 'Customers' : 'Analytics'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {tierMsg && (
+        <div
+          className={cn(
+            'px-4 py-2 rounded-xl text-sm',
+            tierMsg.type === 'ok'
+              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+              : 'bg-red-50 text-red-700 border border-red-200'
+          )}
+        >
+          {tierMsg.text}
+          <button onClick={() => setTierMsg(null)} className="float-right text-xs">×</button>
+        </div>
+      )}
+
+      {/* ── TIERS sub-view ────────────────────────────────────────────── */}
+      {subTab === 'TIERS' && (
+        <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 md:p-8">
+          <div className="flex flex-col md:flex-row md:items-center gap-3 mb-5">
+            <div className="flex-1">
+              <h3 className="text-xl font-bold flex items-center gap-2">🏆 Tier configuration</h3>
+              <p className="text-sm text-[#6b5d52] mt-1">
+                Higher tiers unlock at higher lifetime spend. Discount % applies to every future order — automatically.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={recomputeAllTiers}
+                className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#faf7f2] hover:bg-amber-50"
+                title="Recalculate every customer's tier based on the current thresholds. Use after editing thresholds."
+              >
+                Recompute all
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setEditingTier({
+                    id: '',
+                    name: '',
+                    min_lifetime_spend: 0,
+                    discount_percent: 0,
+                    perks: '',
+                    is_enabled: true,
+                    sort_order: (tiers.length || 0) + 1,
+                  })
+                }
+                className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#cc5a16] text-white hover:bg-[#a84612]"
+              >
+                + Add tier
+              </button>
+            </div>
+          </div>
+
+          {tiersLoading ? (
+            <div className="flex justify-center py-12">
+              <div className="w-8 h-8 border-2 border-[#cc5a16]/30 border-t-[#cc5a16] rounded-full animate-spin" />
+            </div>
+          ) : tiers.length === 0 ? (
+            <div className="text-center py-12 text-[#9c8e85] italic">No tiers configured yet.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-[10px] uppercase tracking-widest text-[#9c8e85] border-b border-[#e8dfd0]">
+                    <th className="py-3 pr-3">ID</th>
+                    <th className="py-3 px-3">Name</th>
+                    <th className="py-3 px-3">Min lifetime spend</th>
+                    <th className="py-3 px-3">Discount %</th>
+                    <th className="py-3 px-3">Perks</th>
+                    <th className="py-3 px-3">Status</th>
+                    <th className="py-3 px-3">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tiers.map((t: any, i: number) => (
+                    <tr key={t.id} className={cn('border-b border-[#f5ece0]', i % 2 === 0 ? 'bg-white' : 'bg-[#faf7f2]/40')}>
+                      <td className="py-3 pr-3 font-mono text-[11px] font-bold">{t.id}</td>
+                      <td className="py-3 px-3 font-semibold">{t.name}</td>
+                      <td className="py-3 px-3">{fmtMoney(Number(t.min_lifetime_spend))}</td>
+                      <td className="py-3 px-3">
+                        <span className="font-bold text-[#cc5a16]">{Number(t.discount_percent).toFixed(1)}%</span>
+                      </td>
+                      <td className="py-3 px-3 text-xs text-[#6b5d52] max-w-[280px] truncate" title={t.perks || ''}>
+                        {t.perks || '—'}
+                      </td>
+                      <td className="py-3 px-3">
+                        {t.is_enabled ? (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase tracking-wider">Active</span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-[#faf7f2] text-[#9c8e85] text-[10px] font-bold uppercase tracking-wider">Disabled</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-3">
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditingTier({ ...t })}
+                            className="px-3 py-1 rounded-lg text-xs font-bold bg-[#faf7f2] hover:bg-[#cc5a16]/10"
+                          >
+                            Edit
+                          </button>
+                          {t.is_enabled && (
+                            <button
+                              type="button"
+                              onClick={() => disableTier(t.id, t.name)}
+                              className="px-3 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 hover:bg-red-100"
+                            >
+                              Disable
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── CUSTOMERS sub-view ─────────────────────────────────────── */}
+      {subTab === 'CUSTOMERS' && (
+        <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 md:p-8">
+          <div className="flex flex-col md:flex-row md:items-center gap-3 mb-5">
+            <input
+              type="search"
+              placeholder="Search by phone or name…"
+              value={customerSearch}
+              onChange={e => { setCustomerSearch(e.target.value); setCustomerPage(0); }}
+              className="bg-[#faf7f2] rounded-2xl px-4 py-2 text-sm border-none outline-none w-full md:w-72"
+            />
+            <select
+              value={customerTierFilter}
+              onChange={e => { setCustomerTierFilter(e.target.value); setCustomerPage(0); }}
+              className="bg-[#faf7f2] rounded-2xl px-3 py-2 text-sm font-semibold border-none outline-none"
+            >
+              <option value="">All tiers</option>
+              {tiers.map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            <select
+              value={customerSort}
+              onChange={e => setCustomerSort(e.target.value as any)}
+              className="bg-[#faf7f2] rounded-2xl px-3 py-2 text-sm font-semibold border-none outline-none"
+            >
+              <option value="spent">Top spenders</option>
+              <option value="recent">Most recent</option>
+              <option value="orders">Most orders</option>
+              <option value="name">By name</option>
+            </select>
+            <div className="ml-auto text-xs text-[#6b5d52]">
+              {customersTotal} customer{customersTotal === 1 ? '' : 's'}
+            </div>
+          </div>
+
+          {customersLoading ? (
+            <div className="flex justify-center py-12">
+              <div className="w-8 h-8 border-2 border-[#cc5a16]/30 border-t-[#cc5a16] rounded-full animate-spin" />
+            </div>
+          ) : customers.length === 0 ? (
+            <div className="text-center py-12 text-[#9c8e85] italic">
+              No loyalty customers yet. Customers are added automatically when an order is placed with their phone number.
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[10px] uppercase tracking-widest text-[#9c8e85] border-b border-[#e8dfd0]">
+                      <th className="py-3 pr-3">Customer</th>
+                      <th className="py-3 px-3">Tier</th>
+                      <th className="py-3 px-3">Orders</th>
+                      <th className="py-3 px-3">Lifetime spend</th>
+                      <th className="py-3 px-3">Last order</th>
+                      <th className="py-3 px-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customers.map((c: any, i: number) => {
+                      const tier = tiers.find((t: any) => t.id === c.current_tier_id);
+                      return (
+                        <tr
+                          key={c.phone}
+                          onClick={() => setSelectedCustomer(c)}
+                          className={cn(
+                            'border-b border-[#f5ece0] cursor-pointer hover:bg-amber-50/40',
+                            i % 2 === 0 ? 'bg-white' : 'bg-[#faf7f2]/40'
+                          )}
+                        >
+                          <td className="py-3 pr-3">
+                            <div className="font-semibold">{c.name || '—'}</div>
+                            <div className="text-[11px] text-[#9c8e85] font-mono">{c.phone}</div>
+                          </td>
+                          <td className="py-3 px-3">
+                            {tier ? (
+                              <span className="px-2 py-0.5 rounded-full bg-[#cc5a16]/10 text-[#cc5a16] text-[10px] font-bold uppercase tracking-wider">
+                                {tier.name}
+                              </span>
+                            ) : (
+                              <span className="text-[#9c8e85] text-xs">—</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 font-mono">{c.total_orders}</td>
+                          <td className="py-3 px-3 font-mono font-bold">{fmtMoney(c.total_spent)}</td>
+                          <td className="py-3 px-3 text-xs text-[#6b5d52]">
+                            {c.last_order_at ? new Date(c.last_order_at).toLocaleDateString('en-IN') : '—'}
+                          </td>
+                          <td className="py-3 px-3">
+                            {c.is_blocked ? (
+                              <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-wider">Blocked</span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase tracking-wider">Active</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination */}
+              {customersTotal > PAGE && (
+                <div className="flex justify-center items-center gap-3 mt-5">
+                  <button
+                    type="button"
+                    onClick={() => setCustomerPage(p => Math.max(0, p - 1))}
+                    disabled={customerPage === 0}
+                    className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#faf7f2] disabled:opacity-50"
+                  >
+                    ← Previous
+                  </button>
+                  <span className="text-xs text-[#6b5d52]">
+                    Page {customerPage + 1} of {Math.ceil(customersTotal / PAGE)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCustomerPage(p => p + 1)}
+                    disabled={(customerPage + 1) * PAGE >= customersTotal}
+                    className="px-4 py-2 rounded-2xl text-xs font-bold bg-[#faf7f2] disabled:opacity-50"
+                  >
+                    Next →
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── ANALYTICS sub-view ─────────────────────────────────────── */}
+      {subTab === 'ANALYTICS' && (
+        <div className="space-y-5">
+          {analyticsLoading || !analytics ? (
+            <div className="flex justify-center py-20">
+              <div className="w-8 h-8 border-2 border-[#cc5a16]/30 border-t-[#cc5a16] rounded-full animate-spin" />
+            </div>
+          ) : (
+            <>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <KPICard label="Total members"             value={analytics.total_members.toLocaleString('en-IN')} />
+                <KPICard label="Active (last 90 days)"      value={analytics.active_last_90d.toLocaleString('en-IN')} />
+                <KPICard label="Total lifetime revenue"     value={fmtMoney(analytics.total_revenue)} />
+                <KPICard label="Discounts given (90 d)"     value={fmtMoney(analytics.discounts_given_last_90d)} />
+              </div>
+
+              <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 md:p-8">
+                <h3 className="text-xl font-bold mb-5 flex items-center gap-2">🏆 Members per tier</h3>
+                {analytics.by_tier.length === 0 ? (
+                  <div className="text-center py-8 text-[#9c8e85] italic">No tiers configured.</div>
+                ) : (
+                  <ResponsiveContainer width="100%" height={280}>
+                    <BarChart
+                      data={analytics.by_tier.filter((t: any) => t.is_enabled).map((t: any) => ({
+                        name: t.name,
+                        members: t.members,
+                        revenue: Math.round(t.revenue),
+                      }))}
+                      margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e8dfd0" />
+                      <XAxis dataKey="name" tick={{ fontSize: 12 }} stroke="#6b5d52" />
+                      <YAxis tick={{ fontSize: 11 }} stroke="#6b5d52" />
+                      <Tooltip />
+                      <Bar dataKey="members" fill="#cc5a16" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Edit tier modal ────────────────────────────────────────── */}
+      {editingTier && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-7">
+            <h3 className="text-xl font-bold mb-4">{tiers.some((t: any) => t.id === editingTier.id) ? 'Edit tier' : 'Add tier'}</h3>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Tier ID (e.g. PLATINUM)</label>
+                <input
+                  type="text"
+                  value={editingTier.id}
+                  onChange={e => setEditingTier({ ...editingTier, id: e.target.value.toUpperCase() })}
+                  disabled={tiers.some((t: any) => t.id === editingTier.id)}
+                  className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm border-none outline-none font-mono uppercase disabled:opacity-60"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Display name</label>
+                <input
+                  type="text"
+                  value={editingTier.name}
+                  onChange={e => setEditingTier({ ...editingTier, name: e.target.value })}
+                  className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm border-none outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Min lifetime spend (₹)</label>
+                  <input
+                    type="number" min={0} step={100}
+                    value={editingTier.min_lifetime_spend}
+                    onChange={e => setEditingTier({ ...editingTier, min_lifetime_spend: e.target.value })}
+                    className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm border-none outline-none font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Discount %</label>
+                  <input
+                    type="number" min={0} max={100} step={0.5}
+                    value={editingTier.discount_percent}
+                    onChange={e => setEditingTier({ ...editingTier, discount_percent: e.target.value })}
+                    className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm border-none outline-none font-mono"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Perks (visible to customer)</label>
+                <textarea
+                  rows={2}
+                  value={editingTier.perks || ''}
+                  onChange={e => setEditingTier({ ...editingTier, perks: e.target.value })}
+                  className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm border-none outline-none"
+                  placeholder="e.g. Free dessert on birthday · Priority seating"
+                />
+              </div>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editingTier.is_enabled !== false}
+                  onChange={e => setEditingTier({ ...editingTier, is_enabled: e.target.checked })}
+                />
+                <span>Enabled</span>
+              </label>
+            </div>
+            <div className="flex gap-2 mt-6">
+              <button
+                type="button"
+                onClick={() => setEditingTier(null)}
+                className="flex-1 px-4 py-3 rounded-2xl text-sm font-bold bg-[#faf7f2] hover:bg-[#e8dfd0]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => saveTier(editingTier)}
+                className="flex-1 px-4 py-3 rounded-2xl text-sm font-bold bg-[#cc5a16] text-white hover:bg-[#a84612]"
+              >
+                Save tier
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Customer detail drawer ─────────────────────────────────── */}
+      {selectedCustomer && (
+        <CustomerDetailDrawer
+          restaurantId={restaurantId}
+          token={token}
+          phone={selectedCustomer.phone}
+          tiers={tiers}
+          onClose={() => setSelectedCustomer(null)}
+          onUpdated={() => { fetchCustomers(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Small KPI card reused by Loyalty Analytics. Mirrors the styling of the
+// existing AnalyticsDashboard KPI cards for visual consistency.
+function KPICard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-white rounded-2xl border border-[#cc5a16]/10 px-5 py-4 shadow-sm">
+      <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{label}</div>
+      <div className="text-2xl font-serif font-bold text-[#1a1208] mt-1">{value}</div>
+    </div>
+  );
+}
+
+// Customer detail drawer — order history, tier history, redemption log,
+// owner actions (block / unblock, manual tier override, edit name/email).
+function CustomerDetailDrawer(props: {
+  restaurantId: string;
+  token: string;
+  phone: string;
+  tiers: any[];
+  onClose: () => void;
+  onUpdated: () => void;
+}) {
+  const { restaurantId, token, phone, tiers, onClose, onUpdated } = props;
+  const [detail, setDetail] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const fetchDetail = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/customers/${encodeURIComponent(phone)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setDetail(await res.json());
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [restaurantId, token, phone]);
+
+  useEffect(() => { fetchDetail(); }, [fetchDetail]);
+
+  const patchCustomer = async (changes: Record<string, any>) => {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/customers/${encodeURIComponent(phone)}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(changes),
+      });
+      if (res.ok) { await fetchDetail(); onUpdated(); }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fmtMoney = (n: number) => `₹${(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end" onClick={onClose}>
+      <div
+        className="bg-white w-full max-w-2xl h-full overflow-y-auto shadow-2xl"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="sticky top-0 bg-white border-b border-[#cc5a16]/10 px-6 py-4 flex items-center justify-between z-10">
+          <div>
+            <h3 className="text-xl font-bold font-serif">{detail?.customer?.name || phone}</h3>
+            <p className="text-xs font-mono text-[#9c8e85]">{phone}</p>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-[#faf7f2]">
+            <X size={18} />
+          </button>
+        </div>
+
+        {loading || !detail ? (
+          <div className="flex justify-center py-20">
+            <div className="w-8 h-8 border-2 border-[#cc5a16]/30 border-t-[#cc5a16] rounded-full animate-spin" />
+          </div>
+        ) : (
+          <div className="p-6 space-y-6">
+            {/* KPIs */}
+            <div className="grid grid-cols-3 gap-3">
+              <KPICard label="Lifetime spend" value={fmtMoney(detail.customer.total_spent)} />
+              <KPICard label="Orders" value={String(detail.customer.total_orders)} />
+              <KPICard
+                label="Current tier"
+                value={tiers.find((t: any) => t.id === detail.customer.current_tier_id)?.name || '—'}
+              />
+            </div>
+
+            {/* Manual tier override + block */}
+            <div className="bg-[#faf7f2] rounded-2xl p-5">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-3">Admin actions</div>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-[#6b5d52] block mb-1">Override tier</label>
+                  <select
+                    value={detail.customer.current_tier_id || ''}
+                    onChange={e => patchCustomer({ current_tier_id: e.target.value || null })}
+                    disabled={saving}
+                    className="w-full bg-white rounded-xl px-3 py-2 text-sm border border-[#cc5a16]/10 outline-none"
+                  >
+                    <option value="">— Auto (based on spend) —</option>
+                    {tiers.map((t: any) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => patchCustomer({ is_blocked: !detail.customer.is_blocked })}
+                  disabled={saving}
+                  className={cn(
+                    'w-full px-4 py-2 rounded-xl text-xs font-bold',
+                    detail.customer.is_blocked
+                      ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                      : 'bg-red-50 text-red-700 hover:bg-red-100'
+                  )}
+                >
+                  {detail.customer.is_blocked ? 'Unblock customer' : 'Block from loyalty rewards'}
+                </button>
+              </div>
+            </div>
+
+            {/* Recent orders */}
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">
+                Recent orders ({detail.recent_orders.length})
+              </div>
+              {detail.recent_orders.length === 0 ? (
+                <div className="text-xs text-[#9c8e85] italic py-3">No orders yet.</div>
+              ) : (
+                <div className="space-y-1">
+                  {detail.recent_orders.slice(0, 10).map((o: any) => (
+                    <div key={o.id} className="flex justify-between text-sm py-1.5 border-b border-[#f5ece0]">
+                      <span className="font-mono text-xs text-[#6b5d52]">
+                        {o.invoice_number || o.id.slice(-8)}
+                      </span>
+                      <span className="text-xs text-[#9c8e85]">{new Date(o.created_at).toLocaleDateString('en-IN')}</span>
+                      <span className="font-mono font-bold">{fmtMoney(Number(o.total_amount || 0))}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Tier history */}
+            {detail.tier_history.length > 0 && (
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Tier history</div>
+                <div className="space-y-1">
+                  {detail.tier_history.slice(0, 10).map((h: any) => (
+                    <div key={h.id} className="flex justify-between text-xs py-1.5 border-b border-[#f5ece0]">
+                      <span>
+                        {h.from_tier_id || '—'} → <strong className="text-[#cc5a16]">{h.to_tier_id}</strong>
+                      </span>
+                      <span className="text-[#9c8e85]">{new Date(h.changed_at).toLocaleString('en-IN')}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Redemption history */}
+            {detail.redemptions.length > 0 && (
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Discount redemptions</div>
+                <div className="space-y-1">
+                  {detail.redemptions.slice(0, 10).map((r: any) => (
+                    <div key={r.id} className="flex justify-between text-xs py-1.5 border-b border-[#f5ece0]">
+                      <span className="font-mono text-[#6b5d52]">{r.order_id.slice(-8)}</span>
+                      <span>{r.tier_id} · {Number(r.discount_percent).toFixed(1)}%</span>
+                      <span className="font-mono font-bold text-emerald-700">−{fmtMoney(Number(r.discount_amount))}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

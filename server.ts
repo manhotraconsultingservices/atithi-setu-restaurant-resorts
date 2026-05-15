@@ -3429,7 +3429,559 @@ async function startServer() {
     }
   });
 
-  // Delete a channel-price override (revert the item to the channel default markup).
+  // ─────────────────────────────────────────────────────────────────────
+  // LOYALTY (Phase 1 — tier-based: Bronze / Silver / Gold by lifetime spend)
+  // ─────────────────────────────────────────────────────────────────────
+  // Per-tenant. Customer identity = phone number (canonical). Tiers are
+  // owner-configurable; default seed is Bronze (₹0+, 0%), Silver (₹10k+,
+  // 5%), Gold (₹50k+, 10%) — applied in db.ts on first tenant access.
+  // Hooks fire from the order-creation paths (see "_loyaltyHook" in the
+  // POST /orders + /invoices/manual handlers).
+
+  // Normalise an Indian phone number to a comparable canonical form.
+  // Strips non-digits, drops a leading +91 / 91 / 0 if present, returns
+  // the last 10 digits. Used as the dedup key — handles "+91 70111 89371"
+  // vs "07011189371" vs "7011189371" all landing on the same row.
+  const _normalisePhone = (raw: any): string | null => {
+    if (!raw) return null;
+    let p = String(raw).replace(/\D/g, '');
+    if (p.length === 0) return null;
+    if (p.length > 10 && p.startsWith('91')) p = p.slice(p.length - 10);
+    if (p.length > 10 && p.startsWith('0'))  p = p.slice(p.length - 10);
+    if (p.length !== 10) return p;          // foreign / partial — keep as is
+    return p;
+  };
+
+  // Resolve a customer's tier for a given lifetime spend. Returns the
+  // highest enabled tier whose threshold is met; null if no tier matches
+  // (e.g. all tiers disabled).
+  async function _resolveTierForSpend(db: any, totalSpent: number): Promise<any | null> {
+    const rows: any[] = await db.query(
+      `SELECT id, name, min_lifetime_spend, discount_percent, perks
+         FROM loyalty_tiers
+        WHERE is_enabled = 1 AND min_lifetime_spend <= ?
+        ORDER BY min_lifetime_spend DESC
+        LIMIT 1`,
+      [Number(totalSpent || 0)]
+    );
+    return rows && rows.length > 0 ? rows[0] : null;
+  }
+
+  // Order-creation hook. Best-effort: never throws (the caller's order
+  // insert must still succeed even if loyalty fails). Returns the tier
+  // info applied so the caller can attach it to the response if useful.
+  async function _loyaltyHook(opts: {
+    tenantId: string;
+    orderId: string;
+    customerPhone?: any;
+    customerName?: any;
+    customerEmail?: any;
+    grandTotal: number;
+    discountAmount?: number;
+    discountPercent?: number;
+  }): Promise<{ tier_id: string | null; tier_name: string | null } | null> {
+    const phone = _normalisePhone(opts.customerPhone);
+    if (!phone) return null;
+    try {
+      const db = await getTenantDb(opts.tenantId);
+      // Fetch / create the customer row
+      const existing: any = await db.get(
+        "SELECT phone, name, email, total_orders, total_spent, current_tier_id FROM loyalty_customers WHERE phone = ?",
+        [phone]
+      );
+      const grand = Number(opts.grandTotal || 0);
+      if (existing) {
+        const newTotalSpent = Number(existing.total_spent || 0) + grand;
+        const newTotalOrders = Number(existing.total_orders || 0) + 1;
+        await db.run(
+          `UPDATE loyalty_customers
+              SET total_orders = ?,
+                  total_spent  = ?,
+                  last_order_at = CURRENT_TIMESTAMP,
+                  name  = COALESCE(NULLIF(?, ''), name),
+                  email = COALESCE(NULLIF(?, ''), email)
+            WHERE phone = ?`,
+          [newTotalOrders, newTotalSpent, opts.customerName || '', opts.customerEmail || '', phone]
+        );
+        // Recompute tier
+        const tier = await _resolveTierForSpend(db, newTotalSpent);
+        const newTierId = tier?.id || null;
+        const oldTierId = existing.current_tier_id || null;
+        if (newTierId !== oldTierId) {
+          await db.run("UPDATE loyalty_customers SET current_tier_id = ? WHERE phone = ?", [newTierId, phone]);
+          if (newTierId) {
+            await db.run(
+              `INSERT INTO loyalty_tier_history (customer_phone, from_tier_id, to_tier_id, trigger_order_id, spent_at_upgrade)
+               VALUES (?, ?, ?, ?, ?)`,
+              [phone, oldTierId, newTierId, opts.orderId, newTotalSpent]
+            ).catch(() => {});
+            // Fire upgrade notification (customer-facing). Best-effort.
+            triggerNotification(opts.tenantId, 'LOYALTY_TIER_UPGRADED', {
+              customerName: existing.name || opts.customerName || 'Valued customer',
+              customerPhone: phone,
+              customerEmail: existing.email || opts.customerEmail || null,
+              tierName: tier?.name || newTierId,
+              discountPercent: tier?.discount_percent || 0,
+              perks: tier?.perks || '',
+              totalSpent: newTotalSpent,
+            }).catch(err => console.error('[loyalty] notification failed:', err));
+          }
+        }
+        // Audit the redemption if a loyalty discount was applied
+        if (Number(opts.discountAmount || 0) > 0 && Number(opts.discountPercent || 0) > 0) {
+          await db.run(
+            `INSERT INTO loyalty_redemptions (customer_phone, order_id, tier_id, discount_percent, discount_amount)
+             VALUES (?, ?, ?, ?, ?)`,
+            [phone, opts.orderId, newTierId, Number(opts.discountPercent), Number(opts.discountAmount)]
+          ).catch(() => {});
+        }
+        return { tier_id: newTierId, tier_name: tier?.name || null };
+      } else {
+        // First-time customer
+        const tier = await _resolveTierForSpend(db, grand);
+        const tierId = tier?.id || null;
+        await db.run(
+          `INSERT INTO loyalty_customers
+             (phone, name, email, total_orders, total_spent, current_tier_id, first_order_at, last_order_at)
+           VALUES (?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [phone, opts.customerName || null, opts.customerEmail || null, grand, tierId]
+        );
+        if (tierId) {
+          await db.run(
+            `INSERT INTO loyalty_tier_history (customer_phone, from_tier_id, to_tier_id, trigger_order_id, spent_at_upgrade)
+             VALUES (?, NULL, ?, ?, ?)`,
+            [phone, tierId, opts.orderId, grand]
+          ).catch(() => {});
+        }
+        if (Number(opts.discountAmount || 0) > 0 && Number(opts.discountPercent || 0) > 0) {
+          await db.run(
+            `INSERT INTO loyalty_redemptions (customer_phone, order_id, tier_id, discount_percent, discount_amount)
+             VALUES (?, ?, ?, ?, ?)`,
+            [phone, opts.orderId, tierId, Number(opts.discountPercent), Number(opts.discountAmount)]
+          ).catch(() => {});
+        }
+        return { tier_id: tierId, tier_name: tier?.name || null };
+      }
+    } catch (err) {
+      // Loyalty is best-effort — never propagate. Order insert is already done.
+      console.error('[loyalty] hook failed for tenant', opts.tenantId, ':', err);
+      return null;
+    }
+  }
+
+  // List all configured tiers for a tenant.
+  app.get("/api/restaurant/:id/loyalty/tiers", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT id, name, min_lifetime_spend, discount_percent, perks, is_enabled, sort_order, updated_at
+           FROM loyalty_tiers
+          ORDER BY sort_order ASC, min_lifetime_spend ASC`
+      );
+      res.json(rows.map(r => ({
+        ...r,
+        min_lifetime_spend: Number(r.min_lifetime_spend || 0),
+        discount_percent: Number(r.discount_percent || 0),
+        is_enabled: Number(r.is_enabled) === 1,
+      })));
+    } catch (err) {
+      console.error("List loyalty tiers error:", err);
+      res.status(500).json({ error: "Failed to list tiers" });
+    }
+  });
+
+  // Upsert a tier (create or update). PUT body:
+  //   { name, min_lifetime_spend, discount_percent, perks?, is_enabled?, sort_order? }
+  app.put("/api/restaurant/:id/loyalty/tiers/:tierId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tierId = String(req.params.tierId || '').trim().toUpperCase();
+      if (!tierId || !/^[A-Z0-9_-]+$/.test(tierId)) {
+        return res.status(400).json({ error: "tierId must be alphanumeric (e.g. BRONZE, SILVER, GOLD, PLATINUM)" });
+      }
+      const { name, min_lifetime_spend, discount_percent, perks, is_enabled, sort_order } = req.body || {};
+      if (!name || String(name).trim().length === 0) {
+        return res.status(400).json({ error: "name is required" });
+      }
+      const spend = Number(min_lifetime_spend || 0);
+      const pct = Number(discount_percent || 0);
+      if (!Number.isFinite(spend) || spend < 0) return res.status(400).json({ error: "min_lifetime_spend must be >= 0" });
+      if (!Number.isFinite(pct) || pct < 0 || pct > 100) return res.status(400).json({ error: "discount_percent must be in [0, 100]" });
+      const db = await getTenantDb(req.params.id);
+      await db.run(
+        `INSERT INTO loyalty_tiers (id, name, min_lifetime_spend, discount_percent, perks, is_enabled, sort_order, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name,
+           min_lifetime_spend = EXCLUDED.min_lifetime_spend,
+           discount_percent = EXCLUDED.discount_percent,
+           perks = EXCLUDED.perks,
+           is_enabled = EXCLUDED.is_enabled,
+           sort_order = EXCLUDED.sort_order,
+           updated_at = CURRENT_TIMESTAMP`,
+        [tierId, String(name).trim(), spend, pct, perks || null,
+         is_enabled === false || Number(is_enabled) === 0 ? 0 : 1,
+         Number(sort_order || 0)]
+      );
+      res.json({ success: true, id: tierId });
+    } catch (err) {
+      console.error("Upsert loyalty tier error:", err);
+      res.status(500).json({ error: "Failed to save tier" });
+    }
+  });
+
+  // Disable a tier (we never hard-delete because history references it).
+  app.delete("/api/restaurant/:id/loyalty/tiers/:tierId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tierId = String(req.params.tierId || '').trim().toUpperCase();
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE loyalty_tiers SET is_enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [tierId]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Disable loyalty tier error:", err);
+      res.status(500).json({ error: "Failed to disable tier" });
+    }
+  });
+
+  // Paginated customer list, sorted by spend desc by default. Query params:
+  //   q?       = search (phone or name)
+  //   tier?    = filter by current_tier_id
+  //   limit?   = default 50, max 200
+  //   offset?  = default 0
+  //   sort?    = 'spent' | 'recent' | 'orders' | 'name' (default: spent)
+  app.get("/api/restaurant/:id/loyalty/customers", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const q = String((req.query.q as string) || '').trim();
+      const tier = String((req.query.tier as string) || '').trim().toUpperCase();
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const sort = String((req.query.sort as string) || 'spent');
+      const orderClause = sort === 'recent' ? 'last_order_at DESC NULLS LAST'
+                       : sort === 'orders' ? 'total_orders DESC'
+                       : sort === 'name'   ? 'name ASC NULLS LAST'
+                       : 'total_spent DESC';
+      const where: string[] = [];
+      const params: any[] = [];
+      if (q) {
+        where.push('(phone ILIKE ? OR name ILIKE ?)');
+        params.push(`%${q}%`, `%${q}%`);
+      }
+      if (tier) {
+        where.push('current_tier_id = ?');
+        params.push(tier);
+      }
+      const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+      const rows: any[] = await db.query(
+        `SELECT phone, name, email, total_orders, total_spent, current_tier_id,
+                first_order_at, last_order_at, is_blocked
+           FROM loyalty_customers
+           ${whereClause}
+           ORDER BY ${orderClause}
+           LIMIT ? OFFSET ?`,
+        [...params, limit, offset]
+      );
+      const totalRow: any = await db.get(
+        `SELECT COUNT(*) AS c FROM loyalty_customers ${whereClause}`,
+        params
+      );
+      res.json({
+        customers: rows.map(r => ({
+          phone: r.phone,
+          name: r.name,
+          email: r.email,
+          total_orders: Number(r.total_orders || 0),
+          total_spent: Number(r.total_spent || 0),
+          current_tier_id: r.current_tier_id,
+          first_order_at: r.first_order_at,
+          last_order_at: r.last_order_at,
+          is_blocked: Number(r.is_blocked) === 1,
+        })),
+        total: Number(totalRow?.c || 0),
+        limit, offset,
+      });
+    } catch (err) {
+      console.error("List loyalty customers error:", err);
+      res.status(500).json({ error: "Failed to list customers" });
+    }
+  });
+
+  // Customer detail — includes recent orders + tier history.
+  app.get("/api/restaurant/:id/loyalty/customers/:phone", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const phone = _normalisePhone(req.params.phone);
+      if (!phone) return res.status(400).json({ error: "Invalid phone" });
+      const db = await getTenantDb(req.params.id);
+      const customer: any = await db.get(
+        `SELECT * FROM loyalty_customers WHERE phone = ?`, [phone]
+      );
+      if (!customer) return res.status(404).json({ error: "Customer not found" });
+      const history: any[] = await db.query(
+        `SELECT id, from_tier_id, to_tier_id, trigger_order_id, spent_at_upgrade, changed_at
+           FROM loyalty_tier_history
+          WHERE customer_phone = ?
+          ORDER BY changed_at DESC
+          LIMIT 50`,
+        [phone]
+      );
+      const redemptions: any[] = await db.query(
+        `SELECT id, order_id, tier_id, discount_percent, discount_amount, redeemed_at
+           FROM loyalty_redemptions
+          WHERE customer_phone = ?
+          ORDER BY redeemed_at DESC
+          LIMIT 50`,
+        [phone]
+      );
+      const recentOrders: any[] = await db.query(
+        `SELECT id, created_at, total_amount, status, payment_status, invoice_number
+           FROM orders
+          WHERE customer_phone LIKE ?
+          ORDER BY created_at DESC
+          LIMIT 50`,
+        [`%${phone.slice(-10)}%`]
+      );
+      res.json({ customer, tier_history: history, redemptions, recent_orders: recentOrders });
+    } catch (err) {
+      console.error("Customer detail error:", err);
+      res.status(500).json({ error: "Failed to fetch customer" });
+    }
+  });
+
+  // Owner edits: block / unblock, override notes, manual tier override.
+  app.patch("/api/restaurant/:id/loyalty/customers/:phone", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const phone = _normalisePhone(req.params.phone);
+      if (!phone) return res.status(400).json({ error: "Invalid phone" });
+      const db = await getTenantDb(req.params.id);
+      const { is_blocked, notes, name, email, current_tier_id } = req.body || {};
+      const sets: string[] = [];
+      const params: any[] = [];
+      if (is_blocked != null) { sets.push('is_blocked = ?'); params.push(is_blocked ? 1 : 0); }
+      if (notes != null)      { sets.push('notes = ?');      params.push(String(notes)); }
+      if (name != null)       { sets.push('name = ?');       params.push(String(name) || null); }
+      if (email != null)      { sets.push('email = ?');      params.push(String(email) || null); }
+      if (current_tier_id !== undefined) {
+        sets.push('current_tier_id = ?');
+        params.push(current_tier_id || null);
+      }
+      if (sets.length === 0) return res.status(400).json({ error: "No fields to update" });
+      params.push(phone);
+      await db.run(`UPDATE loyalty_customers SET ${sets.join(', ')} WHERE phone = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Update loyalty customer error:", err);
+      res.status(500).json({ error: "Failed to update customer" });
+    }
+  });
+
+  // POS-side endpoint: at checkout, look up tier + discount for a phone.
+  // Returns null / empty discount when the customer is unknown, blocked,
+  // or there is no enabled tier matching their current spend.
+  app.get("/api/restaurant/:id/loyalty/lookup", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const phone = _normalisePhone(req.query.phone);
+      if (!phone) return res.json({ recognised: false });
+      const db = await getTenantDb(req.params.id);
+      const customer: any = await db.get(
+        `SELECT phone, name, email, total_orders, total_spent, current_tier_id, is_blocked
+           FROM loyalty_customers WHERE phone = ?`,
+        [phone]
+      );
+      if (!customer || Number(customer.is_blocked) === 1) {
+        return res.json({ recognised: !!customer, blocked: !!customer && Number(customer.is_blocked) === 1 });
+      }
+      // Resolve the live tier (in case admin changed thresholds since the
+      // customer's last upgrade — show the right tier now).
+      const tier = await _resolveTierForSpend(db, Number(customer.total_spent || 0));
+      // Next-tier preview (motivates more spend)
+      const nextRows: any[] = await db.query(
+        `SELECT id, name, min_lifetime_spend, discount_percent
+           FROM loyalty_tiers
+          WHERE is_enabled = 1 AND min_lifetime_spend > ?
+          ORDER BY min_lifetime_spend ASC LIMIT 1`,
+        [Number(customer.total_spent || 0)]
+      );
+      const next = nextRows && nextRows.length > 0 ? nextRows[0] : null;
+      res.json({
+        recognised: true,
+        customer: {
+          phone: customer.phone,
+          name: customer.name,
+          total_orders: Number(customer.total_orders || 0),
+          total_spent: Number(customer.total_spent || 0),
+        },
+        tier: tier ? {
+          id: tier.id, name: tier.name,
+          discount_percent: Number(tier.discount_percent || 0),
+          perks: tier.perks,
+        } : null,
+        next_tier: next ? {
+          id: next.id, name: next.name,
+          min_lifetime_spend: Number(next.min_lifetime_spend || 0),
+          discount_percent: Number(next.discount_percent || 0),
+          spend_remaining: Math.max(0, Number(next.min_lifetime_spend || 0) - Number(customer.total_spent || 0)),
+        } : null,
+      });
+    } catch (err) {
+      console.error("Loyalty lookup error:", err);
+      res.status(500).json({ error: "Failed to look up loyalty" });
+    }
+  });
+
+  // Preview the discount for a given subtotal. Used by the POS to show
+  // "₹X off" before the order is submitted, AND by the customer-facing QR
+  // ordering page to show "You're a Silver member — 5% off" banner.
+  //
+  // PUBLIC endpoint — no authentication required. Returns only the minimal
+  // info needed to render the discount preview (tier name, discount %, next-
+  // tier progress). No name, email, or order history is exposed. The phone
+  // path param acts as the key: a caller must already know the phone number
+  // to query, so this is functionally equivalent to the existing customer-
+  // facing flow.
+  app.get("/api/restaurant/:id/loyalty/customers/:phone/preview-discount",
+    async (req: Request, res: Response) => {
+    try {
+      const phone = _normalisePhone(req.params.phone);
+      const total = Number(req.query.total);
+      if (!phone || !Number.isFinite(total) || total < 0) {
+        return res.status(400).json({ error: "Invalid phone or total" });
+      }
+      const db = await getTenantDb(req.params.id);
+      const customer: any = await db.get(
+        `SELECT total_spent, is_blocked FROM loyalty_customers WHERE phone = ?`, [phone]
+      );
+      if (!customer || Number(customer.is_blocked) === 1) {
+        return res.json({
+          is_member: false,
+          tier_id: null, tier_name: null,
+          discount_percent: 0, discount_amount: 0, final_total: total,
+        });
+      }
+      const spent = Number(customer.total_spent || 0);
+      const tier = await _resolveTierForSpend(db, spent);
+      const pct = Number(tier?.discount_percent || 0);
+      const discount = Math.round((total * pct) / 100 * 100) / 100;
+      // Next-tier progress: enabled tier with the lowest threshold above
+      // the customer's current lifetime spend.
+      const nextRows: any[] = await db.query(
+        `SELECT name, min_lifetime_spend
+           FROM loyalty_tiers
+          WHERE is_enabled = 1 AND min_lifetime_spend > ?
+          ORDER BY min_lifetime_spend ASC LIMIT 1`,
+        [spent]
+      );
+      const next = nextRows && nextRows.length > 0 ? nextRows[0] : null;
+      res.json({
+        is_member: true,
+        tier_id: tier?.id || null,
+        tier_name: tier?.name || null,
+        discount_percent: pct,
+        discount_amount: discount,
+        final_total: Math.max(0, total - discount),
+        total_spent: spent,
+        next_tier_name: next ? next.name : null,
+        next_tier_min_spend: next ? Number(next.min_lifetime_spend || 0) : null,
+      });
+    } catch (err) {
+      console.error("Loyalty preview-discount error:", err);
+      res.status(500).json({ error: "Failed to compute preview" });
+    }
+  });
+
+  // Analytics for the LOYALTY tab — KPI cards + chart data.
+  app.get("/api/restaurant/:id/loyalty/analytics", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const tiers: any[] = await db.query(
+        `SELECT id, name, min_lifetime_spend, discount_percent, is_enabled, sort_order
+           FROM loyalty_tiers ORDER BY min_lifetime_spend ASC`
+      );
+      const byTier: any[] = await db.query(
+        `SELECT current_tier_id, COUNT(*) AS members, COALESCE(SUM(total_spent), 0) AS revenue
+           FROM loyalty_customers
+          WHERE is_blocked = 0
+          GROUP BY current_tier_id`
+      );
+      const totalRow: any = await db.get(
+        `SELECT COUNT(*) AS members,
+                COALESCE(SUM(total_spent), 0) AS revenue,
+                COALESCE(SUM(total_orders), 0) AS orders
+           FROM loyalty_customers WHERE is_blocked = 0`
+      );
+      const activeRow: any = await db.get(
+        `SELECT COUNT(*) AS active_90d
+           FROM loyalty_customers
+          WHERE is_blocked = 0
+            AND last_order_at >= CURRENT_TIMESTAMP - INTERVAL '90 days'`
+      );
+      const redemptionsRow: any = await db.get(
+        `SELECT COUNT(*) AS count, COALESCE(SUM(discount_amount), 0) AS total
+           FROM loyalty_redemptions
+          WHERE redeemed_at >= CURRENT_TIMESTAMP - INTERVAL '90 days'`
+      );
+      const byTierMap: Record<string, { members: number; revenue: number }> = {};
+      for (const r of byTier) {
+        byTierMap[r.current_tier_id || 'UNASSIGNED'] = {
+          members: Number(r.members || 0),
+          revenue: Number(r.revenue || 0),
+        };
+      }
+      res.json({
+        total_members: Number(totalRow?.members || 0),
+        total_revenue: Number(totalRow?.revenue || 0),
+        total_orders: Number(totalRow?.orders || 0),
+        active_last_90d: Number(activeRow?.active_90d || 0),
+        redemptions_last_90d: Number(redemptionsRow?.count || 0),
+        discounts_given_last_90d: Number(redemptionsRow?.total || 0),
+        by_tier: tiers.map(t => ({
+          id: t.id,
+          name: t.name,
+          min_lifetime_spend: Number(t.min_lifetime_spend || 0),
+          discount_percent: Number(t.discount_percent || 0),
+          is_enabled: Number(t.is_enabled) === 1,
+          members: byTierMap[t.id]?.members || 0,
+          revenue: byTierMap[t.id]?.revenue || 0,
+        })),
+        unassigned: byTierMap['UNASSIGNED'] || { members: 0, revenue: 0 },
+      });
+    } catch (err) {
+      console.error("Loyalty analytics error:", err);
+      res.status(500).json({ error: "Failed to compute analytics" });
+    }
+  });
+
+  // Admin maintenance: recompute all tiers in this tenant. Useful after
+  // an admin changes a threshold and wants the whole customer base to
+  // re-tier without waiting for each customer's next order.
+  app.post("/api/restaurant/:id/loyalty/recompute-tiers", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        "SELECT phone, total_spent, current_tier_id FROM loyalty_customers WHERE is_blocked = 0"
+      );
+      let changed = 0;
+      for (const r of rows) {
+        const tier = await _resolveTierForSpend(db, Number(r.total_spent || 0));
+        const newTier = tier?.id || null;
+        if (newTier !== r.current_tier_id) {
+          await db.run(
+            "UPDATE loyalty_customers SET current_tier_id = ? WHERE phone = ?",
+            [newTier, r.phone]
+          );
+          await db.run(
+            `INSERT INTO loyalty_tier_history (customer_phone, from_tier_id, to_tier_id, trigger_order_id, spent_at_upgrade)
+             VALUES (?, ?, ?, NULL, ?)`,
+            [r.phone, r.current_tier_id, newTier, Number(r.total_spent || 0)]
+          ).catch(() => {});
+          changed++;
+        }
+      }
+      res.json({ success: true, customers_scanned: rows.length, customers_changed: changed });
+    } catch (err) {
+      console.error("Loyalty recompute error:", err);
+      res.status(500).json({ error: "Failed to recompute tiers" });
+    }
+  });
+
   // ── Phase 5: Credentials encrypted CRUD ────────────────────────────────
   // Per-tenant + per-channel credentials. AES-256-GCM at rest, master key
   // from ATITHI_CREDENTIAL_KEY env var. The owner-facing UI never displays
@@ -9570,6 +10122,21 @@ async function startServer() {
          Number(discount_amount || 0), Number(service_charge_percent || 0), Number(gst_percent || 0), apply_gst ? 1 : 0, invoiceNumber]
       );
       const display_number = invoiceNumber || `#${id.slice(-8).toUpperCase()}`;
+      // Loyalty hook — fire-and-forget. Never blocks the response, never
+      // throws. discount_percent is derived from discount_amount / total
+      // when the front-end didn't pass an explicit percent.
+      const _discountPct = Number(total) > 0
+        ? Math.round((Number(discount_amount || 0) / Number(total)) * 10000) / 100
+        : 0;
+      _loyaltyHook({
+        tenantId: req.params.id,
+        orderId: id,
+        customerPhone: customer_phone,
+        customerName: customer_name,
+        grandTotal: grand,
+        discountAmount: Number(discount_amount || 0),
+        discountPercent: _discountPct,
+      }).catch(err => console.error('[loyalty] manual-invoice hook error:', err));
       res.json({ success: true, id, grand_total: grand, invoice_number: invoiceNumber, display_number });
     } catch (err) {
       res.status(500).json({ error: "Failed to create manual invoice" });
@@ -10099,6 +10666,23 @@ async function startServer() {
         invoice_number: orderInvoiceNumber,
         invoice_status: invoiceStatus,
       });
+
+      // ── Loyalty: upsert customer + recompute tier (non-blocking) ─────────
+      // Fire-and-forget, never throws. Skips silently when no customer phone
+      // was supplied (e.g. anonymous walk-in). Discount info is derived from
+      // the body when present so the redemption gets audited correctly.
+      const _bodyDiscountAmount = Number(req.body?.discount_amount || req.body?.discountAmount || 0);
+      const _bodyDiscountPct    = Number(req.body?.discount_percent || req.body?.discountPercent || 0);
+      _loyaltyHook({
+        tenantId: req.params.id,
+        orderId: id,
+        customerPhone: finalCustomerPhone,
+        customerName: finalCustomerName,
+        customerEmail: finalCustomerEmail,
+        grandTotal: Number(finalTotalAmount || 0),
+        discountAmount: _bodyDiscountAmount,
+        discountPercent: _bodyDiscountPct,
+      }).catch(err => console.warn(`[loyalty] hook failed for order ${id}:`, err));
 
       // ── Inventory: auto-deduct ingredients per recipe (non-blocking) ─────
       // Fire-and-forget — must NEVER fail an order. If recipes don't exist for
@@ -12405,7 +12989,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'billing-v13-role-access-marker-fix',
+    commit_marker: 'loyalty-v1-tier-based',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -12419,6 +13003,8 @@ async function startServer() {
       'auto-readonly-past-grace',
       'role-access-inventory-delivery',
       'role-access-deterministic-marker', // PERMS_V2_MARKER — unchecking new tabs now actually hides them
+      'loyalty-tier-based',              // Bronze / Silver / Gold lifetime-spend tiers (Phase 1)
+      'loyalty-qr-customer-preview',     // customer-facing QR ordering banner + bill preview
     ],
     booted_at: new Date().toISOString(),
   };

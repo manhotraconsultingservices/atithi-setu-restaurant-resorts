@@ -1091,6 +1091,93 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_settlement_lines_settlement ON settlement_order_lines (settlement_id)`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_settlement_lines_order ON settlement_order_lines (order_id)`);
 
+  // ─────────────────────────────────────────────────────────────────────
+  // LOYALTY (Phase 1 — tier-based: Bronze / Silver / Gold by lifetime spend)
+  // ─────────────────────────────────────────────────────────────────────
+  // Per-tenant. Customer identity is the phone number (canonical).
+  // - loyalty_tiers       : owner-configurable thresholds + benefits
+  // - loyalty_customers   : per-customer aggregate (the "customers" master
+  //                         table that did not exist before — phone is PK)
+  // - loyalty_tier_history: audit log of every tier transition
+  // - loyalty_redemptions : audit log of every loyalty discount applied
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS loyalty_tiers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      min_lifetime_spend DOUBLE PRECISION DEFAULT 0,
+      discount_percent DOUBLE PRECISION DEFAULT 0,
+      perks TEXT,
+      is_enabled INT DEFAULT 1,
+      sort_order INT DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS loyalty_customers (
+      phone TEXT PRIMARY KEY,
+      name TEXT,
+      email TEXT,
+      total_orders INT DEFAULT 0,
+      total_spent DOUBLE PRECISION DEFAULT 0,
+      current_tier_id TEXT,
+      first_order_at TIMESTAMP,
+      last_order_at TIMESTAMP,
+      notes TEXT,
+      is_blocked INT DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_loyalty_customers_tier ON loyalty_customers (current_tier_id)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_loyalty_customers_spent ON loyalty_customers (total_spent DESC)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_loyalty_customers_last_order ON loyalty_customers (last_order_at DESC)`);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS loyalty_tier_history (
+      id SERIAL PRIMARY KEY,
+      customer_phone TEXT NOT NULL,
+      from_tier_id TEXT,
+      to_tier_id TEXT NOT NULL,
+      trigger_order_id TEXT,
+      spent_at_upgrade DOUBLE PRECISION,
+      changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_loyalty_tier_history_phone ON loyalty_tier_history (customer_phone, changed_at DESC)`);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS loyalty_redemptions (
+      id SERIAL PRIMARY KEY,
+      customer_phone TEXT NOT NULL,
+      order_id TEXT NOT NULL,
+      tier_id TEXT,
+      discount_percent DOUBLE PRECISION,
+      discount_amount DOUBLE PRECISION,
+      redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_loyalty_redemptions_phone ON loyalty_redemptions (customer_phone, redeemed_at DESC)`);
+
+  // First-time seed of default tiers per tenant. Owner can edit / disable
+  // any of them via the LOYALTY tab; ON CONFLICT DO NOTHING means edits
+  // survive future tenant DB initialisations.
+  await db.run(
+    `INSERT INTO loyalty_tiers (id, name, min_lifetime_spend, discount_percent, perks, sort_order)
+     VALUES ('BRONZE', 'Bronze', 0, 0, 'Welcome tier — every customer starts here.', 1)
+     ON CONFLICT (id) DO NOTHING`
+  ).catch(() => {});
+  await db.run(
+    `INSERT INTO loyalty_tiers (id, name, min_lifetime_spend, discount_percent, perks, sort_order)
+     VALUES ('SILVER', 'Silver', 10000, 5, 'Loyal customer — 5% off every order.', 2)
+     ON CONFLICT (id) DO NOTHING`
+  ).catch(() => {});
+  await db.run(
+    `INSERT INTO loyalty_tiers (id, name, min_lifetime_spend, discount_percent, perks, sort_order)
+     VALUES ('GOLD', 'Gold', 50000, 10, 'VIP — 10% off every order, priority service.', 3)
+     ON CONFLICT (id) DO NOTHING`
+  ).catch(() => {});
+
   tenantDbCache.set(schema, db);
   return db;
 }
