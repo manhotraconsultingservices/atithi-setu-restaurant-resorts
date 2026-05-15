@@ -78,38 +78,58 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // handling those tabs would vanish for that tenant until an admin re-saves.
 const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET']);
 
-// Sentinel appended by savePermissions() to every PARTIAL restriction list.
-// Its presence is a deterministic "this list was configured through the
-// up-to-date Role Access UI, with full knowledge of every current tab"
-// signal. It is NOT a real tab — it never appears in RESTAURANT_TABS /
-// HOTEL_TABS, is stripped before the admin grid renders, and is ignored by
-// every consumer except isTabVisible(). This replaces the old (broken)
-// "did the list mention any new tab?" heuristic, which could not tell a
-// legacy list apart from an admin who deliberately unchecked every new tab.
+// Versioned sentinels appended by savePermissions() to every PARTIAL
+// restriction list. Each marker stamps the list as "configured through the
+// Role Access UI of THIS generation, with full knowledge of every tab that
+// existed at that time" — so the runtime can tell deliberate exclusions
+// (admin really doesn't want this tab) from "the tab didn't exist yet".
+//
+//   PERMS_V2_MARKER  — first marker, shipped with the INVENTORY/DELIVERY
+//                       Role Access fix. List with V2 only = admin knew
+//                       about INVENTORY+DELIVERY but NOT about LOYALTY /
+//                       ROSTER / TIMESHEET.
+//   PERMS_V3_MARKER  — current generation, shipped with Phase 3. List
+//                       with V3 = admin knew about every tab below.
+//
+// The markers are NOT real tabs — they never appear in RESTAURANT_TABS /
+// HOTEL_TABS, are stripped before the admin grid renders, and are ignored
+// by every consumer except isTabVisible().
 const PERMS_V2_MARKER = '__perm_v2__';
+const PERMS_V3_MARKER = '__perm_v3__';
+
+// Tabs that did NOT exist when V2 markers were being written. If a list
+// has a V2 marker but no V3 marker, the admin couldn't have informed
+// themselves about these tabs (because they hadn't been built yet) — so
+// we grandfather them visible. Once the admin re-saves through the V3 UI,
+// the V3 marker is appended and any exclusion sticks.
+const TABS_INTRODUCED_AFTER_V2 = new Set<string>(['LOYALTY', 'ROSTER', 'TIMESHEET']);
 
 // Decide whether a dashboard tab should be visible for a tenant, given the
 // tenant's saved allowedTabs list.
 //   • allowedTabs null / empty       → no restriction → everything visible
 //   • tab explicitly present         → visible
-//   • tab absent + list has the v2
-//     marker                         → hidden (admin saw this tab in the
-//                                       Role Access UI and excluded it)
-//   • tab absent + NO v2 marker
-//     (legacy list saved before the
-//     tab existed):
-//       - newly-added tab            → visible (grandfathered until re-save)
-//       - any other tab              → hidden
+//   • V3 marker present              → admin's exclusion was fully informed
+//                                       → respect it, hide the tab
+//   • V2 marker present (no V3)      → admin's exclusion was informed only
+//                                       about pre-LOYALTY tabs; grandfather
+//                                       any tab added since (LOYALTY,
+//                                       ROSTER, TIMESHEET)
+//   • no marker                      → ancient legacy list (saved before
+//                                       the marker existed); grandfather
+//                                       every tab in ALWAYS_VISIBLE_TABS
 function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boolean {
   if (!allowedTabs || allowedTabs.length === 0) return true;
   if (allowedTabs.includes(id)) return true;
-  // The tab is NOT in the saved list. Was the list configured with full
-  // knowledge of every current tab, or is it a pre-INVENTORY/DELIVERY list?
-  if (allowedTabs.includes(PERMS_V2_MARKER)) {
-    return false; // deliberate, fully-informed exclusion → respect it
+  if (allowedTabs.includes(PERMS_V3_MARKER)) {
+    // Fully-informed exclusion as of the current UI generation
+    return false;
   }
-  // Legacy list — grandfather only the genuinely-new tabs so owners don't
-  // lose them until an admin re-saves. Everything else stays excluded.
+  if (allowedTabs.includes(PERMS_V2_MARKER)) {
+    // V2-era save — admin couldn't have informed themselves about
+    // post-V2 tabs. Grandfather them; respect exclusions of pre-V2 tabs.
+    return TABS_INTRODUCED_AFTER_V2.has(id);
+  }
+  // Pre-V2 (truly ancient) — grandfather everything in ALWAYS_VISIBLE_TABS.
   if (ALWAYS_VISIBLE_TABS.has(id)) return true;
   return false;
 }
@@ -19273,33 +19293,43 @@ function SuperAdminDashboard({ token }: { token: string }) {
       });
       if (res.ok) {
         const data = await res.json();
-        // Tabs added AFTER the Role Access feature shipped. A "legacy"
-        // permission list (saved before they existed) carries no
-        // PERMS_V2_MARKER — for those we default the newly-added tabs to
-        // CHECKED in the grid so the admin's first re-save doesn't silently
-        // strip a feature the owner could already see. A list that DOES
-        // carry the marker was configured with full knowledge of every
-        // current tab, so we honour it verbatim.
-        const NEWLY_ADDED_TABS = ['INVENTORY', 'DELIVERY'];
+        // Generation grandfathering for the admin grid:
+        //   no marker (pre-V2)   → grandfather INV+DELIVERY+LOYALTY+ROSTER+TIMESHEET
+        //   V2 (post-INV/DEL)    → grandfather LOYALTY+ROSTER+TIMESHEET
+        //   V3 (current)         → honour the saved list verbatim
+        // Grandfathering happens at the GRID level so the admin's first
+        // re-save through the V3 UI doesn't accidentally strip a tab that
+        // was previously visible.
+        const NEWLY_ADDED_PRE_V2: string[] = ['INVENTORY', 'DELIVERY']; // visible in pre-V2 lists, hidden from grid otherwise
+        const NEWLY_ADDED_POST_V2: string[] = ['LOYALTY', 'ROSTER', 'TIMESHEET'];
         const normalized: Record<string, string[]> = {};
         for (const role of PERM_ROLES) {
-          // Strip the marker — permData must only ever contain real tab IDs
+          // Strip markers — permData must only ever contain real tab IDs
           // so the checkbox grid, the All/None length math, and
           // togglePermTab all stay correct.
-          const saved: string[] = (data[role] || []).filter((t: string) => t !== PERMS_V2_MARKER);
-          const isV2 = (data[role] || []).includes(PERMS_V2_MARKER);
+          const raw: string[] = (data[role] || []);
+          const saved: string[] = raw.filter((t: string) => t !== PERMS_V2_MARKER && t !== PERMS_V3_MARKER);
+          const hasV3 = raw.includes(PERMS_V3_MARKER);
+          const hasV2 = raw.includes(PERMS_V2_MARKER);
           if (saved.length === 0) {
             // No restriction saved → everything checked.
             normalized[role] = [...ALL_TABS];
-          } else if (isV2) {
-            // Configured through the up-to-date UI → honour it exactly.
+          } else if (hasV3) {
+            // Saved through the current UI → honour exactly.
             normalized[role] = saved;
-          } else {
-            // Legacy list — grandfather the newly-added tabs as CHECKED so
-            // the admin's first re-save doesn't strip them by accident.
+          } else if (hasV2) {
+            // V2-era save: admin knew about INV/DEL but NOT about
+            // LOYALTY/ROSTER/TIMESHEET. Grandfather the post-V2 tabs.
             normalized[role] = [
               ...saved,
-              ...NEWLY_ADDED_TABS.filter(t => ALL_TABS.includes(t) && !saved.includes(t)),
+              ...NEWLY_ADDED_POST_V2.filter(t => ALL_TABS.includes(t) && !saved.includes(t)),
+            ];
+          } else {
+            // Truly ancient (no marker): grandfather both pre- and post-V2 additions.
+            normalized[role] = [
+              ...saved,
+              ...NEWLY_ADDED_PRE_V2.filter(t => ALL_TABS.includes(t) && !saved.includes(t)),
+              ...NEWLY_ADDED_POST_V2.filter(t => ALL_TABS.includes(t) && !saved.includes(t)),
             ];
           }
         }
@@ -19320,19 +19350,20 @@ function SuperAdminDashboard({ token }: { token: string }) {
       //                          backend treats [] as "no restriction", so
       //                          the None button has always meant "all
       //                          visible"; we deliberately do NOT change it)
-      //   • partial selection → save [chosen tabs..., PERMS_V2_MARKER]
-      //     The marker stamps the list as "configured with full knowledge
-      //     of every current tab" so the runtime respects exclusions of
-      //     INVENTORY / DELIVERY exactly, instead of grandfathering them.
+      //   • partial selection → save [chosen tabs..., PERMS_V3_MARKER]
+      //     The current-generation marker stamps the list as "configured
+      //     with full knowledge of EVERY current tab" (incl. LOYALTY /
+      //     ROSTER / TIMESHEET) so the runtime respects exclusions
+      //     exactly instead of grandfathering post-V2 tabs.
       const toSave: Record<string, string[]> = {};
       for (const role of PERM_ROLES) {
-        // permData is always marker-free (fetchPermissions strips it); the
-        // filter here is purely defensive.
-        const tabs = (permData[role] || []).filter(t => t !== PERMS_V2_MARKER);
+        // permData is always marker-free (fetchPermissions strips both V2
+        // and V3 markers); the filter here is purely defensive.
+        const tabs = (permData[role] || []).filter(t => t !== PERMS_V2_MARKER && t !== PERMS_V3_MARKER);
         if (tabs.length === ALL_TABS.length || tabs.length === 0) {
           toSave[role] = [];
         } else {
-          toSave[role] = [...tabs, PERMS_V2_MARKER];
+          toSave[role] = [...tabs, PERMS_V3_MARKER];
         }
       }
       const res = await fetch(`/api/admin/restaurant/${permSelectedRestaurant}/role-permissions`, {

@@ -13787,7 +13787,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'staff-v1-roster-timesheet',
+    commit_marker: 'perms-v3-grandfather-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -13810,6 +13810,7 @@ async function startServer() {
       'timesheet-planned-vs-actual',     // Phase 3: timesheet_day materialised view + cron
       'shift-notification-events',       // Phase 3: SHIFT_ASSIGNED/UPDATED/CANCELLED/REMINDER
       'staff-recipient-resolution-fix',  // Phase 3: triggerNotification now hits attendance_staff for staff roles
+      'perms-v3-grandfather-loyalty',    // Hotfix: PERMS_V3_MARKER grandfathers LOYALTY/ROSTER/TIMESHEET for V2-era saves
     ],
     booted_at: new Date().toISOString(),
   };
