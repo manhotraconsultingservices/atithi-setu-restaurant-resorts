@@ -309,6 +309,11 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS parent_folio_id TEXT;
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS reason TEXT;
     UPDATE folios SET doc_type = 'INVOICE' WHERE doc_type IS NULL;
+    -- Phase 2 snapshot columns: capture currency + tax-label-string at
+    -- folio creation so a past folio reprints with the original symbols
+    -- even if the tenant later switches country / preset.
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS currency_snapshot TEXT;
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS tax_label_snapshot TEXT;
 
     CREATE TABLE IF NOT EXISTS folio_entries (
       id         TEXT PRIMARY KEY,
@@ -3979,6 +3984,288 @@ async function startServer() {
     } catch (err) {
       console.error("Loyalty recompute error:", err);
       res.status(500).json({ error: "Failed to recompute tiers" });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // TAX + CURRENCY (Phase 2 — template-driven multi-country)
+  // ─────────────────────────────────────────────────────────────────────
+  // Template presets seed a tenant's tax_config table on first /tax-config
+  // GET. Owner edits via Settings → Taxes & Currency. The defaults below
+  // mean every existing Indian tenant gets {country:'IN', currency:'INR',
+  // symbol:'₹', locale:'en-IN', preset:'IN_GST'} on first load —
+  // byte-identical to the pre-Phase-2 behaviour.
+  type TaxConfigRow = {
+    id: string;
+    label: string;
+    rate_percent: number;
+    is_inclusive?: number;
+    applies_to?: 'TOTAL' | 'TAXABLE_ONLY' | 'SUBTOTAL_AFTER_DISCOUNT';
+    display_order?: number;
+    enabled?: number;
+    split_intrastate?: number;
+    cgst_share?: number;
+  };
+
+  const TAX_PRESETS: Record<string, TaxConfigRow[]> = {
+    // India: single GST line with optional intrastate split → CGST + SGST.
+    // Owner can change rate (default 5%) and disable the split for
+    // interstate (IGST-only) flows.
+    IN_GST: [
+      { id: 'GST', label: 'GST', rate_percent: 5, split_intrastate: 1, cgst_share: 0.5, display_order: 1 },
+    ],
+    // United States: flat Sales Tax. Owner must set the rate (default 0%
+    // since it varies by state/city). Sales Tax applies to taxable items
+    // only — owner can refine using the applies_to column.
+    US_SALES: [
+      { id: 'TAX', label: 'Sales Tax', rate_percent: 0, applies_to: 'TAXABLE_ONLY', display_order: 1 },
+    ],
+    // Canada: federal GST + provincial sales tax (owner enables the right one).
+    CA_GST_HST: [
+      { id: 'GST', label: 'GST', rate_percent: 5, display_order: 1 },
+      { id: 'PST', label: 'PST', rate_percent: 7, enabled: 0, display_order: 2 },
+    ],
+    // Australia: GST inclusive — total already contains the tax; we just
+    // surface the embedded amount on the invoice.
+    AU_GST: [
+      { id: 'GST', label: 'GST', rate_percent: 10, is_inclusive: 1, display_order: 1 },
+    ],
+    // EU: flat VAT (the most common scheme). Owner sets the country rate.
+    EU_VAT: [
+      { id: 'VAT', label: 'VAT', rate_percent: 20, display_order: 1 },
+    ],
+  };
+
+  const COUNTRY_DEFAULTS: Record<string, {
+    currency_code: string; currency_symbol: string; locale: string; tax_template_id: string;
+  }> = {
+    IN: { currency_code: 'INR', currency_symbol: '₹',  locale: 'en-IN', tax_template_id: 'IN_GST' },
+    US: { currency_code: 'USD', currency_symbol: '$',  locale: 'en-US', tax_template_id: 'US_SALES' },
+    CA: { currency_code: 'CAD', currency_symbol: 'C$', locale: 'en-CA', tax_template_id: 'CA_GST_HST' },
+    AU: { currency_code: 'AUD', currency_symbol: 'A$', locale: 'en-AU', tax_template_id: 'AU_GST' },
+    GB: { currency_code: 'GBP', currency_symbol: '£',  locale: 'en-GB', tax_template_id: 'EU_VAT' },
+    DE: { currency_code: 'EUR', currency_symbol: '€',  locale: 'de-DE', tax_template_id: 'EU_VAT' },
+    FR: { currency_code: 'EUR', currency_symbol: '€',  locale: 'fr-FR', tax_template_id: 'EU_VAT' },
+  };
+
+  // Load a tenant's tax configuration (seeding from the preset on the
+  // first call). Cheap enough to call per-request — the orders endpoint
+  // hits it once per insert.
+  async function _loadTaxConfig(tenantId: string, templateId: string | null): Promise<TaxConfigRow[]> {
+    const db = await getTenantDb(tenantId);
+    let rows: any[] = await db.query(
+      "SELECT id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share FROM tax_config WHERE enabled = 1 ORDER BY display_order ASC, id ASC"
+    );
+    if (rows && rows.length > 0) return rows as TaxConfigRow[];
+    // First-time seed for this tenant
+    const preset = TAX_PRESETS[templateId || 'IN_GST'] || TAX_PRESETS.IN_GST;
+    for (const row of preset) {
+      await db.run(
+        `INSERT INTO tax_config (id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO NOTHING`,
+        [row.id, row.label, row.rate_percent,
+         row.is_inclusive || 0,
+         row.applies_to || 'TOTAL',
+         row.display_order || 0,
+         row.enabled == null ? 1 : row.enabled,
+         row.split_intrastate || 0,
+         row.cgst_share == null ? 0.5 : row.cgst_share]
+      ).catch(() => {});
+    }
+    rows = await db.query(
+      "SELECT id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share FROM tax_config WHERE enabled = 1 ORDER BY display_order ASC, id ASC"
+    );
+    return (rows || []) as TaxConfigRow[];
+  }
+
+  // Single source-of-truth tax calculator. Returns the list of lines to
+  // render on the invoice (each line: {label, rate, amount}) plus the
+  // total tax. Indian intrastate split emits two lines (CGST + SGST) with
+  // matching rates derived from cgst_share — preserving the exact GST
+  // numeric output that pre-Phase-2 code produced.
+  //
+  // is_inclusive = 1 means the subtotal already contains the tax. We
+  // extract the embedded amount for display but do NOT add it on top of
+  // the subtotal again.
+  type TaxLine = { id: string; label: string; rate: number; amount: number };
+  function computeTaxes(opts: {
+    tenant: { country?: string };
+    taxConfigs: TaxConfigRow[];
+    subtotalAfterDiscount: number;
+    isIntrastate?: boolean;     // hotel folios — same-state guest
+  }): { lines: TaxLine[]; total: number } {
+    const lines: TaxLine[] = [];
+    let totalTax = 0;
+    const base = Math.max(0, opts.subtotalAfterDiscount);
+    for (const cfg of opts.taxConfigs) {
+      if (Number(cfg.enabled || 1) === 0) continue;
+      const rate = Number(cfg.rate_percent || 0);
+      if (rate <= 0) continue;
+      // Compute the gross tax amount. For inclusive taxes, extract from
+      // the base: amount = base × (rate / (100 + rate)).
+      const inclusive = Number(cfg.is_inclusive || 0) === 1;
+      const amount = inclusive
+        ? Math.round((base * rate / (100 + rate)) * 100) / 100
+        : Math.round((base * rate / 100) * 100) / 100;
+      if (amount <= 0) continue;
+      // India intrastate split: emit CGST + SGST instead of a single GST
+      // line. Each gets cgst_share / (1 - cgst_share) of the rate.
+      if (Number(cfg.split_intrastate || 0) === 1 && opts.isIntrastate !== false && (opts.tenant.country || 'IN') === 'IN') {
+        const share = Number(cfg.cgst_share || 0.5);
+        const cgstAmount = Math.round((amount * share) * 100) / 100;
+        const sgstAmount = Math.round((amount - cgstAmount) * 100) / 100;
+        lines.push({ id: 'CGST', label: 'CGST', rate: rate * share,       amount: cgstAmount });
+        lines.push({ id: 'SGST', label: 'SGST', rate: rate * (1 - share), amount: sgstAmount });
+        totalTax += cgstAmount + sgstAmount;
+        continue;
+      }
+      // Indian interstate (split disabled by caller) — render as IGST so
+      // the invoice complies with the GST regime.
+      if (Number(cfg.split_intrastate || 0) === 1 && opts.isIntrastate === false && (opts.tenant.country || 'IN') === 'IN') {
+        lines.push({ id: 'IGST', label: 'IGST', rate, amount });
+        totalTax += amount;
+        continue;
+      }
+      // Default: single line with the configured label.
+      lines.push({ id: cfg.id, label: cfg.label, rate, amount });
+      totalTax += amount;
+    }
+    return { lines, total: Math.round(totalTax * 100) / 100 };
+  }
+
+  // Build a snapshot string captured at order/folio creation time. Stored
+  // on each row so reprints survive future tax/currency changes.
+  function _taxLabelSnapshot(lines: TaxLine[]): string {
+    return lines.map(l => `${l.label}:${l.rate.toFixed(2)}:${l.amount.toFixed(2)}`).join('|');
+  }
+
+  // Expose to closures defined later in this file (order creation,
+  // folio recompute). Wrapping them in module-level refs avoids circular
+  // typing — the helpers are referenced via these inside other handlers.
+  (globalThis as any).__computeTaxes = computeTaxes;
+  (globalThis as any).__loadTaxConfig = _loadTaxConfig;
+  (globalThis as any).__taxLabelSnapshot = _taxLabelSnapshot;
+  (globalThis as any).__TAX_PRESETS = TAX_PRESETS;
+  (globalThis as any).__COUNTRY_DEFAULTS = COUNTRY_DEFAULTS;
+
+  // GET — fetch the tenant's tax + currency settings + active tax_config rows.
+  app.get("/api/restaurant/:id/tax-config", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantId = req.params.id;
+      const row: any = await centralDb.get(
+        `SELECT country, currency_code, currency_symbol, locale, tax_template_id
+           FROM restaurants WHERE id = ?`, [tenantId]
+      );
+      if (!row) return res.status(404).json({ error: "Restaurant not found" });
+      const configs = await _loadTaxConfig(tenantId, row.tax_template_id);
+      const db = await getTenantDb(tenantId);
+      const allRows: any[] = await db.query(
+        "SELECT id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share FROM tax_config ORDER BY display_order ASC, id ASC"
+      );
+      res.json({
+        country: row.country || 'IN',
+        currency_code: row.currency_code || 'INR',
+        currency_symbol: row.currency_symbol || '₹',
+        locale: row.locale || 'en-IN',
+        tax_template_id: row.tax_template_id || 'IN_GST',
+        active_configs: configs,                 // enabled rows only (used at runtime)
+        all_configs: allRows || [],              // full list for editor
+        presets: Object.keys(TAX_PRESETS),
+        country_defaults: COUNTRY_DEFAULTS,
+      });
+    } catch (err) {
+      console.error("Tax config GET error:", err);
+      res.status(500).json({ error: "Failed to load tax config" });
+    }
+  });
+
+  // PUT — owner saves country / currency + tax line edits in one call.
+  // Validates input then runs as a transaction: update restaurants row,
+  // replace tax_config rows, fall back on error.
+  app.put("/api/restaurant/:id/tax-config", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Only owners can edit tax config" });
+      }
+      const tenantId = req.params.id;
+      const {
+        country, currency_code, currency_symbol, locale, tax_template_id,
+        tax_lines,
+      } = req.body || {};
+      // Update restaurants row
+      await centralDb.run(
+        `UPDATE restaurants
+            SET country = COALESCE(?, country),
+                currency_code = COALESCE(?, currency_code),
+                currency_symbol = COALESCE(?, currency_symbol),
+                locale = COALESCE(?, locale),
+                tax_template_id = COALESCE(?, tax_template_id)
+          WHERE id = ?`,
+        [country || null, currency_code || null, currency_symbol || null,
+         locale || null, tax_template_id || null, tenantId]
+      );
+      // Replace tax_config rows if caller passed an array
+      if (Array.isArray(tax_lines)) {
+        const db = await getTenantDb(tenantId);
+        await db.run("DELETE FROM tax_config");
+        for (const t of tax_lines) {
+          if (!t.id || !t.label) continue;
+          await db.run(
+            `INSERT INTO tax_config (id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+            [String(t.id), String(t.label),
+             Number(t.rate_percent || 0),
+             Number(t.is_inclusive || 0),
+             String(t.applies_to || 'TOTAL'),
+             Number(t.display_order || 0),
+             Number(t.enabled == null ? 1 : t.enabled),
+             Number(t.split_intrastate || 0),
+             Number(t.cgst_share == null ? 0.5 : t.cgst_share)]
+          );
+        }
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Tax config PUT error:", err);
+      res.status(500).json({ error: "Failed to save tax config" });
+    }
+  });
+
+  // POST — apply a preset (replaces tax_config with the preset rows).
+  // Owner picks a country in the Settings UI; this seeds the matching rows.
+  app.post("/api/restaurant/:id/tax-config/apply-preset", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Only owners can apply presets" });
+      }
+      const tenantId = req.params.id;
+      const presetId = String(req.body?.preset_id || '').trim();
+      const preset = TAX_PRESETS[presetId];
+      if (!preset) return res.status(400).json({ error: `Unknown preset: ${presetId}` });
+      const db = await getTenantDb(tenantId);
+      await db.run("DELETE FROM tax_config");
+      for (const row of preset) {
+        await db.run(
+          `INSERT INTO tax_config (id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [row.id, row.label, row.rate_percent,
+           row.is_inclusive || 0,
+           row.applies_to || 'TOTAL',
+           row.display_order || 0,
+           row.enabled == null ? 1 : row.enabled,
+           row.split_intrastate || 0,
+           row.cgst_share == null ? 0.5 : row.cgst_share]
+        );
+      }
+      await centralDb.run(
+        `UPDATE restaurants SET tax_template_id = ? WHERE id = ?`,
+        [presetId, tenantId]
+      );
+      res.json({ success: true, applied: presetId });
+    } catch (err) {
+      console.error("Tax config apply-preset error:", err);
+      res.status(500).json({ error: "Failed to apply preset" });
     }
   });
 
@@ -8798,6 +9085,15 @@ async function startServer() {
         parentInvoiceNumber,
         creditNoteReason: folio.reason,
         bilingual:        true,
+        // Phase 2: pass tenant-level currency/country so non-India invoices
+        // render with the right symbol and tax labels. Defaults to IN/INR
+        // when these columns are NULL (the pre-Phase-2 state).
+        tenant: {
+          country:         hotel.country || 'IN',
+          currency_code:   hotel.currency_code || 'INR',
+          currency_symbol: hotel.currency_symbol || '₹',
+          locale:          hotel.locale || 'en-IN',
+        },
       });
 
       const safeName = String(folio.guest_name || 'guest').replace(/[^a-z0-9_-]+/gi, '-');
@@ -8880,6 +9176,13 @@ async function startServer() {
         parentInvoiceNumber,
         creditNoteReason: folio.reason,
         bilingual: true,
+        // Phase 2: tenant currency context (see download-invoice for rationale)
+        tenant: {
+          country:         hotel.country || 'IN',
+          currency_code:   hotel.currency_code || 'INR',
+          currency_symbol: hotel.currency_symbol || '₹',
+          locale:          hotel.locale || 'en-IN',
+        },
       });
 
       const safeName = String(folio.guest_name || 'guest').replace(/[^a-z0-9_-]+/gi, '-');
@@ -8903,7 +9206,7 @@ async function startServer() {
              <p>${isCredit
                  ? `Please find attached your credit note <strong>${invNum}</strong>.` + (parentInvoiceNumber ? ` This reverses invoice <strong>${parentInvoiceNumber}</strong>.` : '')
                  : `Thank you for your stay at <strong>${hotel.name}</strong>. Please find your tax invoice <strong>${invNum}</strong> attached.`}</p>
-             <p style="color:#6b5d52;font-size:13px">Amount: <strong>INR ${Number(folio.grand_total || 0).toLocaleString('en-IN')}</strong></p>
+             <p style="color:#6b5d52;font-size:13px">Amount: <strong>${(hotel.currency_code || 'INR')} ${Number(folio.grand_total || 0).toLocaleString(hotel.locale || 'en-IN')}</strong></p>
              <p style="margin-top:24px">For any queries, reply to this email.<br/><strong>${hotel.name} Team</strong></p>
            </div>
          </div>`;
@@ -12989,7 +13292,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'loyalty-v1-tier-based',
+    commit_marker: 'tax-v1-multi-currency-template',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -13005,6 +13308,9 @@ async function startServer() {
       'role-access-deterministic-marker', // PERMS_V2_MARKER — unchecking new tabs now actually hides them
       'loyalty-tier-based',              // Bronze / Silver / Gold lifetime-spend tiers (Phase 1)
       'loyalty-qr-customer-preview',     // customer-facing QR ordering banner + bill preview
+      'multi-currency-tax-presets',      // Phase 2: country presets (IN/US/CA/AU/EU), tax_config table
+      'invoice-tenant-aware-rendering',  // invoiceService uses tenant.currency + taxLines loop
+      'currency-snapshot-columns',       // orders/folios capture currency_snapshot + tax_label_snapshot
     ],
     booted_at: new Date().toISOString(),
   };

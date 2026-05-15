@@ -160,7 +160,20 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS last_payment_amount DOUBLE PRECISION;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS last_payment_reference TEXT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS billing_notes TEXT;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS subscription_plan TEXT
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS subscription_plan TEXT;
+    -- Phase 2 (Multi-currency + configurable tax). Defaults preserve the
+    -- exact India / GST / ₹ behaviour for every pre-existing tenant.
+    --   country         ISO-3166 alpha-2; selects the default tax preset.
+    --   currency_code   ISO-4217 code, drives invoice & receipt amounts.
+    --   currency_symbol Rendered before every formatted amount.
+    --   locale          Passed to toLocaleString() for thousands separators.
+    --   tax_template_id Picked from TAX_PRESETS in server.ts when the
+    --                   tenant's tax_config table is empty (first-time seed).
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS country TEXT DEFAULT 'IN';
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS currency_code TEXT DEFAULT 'INR';
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS currency_symbol TEXT DEFAULT '₹';
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS locale TEXT DEFAULT 'en-IN';
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS tax_template_id TEXT DEFAULT 'IN_GST'
   `);
 
   // Migration: unique index on locations (safe to run multiple times)
@@ -1177,6 +1190,37 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
      VALUES ('GOLD', 'Gold', 50000, 10, 'VIP — 10% off every order, priority service.', 3)
      ON CONFLICT (id) DO NOTHING`
   ).catch(() => {});
+
+  // ─────────────────────────────────────────────────────────────────────
+  // TAX CONFIG (Phase 2 — multi-currency + configurable tax)
+  // ─────────────────────────────────────────────────────────────────────
+  // Per-tenant tax line configuration. Empty for fresh tenants — they get
+  // their preset rows seeded from TAX_PRESETS[restaurants.tax_template_id]
+  // on first /tax-config GET in server.ts. The schema is a superset so the
+  // same row can represent: a flat US Sales Tax, an Australian inclusive
+  // GST, a split Indian intrastate GST (CGST + SGST via split_intrastate),
+  // or an EU VAT — all without code branches downstream.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS tax_config (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      rate_percent DOUBLE PRECISION NOT NULL DEFAULT 0,
+      is_inclusive INT DEFAULT 0,
+      applies_to TEXT DEFAULT 'TOTAL',
+      display_order INT DEFAULT 0,
+      enabled INT DEFAULT 1,
+      split_intrastate INT DEFAULT 0,
+      cgst_share DOUBLE PRECISION DEFAULT 0.5,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Snapshot columns on orders + folios. Captured at INSERT time so a past
+  // order reprints with its original currency / tax labels even if the
+  // tenant later switches country or tax preset. Backwards-compatible:
+  // existing rows have NULL, code falls back to the live tenant settings.
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS currency_snapshot TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_label_snapshot TEXT`).catch(() => {});
 
   tenantDbCache.set(schema, db);
   return db;

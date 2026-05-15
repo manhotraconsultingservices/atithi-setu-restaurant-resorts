@@ -12662,6 +12662,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             </div>
 
+            {/* ── Taxes & Currency (Phase 2: multi-country) ──────────────
+                The GST controls above remain the canonical input for an
+                Indian tenant's flat rate. This panel exposes country +
+                preset + per-line tax editing for tenants operating outside
+                India. Indian tenants who never touch this panel keep the
+                exact pre-Phase-2 behaviour. */}
+            <TaxCurrencyPanel restaurantId={restaurantId} token={token!} />
+
             {/* ── Checkout Mode Toggle ─────────────────────────────────── */}
             <div className="p-5 bg-[#faf7f2] rounded-2xl space-y-4">
               <div>
@@ -24906,6 +24914,278 @@ function CustomerDetailDrawer(props: {
       </div>
     </div>
   );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TaxCurrencyPanel — Phase 2 Settings widget (country + preset + per-tax-line)
+// ════════════════════════════════════════════════════════════════════════════
+// Loads /tax-config, lets the owner pick a country preset (which auto-fills
+// currency code/symbol/locale and seeds the tax line list), then edit each
+// tax row (label, rate, inclusive flag, intrastate split for India).
+function TaxCurrencyPanel({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [cfg, setCfg] = useState<{
+    country: string; currency_code: string; currency_symbol: string; locale: string;
+    tax_template_id: string;
+    active_configs: any[]; all_configs: any[];
+    presets: string[];
+    country_defaults: Record<string, { currency_code: string; currency_symbol: string; locale: string; tax_template_id: string }>;
+  } | null>(null);
+  const [taxLines, setTaxLines] = useState<any[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true); setMessage('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/tax-config`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) { setMessage('Failed to load tax config'); return; }
+      const data = await res.json();
+      setCfg(data);
+      setTaxLines(data.all_configs || []);
+    } finally { setLoading(false); }
+  }, [restaurantId, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const applyCountry = (country: string) => {
+    if (!cfg) return;
+    const def = cfg.country_defaults[country];
+    if (!def) { setCfg({ ...cfg, country }); return; }
+    setCfg({
+      ...cfg, country,
+      currency_code: def.currency_code,
+      currency_symbol: def.currency_symbol,
+      locale: def.locale,
+      tax_template_id: def.tax_template_id,
+    });
+  };
+
+  const applyPreset = async () => {
+    if (!cfg) return;
+    setSaving(true); setMessage('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/tax-config/apply-preset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ preset_id: cfg.tax_template_id }),
+      });
+      if (!res.ok) { setMessage('Failed to apply preset'); return; }
+      setMessage(`Preset ${cfg.tax_template_id} applied`);
+      await load();
+    } finally { setSaving(false); }
+  };
+
+  const save = async () => {
+    if (!cfg) return;
+    setSaving(true); setMessage('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/tax-config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          country: cfg.country, currency_code: cfg.currency_code,
+          currency_symbol: cfg.currency_symbol, locale: cfg.locale,
+          tax_template_id: cfg.tax_template_id,
+          tax_lines: taxLines,
+        }),
+      });
+      if (!res.ok) { setMessage('Save failed'); return; }
+      setMessage('Saved');
+      await load();
+    } finally { setSaving(false); }
+  };
+
+  const updateLine = (idx: number, patch: any) =>
+    setTaxLines(prev => prev.map((l, i) => i === idx ? { ...l, ...patch } : l));
+  const addLine = () =>
+    setTaxLines(prev => [...prev, { id: `TAX${prev.length+1}`, label: 'Tax', rate_percent: 0, enabled: 1, display_order: prev.length+1, applies_to: 'TOTAL', is_inclusive: 0, split_intrastate: 0, cgst_share: 0.5 }]);
+  const removeLine = (idx: number) =>
+    setTaxLines(prev => prev.filter((_, i) => i !== idx));
+
+  if (loading) {
+    return <div className="p-5 bg-[#faf7f2] rounded-2xl text-center text-sm text-[#6b5d52]">Loading tax & currency settings…</div>;
+  }
+  if (!cfg) {
+    return <div className="p-5 bg-red-50 rounded-2xl text-center text-sm text-red-700">Tax config unavailable.</div>;
+  }
+
+  return (
+    <div className="p-5 bg-[#faf7f2] rounded-2xl space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-bold text-[#1a1a1a]">Taxes & Currency</p>
+          <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest mt-0.5">
+            For tenants operating outside India. Leave on defaults to keep Indian GST behaviour.
+          </p>
+        </div>
+        {message && <span className="text-[11px] font-bold text-orange-700">{message}</span>}
+      </div>
+
+      {/* Country + preset + currency triple */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Country</label>
+          <select
+            value={cfg.country}
+            onChange={e => applyCountry(e.target.value)}
+            className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+          >
+            <option value="IN">India (IN)</option>
+            <option value="US">United States (US)</option>
+            <option value="CA">Canada (CA)</option>
+            <option value="AU">Australia (AU)</option>
+            <option value="GB">United Kingdom (GB)</option>
+            <option value="DE">Germany (DE)</option>
+            <option value="FR">France (FR)</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Tax Preset</label>
+          <div className="flex gap-2">
+            <select
+              value={cfg.tax_template_id}
+              onChange={e => setCfg({ ...cfg, tax_template_id: e.target.value })}
+              className="flex-1 bg-white border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+            >
+              {cfg.presets.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+            <button
+              type="button"
+              onClick={applyPreset}
+              disabled={saving}
+              className="px-3 py-2 bg-[#cc5a16] text-white text-xs font-bold rounded-2xl disabled:opacity-50"
+            >Apply</button>
+          </div>
+        </div>
+        <div>
+          <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Currency code</label>
+          <input
+            value={cfg.currency_code}
+            onChange={e => setCfg({ ...cfg, currency_code: e.target.value.toUpperCase() })}
+            className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+            placeholder="INR"
+          />
+        </div>
+        <div>
+          <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Currency symbol</label>
+          <input
+            value={cfg.currency_symbol}
+            onChange={e => setCfg({ ...cfg, currency_symbol: e.target.value })}
+            className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+            placeholder="₹"
+          />
+        </div>
+        <div className="md:col-span-2">
+          <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Locale</label>
+          <input
+            value={cfg.locale}
+            onChange={e => setCfg({ ...cfg, locale: e.target.value })}
+            className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+            placeholder="en-IN"
+          />
+        </div>
+      </div>
+
+      {/* Tax line editor */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Tax Lines</p>
+          <button type="button" onClick={addLine} className="text-xs font-bold text-[#cc5a16]">+ Add line</button>
+        </div>
+        {taxLines.length === 0 && (
+          <p className="text-xs text-[#9c8e85] italic px-3 py-3 bg-white rounded-2xl">
+            No tax lines configured. Choose a country preset above and click Apply to seed default lines.
+          </p>
+        )}
+        {taxLines.map((line, idx) => (
+          <div key={`${line.id}-${idx}`} className="bg-white rounded-2xl p-3 mb-2 grid grid-cols-1 md:grid-cols-6 gap-2 items-center">
+            <input
+              value={line.id || ''}
+              onChange={e => updateLine(idx, { id: e.target.value })}
+              className="bg-[#faf7f2] rounded-xl px-3 py-2 text-xs font-mono col-span-1"
+              placeholder="ID"
+            />
+            <input
+              value={line.label || ''}
+              onChange={e => updateLine(idx, { label: e.target.value })}
+              className="bg-[#faf7f2] rounded-xl px-3 py-2 text-sm col-span-1"
+              placeholder="Label"
+            />
+            <input
+              type="number" step="0.01"
+              value={line.rate_percent ?? 0}
+              onChange={e => updateLine(idx, { rate_percent: parseFloat(e.target.value) || 0 })}
+              className="bg-[#faf7f2] rounded-xl px-3 py-2 text-sm font-mono col-span-1"
+              placeholder="%"
+            />
+            <label className="flex items-center gap-2 text-xs col-span-1">
+              <input
+                type="checkbox"
+                checked={Number(line.is_inclusive) === 1}
+                onChange={e => updateLine(idx, { is_inclusive: e.target.checked ? 1 : 0 })}
+              />
+              Inclusive
+            </label>
+            <label className="flex items-center gap-2 text-xs col-span-1">
+              <input
+                type="checkbox"
+                checked={Number(line.split_intrastate) === 1}
+                onChange={e => updateLine(idx, { split_intrastate: e.target.checked ? 1 : 0 })}
+                disabled={cfg.country !== 'IN'}
+              />
+              Split IN
+            </label>
+            <div className="flex items-center gap-2 col-span-1 justify-end">
+              <label className="flex items-center gap-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={Number(line.enabled) === 1}
+                  onChange={e => updateLine(idx, { enabled: e.target.checked ? 1 : 0 })}
+                />
+                On
+              </label>
+              <button
+                type="button"
+                onClick={() => removeLine(idx)}
+                className="text-xs text-red-500 font-bold"
+              >Remove</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving}
+          className="px-5 py-2.5 bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest rounded-2xl disabled:opacity-50"
+        >{saving ? 'Saving…' : 'Save Tax & Currency'}</button>
+      </div>
+    </div>
+  );
+}
+
+// useTenantFormatter — Phase 2 hook returning a money formatter bound to
+// the current tenant's currency_symbol + locale. Falls back to "₹" + en-IN
+// when the tenant hasn't migrated yet. Currently used by new screens that
+// surface currency to international tenants; the existing ₹-hardcoded
+// screens continue to work for Indian tenants.
+function useTenantFormatter(restaurant: any) {
+  return useMemo(() => {
+    const symbol = restaurant?.currency_symbol || '₹';
+    const locale = restaurant?.locale || 'en-IN';
+    return (n: number, opts?: { withSymbol?: boolean }): string => {
+      const v = Number.isFinite(n) ? n : 0;
+      let formatted: string;
+      try { formatted = v.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+      catch { formatted = v.toFixed(2); }
+      return opts?.withSymbol === false ? formatted : `${symbol}${formatted}`;
+    };
+  }, [restaurant?.currency_symbol, restaurant?.locale]);
 }
 
 function BookingsManagement({ restaurantId, token }: { restaurantId: string, token: string }) {

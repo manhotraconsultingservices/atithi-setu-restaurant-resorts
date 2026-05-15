@@ -122,6 +122,22 @@ export interface InvoiceData {
   parentInvoiceNumber?: string; // shown on credit notes as "Against Invoice #..."
   creditNoteReason?: string;
   bilingual?: boolean;          // default true — include Hindi sub-labels
+  // Phase 2 — multi-currency + configurable tax. Optional. When absent we
+  // default to the existing INR / GST behaviour so every Indian tenant
+  // sees byte-identical output. Pass these from the server when the tenant
+  // has switched country.
+  tenant?: {
+    country?: string;            // 'IN' | 'US' | 'CA' | 'AU' | ...
+    currency_code?: string;      // 'INR' | 'USD' | ...
+    currency_symbol?: string;    // '₹' | '$' | ...
+    locale?: string;             // 'en-IN' | 'en-US' | ...
+  };
+  // If provided, replaces the auto CGST/SGST/IGST rendering with the
+  // explicit list. Each line is rendered as a single row in the totals
+  // panel. Indian intrastate tenants typically leave this undefined and
+  // rely on the CGST/SGST split derived from gstAmount; international
+  // tenants populate it with e.g. [{label:'Sales Tax', rate:8.875, amount:...}].
+  taxLines?: Array<{ label: string; rate: number; amount: number }>;
 }
 
 /**
@@ -379,10 +395,10 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
         doc.fillColor(INK_SOFT).font('Helvetica').fontSize(9);
         doc.text(hsn,                      colPositions.hsn,      rowY + 6);
         doc.text(String(e.quantity),       colPositions.qty,      rowY + 6, { width: 40, align: 'right' });
-        doc.text(rupee(e.unitPrice * sign),colPositions.rate,     rowY + 6, { width: 50, align: 'right' });
-        doc.text(`${e.gstRate ?? 0}%`,     colPositions.tax,      rowY + 6, { width: 40, align: 'right' });
+        doc.text(money(data.tenant, e.unitPrice * sign),colPositions.rate, rowY + 6, { width: 50, align: 'right' });
+        doc.text(`${e.gstRate ?? 0}%`,                  colPositions.tax,  rowY + 6, { width: 40, align: 'right' });
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
-           .text(rupee(e.amount * sign),   colPositions.amt - 20, rowY + 6, { width: 80, align: 'right' });
+           .text(money(data.tenant, e.amount * sign),   colPositions.amt - 20, rowY + 6, { width: 80, align: 'right' });
         y += 22;
       });
 
@@ -395,17 +411,21 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       const labelW = 140;
       const valueW = 90;
 
-      // Auto-determine GST split if sameStateGst not explicitly set:
-      //   Indian hotel — if guest is in the same state as hotel → CGST + SGST, else → IGST
+      // Phase 2: country-aware tax rendering. India keeps the existing
+      // CGST/SGST/IGST split exactly — every Indian tenant sees identical
+      // numeric and label output. Non-India tenants emit a generic loop
+      // driven by data.taxLines (populated by the server from tax_config).
+      const tenantCountry = (data.tenant?.country || 'IN').toUpperCase();
+      const isIndia = tenantCountry === 'IN';
       let sameState: boolean;
       if (data.sameStateGst !== undefined) sameState = data.sameStateGst;
       else if (data.guest.state && data.hotel.state) {
         sameState = normaliseState(data.guest.state) === normaliseState(data.hotel.state);
       } else sameState = true; // default conservative
       const gstPct = data.folio.subtotal > 0 ? (data.folio.gstAmount / data.folio.subtotal) * 100 : 0;
-      const cgst = sameState ? data.folio.gstAmount / 2 : 0;
-      const sgst = sameState ? data.folio.gstAmount / 2 : 0;
-      const igst = !sameState ? data.folio.gstAmount : 0;
+      const cgst = (isIndia && sameState) ? data.folio.gstAmount / 2 : 0;
+      const sgst = (isIndia && sameState) ? data.folio.gstAmount / 2 : 0;
+      const igst = (isIndia && !sameState) ? data.folio.gstAmount : 0;
 
       const drawTotalRow = (text: string, value: string, bold: boolean = false, accent: boolean = false) => {
         if (bold) {
@@ -421,15 +441,32 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
         y += bold ? 25 : 16;
       };
 
-      drawTotalRow(label('SUBTOTAL').en, rupee(data.folio.subtotal * sign));
+      // Phase 2: format every line via money(tenant, n). For Indian tenants
+      // this resolves to "INR <num>" exactly as rupee() did before — see
+      // the rupee() function at the bottom which is now a thin wrapper.
+      const m = (n: number) => money(data.tenant, n);
+      drawTotalRow(label('SUBTOTAL').en, m(data.folio.subtotal * sign));
       if (data.folio.discount > 0) {
-        drawTotalRow(label('DISCOUNT').en, `− ${rupee(data.folio.discount * sign)}`, false, true);
+        drawTotalRow(label('DISCOUNT').en, `− ${m(data.folio.discount * sign)}`, false, true);
       }
-      if (cgst > 0) drawTotalRow(`CGST @ ${(gstPct / 2).toFixed(1)}%`, rupee(cgst * sign));
-      if (sgst > 0) drawTotalRow(`SGST @ ${(gstPct / 2).toFixed(1)}%`, rupee(sgst * sign));
-      if (igst > 0) drawTotalRow(`IGST @ ${gstPct.toFixed(1)}%`,       rupee(igst * sign));
+      if (isIndia) {
+        if (cgst > 0) drawTotalRow(`CGST @ ${(gstPct / 2).toFixed(1)}%`, m(cgst * sign));
+        if (sgst > 0) drawTotalRow(`SGST @ ${(gstPct / 2).toFixed(1)}%`, m(sgst * sign));
+        if (igst > 0) drawTotalRow(`IGST @ ${gstPct.toFixed(1)}%`,       m(igst * sign));
+      } else if (data.taxLines && data.taxLines.length > 0) {
+        for (const line of data.taxLines) {
+          drawTotalRow(`${line.label} @ ${Number(line.rate || 0).toFixed(1)}%`, m(line.amount * sign));
+        }
+      } else if (data.folio.gstAmount > 0) {
+        // Non-India tenant with no explicit taxLines — fall back to a
+        // single generic Tax row using the country's likely label.
+        const fallbackLabel = tenantCountry === 'US' ? 'Sales Tax'
+                            : tenantCountry === 'AU' ? 'GST'
+                            : 'Tax';
+        drawTotalRow(`${fallbackLabel} @ ${gstPct.toFixed(1)}%`, m(data.folio.gstAmount * sign));
+      }
       y += 3;
-      drawTotalRow(label('GRAND_TOTAL').en, rupee(data.folio.grandTotal * sign), true);
+      drawTotalRow(label('GRAND_TOTAL').en, m(data.folio.grandTotal * sign), true);
 
       y += 10;
 
@@ -443,7 +480,7 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
            .text(amtLbl.hi, M + 12, y + 13);
       }
       doc.fillColor(INK).font('Helvetica-BoldOblique').fontSize(10)
-         .text(rupeesInWords(Math.abs(data.folio.grandTotal)), M + 12, y + (amtLbl.hi ? 20 : 14), { width: INNER_W - 24 });
+         .text(amountInWords(Math.abs(data.folio.grandTotal), data.tenant), M + 12, y + (amtLbl.hi ? 20 : 14), { width: INNER_W - 24 });
       y += (drawBilingual ? 44 : 36);
 
       // ────────────── PAYMENT STATUS ──────────────
@@ -532,12 +569,29 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
 
 // ─────────────────────────── Helpers ────────────────────────────
 
-function rupee(n: number): string {
+// Phase 2 currency formatter. Returns "<CODE> <amount>" using the tenant's
+// configured locale & code; falls back to the exact "INR <amount>" format
+// (en-IN locale) when no tenant context is supplied — preserving the
+// pre-Phase-2 byte output for every Indian invoice in production.
+function money(
+  tenant: InvoiceData['tenant'] | undefined,
+  n: number,
+): string {
   const isNeg = n < 0;
   const abs = Math.abs(n || 0);
-  const formatted = abs.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${isNeg ? '-' : ''}INR ${formatted}`;
+  const code   = tenant?.currency_code || 'INR';
+  const locale = tenant?.locale        || 'en-IN';
+  let formatted: string;
+  try {
+    formatted = abs.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  } catch {
+    formatted = abs.toFixed(2);
+  }
+  return `${isNeg ? '-' : ''}${code} ${formatted}`;
 }
+// Backwards-compatible alias retained for the few remaining call sites
+// (amount-in-words, etc.). Equivalent to money(undefined, n).
+function rupee(n: number): string { return money(undefined, n); }
 function fmtDate(val: string | undefined): string {
   if (!val) return '—';
   const d = new Date(val);
@@ -576,11 +630,35 @@ function normaliseState(s: string): string {
   return String(s || '').toLowerCase().trim().replace(/[\s\-_]+/g, '');
 }
 function rupeesInWords(amount: number): string {
+  // Kept for backwards compatibility — equivalent to the tenant-less call.
+  return amountInWords(amount, undefined);
+}
+// Phase 2: tenant-aware "amount in words" renderer. India keeps the exact
+// "Rupees ... Only" output; other currencies use a generic format. The
+// minor-unit word ("Paise" / "Cents" / "Pence") is picked per code.
+function amountInWords(amount: number, tenant: InvoiceData['tenant'] | undefined): string {
+  const code = (tenant?.currency_code || 'INR').toUpperCase();
   const n = Math.round(amount);
-  const paise = Math.round((amount - n) * 100);
+  const minor = Math.round((amount - n) * 100);
   const words = numberToIndianWords(n);
-  const paiseWords = paise > 0 ? ` and ${numberToIndianWords(paise)} Paise` : '';
-  return `Rupees ${words}${paiseWords} Only`;
+  if (code === 'INR') {
+    const paiseWords = minor > 0 ? ` and ${numberToIndianWords(minor)} Paise` : '';
+    return `Rupees ${words}${paiseWords} Only`;
+  }
+  const minorUnit =
+    code === 'USD' || code === 'CAD' || code === 'AUD' ? 'Cents'
+    : code === 'GBP' ? 'Pence'
+    : code === 'EUR' ? 'Cents'
+    : 'Minor';
+  const noun =
+    code === 'USD' ? 'US Dollars'
+    : code === 'CAD' ? 'Canadian Dollars'
+    : code === 'AUD' ? 'Australian Dollars'
+    : code === 'GBP' ? 'Pounds'
+    : code === 'EUR' ? 'Euros'
+    : code;
+  const minorWords = minor > 0 ? ` and ${numberToIndianWords(minor)} ${minorUnit}` : '';
+  return `${noun} ${words}${minorWords} Only`;
 }
 function numberToIndianWords(num: number): string {
   if (num === 0) return 'Zero';
