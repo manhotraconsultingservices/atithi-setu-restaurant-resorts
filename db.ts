@@ -1210,6 +1210,67 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   `);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_loyalty_redemptions_phone ON loyalty_redemptions (customer_phone, redeemed_at DESC)`);
 
+  // Phase L2 additions to loyalty_customers:
+  //   birthday               DOB for the birthday-rewards cron. NULL = unknown.
+  //   marketing_opt_out      1 = customer asked not to receive promotional SMS / email.
+  //                          Transactional notifications (tier upgrade) still fire.
+  //   last_nudge_sent_at     dedup for near-upgrade nudges so we don't spam.
+  await db.exec(`ALTER TABLE loyalty_customers ADD COLUMN IF NOT EXISTS birthday DATE`).catch(() => {});
+  await db.exec(`ALTER TABLE loyalty_customers ADD COLUMN IF NOT EXISTS marketing_opt_out INT DEFAULT 0`).catch(() => {});
+  await db.exec(`ALTER TABLE loyalty_customers ADD COLUMN IF NOT EXISTS last_nudge_sent_at TIMESTAMP`).catch(() => {});
+
+  // ─────────────────────────────────────────────────────────────────────
+  // PROMO CODES (Phase L2 — owner-managed discount codes layered on tiers)
+  // ─────────────────────────────────────────────────────────────────────
+  // Owner creates codes like SUMMER25, FRIENDSDAY10, etc.
+  //   code                   the customer-typed string (uppercased, unique).
+  //   discount_percent       % off subtotal (mutually exclusive with discount_amount).
+  //   discount_amount        flat off (when set, percent is ignored).
+  //   min_order_amount       optional floor; code is rejected below this subtotal.
+  //   max_uses               total redemptions across all customers (NULL = unlimited).
+  //   max_uses_per_customer  per-customer cap (typical: 1 for one-shot codes).
+  //   used_count             running counter, incremented atomically on redeem.
+  //   starts_at, expires_at  optional validity window.
+  //   restricted_tier_id     if set, only customers in this tier can redeem.
+  //   stack_with_tier        1 = adds to tier discount (e.g. Silver 5% + code 10% = 15%);
+  //                          0 = takes the larger of the two (default — safer).
+  //   is_enabled             owner soft-disable toggle.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS promo_codes (
+      id TEXT PRIMARY KEY,
+      code TEXT UNIQUE NOT NULL,
+      label TEXT,
+      discount_percent DOUBLE PRECISION DEFAULT 0,
+      discount_amount DOUBLE PRECISION DEFAULT 0,
+      min_order_amount DOUBLE PRECISION DEFAULT 0,
+      max_uses INT,
+      max_uses_per_customer INT DEFAULT 1,
+      used_count INT DEFAULT 0,
+      starts_at TIMESTAMP,
+      expires_at TIMESTAMP,
+      restricted_tier_id TEXT,
+      stack_with_tier INT DEFAULT 0,
+      is_enabled INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_promo_codes_enabled ON promo_codes (is_enabled, expires_at)`);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS promo_redemptions (
+      id SERIAL PRIMARY KEY,
+      promo_code_id TEXT NOT NULL,
+      code TEXT NOT NULL,
+      customer_phone TEXT,
+      order_id TEXT NOT NULL,
+      discount_amount DOUBLE PRECISION,
+      redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_promo_redemptions_code ON promo_redemptions (promo_code_id, redeemed_at DESC)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_promo_redemptions_phone ON promo_redemptions (customer_phone, redeemed_at DESC)`);
+
   // First-time seed of default tiers per tenant. Owner can edit / disable
   // any of them via the LOYALTY tab; ON CONFLICT DO NOTHING means edits
   // survive future tenant DB initialisations.

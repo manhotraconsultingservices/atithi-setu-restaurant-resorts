@@ -24208,7 +24208,7 @@ function CustomerReservationView({ restaurantId, onBack }: { restaurantId: strin
 //   3. ANALYTICS — KPI cards + per-tier charts
 // All data per-tenant (server-side getTenantDb scoping).
 function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; token: string }) {
-  type SubTab = 'TIERS' | 'CUSTOMERS' | 'ANALYTICS';
+  type SubTab = 'TIERS' | 'CUSTOMERS' | 'PROMO_CODES' | 'ANALYTICS';
   const [subTab, setSubTab] = useState<SubTab>('TIERS');
 
   // Tiers
@@ -24362,18 +24362,18 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
             Tier-based rewards. Customers earn permanent discounts as their lifetime spend grows.
           </p>
         </div>
-        <div className="inline-flex bg-white rounded-2xl p-1 border border-[#cc5a16]/15">
-          {(['TIERS', 'CUSTOMERS', 'ANALYTICS'] as SubTab[]).map(s => (
+        <div className="inline-flex flex-wrap bg-white rounded-2xl p-1 border border-[#cc5a16]/15">
+          {(['TIERS', 'CUSTOMERS', 'PROMO_CODES', 'ANALYTICS'] as SubTab[]).map(s => (
             <button
               key={s}
               type="button"
               onClick={() => setSubTab(s)}
               className={cn(
-                'px-5 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all',
+                'px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all',
                 subTab === s ? 'bg-[#cc5a16] text-white shadow' : 'text-[#6b5d52] hover:bg-[#cc5a16]/5'
               )}
             >
-              {s === 'TIERS' ? 'Tiers' : s === 'CUSTOMERS' ? 'Customers' : 'Analytics'}
+              {s === 'TIERS' ? 'Tiers' : s === 'CUSTOMERS' ? 'Customers' : s === 'PROMO_CODES' ? 'Promo Codes' : 'Analytics'}
             </button>
           ))}
         </div>
@@ -24637,6 +24637,11 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
         </div>
       )}
 
+      {/* ── PROMO CODES sub-view (Phase L2) ─────────────────────────── */}
+      {subTab === 'PROMO_CODES' && (
+        <PromoCodesPanel restaurantId={restaurantId} token={token} tiers={tiers} />
+      )}
+
       {/* ── ANALYTICS sub-view ─────────────────────────────────────── */}
       {subTab === 'ANALYTICS' && (
         <div className="space-y-5">
@@ -24808,6 +24813,7 @@ function EnrollCustomerModal({ restaurantId, token, tiers, onClose, onEnrolled }
   const [email, setEmail] = useState('');
   const [tierId, setTierId] = useState('');
   const [notes, setNotes] = useState('');
+  const [birthday, setBirthday] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -24828,6 +24834,7 @@ function EnrollCustomerModal({ restaurantId, token, tiers, onClose, onEnrolled }
           email: email.trim() || null,
           notes: notes.trim() || null,
           current_tier_id: tierId || null,
+          birthday: birthday || null,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -24910,11 +24917,23 @@ function EnrollCustomerModal({ restaurantId, token, tiers, onClose, onEnrolled }
             </p>
           </div>
           <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Birthday</label>
+            <input
+              type="date"
+              value={birthday}
+              onChange={e => setBirthday(e.target.value)}
+              className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm border-none outline-none focus:ring-2 ring-[#cc5a16]/20"
+            />
+            <p className="text-[10px] text-[#9c8e85] mt-1 ml-1">
+              Optional — triggers a birthday reward email + WhatsApp on the day.
+            </p>
+          </div>
+          <div>
             <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Notes</label>
             <textarea
               value={notes}
               onChange={e => setNotes(e.target.value)}
-              placeholder="Optional — birthday, allergies, preferences…"
+              placeholder="Optional — allergies, preferences…"
               rows={2}
               className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm border-none outline-none focus:ring-2 ring-[#cc5a16]/20"
             />
@@ -24947,6 +24966,327 @@ function KPICard({ label, value }: { label: string; value: string }) {
     <div className="bg-white rounded-2xl border border-[#cc5a16]/10 px-5 py-4 shadow-sm">
       <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{label}</div>
       <div className="text-2xl font-serif font-bold text-[#1a1208] mt-1">{value}</div>
+    </div>
+  );
+}
+
+// PromoCodesPanel (Phase L2) — owner-managed discount codes that stack
+// with or replace the loyalty tier discount. Lists existing codes, lets
+// the owner create new ones, edit (rate / cap / window / tier-restriction
+// / stacking flag), or soft-disable.
+function PromoCodesPanel({ restaurantId, token, tiers }: { restaurantId: string; token: string; tiers: any[] }) {
+  const [codes, setCodes] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState<any | null>(null);
+  const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/promo-codes`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setCodes(await res.json());
+    } finally { setLoading(false); }
+  }, [restaurantId, token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async (id: string, body: any) => {
+    setMsg(null);
+    const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/promo-codes/${encodeURIComponent(id)}`, {
+      method: 'PUT', headers: auth, body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { setMsg({ type: 'err', text: data.error || `Save failed (${res.status})` }); return; }
+    setMsg({ type: 'ok', text: 'Promo code saved.' });
+    setEditing(null);
+    load();
+  };
+
+  const disable = async (id: string) => {
+    const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/promo-codes/${encodeURIComponent(id)}`, {
+      method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) { setMsg({ type: 'ok', text: 'Code disabled.' }); load(); }
+  };
+
+  return (
+    <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 md:p-8">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-5">
+        <div>
+          <h3 className="text-lg font-bold font-serif">Promo Codes</h3>
+          <p className="text-xs text-[#6b5d52]">Owner-managed discount codes that layer on top of (or replace) tier discounts.</p>
+        </div>
+        <button
+          onClick={() => setEditing({})}
+          className="px-4 py-2 bg-[#cc5a16] text-white rounded-2xl text-xs font-bold uppercase tracking-widest"
+        >+ New code</button>
+      </div>
+
+      {msg && (
+        <div className={cn('px-4 py-2 rounded-xl text-sm mb-4',
+          msg.type === 'ok' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                              'bg-red-50 text-red-700 border border-red-200')}>
+          {msg.text}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex justify-center py-12">
+          <div className="w-8 h-8 border-2 border-[#cc5a16]/30 border-t-[#cc5a16] rounded-full animate-spin" />
+        </div>
+      ) : codes.length === 0 ? (
+        <div className="py-12 text-center text-[#9c8e85] italic">
+          No promo codes yet. Click <strong>+ New code</strong> to create one.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[10px] uppercase tracking-widest text-[#9c8e85] border-b border-[#e8dfd0]">
+                <th className="py-3 pr-3">Code</th>
+                <th className="py-3 px-3">Discount</th>
+                <th className="py-3 px-3">Min order</th>
+                <th className="py-3 px-3">Uses</th>
+                <th className="py-3 px-3">Validity</th>
+                <th className="py-3 px-3">Restrictions</th>
+                <th className="py-3 px-3">Status</th>
+                <th className="py-3 px-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {codes.map((c: any) => (
+                <tr key={c.id} className="border-b border-[#f5ece0]">
+                  <td className="py-3 pr-3 font-mono font-bold">{c.code}{c.label ? <span className="block text-[10px] text-[#9c8e85] font-sans font-normal">{c.label}</span> : null}</td>
+                  <td className="py-3 px-3">
+                    {Number(c.discount_percent || 0) > 0 ? `${Number(c.discount_percent).toFixed(0)}%` :
+                     Number(c.discount_amount  || 0) > 0 ? `₹${Number(c.discount_amount).toFixed(0)} off` : '—'}
+                  </td>
+                  <td className="py-3 px-3">{Number(c.min_order_amount || 0) > 0 ? `₹${Number(c.min_order_amount).toFixed(0)}` : '—'}</td>
+                  <td className="py-3 px-3">
+                    {Number(c.used_count || 0)}
+                    {c.max_uses != null ? <span className="text-[#9c8e85]"> / {c.max_uses}</span> : <span className="text-[#9c8e85]"> / ∞</span>}
+                  </td>
+                  <td className="py-3 px-3 text-[11px]">
+                    {c.starts_at && <div>From {new Date(c.starts_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</div>}
+                    {c.expires_at && <div>Until {new Date(c.expires_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</div>}
+                    {!c.starts_at && !c.expires_at && '—'}
+                  </td>
+                  <td className="py-3 px-3 text-[11px]">
+                    {c.restricted_tier_id ? <div>{tiers.find((t: any) => t.id === c.restricted_tier_id)?.name || c.restricted_tier_id} only</div> : null}
+                    {Number(c.stack_with_tier || 0) === 1 ? <div className="text-orange-700">Stacks w/ tier</div> : null}
+                    {!c.restricted_tier_id && !c.stack_with_tier && <span className="text-[#9c8e85]">—</span>}
+                  </td>
+                  <td className="py-3 px-3">
+                    {Number(c.is_enabled || 0) === 1 ? (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">Active</span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-bold">Disabled</span>
+                    )}
+                  </td>
+                  <td className="py-3 px-3 text-right">
+                    <button onClick={() => setEditing(c)} className="text-xs font-bold text-[#cc5a16] mr-3">Edit</button>
+                    {Number(c.is_enabled || 0) === 1 && (
+                      <button onClick={() => disable(c.id)} className="text-xs font-bold text-red-500">Disable</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {editing && (
+        <PromoCodeEditorModal
+          code={editing}
+          tiers={tiers}
+          onClose={() => setEditing(null)}
+          onSave={save}
+        />
+      )}
+    </div>
+  );
+}
+
+function PromoCodeEditorModal({ code, tiers, onClose, onSave }: {
+  code: any;
+  tiers: any[];
+  onClose: () => void;
+  onSave: (id: string, body: any) => Promise<void>;
+}) {
+  const isEdit = !!code.id;
+  const [form, setForm] = useState({
+    code: code.code || '',
+    label: code.label || '',
+    discount_type: Number(code.discount_amount || 0) > 0 ? 'amount' : 'percent',
+    discount_percent: code.discount_percent ?? 10,
+    discount_amount: code.discount_amount ?? 0,
+    min_order_amount: code.min_order_amount ?? 0,
+    max_uses: code.max_uses ?? '',
+    max_uses_per_customer: code.max_uses_per_customer ?? 1,
+    starts_at: code.starts_at ? String(code.starts_at).slice(0, 10) : '',
+    expires_at: code.expires_at ? String(code.expires_at).slice(0, 10) : '',
+    restricted_tier_id: code.restricted_tier_id || '',
+    stack_with_tier: Number(code.stack_with_tier || 0) === 1,
+    is_enabled: code.is_enabled == null ? true : Number(code.is_enabled || 0) === 1,
+  });
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    setSaving(true);
+    try {
+      await onSave(isEdit ? code.id : 'new', {
+        code: form.code.trim().toUpperCase(),
+        label: form.label.trim(),
+        discount_percent: form.discount_type === 'percent' ? Number(form.discount_percent || 0) : 0,
+        discount_amount:  form.discount_type === 'amount'  ? Number(form.discount_amount  || 0) : 0,
+        min_order_amount: Number(form.min_order_amount || 0),
+        max_uses: form.max_uses === '' || form.max_uses == null ? null : Number(form.max_uses),
+        max_uses_per_customer: Number(form.max_uses_per_customer || 1),
+        starts_at: form.starts_at || null,
+        expires_at: form.expires_at || null,
+        restricted_tier_id: form.restricted_tier_id || null,
+        stack_with_tier: form.stack_with_tier,
+        is_enabled: form.is_enabled,
+      });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+      <div className="bg-white rounded-[32px] shadow-2xl w-full max-w-lg my-auto">
+        <div className="p-6 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
+          <h3 className="text-xl font-bold font-serif">{isEdit ? 'Edit Promo Code' : 'New Promo Code'}</h3>
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={20}/></button>
+        </div>
+        <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Code *</label>
+            <input
+              value={form.code}
+              onChange={e => setForm(f => ({ ...f, code: e.target.value.toUpperCase() }))}
+              placeholder="SUMMER25"
+              className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm font-mono uppercase tracking-wider"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Label (optional)</label>
+            <input
+              value={form.label}
+              onChange={e => setForm(f => ({ ...f, label: e.target.value }))}
+              placeholder="Summer campaign"
+              className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Discount type</label>
+            <div className="flex gap-2">
+              {[{ k: 'percent', l: '% off' }, { k: 'amount', l: 'Flat ₹ off' }].map(opt => (
+                <button
+                  key={opt.k}
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, discount_type: opt.k }))}
+                  className={cn('flex-1 py-2 rounded-xl text-xs font-bold',
+                    form.discount_type === opt.k ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52]')}
+                >{opt.l}</button>
+              ))}
+            </div>
+          </div>
+          {form.discount_type === 'percent' ? (
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Percent off *</label>
+              <input type="number" min={0} max={100} step={1}
+                value={form.discount_percent}
+                onChange={e => setForm(f => ({ ...f, discount_percent: e.target.value as any }))}
+                className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm" />
+            </div>
+          ) : (
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Amount off (₹) *</label>
+              <input type="number" min={0} step={1}
+                value={form.discount_amount}
+                onChange={e => setForm(f => ({ ...f, discount_amount: e.target.value as any }))}
+                className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm" />
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Min order (₹)</label>
+              <input type="number" min={0}
+                value={form.min_order_amount}
+                onChange={e => setForm(f => ({ ...f, min_order_amount: e.target.value as any }))}
+                className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm" />
+            </div>
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Max total uses</label>
+              <input type="number" min={0}
+                value={form.max_uses}
+                onChange={e => setForm(f => ({ ...f, max_uses: e.target.value as any }))}
+                placeholder="∞"
+                className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm" />
+            </div>
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Per customer</label>
+              <input type="number" min={1}
+                value={form.max_uses_per_customer}
+                onChange={e => setForm(f => ({ ...f, max_uses_per_customer: e.target.value as any }))}
+                className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm" />
+            </div>
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Tier restriction</label>
+              <select
+                value={form.restricted_tier_id}
+                onChange={e => setForm(f => ({ ...f, restricted_tier_id: e.target.value }))}
+                className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm"
+              >
+                <option value="">Any customer</option>
+                {tiers.filter((t: any) => t.is_enabled).map((t: any) => (
+                  <option key={t.id} value={t.id}>{t.name} only</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Starts</label>
+              <input type="date" value={form.starts_at}
+                onChange={e => setForm(f => ({ ...f, starts_at: e.target.value }))}
+                className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm" />
+            </div>
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Expires</label>
+              <input type="date" value={form.expires_at}
+                onChange={e => setForm(f => ({ ...f, expires_at: e.target.value }))}
+                className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm" />
+            </div>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox"
+              checked={form.stack_with_tier}
+              onChange={e => setForm(f => ({ ...f, stack_with_tier: e.target.checked }))}
+            />
+            <span className="text-sm">Stack with tier discount (adds to it)</span>
+          </label>
+          <p className="text-[10px] text-[#9c8e85] ml-6 -mt-3">
+            Off = take the larger of code-discount and tier-discount. On = both apply (e.g. Silver 5% + code 10% = 15%).
+          </p>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox"
+              checked={form.is_enabled}
+              onChange={e => setForm(f => ({ ...f, is_enabled: e.target.checked }))}
+            />
+            <span className="text-sm">Enabled</span>
+          </label>
+        </div>
+        <div className="p-6 border-t border-[#cc5a16]/10 flex justify-end gap-3">
+          <button onClick={onClose} className="px-5 py-2.5 text-xs font-bold text-[#6b5d52]">Cancel</button>
+          <button onClick={submit} disabled={saving || !form.code.trim()}
+            className="px-5 py-2.5 bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest rounded-2xl disabled:opacity-50">
+            {saving ? 'Saving…' : 'Save Code'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

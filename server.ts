@@ -3776,6 +3776,15 @@ async function startServer() {
       const email = (req.body?.email || '').toString().trim() || null;
       const notes = (req.body?.notes || '').toString().trim() || null;
       const initialTier = (req.body?.current_tier_id || '').toString().trim().toUpperCase() || null;
+      // Birthday: accept YYYY-MM-DD; reject obvious garbage; treat empty as null.
+      let birthday: string | null = null;
+      if (req.body?.birthday) {
+        const b = String(req.body.birthday).trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(b)) {
+          return res.status(400).json({ error: "Birthday must be YYYY-MM-DD" });
+        }
+        birthday = b;
+      }
       const db = await getTenantDb(req.params.id);
       const existing: any = await db.get(
         "SELECT phone, name FROM loyalty_customers WHERE phone = ?", [phone]
@@ -3799,9 +3808,9 @@ async function startServer() {
         tierId = defaultTier?.id || null;
       }
       await db.run(
-        `INSERT INTO loyalty_customers (phone, name, email, notes, current_tier_id, total_orders, total_spent, first_order_at, last_order_at)
-         VALUES (?, ?, ?, ?, ?, 0, 0, NULL, NULL)`,
-        [phone, name, email, notes, tierId]
+        `INSERT INTO loyalty_customers (phone, name, email, notes, current_tier_id, birthday, total_orders, total_spent, first_order_at, last_order_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, NULL)`,
+        [phone, name, email, notes, tierId, birthday]
       );
       if (tierId) {
         await db.run(
@@ -3810,7 +3819,7 @@ async function startServer() {
           [phone, tierId]
         ).catch(() => {});
       }
-      res.json({ success: true, phone, name, email, current_tier_id: tierId });
+      res.json({ success: true, phone, name, email, current_tier_id: tierId, birthday });
     } catch (err) {
       console.error("Enroll loyalty customer error:", err);
       res.status(500).json({ error: "Failed to enroll customer" });
@@ -4226,6 +4235,490 @@ async function startServer() {
       console.error("Loyalty seed-demo error:", err);
       res.status(500).json({ error: "Failed to seed demo data" });
     }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // PROMO CODES (Phase L2 — discount codes layered on loyalty tiers)
+  // ─────────────────────────────────────────────────────────────────────
+
+  // List all promo codes (owner view — includes disabled and expired)
+  app.get("/api/restaurant/:id/loyalty/promo-codes", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT id, code, label, discount_percent, discount_amount, min_order_amount,
+                max_uses, max_uses_per_customer, used_count,
+                starts_at, expires_at, restricted_tier_id, stack_with_tier, is_enabled,
+                created_at, updated_at
+           FROM promo_codes
+          ORDER BY created_at DESC`
+      );
+      res.json(rows || []);
+    } catch (err) {
+      console.error("Promo codes GET error:", err);
+      res.status(500).json({ error: "Failed to list promo codes" });
+    }
+  });
+
+  // Create or update a promo code
+  app.put("/api/restaurant/:id/loyalty/promo-codes/:codeId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const db = await getTenantDb(req.params.id);
+      const idParam = String(req.params.codeId || '').trim();
+      const code = String(req.body?.code || '').trim().toUpperCase();
+      if (!code || !/^[A-Z0-9_-]{3,32}$/.test(code)) {
+        return res.status(400).json({ error: "Code must be 3-32 chars, A-Z/0-9/_/- only" });
+      }
+      const pct = Number(req.body?.discount_percent || 0);
+      const amt = Number(req.body?.discount_amount || 0);
+      if (pct <= 0 && amt <= 0) {
+        return res.status(400).json({ error: "Set either discount_percent or discount_amount > 0" });
+      }
+      if (pct > 0 && amt > 0) {
+        return res.status(400).json({ error: "Use either percent or fixed amount, not both" });
+      }
+      const id = idParam === 'new' ? `promo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` : idParam;
+      const exists: any = idParam !== 'new'
+        ? await db.get("SELECT id FROM promo_codes WHERE id = ?", [id])
+        : null;
+      const values = {
+        code,
+        label: req.body?.label ? String(req.body.label).trim() : null,
+        discount_percent: pct,
+        discount_amount: amt,
+        min_order_amount: Number(req.body?.min_order_amount || 0),
+        max_uses: req.body?.max_uses != null ? Number(req.body.max_uses) : null,
+        max_uses_per_customer: Number(req.body?.max_uses_per_customer || 1),
+        starts_at: req.body?.starts_at || null,
+        expires_at: req.body?.expires_at || null,
+        restricted_tier_id: req.body?.restricted_tier_id ? String(req.body.restricted_tier_id) : null,
+        stack_with_tier: req.body?.stack_with_tier ? 1 : 0,
+        is_enabled: req.body?.is_enabled === false ? 0 : 1,
+      };
+      if (exists) {
+        await db.run(
+          `UPDATE promo_codes SET
+             code = ?, label = ?, discount_percent = ?, discount_amount = ?,
+             min_order_amount = ?, max_uses = ?, max_uses_per_customer = ?,
+             starts_at = ?, expires_at = ?, restricted_tier_id = ?,
+             stack_with_tier = ?, is_enabled = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [values.code, values.label, values.discount_percent, values.discount_amount,
+           values.min_order_amount, values.max_uses, values.max_uses_per_customer,
+           values.starts_at, values.expires_at, values.restricted_tier_id,
+           values.stack_with_tier, values.is_enabled, id]
+        );
+      } else {
+        try {
+          await db.run(
+            `INSERT INTO promo_codes
+               (id, code, label, discount_percent, discount_amount, min_order_amount,
+                max_uses, max_uses_per_customer, starts_at, expires_at,
+                restricted_tier_id, stack_with_tier, is_enabled)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, values.code, values.label, values.discount_percent, values.discount_amount,
+             values.min_order_amount, values.max_uses, values.max_uses_per_customer,
+             values.starts_at, values.expires_at, values.restricted_tier_id,
+             values.stack_with_tier, values.is_enabled]
+          );
+        } catch (err: any) {
+          if (err?.code === '23505') {
+            return res.status(409).json({ error: `Code ${code} already exists` });
+          }
+          throw err;
+        }
+      }
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error("Promo code PUT error:", err);
+      res.status(500).json({ error: "Failed to save promo code" });
+    }
+  });
+
+  // Delete a promo code (soft delete by disabling — we never lose redemption history)
+  app.delete("/api/restaurant/:id/loyalty/promo-codes/:codeId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE promo_codes SET is_enabled = 0 WHERE id = ?", [req.params.codeId]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Promo code DELETE error:", err);
+      res.status(500).json({ error: "Failed to disable code" });
+    }
+  });
+
+  // Customer-facing: validate a promo code at checkout
+  // Returns the discount that would apply (or an error reason). Does NOT
+  // record a redemption — that happens in /apply once the order is placed.
+  app.get("/api/restaurant/:id/loyalty/promo-codes/validate", async (req: Request, res: Response) => {
+    try {
+      const code = String(req.query.code || '').trim().toUpperCase();
+      const phone = _normalisePhone(req.query.phone);
+      const subtotal = Number(req.query.subtotal || 0);
+      if (!code) return res.status(400).json({ valid: false, error: "Code required" });
+      const db = await getTenantDb(req.params.id);
+      const promo: any = await db.get(
+        `SELECT * FROM promo_codes WHERE code = ?`, [code]
+      );
+      if (!promo) return res.json({ valid: false, error: "Code not found" });
+      if (Number(promo.is_enabled || 0) === 0) return res.json({ valid: false, error: "Code is disabled" });
+      const now = new Date();
+      if (promo.starts_at && new Date(promo.starts_at) > now) return res.json({ valid: false, error: "Code not yet active" });
+      if (promo.expires_at && new Date(promo.expires_at) < now) return res.json({ valid: false, error: "Code expired" });
+      if (promo.max_uses != null && Number(promo.used_count || 0) >= Number(promo.max_uses)) {
+        return res.json({ valid: false, error: "Code fully redeemed" });
+      }
+      if (Number(promo.min_order_amount || 0) > 0 && subtotal < Number(promo.min_order_amount)) {
+        return res.json({
+          valid: false,
+          error: `Minimum order ₹${Number(promo.min_order_amount).toFixed(0)} required`,
+          min_order_amount: Number(promo.min_order_amount),
+        });
+      }
+      // Customer-level checks
+      let tierId: string | null = null;
+      if (phone) {
+        const customer: any = await db.get(
+          "SELECT current_tier_id, is_blocked FROM loyalty_customers WHERE phone = ?", [phone]
+        );
+        if (customer && Number(customer.is_blocked || 0) === 1) {
+          return res.json({ valid: false, error: "Customer is blocked" });
+        }
+        tierId = customer?.current_tier_id || null;
+        if (promo.restricted_tier_id && promo.restricted_tier_id !== tierId) {
+          const tierRow: any = await db.get(
+            "SELECT name FROM loyalty_tiers WHERE id = ?", [promo.restricted_tier_id]
+          );
+          return res.json({
+            valid: false,
+            error: `Code is only valid for ${tierRow?.name || promo.restricted_tier_id} members`,
+          });
+        }
+        const perCustomer: any = await db.get(
+          "SELECT COUNT(*) AS c FROM promo_redemptions WHERE promo_code_id = ? AND customer_phone = ?",
+          [promo.id, phone]
+        );
+        if (Number(perCustomer?.c || 0) >= Number(promo.max_uses_per_customer || 1)) {
+          return res.json({ valid: false, error: "You've already used this code the maximum number of times" });
+        }
+      } else if (promo.restricted_tier_id) {
+        return res.json({ valid: false, error: "Code requires a registered loyalty customer" });
+      }
+      // Compute discount
+      let discountAmount = Number(promo.discount_amount || 0);
+      if (discountAmount <= 0 && Number(promo.discount_percent || 0) > 0) {
+        discountAmount = Math.round((subtotal * Number(promo.discount_percent)) / 100 * 100) / 100;
+      }
+      // Cap at subtotal so we never produce a negative grand total
+      discountAmount = Math.min(discountAmount, subtotal);
+      // Tier stacking preview
+      let tierDiscount = 0;
+      let tierName: string | null = null;
+      if (tierId) {
+        const tier: any = await db.get(
+          "SELECT name, discount_percent FROM loyalty_tiers WHERE id = ? AND is_enabled = 1", [tierId]
+        );
+        if (tier) {
+          tierName = tier.name;
+          tierDiscount = Math.round((subtotal * Number(tier.discount_percent || 0)) / 100 * 100) / 100;
+        }
+      }
+      const totalDiscount = Number(promo.stack_with_tier || 0) === 1
+        ? Math.min(subtotal, discountAmount + tierDiscount)
+        : Math.max(discountAmount, tierDiscount);
+      res.json({
+        valid: true,
+        code: promo.code,
+        label: promo.label,
+        promo_discount: discountAmount,
+        tier_discount: tierDiscount,
+        tier_name: tierName,
+        stack_with_tier: Number(promo.stack_with_tier || 0) === 1,
+        total_discount: totalDiscount,
+        final_total: Math.max(0, subtotal - totalDiscount),
+      });
+    } catch (err) {
+      console.error("Promo validate error:", err);
+      res.status(500).json({ valid: false, error: "Failed to validate" });
+    }
+  });
+
+  // Record a redemption — called from the order-creation hook in
+  // POST /invoices/manual + POST /orders if a code was applied.
+  // Atomic increment of used_count via a row update.
+  async function _recordPromoRedemption(
+    tenantId: string,
+    code: string,
+    customerPhone: string | null,
+    orderId: string,
+    discountAmount: number,
+  ): Promise<void> {
+    try {
+      const db = await getTenantDb(tenantId);
+      const promo: any = await db.get(
+        "SELECT id FROM promo_codes WHERE code = ?", [code.toUpperCase()]
+      );
+      if (!promo) return;
+      await db.run(
+        `INSERT INTO promo_redemptions (promo_code_id, code, customer_phone, order_id, discount_amount)
+         VALUES (?, ?, ?, ?, ?)`,
+        [promo.id, code.toUpperCase(), customerPhone || null, orderId, discountAmount]
+      );
+      await db.run(
+        "UPDATE promo_codes SET used_count = used_count + 1 WHERE id = ?", [promo.id]
+      );
+    } catch (err) {
+      console.error('[loyalty] promo redemption record error:', err);
+    }
+  }
+  (globalThis as any).__recordPromoRedemption = _recordPromoRedemption;
+
+  // ─────────────────────────────────────────────────────────────────────
+  // CUSTOMER SELF-LOOKUP (Phase L2 — public page for tier check)
+  // ─────────────────────────────────────────────────────────────────────
+  // Public, no-auth. Customer enters their phone, gets back their tier
+  // name, current discount, and how close they are to the next tier.
+  // Rate-limited per phone via the standard nginx layer + small per-call
+  // sanity (max 1 lookup per second).
+  const _selfLookupLast = new Map<string, number>();
+  app.get("/api/restaurant/:id/loyalty/self-lookup", async (req: Request, res: Response) => {
+    try {
+      const phone = _normalisePhone(req.query.phone);
+      if (!phone || phone.length < 7) return res.status(400).json({ error: "Valid phone required" });
+      const key = `${req.params.id}:${phone}`;
+      const last = _selfLookupLast.get(key) || 0;
+      const now = Date.now();
+      if (now - last < 1000) return res.status(429).json({ error: "Please wait a moment" });
+      _selfLookupLast.set(key, now);
+      const db = await getTenantDb(req.params.id);
+      const restaurant: any = await centralDb.get(
+        "SELECT name, currency_symbol FROM restaurants WHERE id = ?", [req.params.id]
+      );
+      const customer: any = await db.get(
+        `SELECT phone, name, total_orders, total_spent, current_tier_id, is_blocked,
+                first_order_at, last_order_at
+           FROM loyalty_customers WHERE phone = ?`, [phone]
+      );
+      if (!customer) {
+        return res.json({
+          recognised: false,
+          restaurant_name: restaurant?.name || null,
+          message: "We don't see you in our loyalty program yet. Your next order at this restaurant will enrol you automatically.",
+        });
+      }
+      if (Number(customer.is_blocked || 0) === 1) {
+        return res.json({ recognised: true, blocked: true });
+      }
+      const spent = Number(customer.total_spent || 0);
+      const tier = await _resolveTierForSpend(db, spent);
+      const nextRows: any[] = await db.query(
+        `SELECT name, min_lifetime_spend, discount_percent
+           FROM loyalty_tiers
+          WHERE is_enabled = 1 AND min_lifetime_spend > ?
+          ORDER BY min_lifetime_spend ASC LIMIT 1`,
+        [spent]
+      );
+      const next = nextRows && nextRows.length > 0 ? nextRows[0] : null;
+      res.json({
+        recognised: true,
+        restaurant_name: restaurant?.name || null,
+        currency_symbol: restaurant?.currency_symbol || '₹',
+        customer: {
+          name: customer.name,
+          total_orders: Number(customer.total_orders || 0),
+          total_spent: spent,
+          first_order_at: customer.first_order_at,
+          last_order_at: customer.last_order_at,
+        },
+        tier: tier ? {
+          name: tier.name,
+          discount_percent: Number(tier.discount_percent || 0),
+        } : null,
+        next_tier: next ? {
+          name: next.name,
+          spend_remaining: Math.max(0, Number(next.min_lifetime_spend || 0) - spent),
+          discount_percent: Number(next.discount_percent || 0),
+        } : null,
+      });
+    } catch (err) {
+      console.error("Self-lookup error:", err);
+      res.status(500).json({ error: "Lookup failed" });
+    }
+  });
+
+  // Public HTML page — customers visit /my-loyalty on the tenant subdomain
+  // and check their tier without needing to log in. Self-contained: no
+  // React bundle, no auth, just one fetch to /loyalty/self-lookup.
+  // Restaurant ID is resolved from the tenant subdomain via
+  // /api/tenant/by-slug, so the same HTML works for every tenant.
+  app.get('/my-loyalty', (_req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.send(`<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>My Loyalty Status</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;background:#faf7f2;color:#1a1208}
+  .wrap{max-width:480px;margin:0 auto;padding:32px 20px;min-height:100vh;display:flex;flex-direction:column}
+  h1{font-family:Georgia,serif;font-size:28px;margin:0 0 4px}
+  .sub{color:#6b5d52;font-size:14px;margin-bottom:24px}
+  .card{background:#fff;border-radius:24px;border:1px solid rgba(204,90,22,0.1);padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.04)}
+  input,button{font:inherit}
+  input[type=tel]{width:100%;padding:14px 16px;border-radius:14px;border:none;background:#faf7f2;font-size:16px;outline:none}
+  input[type=tel]:focus{box-shadow:0 0 0 2px rgba(204,90,22,0.2)}
+  button{width:100%;padding:14px;background:#cc5a16;color:#fff;border:none;border-radius:14px;font-weight:700;font-size:14px;letter-spacing:0.05em;text-transform:uppercase;cursor:pointer;margin-top:12px}
+  button:disabled{opacity:0.5;cursor:not-allowed}
+  .tier-badge{display:inline-block;padding:6px 14px;border-radius:999px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;margin:8px 0}
+  .tier-GOLD{background:#fef3c7;color:#92400e}
+  .tier-SILVER{background:#e5e7eb;color:#374151}
+  .tier-BRONZE{background:#fde4cf;color:#9a3412}
+  .progress{height:8px;background:#faf7f2;border-radius:999px;overflow:hidden;margin:12px 0 6px}
+  .progress-bar{height:100%;background:#cc5a16;transition:width 0.5s}
+  .stat{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f5ece0;font-size:14px}
+  .stat:last-child{border:0}
+  .stat .lbl{color:#6b5d52}
+  .stat .val{font-weight:700}
+  .err{background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:12px;padding:12px;font-size:14px;margin-top:12px}
+  .ok{background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:16px;margin-bottom:16px}
+  .footer{margin-top:auto;padding-top:32px;text-align:center;color:#9c8e85;font-size:12px}
+  a{color:#cc5a16}
+</style>
+</head><body>
+<div class="wrap">
+  <h1 id="title">My Loyalty Status</h1>
+  <div class="sub" id="restName">Loading…</div>
+  <div class="card" id="card">
+    <div id="form">
+      <label style="display:block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:#6b5d52;margin-bottom:8px">Your phone number</label>
+      <input type="tel" id="phone" placeholder="e.g. 9876543210" maxlength="14" autofocus />
+      <button id="go">Check my status</button>
+      <div id="err"></div>
+    </div>
+    <div id="result" style="display:none"></div>
+  </div>
+  <div class="footer">Powered by Atithi Setu</div>
+</div>
+<script>
+(function(){
+  var RESERVED = ['www','api','admin','app','demo','internal','support','mail','ftp','blog','cdn','static','help','docs','auth','login','signup','register','test','staging','dev','erp'];
+  function detectSlug(){
+    try{
+      var host = window.location.hostname;
+      if(host === 'localhost' || host === '127.0.0.1' || /^\\d+\\.\\d+\\.\\d+\\.\\d+$/.test(host)){
+        var p = new URLSearchParams(window.location.search);
+        var qp = p.get('tenant');
+        return qp && RESERVED.indexOf(qp.toLowerCase()) === -1 ? qp.toLowerCase() : null;
+      }
+      var parts = host.split('.');
+      if(parts.length < 3) return null;
+      var first = parts[0].toLowerCase();
+      if(RESERVED.indexOf(first) !== -1) return null;
+      return first;
+    }catch(e){ return null; }
+  }
+  var slug = detectSlug();
+  var restaurantId = null;
+  var restaurantName = '';
+  var currencySymbol = '₹';
+  var titleEl = document.getElementById('title');
+  var restNameEl = document.getElementById('restName');
+  if(!slug){
+    restNameEl.textContent = 'No tenant detected — open this page from a restaurant subdomain.';
+    document.getElementById('go').disabled = true;
+    return;
+  }
+  fetch('/api/tenant/by-slug/' + encodeURIComponent(slug)).then(function(r){
+    if(!r.ok) throw new Error('lookup failed');
+    return r.json();
+  }).then(function(t){
+    restaurantId = t.id;
+    restaurantName = t.name || slug;
+    titleEl.textContent = restaurantName + ' Loyalty';
+    restNameEl.textContent = 'Enter your phone to check your tier and discount.';
+  }).catch(function(){
+    restNameEl.textContent = 'Restaurant not found.';
+    document.getElementById('go').disabled = true;
+  });
+
+  function render(data){
+    document.getElementById('form').style.display = 'none';
+    var el = document.getElementById('result');
+    el.style.display = 'block';
+    if(!data.recognised){
+      el.innerHTML = '<div class="ok"><strong>Not enrolled yet</strong><br/><span style="color:#6b5d52;font-size:13px">' +
+        (data.message || 'Your next order will enrol you automatically.') + '</span></div>' +
+        '<button onclick="location.reload()" style="background:#e5e7eb;color:#1a1208">Try another number</button>';
+      return;
+    }
+    if(data.blocked){
+      el.innerHTML = '<div class="err">Your account is currently inactive. Please reach out to the restaurant.</div>' +
+        '<button onclick="location.reload()" style="background:#e5e7eb;color:#1a1208">Back</button>';
+      return;
+    }
+    var sym = data.currency_symbol || currencySymbol;
+    var c = data.customer || {};
+    var t = data.tier;
+    var nt = data.next_tier;
+    var tierName = t ? t.name : 'Bronze';
+    var tierClass = 'tier-' + (tierName || 'BRONZE').toUpperCase();
+    var pct = t ? Number(t.discount_percent || 0) : 0;
+    var html = '';
+    html += '<div style="text-align:center;margin-bottom:16px">';
+    html += '<div style="font-size:14px;color:#6b5d52">Welcome back,</div>';
+    html += '<div style="font-size:22px;font-weight:700;font-family:Georgia,serif">' + (c.name || 'Loyalty member') + '</div>';
+    html += '<span class="tier-badge ' + tierClass + '">' + tierName + ' member</span>';
+    if(pct > 0) html += '<div style="color:#cc5a16;font-weight:700;font-size:18px;margin-top:4px">' + pct + '% off every order</div>';
+    html += '</div>';
+    html += '<div class="stat"><span class="lbl">Total orders</span><span class="val">' + (Number(c.total_orders) || 0) + '</span></div>';
+    html += '<div class="stat"><span class="lbl">Lifetime spend</span><span class="val">' + sym + Number(c.total_spent || 0).toLocaleString('en-IN') + '</span></div>';
+    if(nt){
+      var max = Number(c.total_spent || 0) + Number(nt.spend_remaining || 0);
+      var prog = max > 0 ? Math.min(100, Math.round((Number(c.total_spent || 0) / max) * 100)) : 0;
+      html += '<div style="margin-top:16px;padding:14px;background:#faf7f2;border-radius:14px">';
+      html += '<div style="font-size:13px;color:#6b5d52;margin-bottom:8px">' + sym + Number(nt.spend_remaining || 0).toLocaleString('en-IN') + ' more to reach <strong>' + nt.name + '</strong> (' + Number(nt.discount_percent || 0) + '% off)</div>';
+      html += '<div class="progress"><div class="progress-bar" style="width:' + prog + '%"></div></div>';
+      html += '<div style="font-size:11px;color:#9c8e85;text-align:right">' + prog + '%</div>';
+      html += '</div>';
+    } else {
+      html += '<div style="margin-top:16px;padding:14px;background:#fef3c7;border-radius:14px;text-align:center;font-size:13px;color:#92400e"><strong>You\\'re at the top tier.</strong> Thanks for being a loyal customer.</div>';
+    }
+    html += '<button onclick="location.reload()" style="background:#e5e7eb;color:#1a1208;margin-top:16px">Check another number</button>';
+    el.innerHTML = html;
+  }
+  document.getElementById('go').addEventListener('click', function(){
+    if(!restaurantId) return;
+    var p = document.getElementById('phone').value.replace(/\\D/g, '');
+    var errEl = document.getElementById('err');
+    errEl.innerHTML = '';
+    if(p.length < 10){ errEl.innerHTML = '<div class="err">Please enter a 10-digit phone number.</div>'; return; }
+    var btn = document.getElementById('go');
+    btn.disabled = true; btn.textContent = 'Looking up…';
+    fetch('/api/restaurant/' + encodeURIComponent(restaurantId) + '/loyalty/self-lookup?phone=' + encodeURIComponent(p))
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(d.error) throw new Error(d.error);
+        render(d);
+      })
+      .catch(function(e){
+        errEl.innerHTML = '<div class="err">' + (e.message || 'Lookup failed') + '</div>';
+        btn.disabled = false; btn.textContent = 'Check my status';
+      });
+  });
+  document.getElementById('phone').addEventListener('keydown', function(e){
+    if(e.key === 'Enter') document.getElementById('go').click();
+  });
+})();
+</script>
+</body></html>`);
   });
 
   // ─────────────────────────────────────────────────────────────────────
@@ -13975,7 +14468,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'loyalty-enrollment-and-seed',
+    commit_marker: 'loyalty-v2-birthdays-promos-selflookup',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -14003,6 +14496,10 @@ async function startServer() {
       'tenant-db-init-race-fix',         // Hotfix: getTenantDb() caches an init Promise so concurrent callers don't race on CREATE INDEX IF NOT EXISTS
       'loyalty-manual-enrollment',       // POST /loyalty/customers — owner can enroll walk-ins/VIPs without an order; + Enroll Customer button in LOYALTY tab
       'loyalty-bulk-seed-endpoint',      // POST /api/admin/restaurant/:id/loyalty/seed-demo — SUPER_ADMIN, one-curl population of 30 demo customers
+      'loyalty-birthday-rewards',        // Daily 09:00 IST cron — LOYALTY_BIRTHDAY_REWARD per DOB match
+      'loyalty-near-upgrade-nudge',      // Weekly Mon 09:00 IST cron — customers within 20% of next tier
+      'loyalty-promo-codes',             // Owner-managed discount codes; stack-with-tier or max(tier, code)
+      'loyalty-self-lookup-page',        // Public /my-loyalty HTML page — customers check their tier without login
     ],
     booted_at: new Date().toISOString(),
   };
@@ -14687,6 +15184,144 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[timesheet-cron] Daily timesheet materialisation started — 23:59 IST');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Phase L2 — Loyalty birthday rewards (daily 09:00 IST) ───────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Scans every active tenant for loyalty customers whose DOB matches today
+  // (month + day). Fires LOYALTY_BIRTHDAY_REWARD per match. Skips customers
+  // with marketing_opt_out = 1. Idempotent across the same calendar day:
+  // central `sent_loyalty_birthdays` dedup table prevents double-sends if
+  // the cron runs twice (manual + scheduled) on the same UTC date.
+  cron.schedule('0 9 * * *', async () => {
+    try {
+      console.log('[loyalty-birthday] 09:00 IST — scanning loyalty customers for birthdays');
+      await centralDb.exec(`
+        CREATE TABLE IF NOT EXISTS sent_loyalty_birthdays (
+          id SERIAL PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          customer_phone TEXT NOT NULL,
+          sent_on DATE NOT NULL DEFAULT CURRENT_DATE,
+          UNIQUE (tenant_id, customer_phone, sent_on)
+        )
+      `).catch(() => {});
+      const tenants: any[] = await centralDb.query(
+        "SELECT id, name FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM' AND access_revoked = 0"
+      );
+      const todayIso = new Date().toISOString().slice(0, 10);
+      let sent = 0;
+      for (const t of (tenants || [])) {
+        try {
+          const db = await getTenantDb(t.id);
+          const matches: any[] = await db.query(
+            `SELECT phone, name, email, current_tier_id
+               FROM loyalty_customers
+              WHERE birthday IS NOT NULL
+                AND COALESCE(marketing_opt_out, 0) = 0
+                AND COALESCE(is_blocked, 0) = 0
+                AND EXTRACT(MONTH FROM birthday) = EXTRACT(MONTH FROM CURRENT_DATE)
+                AND EXTRACT(DAY   FROM birthday) = EXTRACT(DAY   FROM CURRENT_DATE)`
+          );
+          for (const c of (matches || [])) {
+            // Dedup: skip if already sent today
+            const dup = await centralDb.run(
+              `INSERT INTO sent_loyalty_birthdays (tenant_id, customer_phone, sent_on)
+               VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+              [t.id, c.phone, todayIso]
+            );
+            const fresh = (dup as any)?.rowCount ?? (dup as any)?.changes ?? 1;
+            if (Number(fresh) === 0) continue;
+            const tier: any = c.current_tier_id
+              ? await db.get("SELECT name, discount_percent FROM loyalty_tiers WHERE id = ?", [c.current_tier_id])
+              : null;
+            triggerNotification(t.id, 'LOYALTY_BIRTHDAY_REWARD', {
+              customerName: c.name,
+              customerEmail: c.email,
+              customerPhone: c.phone,
+              tierName: tier?.name || 'Loyalty',
+              discountPercent: Number(tier?.discount_percent || 0),
+            }).catch(() => {});
+            sent++;
+          }
+        } catch (err) {
+          console.error(`[loyalty-birthday] tenant ${t.id} failed:`, err);
+        }
+      }
+      console.log(`[loyalty-birthday] done — ${sent} birthday message(s) sent across ${tenants?.length || 0} tenants`);
+    } catch (err) {
+      console.error('[loyalty-birthday] error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[loyalty-birthday] Daily birthday rewards cron started — 09:00 IST');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Phase L2 — Loyalty near-upgrade nudge (weekly Mon 09:00 IST) ────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Once a week, find customers within 20% of their next tier threshold and
+  // send a friendly nudge. Rate-limited per customer via last_nudge_sent_at
+  // (30-day cooldown) so we don't pester anyone who hasn't bumped their
+  // spend since the last nudge.
+  cron.schedule('0 9 * * 1', async () => {
+    try {
+      console.log('[loyalty-nudge] Mon 09:00 IST — scanning for near-upgrade candidates');
+      const tenants: any[] = await centralDb.query(
+        "SELECT id, name FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM' AND access_revoked = 0"
+      );
+      let nudged = 0;
+      for (const t of (tenants || [])) {
+        try {
+          const db = await getTenantDb(t.id);
+          // Find every enabled tier sorted by threshold so we can compute the next-tier gap per customer.
+          const tiers: any[] = await db.query(
+            "SELECT id, name, min_lifetime_spend, discount_percent FROM loyalty_tiers WHERE is_enabled = 1 ORDER BY min_lifetime_spend ASC"
+          );
+          if (!tiers || tiers.length < 2) continue;
+          // Candidates: not blocked, opt-in, has recent activity (not stale),
+          // not nudged in the past 30 days.
+          const candidates: any[] = await db.query(
+            `SELECT phone, name, email, current_tier_id, total_spent, last_nudge_sent_at
+               FROM loyalty_customers
+              WHERE COALESCE(marketing_opt_out, 0) = 0
+                AND COALESCE(is_blocked, 0) = 0
+                AND last_order_at >= CURRENT_TIMESTAMP - INTERVAL '180 days'
+                AND (last_nudge_sent_at IS NULL OR last_nudge_sent_at < CURRENT_TIMESTAMP - INTERVAL '30 days')`
+          );
+          for (const c of (candidates || [])) {
+            const spent = Number(c.total_spent || 0);
+            const nextTier = tiers.find((tier: any) => Number(tier.min_lifetime_spend || 0) > spent);
+            if (!nextTier) continue; // already at top
+            const threshold = Number(nextTier.min_lifetime_spend || 0);
+            const remaining = threshold - spent;
+            const window = threshold * 0.2;             // within 20% of threshold
+            if (remaining > window) continue;
+            const currentTier: any = c.current_tier_id
+              ? tiers.find((tier: any) => tier.id === c.current_tier_id)
+              : null;
+            triggerNotification(t.id, 'LOYALTY_NEAR_UPGRADE', {
+              customerName: c.name,
+              customerEmail: c.email,
+              customerPhone: c.phone,
+              currentTierName: currentTier?.name || 'Bronze',
+              nextTierName: nextTier.name,
+              spendRemaining: Math.round(remaining),
+              nextDiscountPercent: Number(nextTier.discount_percent || 0),
+            }).catch(() => {});
+            await db.run(
+              "UPDATE loyalty_customers SET last_nudge_sent_at = CURRENT_TIMESTAMP WHERE phone = ?",
+              [c.phone]
+            ).catch(() => {});
+            nudged++;
+          }
+        } catch (err) {
+          console.error(`[loyalty-nudge] tenant ${t.id} failed:`, err);
+        }
+      }
+      console.log(`[loyalty-nudge] done — ${nudged} near-upgrade nudge(s) sent across ${tenants?.length || 0} tenants`);
+    } catch (err) {
+      console.error('[loyalty-nudge] error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[loyalty-nudge] Weekly near-upgrade nudge cron started — Mon 09:00 IST');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase 4 — Outbound delivery-platform sync queue worker ──────────────

@@ -889,6 +889,64 @@ export function buildNotificationContent(
       };
     }
 
+    /* ── Loyalty v2 — birthdays, near-upgrade nudges ─────────────────── */
+
+    case 'LOYALTY_BIRTHDAY_REWARD': {
+      // Fired by the daily 09:00 IST birthday cron for every loyalty
+      // customer whose DOB matches today. Soft promotional message —
+      // owner can soft-couple this with a special promo code via
+      // data.promo_code if they want (interpolated only when present).
+      const name = data.customerName || data.name || 'Friend';
+      const tier = data.tierName || 'Loyalty';
+      const pct = Number(data.discountPercent || 0);
+      const code = data.promo_code ? String(data.promo_code) : null;
+      return {
+        subject: `🎂 Happy birthday from ${r}!`,
+        text:
+          `Happy birthday, ${name}! 🎂\n\n` +
+          `As one of our valued ${tier} customers, we wanted to wish you a wonderful day at ${r}.\n\n` +
+          (pct > 0 ? `Your tier already gives you ${pct}% off every order — birthdays are always sweeter with that.\n\n` : '') +
+          (code ? `For today, use code ${code} for an extra treat on us.\n\n` : '') +
+          `See you soon!\n— The ${r} team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #fde68a;border-radius:12px;background:#fffbeb">` +
+          `<h2 style="color:#cc5a16;margin-top:0">🎂 Happy birthday, ${name}!</h2>` +
+          `<p>As one of our valued <strong>${tier}</strong> customers, we wanted to wish you a wonderful day at <strong>${r}</strong>.</p>` +
+          (pct > 0 ? `<p>Your tier already gives you <strong>${pct}% off</strong> every order — birthdays are always sweeter with that.</p>` : '') +
+          (code ? `<p style="background:#fef3c7;border-radius:8px;padding:12px;font-size:15px"><b>Today's gift:</b> use code <strong style="font-family:monospace;font-size:16px">${code}</strong> at checkout.</p>` : '') +
+          `<p style="margin-top:24px">See you soon!<br/><em>— The ${r} team</em></p>` +
+          `</div>`,
+      };
+    }
+
+    case 'LOYALTY_NEAR_UPGRADE': {
+      // Sent weekly to customers within 20% of their next tier threshold.
+      // Drives more spend by making the upgrade feel close.
+      const name = data.customerName || data.name || 'Friend';
+      const currentTier = data.currentTierName || data.tierName || 'Bronze';
+      const nextTier = data.nextTierName || 'the next tier';
+      const remaining = Number(data.spendRemaining || 0);
+      const nextPct = Number(data.nextDiscountPercent || 0);
+      const fmtAmt = remaining.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+      return {
+        subject: `You're almost ${nextTier} at ${r}!`,
+        text:
+          `Hi ${name},\n\n` +
+          `You're currently a ${currentTier} customer at ${r} — and just ₹${fmtAmt} away from reaching ${nextTier}.\n\n` +
+          (nextPct > 0 ? `${nextTier} members get ${nextPct}% off every order, automatically.\n\n` : '') +
+          `Drop by soon — we'd love to bump you up.\n\n— The ${r} team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">You're almost ${nextTier}!</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>You're currently a <strong>${currentTier}</strong> customer at <strong>${r}</strong> — and just <strong>₹${fmtAmt}</strong> away from reaching <strong>${nextTier}</strong>.</p>` +
+          (nextPct > 0 ? `<p style="background:#f0fdf4;border:1px solid #d1fae5;border-radius:8px;padding:12px;color:#065f46">${nextTier} members get <strong>${nextPct}% off</strong> every order, automatically.</p>` : '') +
+          `<p>Drop by soon — we'd love to bump you up.</p>` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— The ${r} team</p>` +
+          `</div>`,
+      };
+    }
+
     /* ── Subscription billing ─────────────────────────────────────────── */
 
     case 'PAYMENT_DUE_SOON': {
