@@ -2,12 +2,13 @@
 # ══════════════════════════════════════════════════════════════════════════
 # Atithi Setu — Deploy with auto-rollback
 # ══════════════════════════════════════════════════════════════════════════
-# Runs on the VPS. Invoked by GitHub Actions via SSH after a push to main.
+# Runs on the VPS. Invoked by GitHub Actions via SSH after a push to master
+# (or manually via workflow_dispatch with any other branch).
 #
 # Flow:
 #   1. Tag the currently-running image as "atithi-setu:rollback"
 #      (so we can revert if the new build fails)
-#   2. git pull main
+#   2. git fetch + reset to origin/$BRANCH
 #   3. docker compose build (new image)
 #   4. docker compose up -d (swaps containers — brief 10-20s downtime)
 #   5. Wait up to 60s for /api/public/restaurants → 200
@@ -26,7 +27,7 @@ ROLLBACK_TAG="atithi-setu:rollback"
 HEALTH_URL="http://localhost:5001/api/public/restaurants"
 HEALTH_MAX_WAIT=60                  # seconds to wait for new version to become healthy
 LOG_FILE="$APP_DIR/deploy-history.log"
-BRANCH="${BRANCH:-main}"           # which branch to deploy; override with env BRANCH=dev
+BRANCH="${BRANCH:-master}"         # which branch to deploy; override with env BRANCH=dev for staging
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
 log() {

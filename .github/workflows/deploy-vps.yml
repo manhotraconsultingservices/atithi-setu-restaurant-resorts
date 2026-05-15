@@ -1,10 +1,15 @@
 # ═════════════════════════════════════════════════════════════════════════════
 # Atithi Setu — Auto-deploy to Hostinger VPS
 # ═════════════════════════════════════════════════════════════════════════════
-# Triggers on a push to `dev` (or manual run from the Actions tab). SSHes into
-# the VPS and runs deploy/deploy-with-rollback.sh, which pulls the new code,
-# rebuilds the Docker image, swaps containers, health-checks, and
+# Triggers on a push to `master` (or manual run from the Actions tab). SSHes
+# into the VPS and runs deploy/deploy-with-rollback.sh, which pulls the new
+# code, rebuilds the Docker image, swaps containers, health-checks, and
 # auto-rollbacks if the new version doesn't come up.
+#
+# History: previously watched `dev`. Switched to `master` 2026-05 so the
+# production branch matches what's actually deployed. Pushes to `dev` no
+# longer auto-deploy — use `dev` for staging / WIP, then fast-forward
+# `dev → master` to release.
 #
 # Secrets required on the GitHub repo (Settings -> Secrets and variables ->
 # Actions):
@@ -21,20 +26,20 @@
 #   4. Start the stack once manually: `cd /opt/atithi-setu/deploy && docker compose -f docker-compose.prod.yml up -d`
 #   5. Add this repo's public deploy key to /root/.ssh/authorized_keys
 #
-# After that, every push to `dev` rebuilds + redeploys in ~2 minutes.
+# After that, every push to `master` rebuilds + redeploys in ~2 minutes.
 # ═════════════════════════════════════════════════════════════════════════════
 
 name: Deploy to VPS
 
 on:
   push:
-    branches: [dev]
+    branches: [master]
   workflow_dispatch:
     inputs:
       branch:
-        description: "Branch to deploy (default: dev)"
+        description: "Branch to deploy (default: master)"
         required: false
-        default: "dev"
+        default: "master"
 
 concurrency:
   # Never run two deploys in parallel — one would race the other's docker swap.
