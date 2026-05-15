@@ -3763,6 +3763,60 @@ async function startServer() {
     }
   });
 
+  // Manual enrollment: create a loyalty customer record without an order.
+  // Used when the owner wants to add a walk-in / VIP / pre-existing
+  // customer to the loyalty program before they next place an order.
+  // Automatic enrollment from POST /orders still works in parallel.
+  // Returns 409 if the phone is already enrolled.
+  app.post("/api/restaurant/:id/loyalty/customers", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const phone = _normalisePhone(req.body?.phone);
+      if (!phone) return res.status(400).json({ error: "Valid phone is required" });
+      const name = (req.body?.name || '').toString().trim() || null;
+      const email = (req.body?.email || '').toString().trim() || null;
+      const notes = (req.body?.notes || '').toString().trim() || null;
+      const initialTier = (req.body?.current_tier_id || '').toString().trim().toUpperCase() || null;
+      const db = await getTenantDb(req.params.id);
+      const existing: any = await db.get(
+        "SELECT phone, name FROM loyalty_customers WHERE phone = ?", [phone]
+      );
+      if (existing) {
+        return res.status(409).json({
+          error: "Customer is already enrolled",
+          phone, existing_name: existing.name || null,
+        });
+      }
+      // Resolve tier — if owner picked one, validate it exists. Otherwise
+      // default to the lowest-threshold enabled tier (typically Bronze).
+      let tierId = initialTier;
+      if (tierId) {
+        const tierRow: any = await db.get(
+          "SELECT id FROM loyalty_tiers WHERE id = ? AND is_enabled = 1", [tierId]
+        );
+        if (!tierRow) return res.status(400).json({ error: `Unknown or disabled tier: ${tierId}` });
+      } else {
+        const defaultTier = await _resolveTierForSpend(db, 0);
+        tierId = defaultTier?.id || null;
+      }
+      await db.run(
+        `INSERT INTO loyalty_customers (phone, name, email, notes, current_tier_id, total_orders, total_spent, first_order_at, last_order_at)
+         VALUES (?, ?, ?, ?, ?, 0, 0, NULL, NULL)`,
+        [phone, name, email, notes, tierId]
+      );
+      if (tierId) {
+        await db.run(
+          `INSERT INTO loyalty_tier_history (customer_phone, from_tier_id, to_tier_id, trigger_order_id, spent_at_upgrade)
+           VALUES (?, NULL, ?, NULL, 0)`,
+          [phone, tierId]
+        ).catch(() => {});
+      }
+      res.json({ success: true, phone, name, email, current_tier_id: tierId });
+    } catch (err) {
+      console.error("Enroll loyalty customer error:", err);
+      res.status(500).json({ error: "Failed to enroll customer" });
+    }
+  });
+
   // Customer detail — includes recent orders + tier history.
   app.get("/api/restaurant/:id/loyalty/customers/:phone", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -4037,6 +4091,140 @@ async function startServer() {
     } catch (err) {
       console.error("Loyalty recompute error:", err);
       res.status(500).json({ error: "Failed to recompute tiers" });
+    }
+  });
+
+  // ── ADMIN: Bulk demo seed for a tenant's loyalty program ────────────────
+  // Idempotent (uses ON CONFLICT DO NOTHING). Creates 30 realistic Indian
+  // demo customers spread across Bronze (12) / Silver (12) / Gold (6) tiers
+  // with appropriate total_spent, total_orders, and tier_history rows.
+  // Phones are in the safe 9001-12-3xxx demo range — guaranteed not to
+  // collide with any real customer.
+  //
+  // Auth: SUPER_ADMIN or CTO only.
+  // Body: { confirm: 'YES' } — small belt-and-suspenders to prevent accidents.
+  //
+  // To wipe and re-seed:
+  //   1. DELETE FROM loyalty_redemptions WHERE customer_phone LIKE '900%';
+  //   2. DELETE FROM loyalty_tier_history WHERE customer_phone LIKE '900%';
+  //   3. DELETE FROM loyalty_customers WHERE phone LIKE '900%';
+  //   4. POST .../seed-demo again
+  app.post("/api/admin/restaurant/:id/loyalty/seed-demo", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      if (String(req.body?.confirm) !== 'YES') {
+        return res.status(400).json({
+          error: "Pass { \"confirm\": \"YES\" } in the body to acknowledge this writes ~30 demo customers into the tenant's loyalty tables.",
+        });
+      }
+      const db = await getTenantDb(req.params.id);
+
+      // Demo customer pool — same distribution as scripts/seed-loyalty-vivek.cjs
+      const DEMO = [
+        // 6 Gold (₹52,000–₹90,000 lifetime spend)
+        { tier: 'GOLD',   phone: '9001112301', name: 'Anjali Mehta',   email: 'anjali.mehta@example.com',  spent: 57118, orders:  9 },
+        { tier: 'GOLD',   phone: '9001112302', name: 'Vikram Khanna',  email: 'vikram.k@example.com',      spent: 85390, orders:  6 },
+        { tier: 'GOLD',   phone: '9001112303', name: 'Sunita Reddy',   email: 'sunita.reddy@example.com',  spent: 68711, orders:  6 },
+        { tier: 'GOLD',   phone: '9001112304', name: 'Arjun Kapoor',   email: 'arjun.kapoor@example.com',  spent: 64493, orders: 10 },
+        { tier: 'GOLD',   phone: '9001112305', name: 'Kavita Iyer',    email: 'kavita.iyer@example.com',   spent: 82391, orders:  9 },
+        { tier: 'GOLD',   phone: '9001112306', name: 'Rohit Sharma',   email: 'rohit.s@example.com',       spent: 72153, orders:  9 },
+        // 12 Silver (₹11,000–₹49,000)
+        { tier: 'SILVER', phone: '9001112307', name: 'Meera Bhatia',   email: 'meera.bhatia@example.com',  spent: 44247, orders:  4 },
+        { tier: 'SILVER', phone: '9001112308', name: 'Sanjay Verma',   email: 'sanjay.verma@example.com',  spent: 16955, orders:  3 },
+        { tier: 'SILVER', phone: '9001112311', name: 'Priya Nair',     email: 'priya.nair@example.com',    spent: 25554, orders:  6 },
+        { tier: 'SILVER', phone: '9001112312', name: 'Amit Joshi',     email: 'amit.joshi@example.com',    spent: 43771, orders:  4 },
+        { tier: 'SILVER', phone: '9001112313', name: 'Rashmi Pillai',  email: 'rashmi.p@example.com',      spent: 14172, orders:  3 },
+        { tier: 'SILVER', phone: '9001112314', name: 'Karan Malhotra', email: 'karan.m@example.com',       spent: 14426, orders:  4 },
+        { tier: 'SILVER', phone: '9001112315', name: 'Divya Krishnan', email: 'divya.k@example.com',       spent: 47835, orders:  4 },
+        { tier: 'SILVER', phone: '9001112316', name: 'Nikhil Bansal',  email: 'nikhil.b@example.com',      spent: 21499, orders:  4 },
+        { tier: 'SILVER', phone: '9001112317', name: 'Pooja Saxena',   email: 'pooja.saxena@example.com',  spent: 25785, orders:  4 },
+        { tier: 'SILVER', phone: '9001112318', name: 'Harsh Aggarwal', email: 'harsh.a@example.com',       spent: 45446, orders:  5 },
+        { tier: 'SILVER', phone: '9001112319', name: 'Neha Chopra',    email: 'neha.chopra@example.com',   spent: 26626, orders:  4 },
+        { tier: 'SILVER', phone: '9001112320', name: 'Aditya Rao',     email: 'aditya.rao@example.com',    spent: 25915, orders:  4 },
+        // 12 Bronze (₹400–₹9,800)
+        { tier: 'BRONZE', phone: '9001112321', name: 'Sneha Kulkarni', email: 'sneha.k@example.com',       spent: 8449, orders: 2 },
+        { tier: 'BRONZE', phone: '9001112322', name: 'Manish Goel',    email: 'manish.goel@example.com',   spent: 1817, orders: 1 },
+        { tier: 'BRONZE', phone: '9001112331', name: 'Rahul Dewan',    email: null,                        spent:  634, orders: 2 },
+        { tier: 'BRONZE', phone: '9001112332', name: 'Shweta Kohli',   email: null,                        spent:  516, orders: 1 },
+        { tier: 'BRONZE', phone: '9001112333', name: 'Aakash Patil',   email: 'aakash.p@example.com',      spent: 7637, orders: 2 },
+        { tier: 'BRONZE', phone: '9001112334', name: 'Anita Suresh',   email: 'anita.s@example.com',       spent: 2231, orders: 1 },
+        { tier: 'BRONZE', phone: '9001112335', name: 'Gaurav Tiwari',  email: null,                        spent: 4949, orders: 2 },
+        { tier: 'BRONZE', phone: '9001112336', name: 'Ritu Sengupta',  email: 'ritu.s@example.com',        spent:  617, orders: 1 },
+        { tier: 'BRONZE', phone: '9001112337', name: 'Vivek Ranjan',   email: null,                        spent: 8296, orders: 4 },
+        { tier: 'BRONZE', phone: '9001112338', name: 'Tanvi Desai',    email: 'tanvi.d@example.com',       spent: 3787, orders: 2 },
+        { tier: 'BRONZE', phone: '9001112339', name: 'Sandeep Yadav',  email: null,                        spent:  800, orders: 1 },
+        { tier: 'BRONZE', phone: '9001112340', name: 'Kriti Agarwal',  email: 'kriti.a@example.com',       spent: 3147, orders: 2 },
+      ];
+
+      // Verify tiers exist (default Bronze/Silver/Gold are seeded at first tenant DB init)
+      const tiers: any[] = await db.query("SELECT id FROM loyalty_tiers");
+      const tierIds = new Set((tiers || []).map((t: any) => t.id));
+      const missing = [...new Set(DEMO.map(d => d.tier))].filter(t => !tierIds.has(t));
+      if (missing.length > 0) {
+        return res.status(400).json({
+          error: `Tier(s) ${missing.join(', ')} not configured for this tenant. Open the LOYALTY tab once to seed defaults, then retry.`,
+        });
+      }
+
+      let inserted = 0, skipped = 0;
+      const now = new Date();
+      const dayAgo = (d: number) => new Date(now.getTime() - d * 86400000).toISOString();
+      for (let i = 0; i < DEMO.length; i++) {
+        const c = DEMO[i];
+        // Stagger first_order_at/last_order_at across the past year for chart variety
+        const firstDays = 30 + (i * 11) % 300;          // 30..330 days ago
+        const lastDays  = Math.max(1, firstDays - 7 - (i * 13) % 200);  // more recent
+        const result = await db.run(
+          `INSERT INTO loyalty_customers
+             (phone, name, email, total_orders, total_spent, current_tier_id, first_order_at, last_order_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (phone) DO NOTHING`,
+          [c.phone, c.name, c.email, c.orders, c.spent, c.tier,
+           dayAgo(firstDays), dayAgo(lastDays)]
+        );
+        if (Number(result?.changes || 0) > 0) {
+          inserted++;
+          // Tier history: walking upgrade chain to make analytics realistic.
+          // Every customer entered at Bronze; Silvers crossed once; Golds crossed twice.
+          await db.run(
+            `INSERT INTO loyalty_tier_history (customer_phone, from_tier_id, to_tier_id, trigger_order_id, spent_at_upgrade, changed_at)
+             VALUES (?, NULL, 'BRONZE', NULL, 0, ?)`,
+            [c.phone, dayAgo(firstDays)]
+          ).catch(() => {});
+          if (c.tier === 'SILVER' || c.tier === 'GOLD') {
+            await db.run(
+              `INSERT INTO loyalty_tier_history (customer_phone, from_tier_id, to_tier_id, trigger_order_id, spent_at_upgrade, changed_at)
+               VALUES (?, 'BRONZE', 'SILVER', NULL, 10000, ?)`,
+              [c.phone, dayAgo(Math.floor((firstDays + lastDays) / 2))]
+            ).catch(() => {});
+          }
+          if (c.tier === 'GOLD') {
+            await db.run(
+              `INSERT INTO loyalty_tier_history (customer_phone, from_tier_id, to_tier_id, trigger_order_id, spent_at_upgrade, changed_at)
+               VALUES (?, 'SILVER', 'GOLD', NULL, 50000, ?)`,
+              [c.phone, dayAgo(Math.max(1, lastDays - 5))]
+            ).catch(() => {});
+          }
+        } else {
+          skipped++;
+        }
+      }
+      res.json({
+        success: true,
+        customers_seeded: inserted,
+        customers_skipped: skipped,
+        message: skipped > 0
+          ? `${inserted} demo customers added (${skipped} already existed — re-run after DELETE to refresh).`
+          : `${inserted} demo customers added.`,
+        next_steps: [
+          "Open the LOYALTY tab in the dashboard",
+          "Click the CUSTOMERS sub-tab → Filter by Tier = Gold to see the top 6 spenders",
+          "Click any customer row → drawer shows their tier-upgrade history",
+          "Click ANALYTICS → KPI cards + per-tier bar chart now have data",
+        ],
+      });
+    } catch (err) {
+      console.error("Loyalty seed-demo error:", err);
+      res.status(500).json({ error: "Failed to seed demo data" });
     }
   });
 
@@ -13787,7 +13975,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tenant-db-init-race-fix',
+    commit_marker: 'loyalty-enrollment-and-seed',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -13813,6 +14001,8 @@ async function startServer() {
       'perms-v3-grandfather-loyalty',    // Hotfix: PERMS_V3_MARKER grandfathers LOYALTY/ROSTER/TIMESHEET for V2-era saves
       'db-exec-strip-line-comments',     // Hotfix: db.exec() now strips -- line comments before split(';') — was blocking Phase 2+ deploys
       'tenant-db-init-race-fix',         // Hotfix: getTenantDb() caches an init Promise so concurrent callers don't race on CREATE INDEX IF NOT EXISTS
+      'loyalty-manual-enrollment',       // POST /loyalty/customers — owner can enroll walk-ins/VIPs without an order; + Enroll Customer button in LOYALTY tab
+      'loyalty-bulk-seed-endpoint',      // POST /api/admin/restaurant/:id/loyalty/seed-demo — SUPER_ADMIN, one-curl population of 30 demo customers
     ],
     booted_at: new Date().toISOString(),
   };

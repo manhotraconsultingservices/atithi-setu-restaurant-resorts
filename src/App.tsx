@@ -24226,6 +24226,7 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
   const [customerSort, setCustomerSort] = useState<'spent' | 'recent' | 'orders' | 'name'>('spent');
   const [customerPage, setCustomerPage] = useState(0);
   const [selectedCustomer, setSelectedCustomer] = useState<any | null>(null);
+  const [showEnrollModal, setShowEnrollModal] = useState(false);
   const PAGE = 50;
 
   // Analytics
@@ -24528,8 +24529,16 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
               <option value="orders">Most orders</option>
               <option value="name">By name</option>
             </select>
-            <div className="ml-auto text-xs text-[#6b5d52]">
-              {customersTotal} customer{customersTotal === 1 ? '' : 's'}
+            <div className="ml-auto flex items-center gap-3">
+              <span className="text-xs text-[#6b5d52]">
+                {customersTotal} customer{customersTotal === 1 ? '' : 's'}
+              </span>
+              <button
+                onClick={() => setShowEnrollModal(true)}
+                className="px-3 py-2 bg-[#cc5a16] text-white rounded-2xl text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] transition-colors"
+              >
+                + Enroll Customer
+              </button>
             </div>
           </div>
 
@@ -24767,6 +24776,166 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
           onUpdated={() => { fetchCustomers(); }}
         />
       )}
+
+      {/* ── Enroll Customer modal ──────────────────────────────────── */}
+      {showEnrollModal && (
+        <EnrollCustomerModal
+          restaurantId={restaurantId}
+          token={token}
+          tiers={tiers}
+          onClose={() => setShowEnrollModal(false)}
+          onEnrolled={() => { setShowEnrollModal(false); fetchCustomers(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// EnrollCustomerModal — manual loyalty enrollment for walk-ins, VIPs, or
+// any customer the owner wants to track before they place their next order.
+// Hits POST /api/restaurant/:id/loyalty/customers. Optionally pre-assigns a
+// tier (manual override). The order-creation hook continues to auto-enroll
+// every customer whose phone is captured on an order.
+function EnrollCustomerModal({ restaurantId, token, tiers, onClose, onEnrolled }: {
+  restaurantId: string;
+  token: string;
+  tiers: any[];
+  onClose: () => void;
+  onEnrolled: () => void;
+}) {
+  const [phone, setPhone] = useState('');
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [tierId, setTierId] = useState('');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    const phoneNormalised = phone.replace(/\D/g, '');
+    if (phoneNormalised.length < 10) {
+      setError('Please enter a valid 10-digit phone number');
+      return;
+    }
+    setSaving(true); setError('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/customers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          phone: phoneNormalised,
+          name: name.trim() || null,
+          email: email.trim() || null,
+          notes: notes.trim() || null,
+          current_tier_id: tierId || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        setError(`Already enrolled${data.existing_name ? ` as ${data.existing_name}` : ''}.`);
+        return;
+      }
+      if (!res.ok) {
+        setError(data.error || `Enrollment failed (HTTP ${res.status})`);
+        return;
+      }
+      onEnrolled();
+    } catch (err: any) {
+      setError(err.message || 'Network error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+      <div className="bg-white rounded-[32px] shadow-2xl w-full max-w-md my-auto">
+        <div className="p-6 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
+          <div>
+            <h3 className="text-xl font-bold font-serif">Enroll Customer</h3>
+            <p className="text-xs text-[#6b5d52] mt-0.5">Add a customer to the loyalty program manually.</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={20}/></button>
+        </div>
+        <div className="p-6 space-y-4">
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">
+              Phone number <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="tel"
+              value={phone}
+              onChange={e => setPhone(e.target.value)}
+              placeholder="e.g. 9876543210"
+              className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm border-none outline-none focus:ring-2 ring-[#cc5a16]/20"
+              autoFocus
+            />
+            <p className="text-[10px] text-[#9c8e85] mt-1 ml-1">
+              10-digit Indian mobile. +91 prefix and spaces are normalised automatically.
+            </p>
+          </div>
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Name</label>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="e.g. Anjali Mehta"
+              className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm border-none outline-none focus:ring-2 ring-[#cc5a16]/20"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Email</label>
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="optional"
+              className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm border-none outline-none focus:ring-2 ring-[#cc5a16]/20"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Starting tier</label>
+            <select
+              value={tierId}
+              onChange={e => setTierId(e.target.value)}
+              className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm border-none outline-none focus:ring-2 ring-[#cc5a16]/20"
+            >
+              <option value="">Auto (default — usually Bronze)</option>
+              {tiers.filter((t: any) => t.is_enabled).map((t: any) => (
+                <option key={t.id} value={t.id}>{t.name} (₹{Number(t.min_lifetime_spend || 0).toLocaleString('en-IN')}+, {Number(t.discount_percent || 0)}% off)</option>
+              ))}
+            </select>
+            <p className="text-[10px] text-[#9c8e85] mt-1 ml-1">
+              Override only for VIPs you want at a specific tier from day one. Subsequent orders auto-recompute.
+            </p>
+          </div>
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Notes</label>
+            <textarea
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              placeholder="Optional — birthday, allergies, preferences…"
+              rows={2}
+              className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm border-none outline-none focus:ring-2 ring-[#cc5a16]/20"
+            />
+          </div>
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-2xl px-4 py-2.5 text-sm text-red-700">{error}</div>
+          )}
+        </div>
+        <div className="p-6 border-t border-[#cc5a16]/10 flex justify-end gap-3">
+          <button onClick={onClose} className="px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-[#6b5d52]">
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={saving || !phone.trim()}
+            className="px-5 py-2.5 bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest rounded-2xl disabled:opacity-50"
+          >
+            {saving ? 'Enrolling…' : 'Enroll Customer'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
