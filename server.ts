@@ -13787,7 +13787,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'db-exec-strip-line-comments',
+    commit_marker: 'tenant-db-init-race-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -13812,6 +13812,7 @@ async function startServer() {
       'staff-recipient-resolution-fix',  // Phase 3: triggerNotification now hits attendance_staff for staff roles
       'perms-v3-grandfather-loyalty',    // Hotfix: PERMS_V3_MARKER grandfathers LOYALTY/ROSTER/TIMESHEET for V2-era saves
       'db-exec-strip-line-comments',     // Hotfix: db.exec() now strips -- line comments before split(';') — was blocking Phase 2+ deploys
+      'tenant-db-init-race-fix',         // Hotfix: getTenantDb() caches an init Promise so concurrent callers don't race on CREATE INDEX IF NOT EXISTS
     ],
     booted_at: new Date().toISOString(),
   };

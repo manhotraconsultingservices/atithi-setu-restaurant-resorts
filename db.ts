@@ -352,12 +352,43 @@ function tenantSchema(restaurantId: string): string {
   return `tenant_${restaurantId.replace(/[^a-zA-Z0-9_]/g, '_')}`;
 }
 
-const tenantDbCache = new Map<string, DbInterface>();
+// Cache holds the INIT PROMISE — not the resolved DbInterface — so that
+// concurrent callers for the same tenant share the same migration run.
+// Without this, two cron tasks calling getTenantDb(X) simultaneously
+// each see a cold cache, each instantiate a PostgresDb, each fire
+// CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS — and PG's
+// IF NOT EXISTS check is NOT atomic against concurrent DDL. One call
+// wins, the other hits "duplicate key value violates unique constraint
+// pg_class_relname_nsp_index" (or pg_type_typname_nsp_index for the
+// table's implicit row type) and the request blows up.
+//
+// By storing the promise itself, the second caller awaits the first
+// caller's migrations to finish and then gets the same DbInterface.
+const tenantDbCache = new Map<string, Promise<DbInterface>>();
 
 export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   const schema = tenantSchema(restaurantId);
-  if (tenantDbCache.has(schema)) return tenantDbCache.get(schema)!;
+  const cached = tenantDbCache.get(schema);
+  if (cached) return cached;
 
+  // Build the init promise and put it in the cache IMMEDIATELY (before
+  // awaiting any DDL) so a concurrent caller arriving mid-init joins this
+  // same promise instead of starting a parallel migration race.
+  const initPromise = _initTenantDb(schema);
+  tenantDbCache.set(schema, initPromise);
+
+  // If initialisation throws (transient network glitch, etc.), drop the
+  // poisoned promise so the next call retries from scratch.
+  initPromise.catch(() => {
+    if (tenantDbCache.get(schema) === initPromise) {
+      tenantDbCache.delete(schema);
+    }
+  });
+
+  return initPromise;
+}
+
+async function _initTenantDb(schema: string): Promise<DbInterface> {
   const db = new PostgresDb(pgPool, schema);
 
   await db.exec(`
@@ -1305,7 +1336,8 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   `);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_timesheet_date ON timesheet_day (shift_date)`);
 
-  tenantDbCache.set(schema, db);
+  // Cache stores the init promise (set by getTenantDb above); we return
+  // the resolved DbInterface here. No need to re-cache.
   return db;
 }
 
