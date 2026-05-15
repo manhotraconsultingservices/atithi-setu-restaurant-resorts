@@ -76,7 +76,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // A tenant whose role permissions were saved before these tabs existed has
 // an `allowedTabs` list that simply doesn't mention them. Without special
 // handling those tabs would vanish for that tenant until an admin re-saves.
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET']);
 
 // Sentinel appended by savePermissions() to every PARTIAL restriction list.
 // Its presence is a deterministic "this list was configured through the
@@ -5042,6 +5042,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'INVENTORY'                                 // inventory module
     | 'DELIVERY'                                  // multi-platform delivery integration
     | 'LOYALTY'                                   // tier-based customer loyalty (Phase 1)
+    | 'ROSTER' | 'TIMESHEET'                      // shift roster + planned-vs-actual (Phase 3)
     | 'ROOMS' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE'  // hospitality Phase 2 & 3
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
@@ -7391,7 +7392,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <span className="text-sm font-bold text-[#1a1208]">
           {({
             MENU: 'Menu Management', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', REPORTS: 'Analytics & Reports', QR: 'QR Management',
-            BOOKINGS: 'Bookings', LOYALTY: 'Loyalty Program', STAFF: 'Staff Management', ORDERS: 'Orders', INVOICES: 'Invoices',
+            BOOKINGS: 'Bookings', LOYALTY: 'Loyalty Program', STAFF: 'Staff Management',
+            ROSTER: 'Roster', TIMESHEET: 'Timesheet',
+            ORDERS: 'Orders', INVOICES: 'Invoices',
             ATTENDANCE: 'Attendance', FEEDBACK: 'Feedback',
             SUBSCRIPTION: 'Subscription', NOTIFICATIONS: 'Notifications',
             SETTINGS: 'Brand & Settings', MONITOR: 'Command & Control'
@@ -7424,7 +7427,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['CONCIERGE_FAQ','Concierge FAQ'],
             ] as [string,string][] : []),
             ['LOYALTY', 'Loyalty Program'],
-            ['STAFF', 'Staff Management'], ['ORDERS', 'Orders'], ['INVOICES', 'Invoices'],
+            ['STAFF', 'Staff Management'],
+            ['ROSTER', 'Roster'], ['TIMESHEET', 'Timesheet'],
+            ['ORDERS', 'Orders'], ['INVOICES', 'Invoices'],
             ['ATTENDANCE', 'Attendance'], ['FEEDBACK', 'Feedback'],
             ['SUBSCRIPTION', 'Subscription'], ['NOTIFICATIONS', 'Notifications'],
             ['SETTINGS', 'Brand & Settings'],
@@ -7461,7 +7466,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['CONCIERGE_FAQ','Concierge FAQ'],
             ] as [string,string][] : []),
           ['LOYALTY', 'Loyalty Program'],
-          ['STAFF', 'Staff Management'], ['ORDERS', 'Orders'], ['INVOICES', 'Invoices'],
+          ['STAFF', 'Staff Management'],
+          ['ROSTER', 'Roster'], ['TIMESHEET', 'Timesheet'],
+          ['ORDERS', 'Orders'], ['INVOICES', 'Invoices'],
           ['ATTENDANCE', 'Attendance'], ['FEEDBACK', 'Feedback'],
           ['SUBSCRIPTION', 'Subscription'], ['NOTIFICATIONS', 'Notifications'],
           ['SETTINGS', 'Brand & Settings'],
@@ -10731,6 +10738,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <BookingsManagement restaurantId={restaurantId} token={token} />
       ) : activeTab === 'LOYALTY' ? (
         <LoyaltyManagement restaurantId={restaurantId} token={token!} />
+      ) : activeTab === 'ROSTER' ? (
+        <RosterManagement restaurantId={restaurantId} token={token!} />
+      ) : activeTab === 'TIMESHEET' ? (
+        <TimesheetDashboard restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'REPORTS' ? (
         <AnalyticsDashboard
           restaurantId={restaurantId}
@@ -19235,7 +19246,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // isTabVisible() for how legacy permission sets are grandfathered.
   const RESTAURANT_TABS = [
     'MONITOR', 'MENU', 'INVENTORY', 'DELIVERY', 'REPORTS', 'QR', 'BOOKINGS',
-    'LOYALTY', 'STAFF', 'ORDERS', 'INVOICES', 'ATTENDANCE',
+    'LOYALTY', 'STAFF', 'ROSTER', 'TIMESHEET', 'ORDERS', 'INVOICES', 'ATTENDANCE',
     'FEEDBACK', 'SUBSCRIPTION', 'NOTIFICATIONS', 'SETTINGS'
   ];
   // Hotel-only tabs (shown only when the selected restaurant has property_type IN ('HOTEL','BOTH'))
@@ -25186,6 +25197,500 @@ function useTenantFormatter(restaurant: any) {
       return opts?.withSymbol === false ? formatted : `${symbol}${formatted}`;
     };
   }, [restaurant?.currency_symbol, restaurant?.locale]);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// RosterManagement (Phase 3) — weekly / bi-weekly / monthly shift grid
+// ════════════════════════════════════════════════════════════════════════════
+// Rows = staff, columns = days. Click a cell to assign a shift via a small
+// modal (template picker or explicit times). Each save kicks off
+// SHIFT_ASSIGNED/SHIFT_UPDATED notifications via the existing
+// triggerNotification → _resolveRecipients path (fixed in Phase 3.0).
+function RosterManagement({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [view, setView] = useState<'WEEK' | 'FORTNIGHT' | 'MONTH'>('WEEK');
+  const [anchor, setAnchor] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [staff, setStaff] = useState<any[]>([]);
+  const [slots, setSlots] = useState<any[]>([]);
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState<{ staff_id: string; date: string; slot?: any } | null>(null);
+  const [message, setMessage] = useState('');
+
+  // Date range: start = Monday of the week containing anchor; days = 7/14/28
+  const { start, end, days } = useMemo(() => {
+    const a = new Date(anchor + 'T00:00:00');
+    const dow = a.getDay(); // 0..6, 0=Sun
+    const mondayOffset = dow === 0 ? -6 : 1 - dow;
+    const s = new Date(a); s.setDate(a.getDate() + mondayOffset);
+    const n = view === 'WEEK' ? 7 : view === 'FORTNIGHT' ? 14 : 28;
+    const e = new Date(s); e.setDate(s.getDate() + n - 1);
+    const dayList: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const d = new Date(s); d.setDate(s.getDate() + i);
+      dayList.push(d.toISOString().slice(0, 10));
+    }
+    return {
+      start: s.toISOString().slice(0, 10),
+      end: e.toISOString().slice(0, 10),
+      days: dayList,
+    };
+  }, [anchor, view]);
+
+  const fetchAll = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [rosterRes, tplRes] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/roster?start=${start}&end=${end}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch(`/api/restaurant/${restaurantId}/shift-templates`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+      ]);
+      if (rosterRes.ok) {
+        const d = await rosterRes.json();
+        setStaff(d.staff || []);
+        setSlots(d.slots || []);
+      }
+      if (tplRes.ok) setTemplates(await tplRes.json());
+    } finally { setLoading(false); }
+  }, [restaurantId, token, start, end]);
+
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Build a lookup: { 'staff_id|date': [slot, ...] }
+  const slotMap = useMemo(() => {
+    const m: Record<string, any[]> = {};
+    for (const s of slots) {
+      const key = `${s.staff_id}|${String(s.shift_date).slice(0, 10)}`;
+      (m[key] = m[key] || []).push(s);
+    }
+    return m;
+  }, [slots]);
+
+  const saveSlot = async (payload: any) => {
+    const res = await fetch(`/api/restaurant/${restaurantId}/roster`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ slots: [payload] }),
+    });
+    if (res.ok) {
+      setMessage('Saved & notifications queued');
+      setEditing(null);
+      fetchAll();
+    } else {
+      setMessage('Save failed');
+    }
+  };
+
+  const removeSlot = async (slotId: string) => {
+    const res = await fetch(`/api/restaurant/${restaurantId}/roster/${slotId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (res.ok) { setMessage('Cancelled & notified'); fetchAll(); }
+    else setMessage('Delete failed');
+  };
+
+  const shift = (deltaDays: number) => {
+    const d = new Date(anchor + 'T00:00:00');
+    d.setDate(d.getDate() + deltaDays);
+    setAnchor(d.toISOString().slice(0, 10));
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-3xl font-bold font-serif">Roster</h2>
+          <p className="text-sm text-[#6b5d52] mt-0.5">{start} — {end}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {(['WEEK', 'FORTNIGHT', 'MONTH'] as const).map(v => (
+            <button key={v} onClick={() => setView(v)}
+              className={cn(
+                "px-3 py-1.5 text-xs font-bold uppercase tracking-widest rounded-xl",
+                view === v ? "bg-[#cc5a16] text-white" : "bg-white border border-[#cc5a16]/15 text-[#6b5d52]"
+              )}
+            >{v}</button>
+          ))}
+          <button onClick={() => shift(view === 'WEEK' ? -7 : view === 'FORTNIGHT' ? -14 : -28)}
+            className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold">←</button>
+          <button onClick={() => setAnchor(new Date().toISOString().slice(0, 10))}
+            className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold">Today</button>
+          <button onClick={() => shift(view === 'WEEK' ? 7 : view === 'FORTNIGHT' ? 14 : 28)}
+            className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold">→</button>
+        </div>
+      </div>
+      {message && <p className="text-xs text-orange-700 font-bold">{message}</p>}
+      {loading ? (
+        <div className="py-16 text-center text-[#9c8e85]">Loading roster…</div>
+      ) : staff.length === 0 ? (
+        <div className="py-16 text-center text-[#9c8e85]">No active staff. Add staff in the Staff tab first.</div>
+      ) : (
+        <div className="overflow-x-auto bg-white rounded-2xl border border-[#cc5a16]/10">
+          <table className="min-w-full text-xs">
+            <thead className="bg-[#faf7f2]">
+              <tr>
+                <th className="px-3 py-2 text-left font-bold uppercase tracking-widest text-[#6b5d52] sticky left-0 bg-[#faf7f2] z-10">Staff</th>
+                {days.map(d => {
+                  const dt = new Date(d + 'T00:00:00');
+                  return (
+                    <th key={d} className="px-2 py-2 text-center font-bold uppercase tracking-widest text-[#6b5d52] min-w-[100px]">
+                      <div>{dt.toLocaleDateString('en-IN', { weekday: 'short' })}</div>
+                      <div className="text-[10px] font-mono">{dt.getDate()}/{dt.getMonth()+1}</div>
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {staff.map(s => (
+                <tr key={s.id} className="border-t border-[#cc5a16]/5">
+                  <td className="px-3 py-2 font-bold text-[#1a1208] sticky left-0 bg-white z-10">
+                    {s.name}
+                    <div className="text-[10px] font-normal text-[#9c8e85] uppercase">{s.role || ''}</div>
+                  </td>
+                  {days.map(d => {
+                    const key = `${s.id}|${d}`;
+                    const cellSlots = slotMap[key] || [];
+                    return (
+                      <td key={d} className="px-1 py-1 align-top">
+                        <div className="space-y-1">
+                          {cellSlots.map((slot: any) => (
+                            <div key={slot.id}
+                              onClick={() => setEditing({ staff_id: s.id, date: d, slot })}
+                              className={cn(
+                                "rounded-lg px-2 py-1 cursor-pointer text-[10px] font-bold",
+                                slot.status === 'DRAFT' ? "bg-gray-100 text-gray-600" :
+                                slot.status === 'CANCELLED' ? "bg-red-50 text-red-500 line-through" :
+                                "bg-[#cc5a16] text-white"
+                              )}
+                            >
+                              {slot.start_time}–{slot.end_time}
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setEditing({ staff_id: s.id, date: d })}
+                            className="w-full text-[10px] text-[#9c8e85] hover:text-[#cc5a16] py-0.5"
+                            aria-label={`Add shift for ${s.name} on ${d}`}
+                          >+ shift</button>
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {editing && (
+        <ShiftSlotModal
+          editing={editing}
+          templates={templates}
+          onClose={() => setEditing(null)}
+          onSave={(p: any) => saveSlot(p)}
+          onDelete={editing.slot ? () => { removeSlot(editing.slot.id); setEditing(null); } : undefined}
+        />
+      )}
+    </div>
+  );
+}
+
+// Modal: assign / edit / cancel a single shift slot
+function ShiftSlotModal({ editing, templates, onClose, onSave, onDelete }: {
+  editing: { staff_id: string; date: string; slot?: any };
+  templates: any[];
+  onClose: () => void;
+  onSave: (payload: any) => void;
+  onDelete?: () => void;
+}) {
+  const [startTime, setStartTime] = useState(editing.slot?.start_time || '09:00');
+  const [endTime, setEndTime]     = useState(editing.slot?.end_time   || '17:00');
+  const [templateId, setTemplateId] = useState(editing.slot?.template_id || '');
+  const [status, setStatus] = useState(editing.slot?.status || 'PUBLISHED');
+  const [notes, setNotes] = useState(editing.slot?.notes || '');
+
+  const applyTemplate = (tid: string) => {
+    setTemplateId(tid);
+    const tpl = templates.find(t => t.id === tid);
+    if (tpl) { setStartTime(tpl.start_time); setEndTime(tpl.end_time); }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl">
+        <div className="p-5 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
+          <div>
+            <h3 className="text-lg font-bold font-serif">{editing.slot ? 'Edit Shift' : 'Assign Shift'}</h3>
+            <p className="text-xs text-[#6b5d52]">{editing.date}</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={18}/></button>
+        </div>
+        <div className="p-5 space-y-3">
+          {templates.length > 0 && (
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Template</label>
+              <select value={templateId} onChange={e => applyTemplate(e.target.value)}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm">
+                <option value="">— custom —</option>
+                {templates.map(t => <option key={t.id} value={t.id}>{t.label} ({t.start_time}–{t.end_time})</option>)}
+              </select>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Start</label>
+              <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">End</label>
+              <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+            </div>
+          </div>
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Status</label>
+            <select value={status} onChange={e => setStatus(e.target.value)}
+              className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm">
+              <option value="DRAFT">Draft (no notification)</option>
+              <option value="PUBLISHED">Published (notify staff)</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Notes</label>
+            <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional"
+              className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+          </div>
+        </div>
+        <div className="p-5 border-t border-[#cc5a16]/10 flex justify-between items-center">
+          {onDelete && (
+            <button onClick={onDelete} className="text-xs font-bold text-red-600">Cancel shift</button>
+          )}
+          <div className="flex gap-2 ml-auto">
+            <button onClick={onClose} className="px-4 py-2 text-xs font-bold text-[#6b5d52]">Close</button>
+            <button onClick={() => onSave({
+              id: editing.slot?.id, staff_id: editing.staff_id, shift_date: editing.date,
+              start_time: startTime, end_time: endTime,
+              template_id: templateId || null,
+              status, notes,
+            })}
+              className="px-5 py-2 bg-[#cc5a16] text-white text-xs font-bold rounded-2xl">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TimesheetDashboard (Phase 3) — planned vs actual variance
+// ════════════════════════════════════════════════════════════════════════════
+function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; token: string }) {
+  // Default range: this week (Mon..Sun)
+  const initRange = useMemo(() => {
+    const now = new Date();
+    const dow = now.getDay(); const mondayOffset = dow === 0 ? -6 : 1 - dow;
+    const s = new Date(now); s.setDate(now.getDate() + mondayOffset);
+    const e = new Date(s); e.setDate(s.getDate() + 6);
+    return { start: s.toISOString().slice(0, 10), end: e.toISOString().slice(0, 10) };
+  }, []);
+  const [start, setStart] = useState(initRange.start);
+  const [end, setEnd] = useState(initRange.end);
+  const [summary, setSummary] = useState<any>(null);
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [recomputing, setRecomputing] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true); setMessage('');
+    try {
+      const [sumRes, rowRes] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/timesheet/summary?start=${start}&end=${end}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+        fetch(`/api/restaurant/${restaurantId}/timesheet?start=${start}&end=${end}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }),
+      ]);
+      if (sumRes.ok) setSummary(await sumRes.json());
+      if (rowRes.ok) setRows(await rowRes.json());
+    } finally { setLoading(false); }
+  }, [restaurantId, token, start, end]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const recompute = async () => {
+    setRecomputing(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/timesheet/recompute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ start, end }),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        setMessage(`Recomputed ${d.days_written} day rows`);
+        load();
+      } else setMessage('Recompute failed');
+    } finally { setRecomputing(false); }
+  };
+
+  const exportCsv = () => {
+    const url = `/api/restaurant/${restaurantId}/timesheet/export.csv?start=${start}&end=${end}`;
+    // Use fetch + blob so the auth header is sent — anchor tag won't include it.
+    fetch(url, { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => r.blob())
+      .then(blob => {
+        const u = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = u; a.download = `timesheet-${start}-to-${end}.csv`;
+        a.click(); URL.revokeObjectURL(u);
+      });
+  };
+
+  const presets = [
+    { id: 'thisweek',  label: 'This week',  fn: () => initRange },
+    { id: 'lastweek',  label: 'Last week',  fn: () => {
+      const s = new Date(initRange.start); s.setDate(s.getDate() - 7);
+      const e = new Date(s); e.setDate(s.getDate() + 6);
+      return { start: s.toISOString().slice(0,10), end: e.toISOString().slice(0,10) };
+    }},
+    { id: 'thismonth', label: 'This month', fn: () => {
+      const now = new Date(); const s = new Date(now.getFullYear(), now.getMonth(), 1);
+      const e = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+      return { start: s.toISOString().slice(0,10), end: e.toISOString().slice(0,10) };
+    }},
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-3xl font-bold font-serif">Timesheet</h2>
+          <p className="text-sm text-[#6b5d52] mt-0.5">Planned vs actual · {start} → {end}</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {presets.map(p => (
+            <button key={p.id}
+              onClick={() => { const r = p.fn(); setStart(r.start); setEnd(r.end); }}
+              className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold text-[#6b5d52]"
+            >{p.label}</button>
+          ))}
+          <input type="date" value={start} onChange={e => setStart(e.target.value)} className="bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-1.5 text-xs" />
+          <input type="date" value={end}   onChange={e => setEnd(e.target.value)}   className="bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-1.5 text-xs" />
+          <button onClick={recompute} disabled={recomputing}
+            className="px-3 py-1.5 bg-[#cc5a16] text-white text-xs font-bold rounded-xl disabled:opacity-50">
+            {recomputing ? '…' : 'Recompute'}
+          </button>
+          <button onClick={exportCsv}
+            className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold text-[#6b5d52]">
+            CSV
+          </button>
+        </div>
+      </div>
+      {message && <p className="text-xs text-orange-700 font-bold">{message}</p>}
+      {loading ? (
+        <div className="py-16 text-center text-[#9c8e85]">Loading timesheet…</div>
+      ) : (
+        <>
+          {/* KPI cards */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              { label: 'Planned hrs', value: Number(summary?.totals?.planned_hours || 0).toFixed(1), color: 'text-[#1a1208]' },
+              { label: 'Actual hrs',  value: Number(summary?.totals?.actual_hours  || 0).toFixed(1), color: 'text-[#1a1208]' },
+              { label: 'Variance',    value: `${Number(summary?.totals?.variance_hours || 0) >= 0 ? '+' : ''}${Number(summary?.totals?.variance_hours || 0).toFixed(1)}`, color: Number(summary?.totals?.variance_hours || 0) >= 0 ? 'text-green-700' : 'text-red-600' },
+              { label: 'Overtime hrs',value: Number(summary?.totals?.overtime_hours || 0).toFixed(1), color: 'text-orange-700' },
+              { label: 'No-shows',    value: Number(summary?.totals?.no_shows || 0).toFixed(0),       color: 'text-red-600' },
+            ].map(k => (
+              <div key={k.label} className="bg-white rounded-2xl p-4 border border-[#cc5a16]/10">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{k.label}</p>
+                <p className={cn("text-2xl font-bold mt-1", k.color)}>{k.value}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Per-staff table */}
+          <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-x-auto">
+            <table className="min-w-full text-xs">
+              <thead className="bg-[#faf7f2]">
+                <tr>
+                  <th className="px-3 py-2 text-left font-bold uppercase tracking-widest text-[#6b5d52]">Staff</th>
+                  <th className="px-3 py-2 text-left font-bold uppercase tracking-widest text-[#6b5d52]">Role</th>
+                  <th className="px-3 py-2 text-right font-bold uppercase tracking-widest text-[#6b5d52]">Planned</th>
+                  <th className="px-3 py-2 text-right font-bold uppercase tracking-widest text-[#6b5d52]">Actual</th>
+                  <th className="px-3 py-2 text-right font-bold uppercase tracking-widest text-[#6b5d52]">Variance</th>
+                  <th className="px-3 py-2 text-right font-bold uppercase tracking-widest text-[#6b5d52]">No-shows</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(summary?.by_staff || []).map((s: any) => (
+                  <tr key={s.staff_id} className="border-t border-[#cc5a16]/5">
+                    <td className="px-3 py-2 font-bold">{s.name || s.staff_id}</td>
+                    <td className="px-3 py-2 text-[#6b5d52] uppercase text-[10px]">{s.role || ''}</td>
+                    <td className="px-3 py-2 text-right font-mono">{Number(s.planned || 0).toFixed(1)}</td>
+                    <td className="px-3 py-2 text-right font-mono">{Number(s.actual || 0).toFixed(1)}</td>
+                    <td className={cn("px-3 py-2 text-right font-mono",
+                      Number(s.variance || 0) >= 0 ? "text-green-700" : "text-red-600")}>
+                      {Number(s.variance || 0) >= 0 ? '+' : ''}{Number(s.variance || 0).toFixed(1)}
+                    </td>
+                    <td className="px-3 py-2 text-right text-red-600 font-bold">{Number(s.no_shows || 0)}</td>
+                  </tr>
+                ))}
+                {(summary?.by_staff || []).length === 0 && (
+                  <tr><td colSpan={6} className="py-12 text-center text-[#9c8e85] italic">
+                    No data — assign roster slots and let staff check in to populate the timesheet.
+                  </td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Day-level detail (optional drill-down) */}
+          {rows.length > 0 && (
+            <details className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+              <summary className="text-xs font-bold uppercase tracking-widest text-[#6b5d52] cursor-pointer">
+                Per-day rows ({rows.length})
+              </summary>
+              <table className="min-w-full text-xs mt-3">
+                <thead className="bg-[#faf7f2]">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Staff</th>
+                    <th className="px-3 py-2 text-right">Planned</th>
+                    <th className="px-3 py-2 text-right">Actual</th>
+                    <th className="px-3 py-2 text-right">Variance</th>
+                    <th className="px-3 py-2 text-center">Flags</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r: any, i: number) => (
+                    <tr key={i} className="border-t border-[#cc5a16]/5">
+                      <td className="px-3 py-1.5 font-mono">{String(r.shift_date).slice(0, 10)}</td>
+                      <td className="px-3 py-1.5">{r.staff_name || r.staff_id}</td>
+                      <td className="px-3 py-1.5 text-right font-mono">{Number(r.planned_hours || 0).toFixed(1)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono">{Number(r.actual_hours  || 0).toFixed(1)}</td>
+                      <td className={cn("px-3 py-1.5 text-right font-mono",
+                        Number(r.variance_hours || 0) >= 0 ? "text-green-700" : "text-red-600")}>
+                        {Number(r.variance_hours || 0) >= 0 ? '+' : ''}{Number(r.variance_hours || 0).toFixed(1)}
+                      </td>
+                      <td className="px-3 py-1.5 text-center">
+                        {r.is_no_show ? <span className="text-red-600 font-bold mr-2">No-show</span> : null}
+                        {r.is_overtime ? <span className="text-orange-700 font-bold">OT</span> : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
 function BookingsManagement({ restaurantId, token }: { restaurantId: string, token: string }) {

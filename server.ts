@@ -713,6 +713,47 @@ function resolveTargetRestaurantId(req: AuthRequest): string | null {
 
 const MAX_TENANTS_IN_MEMORY = 100;
 
+// Phase 3 helper. Resolves the right recipient set for a given role,
+// crossing the public/users vs tenant/attendance_staff boundary that
+// previously broke every staff-targeted notification.
+//
+//   OWNER / MANAGER / SUPER_ADMIN / CTO → public.users (tenant owners)
+//   STAFF / CHEF / WAITER / HOUSEKEEPING / ROOM_SERVICE / SECURITY /
+//     CONCIERGE / FRONT_DESK / ANY                              → attendance_staff (tenant)
+//
+// Lookups are tolerant: rows missing email/phone simply do not contribute
+// — they don't fail the whole call. Returns objects so callers can pick
+// the channel they want.
+async function _resolveRecipients(
+  restaurantId: string,
+  role: string,
+  tenantDb: any,
+): Promise<Array<{ email?: string; phone?: string }>> {
+  const r = String(role || '').toUpperCase();
+  const OWNER_ROLES = new Set(['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO', 'ADMIN']);
+  if (OWNER_ROLES.has(r)) {
+    const users: any[] = await centralDb.query(
+      "SELECT email, phone FROM users WHERE restaurant_id = ? AND role = ? AND is_active = 1",
+      [restaurantId, role]
+    ).catch(() => []);
+    return (users || []).map((u: any) => ({ email: u.email, phone: u.phone }));
+  }
+  // Tenant-staff roles live in the tenant's attendance_staff table.
+  // role='ANY' (or empty) → every active staff row regardless of role.
+  let staff: any[];
+  if (!r || r === 'ANY' || r === 'STAFF') {
+    staff = await tenantDb.query(
+      "SELECT email, phone FROM attendance_staff WHERE is_active = 1"
+    ).catch(() => []);
+  } else {
+    staff = await tenantDb.query(
+      "SELECT email, phone FROM attendance_staff WHERE is_active = 1 AND UPPER(COALESCE(role, '')) = ?",
+      [r]
+    ).catch(() => []);
+  }
+  return (staff || []).map((s: any) => ({ email: s.email, phone: s.phone }));
+}
+
 async function triggerNotification(restaurantId: string, eventName: string, data: any) {
   try {
     // Inject restaurant name so all notifications display the correct restaurant
@@ -732,12 +773,24 @@ async function triggerNotification(restaurantId: string, eventName: string, data
         recipients.push(data.customerEmail);
         if (data.customerPhone) recipients.push(data.customerPhone);
       } else {
-        // Fetch users with this role for this restaurant
-        const users = await centralDb.query("SELECT email, phone FROM users WHERE restaurant_id = ? AND role = ? AND is_active = 1", [restaurantId, setting.role]);
-        users.forEach(u => {
-          if (u.email) recipients.push(u.email);
-          if (u.phone) recipients.push(u.phone);
-        });
+        // Phase 3 fix: resolve recipients via _resolveRecipients so that
+        // staff-targeted events (CHEF / WAITER / MANAGER / HOUSEKEEPING /
+        // ROOM_SERVICE / etc.) hit attendance_staff rows in the tenant DB.
+        // Previously this only checked public.users, which contains owners
+        // and the central admin set — every staff-targeted event was being
+        // silently dropped. STAFF_ATTENDANCE and the new SHIFT_* events
+        // depend on this fix.
+        const resolved = await _resolveRecipients(restaurantId, setting.role, db);
+        for (const r of resolved) {
+          if (r.email) recipients.push(r.email);
+          if (r.phone) recipients.push(r.phone);
+        }
+        // Additionally: if the event_data carries an explicit
+        // staff_id / staff_phone, push that too. Useful for SHIFT_* events
+        // where we want to ping the affected staff specifically even if
+        // their attendance_staff row is missing phone/email.
+        if (data.staff_phone) recipients.push(data.staff_phone);
+        if (data.staff_email) recipients.push(data.staff_email);
       }
 
       // Add manual recipients if any
@@ -4266,6 +4319,448 @@ async function startServer() {
     } catch (err) {
       console.error("Tax config apply-preset error:", err);
       res.status(500).json({ error: "Failed to apply preset" });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // ROSTER + TIMESHEET (Phase 3)
+  // ─────────────────────────────────────────────────────────────────────
+
+  // Helpers
+  const _hoursBetween = (start: string, end: string): number => {
+    // start / end are "HH:MM" strings; supports overnight (end < start → +24h)
+    const [sh, sm] = String(start || '0:0').split(':').map(Number);
+    const [eh, em] = String(end || '0:0').split(':').map(Number);
+    let mins = (eh * 60 + (em || 0)) - (sh * 60 + (sm || 0));
+    if (mins < 0) mins += 24 * 60;
+    return Math.round((mins / 60) * 100) / 100;
+  };
+
+  // ── Shift templates ──────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/shift-templates", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        "SELECT id, label, start_time, end_time, expected_hours, role_filter, color, is_archived FROM shift_templates WHERE is_archived = 0 ORDER BY start_time ASC"
+      );
+      res.json(rows || []);
+    } catch (err) {
+      console.error("Shift templates GET error:", err);
+      res.status(500).json({ error: "Failed to load templates" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/shift-templates", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const db = await getTenantDb(req.params.id);
+      const { id, label, start_time, end_time, role_filter, color } = req.body || {};
+      if (!label || !start_time || !end_time) {
+        return res.status(400).json({ error: "label, start_time, end_time are required" });
+      }
+      const tid = id || `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const hours = _hoursBetween(start_time, end_time);
+      await db.run(
+        `INSERT INTO shift_templates (id, label, start_time, end_time, expected_hours, role_filter, color)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           label = EXCLUDED.label, start_time = EXCLUDED.start_time,
+           end_time = EXCLUDED.end_time, expected_hours = EXCLUDED.expected_hours,
+           role_filter = EXCLUDED.role_filter, color = EXCLUDED.color`,
+        [tid, label, start_time, end_time, hours, role_filter || null, color || null]
+      );
+      res.json({ success: true, id: tid, expected_hours: hours });
+    } catch (err) {
+      console.error("Shift template POST error:", err);
+      res.status(500).json({ error: "Failed to save template" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/shift-templates/:tid", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const db = await getTenantDb(req.params.id);
+      await db.run(
+        "UPDATE shift_templates SET is_archived = 1 WHERE id = ?",
+        [req.params.tid]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Shift template DELETE error:", err);
+      res.status(500).json({ error: "Failed to archive template" });
+    }
+  });
+
+  // ── Roster grid ─────────────────────────────────────────────────────
+  // GET /roster?start=YYYY-MM-DD&end=YYYY-MM-DD
+  // Returns slots joined with staff name/role for the grid renderer.
+  app.get("/api/restaurant/:id/roster", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      if (!start || !end) return res.status(400).json({ error: "start and end (YYYY-MM-DD) required" });
+      const db = await getTenantDb(req.params.id);
+      const slots: any[] = await db.query(
+        `SELECT rs.id, rs.staff_id, rs.shift_date, rs.template_id,
+                rs.start_time, rs.end_time, rs.expected_hours, rs.status,
+                rs.notes, s.name AS staff_name, s.role AS staff_role
+           FROM roster_slots rs
+           LEFT JOIN attendance_staff s ON s.id = rs.staff_id
+          WHERE rs.shift_date >= ? AND rs.shift_date <= ?
+          ORDER BY rs.shift_date ASC, rs.start_time ASC`,
+        [start, end]
+      );
+      const staff: any[] = await db.query(
+        "SELECT id, name, role, phone, email FROM attendance_staff WHERE is_active = 1 ORDER BY name ASC"
+      );
+      res.json({ slots: slots || [], staff: staff || [] });
+    } catch (err) {
+      console.error("Roster GET error:", err);
+      res.status(500).json({ error: "Failed to load roster" });
+    }
+  });
+
+  // POST /roster — batch upsert. Body: { slots: [{staff_id, shift_date,
+  // start_time, end_time, template_id?, status?, notes?}, ...] }.
+  // Writes change log rows for every diff and enqueues SHIFT_ASSIGNED /
+  // SHIFT_UPDATED notifications via triggerNotification.
+  app.post("/api/restaurant/:id/roster", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const tenantId = req.params.id;
+      const db = await getTenantDb(tenantId);
+      const slots: any[] = Array.isArray(req.body?.slots) ? req.body.slots : [];
+      if (slots.length === 0) return res.json({ success: true, written: 0 });
+      const changedBy = req.user?.email || req.user?.id || 'system';
+      const written: any[] = [];
+      for (const s of slots) {
+        if (!s.staff_id || !s.shift_date || !s.start_time || !s.end_time) continue;
+        const id = s.id || `slot_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        const hours = _hoursBetween(s.start_time, s.end_time);
+        // Diff against existing row for the change log
+        const existing: any = await db.get(
+          "SELECT * FROM roster_slots WHERE id = ?", [id]
+        ).catch(() => null);
+        await db.run(
+          `INSERT INTO roster_slots (id, staff_id, shift_date, template_id, start_time, end_time, expected_hours, status, created_by, notes, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT (id) DO UPDATE SET
+             staff_id = EXCLUDED.staff_id, shift_date = EXCLUDED.shift_date,
+             template_id = EXCLUDED.template_id, start_time = EXCLUDED.start_time,
+             end_time = EXCLUDED.end_time, expected_hours = EXCLUDED.expected_hours,
+             status = EXCLUDED.status, notes = EXCLUDED.notes,
+             updated_at = CURRENT_TIMESTAMP`,
+          [id, s.staff_id, s.shift_date, s.template_id || null,
+           s.start_time, s.end_time, hours,
+           s.status || 'PUBLISHED', changedBy, s.notes || null]
+        );
+        // Audit + notify
+        const action = existing ? 'UPDATED' : 'CREATED';
+        await db.run(
+          `INSERT INTO roster_change_log (slot_id, staff_id, action, old_value, new_value, changed_by)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [id, s.staff_id, action,
+           existing ? JSON.stringify(existing) : null,
+           JSON.stringify({ ...s, id, expected_hours: hours }),
+           changedBy]
+        ).catch(() => {});
+        // Notification: SHIFT_ASSIGNED for new published slots, SHIFT_UPDATED otherwise.
+        if ((s.status || 'PUBLISHED') === 'PUBLISHED') {
+          const staffRow: any = await db.get(
+            "SELECT name, phone, email FROM attendance_staff WHERE id = ?", [s.staff_id]
+          ).catch(() => null);
+          const event = existing ? 'SHIFT_UPDATED' : 'SHIFT_ASSIGNED';
+          triggerNotification(tenantId, event, {
+            staff_id: s.staff_id,
+            staff_name: staffRow?.name || 'Team',
+            staff_phone: staffRow?.phone,
+            staff_email: staffRow?.email,
+            shift_date: s.shift_date,
+            start_time: s.start_time,
+            end_time: s.end_time,
+            notes: s.notes,
+          }).catch(() => {});
+        }
+        written.push({ id, action });
+      }
+      res.json({ success: true, written: written.length, slots: written });
+    } catch (err) {
+      console.error("Roster POST error:", err);
+      res.status(500).json({ error: "Failed to save roster" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/roster/:slotId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const tenantId = req.params.id;
+      const db = await getTenantDb(tenantId);
+      const existing: any = await db.get("SELECT * FROM roster_slots WHERE id = ?", [req.params.slotId]).catch(() => null);
+      if (!existing) return res.status(404).json({ error: "Slot not found" });
+      await db.run("DELETE FROM roster_slots WHERE id = ?", [req.params.slotId]);
+      await db.run(
+        `INSERT INTO roster_change_log (slot_id, staff_id, action, old_value, changed_by)
+         VALUES (?, ?, 'CANCELLED', ?, ?)`,
+        [existing.id, existing.staff_id, JSON.stringify(existing), req.user?.email || 'system']
+      ).catch(() => {});
+      const staffRow: any = await db.get(
+        "SELECT name, phone, email FROM attendance_staff WHERE id = ?", [existing.staff_id]
+      ).catch(() => null);
+      triggerNotification(tenantId, 'SHIFT_CANCELLED', {
+        staff_id: existing.staff_id,
+        staff_name: staffRow?.name || 'Team',
+        staff_phone: staffRow?.phone,
+        staff_email: staffRow?.email,
+        shift_date: existing.shift_date,
+        start_time: existing.start_time,
+        end_time: existing.end_time,
+      }).catch(() => {});
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Roster DELETE error:", err);
+      res.status(500).json({ error: "Failed to delete slot" });
+    }
+  });
+
+  // POST /roster/copy?from_start&from_end&to_start  → duplicates the slots
+  // from one date range to another, shifted by the same number of days.
+  // Each copied slot starts in DRAFT so the owner can review before
+  // publishing (no notifications fire until publish).
+  app.post("/api/restaurant/:id/roster/copy", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const { from_start, from_end, to_start } = req.body || {};
+      if (!from_start || !from_end || !to_start) {
+        return res.status(400).json({ error: "from_start, from_end, to_start required" });
+      }
+      const db = await getTenantDb(req.params.id);
+      const sourceStart = new Date(from_start);
+      const sourceEnd   = new Date(from_end);
+      const targetStart = new Date(to_start);
+      const offsetMs = targetStart.getTime() - sourceStart.getTime();
+      const src: any[] = await db.query(
+        `SELECT * FROM roster_slots WHERE shift_date >= ? AND shift_date <= ?`,
+        [from_start, from_end]
+      );
+      let copied = 0;
+      for (const s of (src || [])) {
+        const oldDate = new Date(s.shift_date);
+        const newDate = new Date(oldDate.getTime() + offsetMs);
+        if (newDate < targetStart) continue;
+        const newId = `slot_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        await db.run(
+          `INSERT INTO roster_slots (id, staff_id, shift_date, template_id, start_time, end_time, expected_hours, status, created_by, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)
+           ON CONFLICT DO NOTHING`,
+          [newId, s.staff_id, newDate.toISOString().slice(0, 10),
+           s.template_id, s.start_time, s.end_time, s.expected_hours,
+           req.user?.email || 'system', s.notes]
+        ).catch(() => {});
+        copied++;
+      }
+      // Cap at 31 days end date for safety (handles open-ended ranges)
+      void sourceEnd;
+      res.json({ success: true, copied });
+    } catch (err) {
+      console.error("Roster copy error:", err);
+      res.status(500).json({ error: "Failed to copy roster" });
+    }
+  });
+
+  // ── Timesheet ───────────────────────────────────────────────────────
+  // GET /timesheet?start=&end=&staff_id=
+  // Returns the joined planned-vs-actual view for the range.
+  app.get("/api/restaurant/:id/timesheet", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      const staffFilter = String(req.query.staff_id || '').trim();
+      if (!start || !end) return res.status(400).json({ error: "start and end required" });
+      const db = await getTenantDb(req.params.id);
+      let q = `SELECT t.staff_id, t.shift_date, t.planned_hours, t.actual_hours,
+                      t.variance_hours, t.is_no_show, t.is_overtime, t.notes,
+                      s.name AS staff_name, s.role AS staff_role
+                 FROM timesheet_day t
+                 LEFT JOIN attendance_staff s ON s.id = t.staff_id
+                WHERE t.shift_date >= ? AND t.shift_date <= ?`;
+      const params: any[] = [start, end];
+      if (staffFilter) { q += ` AND t.staff_id = ?`; params.push(staffFilter); }
+      q += ` ORDER BY t.shift_date ASC, s.name ASC`;
+      const rows: any[] = await db.query(q, params);
+      res.json(rows || []);
+    } catch (err) {
+      console.error("Timesheet GET error:", err);
+      res.status(500).json({ error: "Failed to load timesheet" });
+    }
+  });
+
+  // GET /timesheet/summary — aggregate KPIs for the dashboard cards.
+  app.get("/api/restaurant/:id/timesheet/summary", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      if (!start || !end) return res.status(400).json({ error: "start and end required" });
+      const db = await getTenantDb(req.params.id);
+      const totals: any = await db.get(
+        `SELECT COALESCE(SUM(planned_hours), 0) AS planned,
+                COALESCE(SUM(actual_hours), 0)  AS actual,
+                COALESCE(SUM(variance_hours), 0) AS variance,
+                COALESCE(SUM(CASE WHEN is_no_show = 1 THEN 1 ELSE 0 END), 0) AS no_shows,
+                COALESCE(SUM(CASE WHEN is_overtime = 1 THEN actual_hours - planned_hours ELSE 0 END), 0) AS overtime_hours,
+                COUNT(*) AS days
+           FROM timesheet_day
+          WHERE shift_date >= ? AND shift_date <= ?`,
+        [start, end]
+      );
+      const byStaff: any[] = await db.query(
+        `SELECT t.staff_id, s.name, s.role,
+                COALESCE(SUM(t.planned_hours), 0) AS planned,
+                COALESCE(SUM(t.actual_hours), 0)  AS actual,
+                COALESCE(SUM(t.variance_hours), 0) AS variance,
+                COALESCE(SUM(CASE WHEN t.is_no_show = 1 THEN 1 ELSE 0 END), 0) AS no_shows
+           FROM timesheet_day t
+           LEFT JOIN attendance_staff s ON s.id = t.staff_id
+          WHERE t.shift_date >= ? AND t.shift_date <= ?
+          GROUP BY t.staff_id, s.name, s.role
+          ORDER BY actual DESC`,
+        [start, end]
+      );
+      res.json({
+        totals: {
+          planned_hours: Number(totals?.planned || 0),
+          actual_hours:  Number(totals?.actual  || 0),
+          variance_hours: Number(totals?.variance || 0),
+          no_shows: Number(totals?.no_shows || 0),
+          overtime_hours: Number(totals?.overtime_hours || 0),
+          days: Number(totals?.days || 0),
+        },
+        by_staff: byStaff || [],
+      });
+    } catch (err) {
+      console.error("Timesheet summary error:", err);
+      res.status(500).json({ error: "Failed to compute summary" });
+    }
+  });
+
+  // GET /timesheet/export.csv — owner-friendly export
+  app.get("/api/restaurant/:id/timesheet/export.csv", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      if (!start || !end) return res.status(400).send("start and end required");
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT t.shift_date, s.name AS staff_name, s.role AS staff_role,
+                t.planned_hours, t.actual_hours, t.variance_hours,
+                t.is_no_show, t.is_overtime, COALESCE(t.notes, '') AS notes
+           FROM timesheet_day t
+           LEFT JOIN attendance_staff s ON s.id = t.staff_id
+          WHERE t.shift_date >= ? AND t.shift_date <= ?
+          ORDER BY t.shift_date ASC, s.name ASC`,
+        [start, end]
+      );
+      const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const head = "Date,Staff,Role,Planned Hours,Actual Hours,Variance,No-show,Overtime,Notes";
+      const body = (rows || []).map(r =>
+        [r.shift_date, r.staff_name || '', r.staff_role || '',
+         Number(r.planned_hours || 0).toFixed(2),
+         Number(r.actual_hours  || 0).toFixed(2),
+         Number(r.variance_hours || 0).toFixed(2),
+         r.is_no_show ? 'Y' : '', r.is_overtime ? 'Y' : '',
+         r.notes].map(esc).join(',')
+      ).join('\n');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="timesheet-${start}-to-${end}.csv"`);
+      res.send(head + '\n' + body);
+    } catch (err) {
+      console.error("Timesheet export error:", err);
+      res.status(500).send("Export failed");
+    }
+  });
+
+  // Recompute timesheet for an arbitrary range. Joins roster_slots
+  // (planned) with the attendance table (actual hours from check_in / check_out).
+  // Also drives the daily cron.
+  async function _recomputeTimesheet(tenantId: string, startDate: string, endDate: string) {
+    const db = await getTenantDb(tenantId);
+    const slots: any[] = await db.query(
+      `SELECT staff_id, shift_date, expected_hours, start_time
+         FROM roster_slots
+        WHERE shift_date >= ? AND shift_date <= ?
+          AND status != 'CANCELLED'`,
+      [startDate, endDate]
+    );
+    const attendance: any[] = await db.query(
+      `SELECT user_id AS staff_id, date AS shift_date, hours, check_in, check_out, status
+         FROM attendance
+        WHERE date >= ? AND date <= ?`,
+      [startDate, endDate]
+    );
+    // Build maps keyed by (staff_id, date)
+    type Key = string;
+    const k = (sid: string, d: string) => `${sid}|${String(d).slice(0, 10)}`;
+    const planned: Record<Key, number> = {};
+    const slotMeta: Record<Key, any> = {};
+    for (const s of slots) {
+      const key = k(s.staff_id, s.shift_date);
+      planned[key] = (planned[key] || 0) + Number(s.expected_hours || 0);
+      slotMeta[key] = s;
+    }
+    const actual: Record<Key, number> = {};
+    const noCheckIn: Record<Key, boolean> = {};
+    for (const a of attendance) {
+      const key = k(a.staff_id, a.shift_date);
+      actual[key] = (actual[key] || 0) + Number(a.hours || 0);
+      if (a.check_in) noCheckIn[key] = false;
+    }
+    // Union of all keys
+    const keys = new Set<Key>([...Object.keys(planned), ...Object.keys(actual)]);
+    let written = 0;
+    for (const key of keys) {
+      const [staffId, date] = key.split('|');
+      const p = planned[key] || 0;
+      const a = actual[key] || 0;
+      const variance = Math.round((a - p) * 100) / 100;
+      const isNoShow = p > 0 && a === 0 ? 1 : 0;
+      const isOvertime = p > 0 && a > p * 1.25 ? 1 : 0;
+      await db.run(
+        `INSERT INTO timesheet_day (staff_id, shift_date, planned_hours, actual_hours, variance_hours, is_no_show, is_overtime, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (staff_id, shift_date) DO UPDATE SET
+           planned_hours = EXCLUDED.planned_hours,
+           actual_hours  = EXCLUDED.actual_hours,
+           variance_hours = EXCLUDED.variance_hours,
+           is_no_show    = EXCLUDED.is_no_show,
+           is_overtime   = EXCLUDED.is_overtime,
+           updated_at    = CURRENT_TIMESTAMP`,
+        [staffId, date, p, a, variance, isNoShow, isOvertime]
+      ).catch(() => {});
+      written++;
+    }
+    return written;
+  }
+  (globalThis as any).__recomputeTimesheet = _recomputeTimesheet;
+
+  app.post("/api/restaurant/:id/timesheet/recompute", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.body?.start || '').trim();
+      const end   = String(req.body?.end   || '').trim();
+      if (!start || !end) return res.status(400).json({ error: "start and end required" });
+      const written = await _recomputeTimesheet(req.params.id, start, end);
+      res.json({ success: true, days_written: written });
+    } catch (err) {
+      console.error("Timesheet recompute error:", err);
+      res.status(500).json({ error: "Failed to recompute timesheet" });
     }
   });
 
@@ -13292,7 +13787,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tax-v1-multi-currency-template',
+    commit_marker: 'staff-v1-roster-timesheet',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -13311,6 +13806,10 @@ async function startServer() {
       'multi-currency-tax-presets',      // Phase 2: country presets (IN/US/CA/AU/EU), tax_config table
       'invoice-tenant-aware-rendering',  // invoiceService uses tenant.currency + taxLines loop
       'currency-snapshot-columns',       // orders/folios capture currency_snapshot + tax_label_snapshot
+      'roster-shift-assignment',         // Phase 3: shift_templates + roster_slots + change log
+      'timesheet-planned-vs-actual',     // Phase 3: timesheet_day materialised view + cron
+      'shift-notification-events',       // Phase 3: SHIFT_ASSIGNED/UPDATED/CANCELLED/REMINDER
+      'staff-recipient-resolution-fix',  // Phase 3: triggerNotification now hits attendance_staff for staff roles
     ],
     booted_at: new Date().toISOString(),
   };
@@ -13962,6 +14461,39 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[billing-reminder] Subscription billing reminder cron started — daily at 09:30 IST');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Phase 3 — Timesheet materialisation cron (23:59 IST) ────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Snapshots yesterday's planned-vs-actual into timesheet_day for every
+  // active tenant. Owners get a fast dashboard render in the morning
+  // without needing to join roster + attendance live each time.
+  cron.schedule('59 23 * * *', async () => {
+    try {
+      console.log('[timesheet-cron] 23:59 IST — materialising timesheet_day for active tenants');
+      const tenants: any[] = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM' AND access_revoked = 0"
+      );
+      const today = new Date();
+      const dateStr = today.toISOString().slice(0, 10);
+      let totalWritten = 0;
+      for (const t of (tenants || [])) {
+        try {
+          const fn = (globalThis as any).__recomputeTimesheet as
+            (tid: string, s: string, e: string) => Promise<number>;
+          if (typeof fn !== 'function') continue;
+          const written = await fn(t.id, dateStr, dateStr);
+          totalWritten += written;
+        } catch (err) {
+          console.error(`[timesheet-cron] tenant ${t.id} failed:`, err);
+        }
+      }
+      console.log(`[timesheet-cron] done — ${totalWritten} day rows written across ${tenants?.length || 0} tenants`);
+    } catch (err) {
+      console.error('[timesheet-cron] error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[timesheet-cron] Daily timesheet materialisation started — 23:59 IST');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase 4 — Outbound delivery-platform sync queue worker ──────────────

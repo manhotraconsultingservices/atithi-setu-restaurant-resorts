@@ -1222,6 +1222,82 @@ export async function getTenantDb(restaurantId: string): Promise<DbInterface> {
   await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS currency_snapshot TEXT`).catch(() => {});
   await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_label_snapshot TEXT`).catch(() => {});
 
+  // ─────────────────────────────────────────────────────────────────────
+  // STAFF ROSTER + TIMESHEET (Phase 3)
+  // ─────────────────────────────────────────────────────────────────────
+  // Reusable shift templates (owner-editable: e.g. "Morning 9-1", "Evening 6-11").
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS shift_templates (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      expected_hours DOUBLE PRECISION,
+      role_filter TEXT,
+      color TEXT,
+      is_archived INT DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Roster slots: one row per (staff, date, start_time). Either built from
+  // a template (template_id) or filled with explicit times. status moves
+  // DRAFT → PUBLISHED → CANCELLED. SHIFT_* notifications fire on publish.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS roster_slots (
+      id TEXT PRIMARY KEY,
+      staff_id TEXT NOT NULL,
+      shift_date DATE NOT NULL,
+      template_id TEXT,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      expected_hours DOUBLE PRECISION,
+      status TEXT DEFAULT 'PUBLISHED',
+      created_by TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT
+    )
+  `);
+  await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_roster_unique ON roster_slots (staff_id, shift_date, start_time)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_roster_date ON roster_slots (shift_date)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_roster_staff_date ON roster_slots (staff_id, shift_date)`);
+
+  // Audit trail for slot changes (drives notifications + post-mortem reports).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS roster_change_log (
+      id SERIAL PRIMARY KEY,
+      slot_id TEXT NOT NULL,
+      staff_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      changed_by TEXT,
+      changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      notified INT DEFAULT 0
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_roster_log_slot ON roster_change_log (slot_id, changed_at DESC)`);
+
+  // Denormalised daily view of planned vs actual hours. Materialised at
+  // 23:59 IST by the timesheet cron in server.ts; also recomputable on
+  // demand via POST /api/restaurant/:id/timesheet/recompute.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS timesheet_day (
+      staff_id TEXT NOT NULL,
+      shift_date DATE NOT NULL,
+      planned_hours DOUBLE PRECISION DEFAULT 0,
+      actual_hours DOUBLE PRECISION DEFAULT 0,
+      variance_hours DOUBLE PRECISION DEFAULT 0,
+      is_no_show INT DEFAULT 0,
+      is_overtime INT DEFAULT 0,
+      notes TEXT,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (staff_id, shift_date)
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_timesheet_date ON timesheet_day (shift_date)`);
+
   tenantDbCache.set(schema, db);
   return db;
 }

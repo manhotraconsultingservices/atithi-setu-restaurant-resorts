@@ -791,6 +791,104 @@ export function buildNotificationContent(
       };
     }
 
+    /* ── Staff roster / shift events (Phase 3) ────────────────────────── */
+
+    case 'SHIFT_ASSIGNED': {
+      // Sent to the affected staff member when a new shift is published.
+      const name = data.staff_name || 'Team';
+      const date = data.shift_date
+        ? new Date(data.shift_date).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' })
+        : 'an upcoming date';
+      return {
+        subject: `Shift assigned: ${date} at ${r}`,
+        text:
+          `Hi ${name},\n\n` +
+          `You have a new shift scheduled at ${r}.\n\n` +
+          `Date: ${date}\nTime: ${data.start_time}–${data.end_time}\n` +
+          (data.notes ? `Notes: ${data.notes}\n` : '') +
+          `\nSee you then!\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">New shift assigned</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>You have a new shift scheduled at <strong>${r}</strong>.</p>` +
+          `<table style="margin:12px 0"><tr><td><b>Date:</b></td><td>${date}</td></tr>` +
+          `<tr><td><b>Time:</b></td><td>${data.start_time} – ${data.end_time}</td></tr>` +
+          (data.notes ? `<tr><td><b>Notes:</b></td><td>${data.notes}</td></tr>` : '') +
+          `</table>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'SHIFT_UPDATED': {
+      const name = data.staff_name || 'Team';
+      const date = data.shift_date
+        ? new Date(data.shift_date).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' })
+        : 'an upcoming date';
+      return {
+        subject: `Shift changed: ${date} at ${r}`,
+        text:
+          `Hi ${name},\n\n` +
+          `Your shift at ${r} has been updated.\n\n` +
+          `Date: ${date}\nNew time: ${data.start_time}–${data.end_time}\n` +
+          `\nReply if you cannot make the new timing.\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">Shift updated</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>Your shift at <strong>${r}</strong> has been updated.</p>` +
+          `<table style="margin:12px 0"><tr><td><b>Date:</b></td><td>${date}</td></tr>` +
+          `<tr><td><b>New time:</b></td><td>${data.start_time} – ${data.end_time}</td></tr></table>` +
+          `<p style="color:#dc2626;font-size:13px"><b>Please reply if you cannot make the new timing.</b></p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'SHIFT_CANCELLED': {
+      const name = data.staff_name || 'Team';
+      const date = data.shift_date
+        ? new Date(data.shift_date).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' })
+        : 'the scheduled date';
+      return {
+        subject: `Shift cancelled: ${date} at ${r}`,
+        text:
+          `Hi ${name},\n\n` +
+          `Your shift on ${date} (${data.start_time}–${data.end_time}) at ${r} has been cancelled.\n\n` +
+          `You don't need to come in.\n\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#6b7280;margin-top:0">Shift cancelled</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>Your shift on <strong>${date}</strong> (${data.start_time}–${data.end_time}) at <strong>${r}</strong> has been cancelled. You don't need to come in.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'SHIFT_REMINDER': {
+      // Daily 8am IST cron — staff get a reminder of shifts in the next 12 hours.
+      const name = data.staff_name || 'Team';
+      const date = data.shift_date
+        ? new Date(data.shift_date).toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short' })
+        : 'today';
+      return {
+        subject: `Reminder: shift today at ${r}`,
+        text:
+          `Hi ${name},\n\nQuick reminder — you're scheduled at ${r} today.\n\n` +
+          `Date: ${date}\nTime: ${data.start_time}–${data.end_time}\n\nSee you soon!\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">Shift reminder</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>Quick reminder — you're scheduled at <strong>${r}</strong> today.</p>` +
+          `<p><b>${date}</b> · ${data.start_time} – ${data.end_time}</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
     /* ── Subscription billing ─────────────────────────────────────────── */
 
     case 'PAYMENT_DUE_SOON': {
