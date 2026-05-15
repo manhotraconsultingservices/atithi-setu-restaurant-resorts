@@ -63,7 +63,14 @@ class PostgresDb implements DbInterface {
       await this.pool.query(`CREATE SCHEMA IF NOT EXISTS "${this.schema}"`);
     }
     await this.withClient(async (client) => {
-      const statements = sql.split(';').map(s => s.trim()).filter(s => s.length > 0);
+      // Strip "--" line comments BEFORE splitting on ";". A semicolon
+      // inside a comment would otherwise be treated as a statement
+      // terminator and the next "statement" would start mid-comment with
+      // invalid SQL. Mirrors PostgreSQL's own parser behaviour.
+      // (Block comments /* */ are not stripped — they're rare in DDL and
+      // unlikely to contain unescaped semicolons.)
+      const sanitised = sql.replace(/--[^\n]*/g, '');
+      const statements = sanitised.split(';').map(s => s.trim()).filter(s => s.length > 0);
       for (const stmt of statements) {
         await client.query(stmt);
       }
@@ -163,7 +170,7 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS subscription_plan TEXT;
     -- Phase 2 (Multi-currency + configurable tax). Defaults preserve the
     -- exact India / GST / ₹ behaviour for every pre-existing tenant.
-    --   country         ISO-3166 alpha-2; selects the default tax preset.
+    --   country         ISO-3166 alpha-2, selects the default tax preset.
     --   currency_code   ISO-4217 code, drives invoice & receipt amounts.
     --   currency_symbol Rendered before every formatted amount.
     --   locale          Passed to toLocaleString() for thousands separators.
