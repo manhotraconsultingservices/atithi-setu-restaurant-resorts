@@ -5332,6 +5332,46 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [odApplyGst, setOdApplyGst]           = useState(false);
   const [odSaving, setOdSaving]               = useState(false);
   const [odSearchActive, setOdSearchActive]   = useState<number | null>(null);
+  // Server-computed preview for the manual-invoice modal. The form fields
+  // are still inputs; the totals (incl. multi-tax breakdown + auto-loyalty
+  // discount) are computed by the same code path that will run when the
+  // owner clicks "Generate Invoice". This keeps the live preview honest.
+  const [odPreview, setOdPreview]             = useState<any | null>(null);
+  const [odPreviewLoading, setOdPreviewLoading] = useState(false);
+
+  // Debounced fetch of the server-side preview whenever any input that
+  // affects totals changes (items list, customer phone for loyalty lookup,
+  // discount, service %, GST fallback). 300ms debounce keeps the network
+  // chatter sane while typing.
+  useEffect(() => {
+    if (!showOnDemandModal || !restaurantId) return;
+    const subtotalLocal = odInvoiceItems.reduce(
+      (s, it) => s + Number(it.price || 0) * Number(it.qty || 1), 0
+    );
+    if (subtotalLocal <= 0) { setOdPreview(null); return; }
+    const handle = setTimeout(async () => {
+      setOdPreviewLoading(true);
+      try {
+        const qs = new URLSearchParams({
+          subtotal: String(subtotalLocal),
+          discount: String(odDiscount || 0),
+          service_charge_percent: String(odSvcPct || 0),
+          gst_percent: String(odGstPct || 0),
+          apply_gst: odApplyGst ? '1' : '0',
+        });
+        if (odCustomer.phone) qs.set('customer_phone', odCustomer.phone);
+        const res = await fetch(
+          `/api/restaurant/${restaurantId}/invoices/preview-totals?${qs.toString()}`,
+          { headers: { 'Authorization': `Bearer ${token}` } }
+        );
+        if (res.ok) setOdPreview(await res.json());
+        else setOdPreview(null);
+      } catch { setOdPreview(null); }
+      finally { setOdPreviewLoading(false); }
+    }, 300);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showOnDemandModal, restaurantId, odInvoiceItems, odCustomer.phone, odDiscount, odSvcPct, odGstPct, odApplyGst]);
   // Type-ahead state for the Edit-Invoice modal (separate from the New-Invoice modal)
   const [invEditSearchActive, setInvEditSearchActive] = useState<number | null>(null);
   // Settings save UX — "Saving…" button + "✓ Saved" banner for 3s
@@ -5994,8 +6034,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const after   = Math.max(0, rawSubtotal - disc);
     const svcAmt  = after * svcPct / 100;
     const taxable = after + svcAmt;
-    const gstAmt  = applyGst ? taxable * gstPct / 100 : 0;
+
+    // Parse the multi-tax-line breakdown stored at invoice creation. Format:
+    // "GST:5.00:5.00|ST:10.00:10.00" → [{label:'GST', rate:5, amount:5}, ...]
+    // Falls back to the legacy single GST line when the snapshot is empty
+    // (older invoices created before Phase-2 tax_config support).
+    const parsedTaxLines: { label: string; rate: number; amount: number }[] = (() => {
+      const snap = inv.tax_label_snapshot || inv.taxLabelSnapshot;
+      if (snap && typeof snap === 'string' && snap.includes(':')) {
+        return snap.split('|').map((part: string) => {
+          const [label, rate, amount] = part.split(':');
+          return { label, rate: Number(rate || 0), amount: Number(amount || 0) };
+        }).filter(l => Number(l.amount) > 0);
+      }
+      if (Array.isArray(inv.tax_lines)) {
+        return inv.tax_lines.filter((l: any) => Number(l.amount) > 0);
+      }
+      return [];
+    })();
+    const taxFromLines = parsedTaxLines.reduce((s, l) => s + Number(l.amount || 0), 0);
+    const gstAmt = parsedTaxLines.length > 0
+      ? Number(taxFromLines.toFixed(2))
+      : (applyGst ? taxable * gstPct / 100 : 0);
     const total   = Number((taxable + gstAmt).toFixed(2));
+
+    // If the loyalty redemption amount was recorded server-side AND matches
+    // the total discount, label the discount line with the tier name so the
+    // customer sees "Loyalty discount (Silver 5%)" instead of plain "Discount".
+    const loyaltyAmt = Number(inv.loyalty_redemption_amount || 0);
+    const loyaltyTier = inv.loyalty_tier_name || inv.loyaltyTierName;
+    const loyaltyPct = Number(inv.loyalty_discount_percent || 0);
+    const loyaltyLabel = loyaltyAmt > 0 && loyaltyAmt >= disc - 0.01 && loyaltyTier
+      ? `${loyaltyTier} discount${loyaltyPct > 0 ? ` (${loyaltyPct}%)` : ''}`
+      : undefined;
 
     // Prefer the sequential invoice_number (or backend-computed display_number)
     // when available; fall back to the legacy "#last-8" form for older rows.
@@ -6019,9 +6090,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       rounds,
       subtotal:             rawSubtotal,
       discountAmount:       tpl.showDiscountLine && disc > 0 ? disc : undefined,
+      loyaltyDiscountLabel: loyaltyLabel,
       serviceChargeAmount:  svcAmt > 0 ? svcAmt : undefined,
       serviceChargePercent: svcPct > 0 ? svcPct : undefined,
       gstAmount:            gstAmt,
+      taxLines:             parsedTaxLines.length > 0 ? parsedTaxLines : undefined,
       total,
       paymentMethod:        tpl.showPaymentMethod ? (inv.paymentMethod || inv.payment_method || undefined) : undefined,
       footerNote:           tpl.showThankYouNote ? (tpl.footerText || 'Thank you!') : undefined,
@@ -15563,21 +15636,69 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 </div>
 
-                {/* Live total */}
+                {/* Live total — server-computed, multi-tax + auto-loyalty aware */}
                 {(() => {
-                  const sub = odInvoiceItems.reduce((s,it) => s + it.price * it.qty, 0);
-                  const after = Math.max(0, sub - odDiscount);
-                  const svc = after * odSvcPct / 100;
-                  const taxable = after + svc;
-                  const gst = odApplyGst ? taxable * odGstPct / 100 : 0;
-                  const grand = taxable + gst;
+                  const p = odPreview;
+                  const sub = p ? Number(p.subtotal || 0) : odInvoiceItems.reduce((s,it) => s + it.price * it.qty, 0);
+                  if (!p) {
+                    return (
+                      <div className="bg-[#faf7f2] rounded-2xl p-4 text-sm text-[#9c8e85] text-center">
+                        {sub > 0 ? (odPreviewLoading ? 'Computing totals…' : 'Add items to see totals') : 'Add items to see totals'}
+                      </div>
+                    );
+                  }
+                  const loy = p.loyalty;
                   return (
                     <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-1.5 text-sm">
-                      <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="font-mono">₹{sub.toFixed(2)}</span></div>
-                      {odDiscount > 0 && <div className="flex justify-between text-red-600"><span>Discount</span><span className="font-mono">−₹{odDiscount.toFixed(2)}</span></div>}
-                      {odSvcPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>Service ({odSvcPct}%)</span><span className="font-mono">₹{svc.toFixed(2)}</span></div>}
-                      {odApplyGst && odGstPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>GST ({odGstPct}%)</span><span className="font-mono">₹{gst.toFixed(2)}</span></div>}
-                      <div className="flex justify-between font-bold text-[#1a1208] pt-1 border-t border-[#cc5a16]/10 text-base"><span>Grand Total</span><span className="font-mono text-[#cc5a16]">₹{grand.toFixed(2)}</span></div>
+                      {loy && loy.tier_name && (
+                        <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 -mx-1 mb-2 flex items-center gap-2">
+                          <Sparkles size={14} className="text-amber-700 shrink-0" />
+                          <div className="text-[12px] text-amber-900">
+                            <strong>{loy.tier_name}</strong> member — <strong>{Number(loy.discount_percent || 0)}% off</strong> auto-applied
+                            {Number(p.loyalty_discount || 0) > Number(odDiscount || 0) &&
+                              ` (₹${Number(p.loyalty_discount).toFixed(2)} discount)`}
+                          </div>
+                        </div>
+                      )}
+                      <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="font-mono">₹{Number(p.subtotal || 0).toFixed(2)}</span></div>
+                      {Number(p.totalDiscount || 0) > 0 && (
+                        <div className="flex justify-between text-red-600">
+                          <span>
+                            {loy && Number(p.loyaltyDiscount) >= Number(p.manualDiscount) - 0.01
+                              ? `${loy.tier_name} discount (${Number(loy.discount_percent || 0)}%)`
+                              : 'Discount'}
+                          </span>
+                          <span className="font-mono">−₹{Number(p.totalDiscount).toFixed(2)}</span>
+                        </div>
+                      )}
+                      {Number(p.serviceCharge || 0) > 0 && (
+                        <div className="flex justify-between text-[#6b5d52]">
+                          <span>Service ({Number(p.serviceChargePct || 0)}%)</span>
+                          <span className="font-mono">₹{Number(p.serviceCharge).toFixed(2)}</span>
+                        </div>
+                      )}
+                      {Array.isArray(p.taxLines) && p.taxLines.length > 0 ? (
+                        p.taxLines.map((l: any, i: number) => (
+                          <div key={i} className="flex justify-between text-[#6b5d52]">
+                            <span>{l.label} ({Number(l.rate || 0).toFixed(2)}%)</span>
+                            <span className="font-mono">₹{Number(l.amount || 0).toFixed(2)}</span>
+                          </div>
+                        ))
+                      ) : Number(p.totalTax || 0) > 0 ? (
+                        <div className="flex justify-between text-[#6b5d52]">
+                          <span>Tax</span>
+                          <span className="font-mono">₹{Number(p.totalTax).toFixed(2)}</span>
+                        </div>
+                      ) : null}
+                      <div className="flex justify-between font-bold text-[#1a1208] pt-1 border-t border-[#cc5a16]/10 text-base">
+                        <span>Grand Total</span>
+                        <span className="font-mono text-[#cc5a16]">₹{Number(p.grandTotal || 0).toFixed(2)}</span>
+                      </div>
+                      {p.usedLegacyGst && (
+                        <p className="text-[10px] text-[#9c8e85] italic">
+                          No tax_config rows configured — using single GST % from this form.
+                        </p>
+                      )}
                     </div>
                   );
                 })()}
@@ -15587,21 +15708,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   onClick={async () => {
                     const validItems = odInvoiceItems.filter(it => it.name.trim());
                     if (validItems.length === 0) return;
-                    const sub = validItems.reduce((s,it) => s + it.price * it.qty, 0);
-                    const after = Math.max(0, sub - odDiscount);
-                    const svc = after * odSvcPct / 100;
-                    const taxable = after + svc;
-                    const gst = odApplyGst ? taxable * odGstPct / 100 : 0;
-                    const grand = taxable + gst;
+                    // Use the server's authoritative totals (multi-tax + loyalty)
+                    // so the preview matches the receipt that will print.
+                    const p = odPreview || {};
+                    const taxLabelSnapshot = Array.isArray(p.taxLines) && p.taxLines.length > 0
+                      ? p.taxLines.map((l: any) => `${l.label}:${Number(l.rate).toFixed(2)}:${Number(l.amount).toFixed(2)}`).join('|')
+                      : '';
                     const fakeOrder = {
                       id: `PRV-${Date.now()}`,
                       customerName: odCustomer.name, customerPhone: odCustomer.phone,
                       tableNumber: odCustomer.reference || 'Manual',
                       items: validItems.map(it => ({ name: it.name, quantity: it.qty, price: it.price })),
-                      totalAmount: grand, discount_amount: odDiscount,
-                      service_charge_percent: odSvcPct, gst_percent: odGstPct,
-                      apply_gst: odApplyGst ? 1 : 0, paymentMethod: '',
+                      totalAmount: Number(p.grandTotal || 0),
+                      discount_amount: Number(p.totalDiscount || 0),
+                      service_charge_percent: Number(p.serviceChargePct || odSvcPct),
+                      gst_percent: odGstPct,
+                      apply_gst: odApplyGst ? 1 : 0,
+                      paymentMethod: '',
                       createdAt: new Date().toISOString(),
+                      tax_label_snapshot: taxLabelSnapshot,
+                      loyalty_redemption_amount: Number(p.loyaltyDiscount || 0),
+                      loyalty_tier_name: p.loyalty?.tier_name,
+                      loyalty_discount_percent: p.loyalty?.discount_percent,
                     };
                     setPrintPreviewHtml(buildInvoiceHTML(fakeOrder, invoiceTemplate));
                   }}
@@ -16142,9 +16270,19 @@ interface ThermalReceiptData {
   }>;
   subtotal: number;
   discountAmount?: number;
+  // Phase 2.1 — loyalty discount component of the discountAmount. When
+  // present, the receipt renders "Loyalty discount (Silver 5%)" instead
+  // of a generic "Discount" line so the customer sees why they saved.
+  loyaltyDiscountLabel?: string;
   serviceChargeAmount?: number;
   serviceChargePercent?: number;
   gstAmount: number;
+  // Phase 2 — multiple tax lines (GST + Service Tax + VAT, India CGST/
+  // SGST/IGST split, etc.). When non-empty, the receipt renders each
+  // line individually with its own label and rate. gstAmount above is
+  // still set to sum(taxLines.amount) for backward-compat readers; the
+  // template prefers taxLines when present.
+  taxLines?: Array<{ label: string; rate: number; amount: number }>;
   total: number;
   paymentMethod?: string;
   footerNote?: string;
@@ -16188,6 +16326,20 @@ function buildThermalHTML(d: ThermalReceiptData): string {
   });
 
   const gstLabel = `GST @ ${d.gstPercent ?? 0}%`;
+
+  // Build the tax-line HTML. When taxLines[] is present, render one row
+  // per line (e.g. CGST + SGST, or GST + Service Tax + VAT). Otherwise
+  // fall back to the legacy single GST line driven by gstAmount/gstPercent
+  // so older invoices print exactly as they did pre-Phase-2.
+  const taxLinesHTML = (() => {
+    if (Array.isArray(d.taxLines) && d.taxLines.length > 0) {
+      return d.taxLines
+        .filter(l => Number(l.amount || 0) > 0)
+        .map(l => `<div class="dim">${totalLine(`${l.label} @ ${Number(l.rate || 0).toFixed(2)}%`, Number(l.amount || 0))}</div>`)
+        .join('');
+    }
+    return d.gstAmount > 0 ? `<div class="dim">${totalLine(gstLabel, d.gstAmount)}</div>` : '';
+  })();
 
   return `<!DOCTYPE html>
 <html>
@@ -16243,9 +16395,9 @@ function buildThermalHTML(d: ThermalReceiptData): string {
   <div class="rule">${dash}</div>
 
   <div>${totalLine('Subtotal', d.subtotal)}</div>
-  ${d.discountAmount && d.discountAmount > 0 ? `<div class="dim">${totalLine('Discount', -d.discountAmount)}</div>` : ''}
+  ${d.discountAmount && d.discountAmount > 0 ? `<div class="dim">${totalLine(d.loyaltyDiscountLabel || 'Discount', -d.discountAmount)}</div>` : ''}
   ${d.serviceChargeAmount && d.serviceChargeAmount > 0 ? `<div class="dim">${totalLine(`Service Charge (${d.serviceChargePercent ?? 0}%)`, d.serviceChargeAmount)}</div>` : ''}
-  ${d.gstAmount > 0 ? `<div class="dim">${totalLine(gstLabel, d.gstAmount)}</div>` : ''}
+  ${taxLinesHTML}
   <div class="rule">${rule}</div>
   <div class="big">${totalLine('TOTAL', d.total, true)}</div>
   <div class="rule">${rule}</div>

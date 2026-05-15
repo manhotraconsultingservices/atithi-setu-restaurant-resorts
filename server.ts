@@ -4791,18 +4791,36 @@ async function startServer() {
       "SELECT id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share FROM tax_config WHERE enabled = 1 ORDER BY display_order ASC, id ASC"
     );
     if (rows && rows.length > 0) return rows as TaxConfigRow[];
-    // First-time seed for this tenant
+    // First-time seed for this tenant. CRITICAL: for tenants that already
+    // had legacy GST configured (restaurants.gst_percentage / is_gst_enabled),
+    // we must MIGRATE that into the tax_config row instead of blindly using
+    // the preset default. Otherwise an existing Indian tenant with a custom
+    // 18% rate would silently revert to the preset 5%.
     const preset = TAX_PRESETS[templateId || 'IN_GST'] || TAX_PRESETS.IN_GST;
+    const legacy: any = await centralDb.get(
+      "SELECT gst_percentage, is_gst_enabled FROM restaurants WHERE id = ?",
+      [tenantId]
+    ).catch(() => null);
+    const legacyRate = legacy ? Number(legacy.gst_percentage || 0) : 0;
+    const legacyOn   = legacy ? Number(legacy.is_gst_enabled || 0) === 1 : false;
     for (const row of preset) {
+      // For the FIRST tax row in the preset (typically the country's
+      // primary tax — GST for India, Sales Tax for US, etc.), prefer the
+      // tenant's existing legacy rate when present. Disable the row if the
+      // legacy flag said "no GST" so behaviour is preserved.
+      const isPrimary = (preset.indexOf(row) === 0);
+      const useLegacyOverride = isPrimary && legacyRate > 0;
       await db.run(
         `INSERT INTO tax_config (id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO NOTHING`,
-        [row.id, row.label, row.rate_percent,
+        [row.id, row.label,
+         useLegacyOverride ? legacyRate : row.rate_percent,
          row.is_inclusive || 0,
          row.applies_to || 'TOTAL',
          row.display_order || 0,
-         row.enabled == null ? 1 : row.enabled,
+         isPrimary ? (legacy && !legacyOn ? 0 : (row.enabled == null ? 1 : row.enabled))
+                   : (row.enabled == null ? 1 : row.enabled),
          row.split_intrastate || 0,
          row.cgst_share == null ? 0.5 : row.cgst_share]
       ).catch(() => {});
@@ -4874,6 +4892,154 @@ async function startServer() {
     return lines.map(l => `${l.label}:${l.rate.toFixed(2)}:${l.amount.toFixed(2)}`).join('|');
   }
 
+  function _parseTaxSnapshot(snapshot: string | null | undefined): TaxLine[] {
+    if (!snapshot) return [];
+    return String(snapshot).split('|').map(part => {
+      const [label, rate, amount] = part.split(':');
+      return { id: label, label, rate: Number(rate || 0), amount: Number(amount || 0) };
+    });
+  }
+
+  // ─── Unified invoice totals calculator ──────────────────────────────────
+  // Single source of truth for every endpoint that creates or recomputes
+  // an invoice's totals. Manual invoices, customer QR orders, and folio
+  // recomputes all funnel through this so the math stays consistent and
+  // the same tax_config rows are honoured everywhere.
+  //
+  // Inputs:
+  //   subtotal          sum of line items × quantities (pre-everything)
+  //   discountAmount    optional manual discount entered by the owner
+  //   serviceChargePct  service charge % applied to (subtotal − discount)
+  //   customerPhone     optional — if provided AND the customer is a
+  //                     recognised loyalty member, the tier discount
+  //                     auto-applies. Final discount = max(manual, tier).
+  //   isIntrastate      hotel folio flag — passed straight to computeTaxes
+  //   legacyGstFallback when tax_config has zero enabled rows (no rows or
+  //                     all disabled), fall back to the form's single
+  //                     gst_percent so we preserve pre-Phase-2 behaviour
+  //                     for tenants who haven't migrated.
+  //
+  // Output:
+  //   subtotal, manualDiscount, loyaltyDiscount, totalDiscount,
+  //   subtotalAfterDiscount, serviceCharge, taxableBase, taxLines[],
+  //   totalTax, grandTotal, loyalty: { phone, tier_id, tier_name, discount_percent }?
+  type InvoiceTotalsInput = {
+    tenantId: string;
+    subtotal: number;
+    discountAmount?: number;
+    serviceChargePct?: number;
+    customerPhone?: string | null;
+    isIntrastate?: boolean;
+    legacyGstFallback?: { gst_percent: number; apply_gst: boolean };
+  };
+  type InvoiceTotalsOutput = {
+    subtotal: number;
+    manualDiscount: number;
+    loyaltyDiscount: number;
+    totalDiscount: number;
+    subtotalAfterDiscount: number;
+    serviceCharge: number;
+    serviceChargePct: number;
+    taxableBase: number;
+    taxLines: TaxLine[];
+    totalTax: number;
+    grandTotal: number;
+    loyalty: null | { phone: string; tier_id: string | null; tier_name: string | null; discount_percent: number };
+    taxLabelSnapshot: string;
+    usedLegacyGst: boolean;
+  };
+  async function computeInvoiceTotals(opts: InvoiceTotalsInput): Promise<InvoiceTotalsOutput> {
+    const subtotal = Math.max(0, Math.round((opts.subtotal || 0) * 100) / 100);
+    const manualDiscount = Math.max(0, Math.round((opts.discountAmount || 0) * 100) / 100);
+    const serviceChargePct = Math.max(0, Number(opts.serviceChargePct || 0));
+
+    // ── Loyalty discount auto-apply ────────────────────────────────────
+    // Look up the customer; if their tier has a discount % > 0, compute the
+    // implied discount on subtotal. Final discount = max(manual, loyalty)
+    // so the owner can give MORE than the tier guarantees but never less.
+    const tenantDb = await getTenantDb(opts.tenantId);
+    let loyalty: InvoiceTotalsOutput['loyalty'] = null;
+    let loyaltyDiscount = 0;
+    const phone = opts.customerPhone ? _normalisePhone(opts.customerPhone) : null;
+    if (phone) {
+      const customer: any = await tenantDb.get(
+        "SELECT phone, total_spent, current_tier_id, is_blocked FROM loyalty_customers WHERE phone = ?",
+        [phone]
+      ).catch(() => null);
+      if (customer && Number(customer.is_blocked || 0) !== 1) {
+        const tier = await _resolveTierForSpend(tenantDb, Number(customer.total_spent || 0));
+        const pct = Number(tier?.discount_percent || 0);
+        if (tier && pct > 0) {
+          loyaltyDiscount = Math.round((subtotal * pct / 100) * 100) / 100;
+          loyalty = {
+            phone,
+            tier_id: tier.id,
+            tier_name: tier.name,
+            discount_percent: pct,
+          };
+        }
+      }
+    }
+    const totalDiscount = Math.min(subtotal, Math.max(manualDiscount, loyaltyDiscount));
+
+    const subtotalAfterDiscount = Math.max(0, Math.round((subtotal - totalDiscount) * 100) / 100);
+    const serviceCharge = Math.round((subtotalAfterDiscount * serviceChargePct / 100) * 100) / 100;
+    const taxableBase = Math.round((subtotalAfterDiscount + serviceCharge) * 100) / 100;
+
+    // ── Tax lines from tax_config ──────────────────────────────────────
+    const tenantRow: any = await centralDb.get(
+      "SELECT country, tax_template_id FROM restaurants WHERE id = ?",
+      [opts.tenantId]
+    );
+    const configs = await _loadTaxConfig(opts.tenantId, tenantRow?.tax_template_id || 'IN_GST');
+    const activeConfigs = (configs || []).filter(c =>
+      Number(c.enabled || 1) === 1 && Number(c.rate_percent || 0) > 0
+    );
+
+    let taxLines: TaxLine[] = [];
+    let totalTax = 0;
+    let usedLegacyGst = false;
+
+    if (activeConfigs.length > 0) {
+      const computed = computeTaxes({
+        tenant: { country: tenantRow?.country || 'IN' },
+        taxConfigs: activeConfigs,
+        subtotalAfterDiscount: taxableBase,
+        isIntrastate: opts.isIntrastate,
+      });
+      taxLines = computed.lines;
+      totalTax = computed.total;
+    } else if (opts.legacyGstFallback && opts.legacyGstFallback.apply_gst &&
+               opts.legacyGstFallback.gst_percent > 0) {
+      // No tax_config rows configured → honour the legacy single GST input.
+      const rate = Number(opts.legacyGstFallback.gst_percent);
+      const amount = Math.round((taxableBase * rate / 100) * 100) / 100;
+      if (amount > 0) {
+        taxLines = [{ id: 'GST', label: 'GST', rate, amount }];
+        totalTax = amount;
+        usedLegacyGst = true;
+      }
+    }
+
+    const grandTotal = Math.round((taxableBase + totalTax) * 100) / 100;
+    return {
+      subtotal,
+      manualDiscount,
+      loyaltyDiscount,
+      totalDiscount,
+      subtotalAfterDiscount,
+      serviceCharge,
+      serviceChargePct,
+      taxableBase,
+      taxLines,
+      totalTax,
+      grandTotal,
+      loyalty,
+      taxLabelSnapshot: _taxLabelSnapshot(taxLines),
+      usedLegacyGst,
+    };
+  }
+
   // Expose to closures defined later in this file (order creation,
   // folio recompute). Wrapping them in module-level refs avoids circular
   // typing — the helpers are referenced via these inside other handlers.
@@ -4882,6 +5048,35 @@ async function startServer() {
   (globalThis as any).__taxLabelSnapshot = _taxLabelSnapshot;
   (globalThis as any).__TAX_PRESETS = TAX_PRESETS;
   (globalThis as any).__COUNTRY_DEFAULTS = COUNTRY_DEFAULTS;
+
+  // Preview endpoint — frontend can call this to get the exact same totals
+  // the server would compute when creating the invoice. Mirrors what
+  // POST /invoices/manual does, but read-only. Keeps the live preview
+  // (subtotal/discount/service/tax/grand) in lockstep with the server so
+  // there are no surprises when the owner clicks "Generate Invoice".
+  app.get("/api/restaurant/:id/invoices/preview-totals", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const subtotal = Number(req.query.subtotal || 0);
+      const discount = Number(req.query.discount || 0);
+      const svcPct = Number(req.query.service_charge_percent || 0);
+      const phone = (req.query.customer_phone as string) || null;
+      const totals = await computeInvoiceTotals({
+        tenantId: req.params.id,
+        subtotal,
+        discountAmount: discount,
+        serviceChargePct: svcPct,
+        customerPhone: phone,
+        legacyGstFallback: {
+          gst_percent: Number(req.query.gst_percent || 0),
+          apply_gst: String(req.query.apply_gst || '1') !== '0',
+        },
+      });
+      res.json(totals);
+    } catch (err) {
+      console.error("Invoice preview-totals error:", err);
+      res.status(500).json({ error: "Failed to compute totals" });
+    }
+  });
 
   // GET — fetch the tenant's tax + currency settings + active tax_config rows.
   app.get("/api/restaurant/:id/tax-config", authenticate, async (req: AuthRequest, res: Response) => {
@@ -11583,41 +11778,115 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_label_snapshot TEXT").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS loyalty_redemption_amount FLOAT DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS loyalty_tier_name TEXT").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS loyalty_discount_percent FLOAT").catch(() => {});
       const { customer_name, customer_phone, reference, items, discount_amount, service_charge_percent, gst_percent, apply_gst } = req.body;
       const id = `MAN-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
-      const total = (items || []).reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
-      const after = Math.max(0, total - Number(discount_amount || 0));
-      const svc = after * Number(service_charge_percent || 0) / 100;
-      const taxable = after + svc;
-      const gst = apply_gst ? taxable * Number(gst_percent || 0) / 100 : 0;
-      const grand = taxable + gst;
-      // Sequential invoice number IF the tenant has SEQUENTIAL mode enabled.
-      // Returns null in RANDOM mode → frontend falls back to legacy "#ABCD1234".
+      const subtotal = (items || []).reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
+
+      // ── Unified totals (multi-tax + auto loyalty) ──────────────────────
+      // Computed server-side so the form's single `gst_percent` field never
+      // overrides the configured tax_config rows. Loyalty discount auto-
+      // applies when the customer phone matches a recognised member; the
+      // owner can still type a larger manual discount and have it stick.
+      const totals = await computeInvoiceTotals({
+        tenantId: req.params.id,
+        subtotal,
+        discountAmount: Number(discount_amount || 0),
+        serviceChargePct: Number(service_charge_percent || 0),
+        customerPhone: customer_phone || null,
+        legacyGstFallback: {
+          gst_percent: Number(gst_percent || 0),
+          apply_gst: !!apply_gst,
+        },
+      });
+
       const invoiceNumber = await generateInvoiceNumberIfSequential(db, req.params.id);
+      // We persist the EFFECTIVE total discount (manual ⨆ loyalty) so the
+      // invoice prints the right amount on reprint. Legacy gst_percent /
+      // apply_gst stay as written for backward-compat readers, but the
+      // canonical tax breakdown lives in tax_label_snapshot.
       await db.run(
-        `INSERT INTO orders (id, table_number, customer_name, customer_phone, items, total_amount, discount_amount, service_charge_percent, gst_percent, apply_gst, invoice_number, status, payment_status, invoice_status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', 'PENDING', 'DRAFT', NOW())`,
-        [id, reference || 'Manual', customer_name || '', customer_phone || '', JSON.stringify(items || []), grand,
-         Number(discount_amount || 0), Number(service_charge_percent || 0), Number(gst_percent || 0), apply_gst ? 1 : 0, invoiceNumber]
+        `INSERT INTO orders (id, table_number, customer_name, customer_phone, items,
+                             total_amount, discount_amount, service_charge_percent,
+                             gst_percent, apply_gst, invoice_number,
+                             tax_label_snapshot, loyalty_redemption_amount,
+                             loyalty_tier_name, loyalty_discount_percent,
+                             status, payment_status, invoice_status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', 'PENDING', 'DRAFT', NOW())`,
+        [id, reference || 'Manual', customer_name || '', customer_phone || '',
+         JSON.stringify(items || []),
+         totals.grandTotal,
+         totals.totalDiscount,
+         totals.serviceChargePct,
+         // gst_percent is "effective overall rate" if we have lines — used by
+         // legacy readers that only render one number. For tenants on legacy
+         // path, it's the value they sent.
+         totals.taxableBase > 0
+           ? Math.round((totals.totalTax / totals.taxableBase) * 10000) / 100
+           : 0,
+         totals.taxLines.length > 0 ? 1 : (apply_gst ? 1 : 0),
+         invoiceNumber,
+         totals.taxLabelSnapshot,
+         totals.loyaltyDiscount,
+         totals.loyalty?.tier_name || null,
+         totals.loyalty?.discount_percent || null,
+        ]
       );
       const display_number = invoiceNumber || `#${id.slice(-8).toUpperCase()}`;
-      // Loyalty hook — fire-and-forget. Never blocks the response, never
-      // throws. discount_percent is derived from discount_amount / total
-      // when the front-end didn't pass an explicit percent.
-      const _discountPct = Number(total) > 0
-        ? Math.round((Number(discount_amount || 0) / Number(total)) * 10000) / 100
+
+      // Record a loyalty redemption row when the tier discount actually
+      // contributed (manual > 0 + loyalty > 0 still records both — the
+      // redemption only fires when loyalty was the binding discount).
+      if (totals.loyalty && totals.loyaltyDiscount > 0 && totals.totalDiscount >= totals.loyaltyDiscount) {
+        await db.run(
+          `INSERT INTO loyalty_redemptions (customer_phone, order_id, tier_id, discount_percent, discount_amount)
+           VALUES (?, ?, ?, ?, ?)`,
+          [totals.loyalty.phone, id, totals.loyalty.tier_id,
+           totals.loyalty.discount_percent, totals.loyaltyDiscount]
+        ).catch(() => {});
+      }
+
+      // Loyalty hook — fire-and-forget; updates lifetime spend + may upgrade tier.
+      const _discountPctOfTotal = subtotal > 0
+        ? Math.round((totals.totalDiscount / subtotal) * 10000) / 100
         : 0;
       _loyaltyHook({
         tenantId: req.params.id,
         orderId: id,
         customerPhone: customer_phone,
         customerName: customer_name,
-        grandTotal: grand,
-        discountAmount: Number(discount_amount || 0),
-        discountPercent: _discountPct,
+        grandTotal: totals.grandTotal,
+        discountAmount: totals.totalDiscount,
+        discountPercent: _discountPctOfTotal,
       }).catch(err => console.error('[loyalty] manual-invoice hook error:', err));
-      res.json({ success: true, id, grand_total: grand, invoice_number: invoiceNumber, display_number });
+
+      res.json({
+        success: true,
+        id,
+        grand_total: totals.grandTotal,
+        invoice_number: invoiceNumber,
+        display_number,
+        breakdown: {
+          subtotal: totals.subtotal,
+          manual_discount: totals.manualDiscount,
+          loyalty_discount: totals.loyaltyDiscount,
+          total_discount: totals.totalDiscount,
+          subtotal_after_discount: totals.subtotalAfterDiscount,
+          service_charge: totals.serviceCharge,
+          service_charge_percent: totals.serviceChargePct,
+          taxable_base: totals.taxableBase,
+          tax_lines: totals.taxLines,
+          total_tax: totals.totalTax,
+          grand_total: totals.grandTotal,
+          loyalty: totals.loyalty,
+          used_legacy_gst: totals.usedLegacyGst,
+        },
+      });
     } catch (err) {
+      console.error("Manual invoice error:", err);
       res.status(500).json({ error: "Failed to create manual invoice" });
     }
   });
@@ -14468,7 +14737,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'loyalty-v2-birthdays-promos-selflookup',
+    commit_marker: 'invoice-multitax-and-auto-loyalty',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -14500,6 +14769,9 @@ async function startServer() {
       'loyalty-near-upgrade-nudge',      // Weekly Mon 09:00 IST cron — customers within 20% of next tier
       'loyalty-promo-codes',             // Owner-managed discount codes; stack-with-tier or max(tier, code)
       'loyalty-self-lookup-page',        // Public /my-loyalty HTML page — customers check their tier without login
+      'invoice-multitax-from-tax-config',// CRITICAL FIX: manual invoices + orders now honour every enabled row in tax_config (Tax Line 2+ finally renders on the receipt)
+      'invoice-auto-loyalty-discount',   // CRITICAL FIX: server applies tier discount whenever the customer phone matches; manual entry still wins if larger
+      'tax-config-legacy-rate-migration',// Auto-seed of tax_config preserves the tenant's existing restaurants.gst_percentage (no silent revert to preset 5%)
     ],
     booted_at: new Date().toISOString(),
   };
