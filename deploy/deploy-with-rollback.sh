@@ -25,7 +25,11 @@ COMPOSE_FILE="docker-compose.prod.yml"
 CURRENT_IMAGE="deploy-app"         # docker-compose auto-names the built image <project>-<service>
 ROLLBACK_TAG="atithi-setu:rollback"
 HEALTH_URL="http://localhost:5001/api/public/restaurants"
-HEALTH_MAX_WAIT=60                  # seconds to wait for new version to become healthy
+# Bumped 60 → 120 because run #114 rolled back even though the container
+# was healthy ~5s after boot. The 60s ceiling was tight enough that a
+# postgres connection race during cron warm-up could blow past it. 120s
+# is still fast — clean boots finish in 2–5s — but absorbs slow ones.
+HEALTH_MAX_WAIT=120                 # seconds to wait for new version to become healthy
 LOG_FILE="$APP_DIR/deploy-history.log"
 BRANCH="${BRANCH:-master}"         # which branch to deploy; override with env BRANCH=dev for staging
 
