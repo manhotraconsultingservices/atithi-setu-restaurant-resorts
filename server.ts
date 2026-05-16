@@ -13757,14 +13757,20 @@ async function startServer() {
         return res.status(404).json({ error: "Active session not found" });
       }
 
-      // Aggregate bill from all orders in this session (subtotal + GST)
+      // Aggregate bill from all orders in this session.
+      // Pull subtotal + GST separately so we can apply the loyalty
+      // discount on the subtotal portion and then re-derive GST on
+      // the post-discount amount (otherwise the customer pays GST on
+      // money they didn't actually owe).
       const orderRows = await db.query(
         "SELECT total_amount, gst_amount FROM orders WHERE session_id = ? AND status != 'CANCELLED'",
         [session.id]
       );
-      const billAmount = orderRows.reduce(
-        (s: number, o: any) => s + Number(o.total_amount || 0) + Number(o.gst_amount || 0),
-        0
+      const grossSubtotal = orderRows.reduce(
+        (s: number, o: any) => s + Number(o.total_amount || 0), 0
+      );
+      const grossGst = orderRows.reduce(
+        (s: number, o: any) => s + Number(o.gst_amount || 0), 0
       );
 
       // ── Persist GST fields on the session so the printed invoice can show
@@ -13793,6 +13799,54 @@ async function startServer() {
         console.warn(`[request-bill] Failed to fetch GST settings for ${req.params.id}; keeping existing session values:`, settingsErr);
       }
 
+      // ── Apply loyalty discount server-side, so the persisted bill_amount
+      //    is the authoritative "what the customer owes" number used by:
+      //      • the customer's UPI/online-payment flow (must match bill)
+      //      • the staff PostpaidInvoiceModal (reads session.discount_amount
+      //        and skips its own auto-apply to avoid double-discounting)
+      //
+      //    Only applies if (a) the session has a customer_phone, (b) the
+      //    customer exists in loyalty_customers and is not blocked, and
+      //    (c) the resolved tier has discount_percent > 0. Otherwise we
+      //    fall back to the gross amount.
+      //
+      //    Idempotent for re-requests: if discount_amount is already
+      //    persisted (customer hit Request Bill twice or added items and
+      //    re-requested), we recompute against the live subtotal so the
+      //    discount scales with the current orders.
+      let loyaltyDiscount = 0;
+      let loyaltyTierName: string | null = null;
+      if (session.customer_phone) {
+        try {
+          const phone = _normalisePhone(session.customer_phone);
+          if (phone) {
+            const customer: any = await db.get(
+              `SELECT total_spent, is_blocked FROM loyalty_customers WHERE phone = ?`,
+              [phone]
+            );
+            if (customer && Number(customer.is_blocked) !== 1) {
+              const tier = await _resolveTierForSpend(db, Number(customer.total_spent || 0));
+              const pct = Number(tier?.discount_percent || 0);
+              if (tier && pct > 0) {
+                loyaltyDiscount = Math.round(grossSubtotal * pct / 100 * 100) / 100;
+                loyaltyTierName = tier.name;
+              }
+            }
+          }
+        } catch (loyaltyErr) {
+          console.warn(`[request-bill] loyalty lookup failed for ${req.params.id}:`, loyaltyErr);
+        }
+      }
+
+      // Recompute GST on the post-discount subtotal so the customer doesn't
+      // pay GST on the discounted-away portion. If no loyalty applies, keep
+      // the pre-existing per-order GST sum.
+      const subtotalAfterLoyalty = Math.max(0, grossSubtotal - loyaltyDiscount);
+      const finalGst = loyaltyDiscount > 0 && sessionApplyGst && sessionGstPct > 0
+        ? Math.round(subtotalAfterLoyalty * sessionGstPct / 100 * 100) / 100
+        : grossGst;
+      const billAmount = subtotalAfterLoyalty + finalGst;
+
       // Safety net: if SEQUENTIAL invoice numbering is enabled and the session
       // never got an invoice_number (because it was created via QR before the
       // feature deployed, OR because the orders-POST first-round assignment
@@ -13807,16 +13861,17 @@ async function startServer() {
         `UPDATE table_sessions
             SET status = 'bill_requested',
                 bill_amount = ?,
+                discount_amount = ?,
                 bill_requested_at = COALESCE(bill_requested_at, CURRENT_TIMESTAMP),
                 payment_method = COALESCE(?, payment_method),
                 gst_percent = ?,
                 apply_gst = ?,
                 invoice_number = COALESCE(invoice_number, ?)
           WHERE id = ?`,
-        [billAmount, payment_method || null, sessionGstPct, sessionApplyGst, assignedInvoiceNumber, session.id]
+        [billAmount, loyaltyDiscount, payment_method || null, sessionGstPct, sessionApplyGst, assignedInvoiceNumber, session.id]
       );
 
-      console.log(`[request-bill] OK ${req.params.id}/${req.params.token} → bill_requested, amount=₹${billAmount.toFixed(2)}, gst=${sessionGstPct}%, apply_gst=${sessionApplyGst}, invoice_number=${session.invoice_number || assignedInvoiceNumber || '(none)'}`);
+      console.log(`[request-bill] OK ${req.params.id}/${req.params.token} → bill_requested, amount=₹${billAmount.toFixed(2)}${loyaltyDiscount > 0 ? `, loyalty(${loyaltyTierName})=−₹${loyaltyDiscount.toFixed(2)}` : ''}, gst=${sessionGstPct}%, apply_gst=${sessionApplyGst}, invoice_number=${session.invoice_number || assignedInvoiceNumber || '(none)'}`);
 
       // Notify owner + waiters (don't await — fire and forget)
       triggerNotification(req.params.id, 'ORDER_PLACED', {
@@ -17170,7 +17225,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'loyalty-bronze-banner-fix',
+    commit_marker: 'loyalty-customer-side-parity',
     code_features: [
       'subscription-billing',
       'read-only-mode',

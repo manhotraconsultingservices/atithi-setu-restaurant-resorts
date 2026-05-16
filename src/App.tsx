@@ -18750,6 +18750,17 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [showInvoice, setShowInvoice] = useState(false);
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
   const [customerInfo, setCustomerInfo] = useState({ name: '', phone: '', email: '' });
+  // Loyalty preview for the customer-facing postpaid view. Mirrors what
+  // the staff-side PostpaidInvoiceModal computes so the customer's
+  // "Request Bill" total matches what staff will charge. Fetched from
+  // the PUBLIC /loyalty/customers/:phone/preview-discount endpoint.
+  const [loyaltyInfo, setLoyaltyInfo] = useState<{
+    tier_name: string;
+    discount_percent: number;
+    discount_amount: number;
+    next_tier_name?: string;
+    spend_remaining?: number;
+  } | null>(null);
   // Cloud-kitchen / online-delivery: structured customer address
   const [deliveryAddress, setDeliveryAddress] = useState({
     line1: '',
@@ -19863,8 +19874,58 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const checkoutMode = restaurant?.checkout_mode || 'postpaid';
   const sessionRunningTotal = (session?.orders || []).reduce((s, o) => s + (o.totalAmount || 0), 0);
   const sessionGstTotal     = (session?.orders || []).reduce((s, o) => s + (o.gstAmount   || 0), 0);
+
+  // ── Loyalty preview — keep the customer total in sync with staff ───────
+  // Hits the PUBLIC preview-discount endpoint (no auth) every time the
+  // running total changes. The staff PostpaidInvoiceModal already auto-
+  // applies the same discount; this useEffect makes the customer view
+  // agree before they hit "Request Bill" so there's no surprise on the
+  // final invoice.
+  useEffect(() => {
+    const phone = session?.customer_phone;
+    if (!phone || sessionRunningTotal <= 0) {
+      setLoyaltyInfo(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(
+      `/api/restaurant/${restaurantId}/loyalty/customers/${encodeURIComponent(phone)}/preview-discount?total=${sessionRunningTotal}`
+    )
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (cancelled) return;
+        if (!data?.is_member || !data?.tier_name) {
+          setLoyaltyInfo(null);
+          return;
+        }
+        setLoyaltyInfo({
+          tier_name: data.tier_name,
+          discount_percent: Number(data.discount_percent || 0),
+          discount_amount: Number(data.discount_amount || 0),
+          next_tier_name: data.next_tier?.name,
+          spend_remaining: data.next_tier?.spend_remaining,
+        });
+      })
+      .catch(() => { if (!cancelled) setLoyaltyInfo(null); });
+    return () => { cancelled = true; };
+  }, [restaurantId, session?.customer_phone, sessionRunningTotal]);
+
+  // After-loyalty derived totals. GST is re-computed on the
+  // post-discount subtotal so the percentage stays correct — the
+  // existing sessionGstTotal was summed from per-order amounts and
+  // doesn't account for a session-level discount.
+  const loyaltyDiscount = loyaltyInfo?.discount_amount || 0;
+  const subtotalAfterLoyalty = Math.max(0, sessionRunningTotal - loyaltyDiscount);
+  const gstPct = Number(restaurant?.gst_percentage ?? 0);
+  const recomputedGstAfterLoyalty = loyaltyDiscount > 0 && gstPct > 0
+    ? Math.round(subtotalAfterLoyalty * gstPct / 100 * 100) / 100
+    : sessionGstTotal;
+  const sessionTotalDisplay = loyaltyDiscount > 0
+    ? subtotalAfterLoyalty + recomputedGstAfterLoyalty
+    : sessionRunningTotal + sessionGstTotal;
+
   // bill_amount from server already includes GST; fall back to computed sum
-  const sessionFinalAmount  = session?.bill_amount || (sessionRunningTotal + sessionGstTotal);
+  const sessionFinalAmount  = session?.bill_amount || sessionTotalDisplay;
 
   const printThermalSessionBill = () => {
     if (!session) return;
@@ -20009,16 +20070,25 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                   ))}
                 </div>
 
-                {/* Totals */}
+                {/* Totals — itemised so the loyalty saving is visible on
+                    the invoice the customer reads + saves. */}
                 <div className="border-t border-dashed border-[#cc5a16]/10 pt-4 space-y-1.5">
                   <div className="flex justify-between text-sm text-[#6b5d52]">
                     <span>Subtotal</span>
                     <span className="font-mono">₹{sessionRunningTotal.toFixed(2)}</span>
                   </div>
-                  {sessionGstTotal > 0 && (
+                  {loyaltyDiscount > 0 && (
+                    <div className="flex justify-between text-sm text-amber-700 font-semibold">
+                      <span>{loyaltyInfo?.tier_name} loyalty ({loyaltyInfo?.discount_percent}%)</span>
+                      <span className="font-mono">− ₹{loyaltyDiscount.toFixed(2)}</span>
+                    </div>
+                  )}
+                  {(sessionGstTotal > 0 || (loyaltyDiscount > 0 && gstPct > 0)) && (
                     <div className="flex justify-between text-sm text-[#6b5d52]">
-                      <span>GST ({restaurant?.gst_percentage ?? 0}%)</span>
-                      <span className="font-mono">₹{sessionGstTotal.toFixed(2)}</span>
+                      <span>GST ({gstPct}%)</span>
+                      <span className="font-mono">
+                        ₹{(loyaltyDiscount > 0 ? recomputedGstAfterLoyalty : sessionGstTotal).toFixed(2)}
+                      </span>
                     </div>
                   )}
                   <div className="flex justify-between text-xl font-bold font-serif pt-2 border-t border-[#cc5a16]/10">
@@ -20100,6 +20170,47 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                 </div>
               </div>
 
+              {/* Loyalty banner — surfaces tier + auto-applied discount so
+                  the customer knows what their bill will be BEFORE they
+                  tap "Request Bill". Mirrors the staff-side banner. */}
+              {loyaltyInfo && (
+                <div className={cn(
+                  "rounded-2xl px-4 py-3 flex items-start gap-3 border",
+                  loyaltyInfo.discount_percent > 0
+                    ? "bg-amber-50 border-amber-200"
+                    : "bg-[#faf7f2] border-[#cc5a16]/15"
+                )}>
+                  <Sparkles size={16} className={cn(
+                    "shrink-0 mt-0.5",
+                    loyaltyInfo.discount_percent > 0 ? "text-amber-700" : "text-[#cc5a16]"
+                  )} />
+                  <div className="flex-1 min-w-0">
+                    {loyaltyInfo.discount_percent > 0 ? (
+                      <>
+                        <p className="text-sm font-bold text-amber-900">
+                          {loyaltyInfo.tier_name} member · {loyaltyInfo.discount_percent}% off
+                        </p>
+                        <p className="text-xs text-amber-700 mt-0.5">
+                          ₹{loyaltyInfo.discount_amount.toFixed(2)} saved on this bill
+                        </p>
+                      </>
+                    ) : (
+                      <p className="text-sm font-bold text-[#3d3128]">
+                        {loyaltyInfo.tier_name} member · welcome tier
+                      </p>
+                    )}
+                    {loyaltyInfo.next_tier_name && loyaltyInfo.spend_remaining != null && loyaltyInfo.spend_remaining > 0 && (
+                      <p className={cn(
+                        "text-[11px] mt-1",
+                        loyaltyInfo.discount_percent > 0 ? "text-amber-700/80" : "text-[#6b5d52]"
+                      )}>
+                        ₹{Number(loyaltyInfo.spend_remaining).toFixed(0)} more to unlock {loyaltyInfo.next_tier_name}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Orders by round */}
               {(session.orders || []).length === 0 ? (
                 <div className="text-center py-12 text-[#9c8e85]">
@@ -20160,18 +20271,30 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                 </div>
               )}
 
-              {/* Request Bill CTA */}
+              {/* Request Bill CTA — reflects loyalty discount when applicable */}
               {session.status === 'open' && (session.orders?.length || 0) > 0 && (
                 <div className="space-y-1.5">
                   <button
                     onClick={() => setShowBillRequestModal(true)}
                     className="w-full bg-[#1a1a1a] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:scale-[1.01] transition-transform shadow-xl"
                   >
-                    <IndianRupee size={20} /> Request Bill — ₹{(sessionRunningTotal + sessionGstTotal).toFixed(2)}
+                    <IndianRupee size={20} /> Request Bill — ₹{sessionTotalDisplay.toFixed(2)}
                   </button>
-                  {sessionGstTotal > 0 && (
+                  {/* Itemised breakdown so the customer can see exactly
+                      how the total was built: subtotal → loyalty → GST */}
+                  {(sessionGstTotal > 0 || loyaltyDiscount > 0) && (
                     <p className="text-center text-xs text-[#9c8e85]">
-                      Subtotal ₹{sessionRunningTotal.toFixed(2)} + GST ({restaurant?.gst_percentage ?? 0}%) ₹{sessionGstTotal.toFixed(2)}
+                      Subtotal ₹{sessionRunningTotal.toFixed(2)}
+                      {loyaltyDiscount > 0 && (
+                        <span className="text-amber-700 font-semibold">
+                          {' '}− ₹{loyaltyDiscount.toFixed(2)} loyalty
+                        </span>
+                      )}
+                      {gstPct > 0 && (
+                        <>
+                          {' '}+ GST ({gstPct}%) ₹{(loyaltyDiscount > 0 ? recomputedGstAfterLoyalty : sessionGstTotal).toFixed(2)}
+                        </>
+                      )}
                     </p>
                   )}
                 </div>
@@ -20677,10 +20800,17 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
               </div>
               <div className="bg-[#faf7f2] rounded-2xl p-5 mb-6 text-center">
                 <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Session Total</p>
-                <p className="text-4xl font-bold font-mono">₹{(sessionRunningTotal + sessionGstTotal).toFixed(2)}</p>
+                <p className="text-4xl font-bold font-mono">₹{sessionTotalDisplay.toFixed(2)}</p>
                 <p className="text-xs text-[#6b5d52] mt-1">{session?.orders?.length || 0} round{(session?.orders?.length || 0) !== 1 ? 's' : ''} of orders</p>
-                {sessionGstTotal > 0 && (
-                  <p className="text-xs text-[#9c8e85] mt-1">Incl. GST ({restaurant?.gst_percentage ?? 0}%) ₹{sessionGstTotal.toFixed(2)}</p>
+                {loyaltyDiscount > 0 && (
+                  <p className="text-xs text-amber-700 mt-1 font-semibold">
+                    Incl. {loyaltyInfo?.tier_name} loyalty − ₹{loyaltyDiscount.toFixed(2)}
+                  </p>
+                )}
+                {gstPct > 0 && (
+                  <p className="text-xs text-[#9c8e85] mt-1">
+                    Incl. GST ({gstPct}%) ₹{(loyaltyDiscount > 0 ? recomputedGstAfterLoyalty : sessionGstTotal).toFixed(2)}
+                  </p>
                 )}
               </div>
               <p className="text-sm text-[#6b5d52] text-center mb-6">How would you like to pay?</p>
