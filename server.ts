@@ -2269,6 +2269,307 @@ async function startServer() {
     }
   });
 
+  // ── Brand suppliers (Phase B3) ──────────────────────────────────────
+  app.get("/api/brand/suppliers", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.json([]);
+      const rows: any[] = await centralDb.query(
+        `SELECT id, brand_id, name, contact_name, phone, email, address, gst_number,
+                lead_time_days, payment_terms, notes, is_active, created_at, updated_at
+           FROM brand_suppliers
+          WHERE brand_id = ?
+          ORDER BY name ASC`,
+        [brandId]
+      );
+      res.json(rows || []);
+    } catch (err) {
+      console.error('brand suppliers GET error:', err);
+      res.status(500).json({ error: 'Failed to load brand suppliers' });
+    }
+  });
+
+  app.put("/api/brand/suppliers/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.status(400).json({ error: 'No brand configured' });
+      const idParam = String(req.params.id || '').trim();
+      const isNew = idParam === 'new' || !idParam;
+      const id = isNew ? `bsup_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` : idParam;
+      const name = String(req.body?.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'name required' });
+      const payload = {
+        name,
+        contact_name: req.body?.contact_name || null,
+        phone: req.body?.phone || null,
+        email: req.body?.email || null,
+        address: req.body?.address || null,
+        gst_number: req.body?.gst_number || null,
+        lead_time_days: req.body?.lead_time_days != null ? Number(req.body.lead_time_days) : 1,
+        payment_terms: req.body?.payment_terms || null,
+        notes: req.body?.notes || null,
+        is_active: req.body?.is_active === false ? 0 : 1,
+      };
+      if (isNew) {
+        await centralDb.run(
+          `INSERT INTO brand_suppliers
+             (id, brand_id, name, contact_name, phone, email, address, gst_number,
+              lead_time_days, payment_terms, notes, is_active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, brandId, payload.name, payload.contact_name, payload.phone, payload.email,
+           payload.address, payload.gst_number, payload.lead_time_days,
+           payload.payment_terms, payload.notes, payload.is_active]
+        );
+      } else {
+        await centralDb.run(
+          `UPDATE brand_suppliers SET
+             name = ?, contact_name = ?, phone = ?, email = ?, address = ?,
+             gst_number = ?, lead_time_days = ?, payment_terms = ?, notes = ?,
+             is_active = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND brand_id = ?`,
+          [payload.name, payload.contact_name, payload.phone, payload.email, payload.address,
+           payload.gst_number, payload.lead_time_days, payload.payment_terms,
+           payload.notes, payload.is_active, id, brandId]
+        );
+      }
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error('brand suppliers PUT error:', err);
+      res.status(500).json({ error: 'Failed to save supplier' });
+    }
+  });
+
+  app.delete("/api/brand/suppliers/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.status(400).json({ error: 'No brand configured' });
+      await centralDb.run(
+        "DELETE FROM brand_suppliers WHERE id = ? AND brand_id = ?",
+        [req.params.id, brandId]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error('brand suppliers DELETE error:', err);
+      res.status(500).json({ error: 'Failed to delete' });
+    }
+  });
+
+  // POST /api/brand/suppliers/sync — push brand suppliers into the
+  // selected restaurants' `suppliers` tables. Same insert-if-missing
+  // semantics as menu templates (overwrite=true forces update).
+  app.post("/api/brand/suppliers/sync", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.status(400).json({ error: 'No brand configured' });
+      const supplierIds: string[] = Array.isArray(req.body?.brand_supplier_ids) ? req.body.brand_supplier_ids : [];
+      const restaurantIds: string[] = Array.isArray(req.body?.restaurant_ids) ? req.body.restaurant_ids : [];
+      const overwrite: boolean = !!req.body?.overwrite;
+      if (supplierIds.length === 0 || restaurantIds.length === 0) {
+        return res.status(400).json({ error: 'brand_supplier_ids and restaurant_ids required' });
+      }
+      const accessible = await _listUserRestaurants(req);
+      const accessibleIds = new Set(accessible.map(r => r.id));
+      for (const rid of restaurantIds) {
+        if (!accessibleIds.has(rid)) return res.status(403).json({ error: `No access to ${rid}` });
+      }
+      const placeholders = supplierIds.map(() => '?').join(',');
+      const sources: any[] = await centralDb.query(
+        `SELECT * FROM brand_suppliers WHERE brand_id = ? AND id IN (${placeholders})`,
+        [brandId, ...supplierIds]
+      );
+      if (sources.length === 0) return res.status(404).json({ error: 'No matching brand suppliers' });
+      const synced: Array<{ brand_supplier_id: string; restaurant_id: string; tenant_supplier_id: string; action: string; reason?: string }> = [];
+      for (const rid of restaurantIds) {
+        const tdb = await getTenantDb(rid);
+        for (const src of sources) {
+          // Match by name (case-insensitive) to avoid duplicates
+          const existing: any = await tdb.get(
+            "SELECT id FROM suppliers WHERE LOWER(name) = LOWER(?) LIMIT 1",
+            [src.name]
+          );
+          if (existing && !overwrite) {
+            synced.push({ brand_supplier_id: src.id, restaurant_id: rid, tenant_supplier_id: existing.id, action: 'skipped', reason: 'name already exists' });
+            continue;
+          }
+          if (existing && overwrite) {
+            await tdb.run(
+              `UPDATE suppliers SET
+                 name = ?, contact_name = ?, phone = ?, email = ?, address = ?,
+                 gst_number = ?, lead_time_days = ?, payment_terms = ?, notes = ?
+               WHERE id = ?`,
+              [src.name, src.contact_name, src.phone, src.email, src.address,
+               src.gst_number, src.lead_time_days || 1, src.payment_terms, src.notes, existing.id]
+            );
+            await centralDb.run(
+              `INSERT INTO brand_supplier_sync_log (brand_supplier_id, restaurant_id, tenant_supplier_id, action, synced_by)
+               VALUES (?, ?, ?, 'UPDATED', ?)`,
+              [src.id, rid, existing.id, req.user?.email || 'owner']
+            ).catch(() => {});
+            synced.push({ brand_supplier_id: src.id, restaurant_id: rid, tenant_supplier_id: existing.id, action: 'updated' });
+            continue;
+          }
+          // Insert new
+          const newId = `sup_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          await tdb.run(
+            `INSERT INTO suppliers (id, name, contact_name, phone, email, address, gst_number, lead_time_days, payment_terms, notes, is_active)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            [newId, src.name, src.contact_name, src.phone, src.email, src.address,
+             src.gst_number, src.lead_time_days || 1, src.payment_terms, src.notes]
+          );
+          await centralDb.run(
+            `INSERT INTO brand_supplier_sync_log (brand_supplier_id, restaurant_id, tenant_supplier_id, action, synced_by)
+             VALUES (?, ?, ?, 'CREATED', ?)`,
+            [src.id, rid, newId, req.user?.email || 'owner']
+          ).catch(() => {});
+          synced.push({ brand_supplier_id: src.id, restaurant_id: rid, tenant_supplier_id: newId, action: 'created' });
+        }
+      }
+      const created = synced.filter(s => s.action === 'created').length;
+      const updated = synced.filter(s => s.action === 'updated').length;
+      const skipped = synced.filter(s => s.action === 'skipped').length;
+      res.json({
+        success: true,
+        summary: { created, updated, skipped, total: synced.length },
+        details: synced,
+      });
+    } catch (err) {
+      console.error('brand suppliers sync error:', err);
+      res.status(500).json({ error: 'Sync failed' });
+    }
+  });
+
+  // ── Cross-location staff transfer (Phase B3) ────────────────────────
+  // Move a staff member from one tenant DB to another. Preserves
+  // hourly_rate, payroll_id, role, contact info. Source row is
+  // deactivated (not deleted) so attendance / payroll history stays
+  // intact at the original location.
+  //
+  // mode = 'TRANSFER' (default) → deactivate source after copy
+  //        'COPY'              → leave source active (rare; only when
+  //                              the staff member splits time across
+  //                              both locations)
+  //
+  // Body: { source_staff_id, from_restaurant_id, to_restaurant_id, mode? }
+  app.post("/api/brand/staff/transfer", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const sourceStaffId = String(req.body?.source_staff_id || '').trim();
+      const fromId = String(req.body?.from_restaurant_id || '').trim();
+      const toId   = String(req.body?.to_restaurant_id   || '').trim();
+      const mode   = String(req.body?.mode || 'TRANSFER').toUpperCase();
+      if (!sourceStaffId || !fromId || !toId) {
+        return res.status(400).json({ error: 'source_staff_id, from_restaurant_id, to_restaurant_id required' });
+      }
+      if (fromId === toId) return res.status(400).json({ error: 'Source and target must differ' });
+      if (!['TRANSFER', 'COPY'].includes(mode)) {
+        return res.status(400).json({ error: 'mode must be TRANSFER or COPY' });
+      }
+      const accessible = await _listUserRestaurants(req);
+      const accessibleIds = new Set(accessible.map(r => r.id));
+      if (!accessibleIds.has(fromId) || !accessibleIds.has(toId)) {
+        return res.status(403).json({ error: 'No access to one of the restaurants' });
+      }
+      const srcDb = await getTenantDb(fromId);
+      const tgtDb = await getTenantDb(toId);
+      const source: any = await srcDb.get(
+        `SELECT id, name, role, phone, email, login_id, password, is_active,
+                default_hours, hourly_rate, payroll_id, joined_at, notes
+           FROM attendance_staff WHERE id = ?`,
+        [sourceStaffId]
+      );
+      if (!source) return res.status(404).json({ error: 'Source staff not found' });
+      // Login-id collision: if the same login_id exists at target, append "-2"
+      // so the new row can be inserted. Owner can rename later.
+      let targetLoginId = source.login_id;
+      if (targetLoginId) {
+        const dup: any = await tgtDb.get(
+          "SELECT id FROM attendance_staff WHERE login_id = ?", [targetLoginId]
+        );
+        if (dup) {
+          // Find a free suffix
+          for (let i = 2; i <= 50; i++) {
+            const candidate = `${source.login_id}-${i}`;
+            const c: any = await tgtDb.get("SELECT id FROM attendance_staff WHERE login_id = ?", [candidate]);
+            if (!c) { targetLoginId = candidate; break; }
+          }
+        }
+      }
+      // Find brand id (if any) for the audit row
+      const fromRow: any = await centralDb.get("SELECT brand_id FROM restaurants WHERE id = ?", [fromId]);
+      const newId = `${source.name.toUpperCase().slice(0, 4).replace(/\W/g, '') || 'STAFF'}-${Date.now()}`;
+      await tgtDb.run(
+        `INSERT INTO attendance_staff
+           (id, name, role, phone, email, login_id, password, is_active,
+            default_hours, hourly_rate, payroll_id, joined_at, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+        [newId, source.name, source.role, source.phone, source.email,
+         targetLoginId, source.password,
+         source.default_hours || 8,
+         Number(source.hourly_rate || 0),
+         source.payroll_id || null,
+         source.joined_at || null,
+         (source.notes ? source.notes + '\n' : '') + `Transferred from ${fromId} on ${new Date().toISOString().slice(0,10)}`]
+      );
+      let sourceDeactivated = 0;
+      if (mode === 'TRANSFER') {
+        await srcDb.run("UPDATE attendance_staff SET is_active = 0 WHERE id = ?", [sourceStaffId]);
+        sourceDeactivated = 1;
+      }
+      // Audit
+      await centralDb.run(
+        `INSERT INTO brand_staff_transfer_log
+           (brand_id, from_restaurant_id, to_restaurant_id, source_staff_id, target_staff_id,
+            staff_name, staff_role, mode, source_deactivated, transferred_by, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [fromRow?.brand_id || null, fromId, toId, sourceStaffId, newId,
+         source.name, source.role, mode, sourceDeactivated,
+         req.user?.email || 'owner', req.body?.notes || null]
+      ).catch(() => {});
+      res.json({
+        success: true,
+        target_staff_id: newId,
+        target_login_id: targetLoginId,
+        login_id_changed: targetLoginId !== source.login_id,
+        source_deactivated: sourceDeactivated === 1,
+      });
+    } catch (err) {
+      console.error('staff transfer error:', err);
+      res.status(500).json({ error: 'Transfer failed' });
+    }
+  });
+
+  // GET transfer history for the brand (audit)
+  app.get("/api/brand/staff/transfer-log", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const accessible = await _listUserRestaurants(req);
+      const ids = accessible.map(r => r.id);
+      if (ids.length === 0) return res.json([]);
+      const placeholders = ids.map(() => '?').join(',');
+      const rows: any[] = await centralDb.query(
+        `SELECT * FROM brand_staff_transfer_log
+          WHERE from_restaurant_id IN (${placeholders})
+             OR to_restaurant_id IN (${placeholders})
+          ORDER BY transferred_at DESC LIMIT 100`,
+        [...ids, ...ids]
+      );
+      res.json(rows || []);
+    } catch (err) {
+      console.error('transfer-log error:', err);
+      res.status(500).json({ error: 'Failed to load log' });
+    }
+  });
+
   // POST /api/brand/menu-templates/sync — push selected templates into one
   // or more restaurants. For each (template, restaurant), insert into the
   // tenant's `menu` table if a row with the same name doesn't already
@@ -16807,7 +17108,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'brand-announcements-menu-templates',
+    commit_marker: 'brand-staff-transfer-suppliers',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -16865,6 +17166,8 @@ async function startServer() {
       'brand-multi-location-mvp',         // B1: brands table + restaurants.brand_id + cross-location dashboard + JWT-swap location switcher
       'brand-announcements',              // B2: brand-level announcements with per-tenant banner display + per-user dismissal
       'brand-menu-templates',             // B2: central menu templates + selective per-location sync (insert-if-missing, optional force overwrite)
+      'brand-supplier-directory',         // B3: brand-level shared supplier directory with selective sync (same pattern as menu templates)
+      'brand-staff-cross-transfer',       // B3: cross-location staff transfer (TRANSFER deactivates source, COPY keeps both) preserving rate/payroll_id/role; login_id auto-suffixed on collision; audit log
     ],
     booted_at: new Date().toISOString(),
   };

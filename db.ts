@@ -293,6 +293,73 @@ export async function initDb() {
     `CREATE INDEX IF NOT EXISTS idx_brand_menu_sync_template ON brand_menu_sync_log (template_id, restaurant_id)`
   ).catch(() => {});
 
+  // Phase B3 — brand-level shared supplier directory.
+  // Multi-location brands typically order from the same vendors (e.g.
+  // "Hari Dairy" delivers to every branch). Registering them once at the
+  // brand level, then syncing to each location's `suppliers` table,
+  // saves duplicate data-entry and keeps lead-times / payment terms /
+  // GST numbers consistent across branches.
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS brand_suppliers (
+      id TEXT PRIMARY KEY,
+      brand_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      contact_name TEXT,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      gst_number TEXT,
+      lead_time_days INTEGER DEFAULT 1,
+      payment_terms TEXT,
+      notes TEXT,
+      is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await centralDb.exec(
+    `CREATE INDEX IF NOT EXISTS idx_brand_suppliers_brand ON brand_suppliers (brand_id, name)`
+  ).catch(() => {});
+
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS brand_supplier_sync_log (
+      id SERIAL PRIMARY KEY,
+      brand_supplier_id TEXT NOT NULL,
+      restaurant_id TEXT NOT NULL,
+      tenant_supplier_id TEXT,
+      action TEXT NOT NULL,
+      synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      synced_by TEXT
+    )
+  `).catch(() => {});
+  await centralDb.exec(
+    `CREATE INDEX IF NOT EXISTS idx_brand_supplier_sync_sup ON brand_supplier_sync_log (brand_supplier_id, restaurant_id)`
+  ).catch(() => {});
+
+  // Audit log for cross-location staff transfers. One row per move/copy
+  // so the owner can trace which staff member went where and roll back
+  // by re-transferring if needed.
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS brand_staff_transfer_log (
+      id SERIAL PRIMARY KEY,
+      brand_id TEXT,
+      from_restaurant_id TEXT NOT NULL,
+      to_restaurant_id TEXT NOT NULL,
+      source_staff_id TEXT NOT NULL,
+      target_staff_id TEXT NOT NULL,
+      staff_name TEXT,
+      staff_role TEXT,
+      mode TEXT NOT NULL,
+      source_deactivated INT DEFAULT 0,
+      transferred_by TEXT,
+      transferred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT
+    )
+  `).catch(() => {});
+  await centralDb.exec(
+    `CREATE INDEX IF NOT EXISTS idx_brand_staff_xfer_route ON brand_staff_transfer_log (from_restaurant_id, to_restaurant_id, transferred_at DESC)`
+  ).catch(() => {});
+
   // Migration: unique index on locations (safe to run multiple times)
   await centralDb.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_locations_state_city ON locations (state, city)`

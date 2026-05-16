@@ -2186,7 +2186,7 @@ function LocationSwitcher({ token, currentRestaurantId, currentRestaurantName }:
 // the owner switches to it from the dropdown.
 function BrandDashboardModal({ token, onClose }: { token: string; onClose: () => void }) {
   type Period = 'TODAY' | 'WTD' | 'MTD' | 'YTD';
-  type Tab = 'SUMMARY' | 'ANNOUNCEMENTS' | 'MENU_TEMPLATES';
+  type Tab = 'SUMMARY' | 'ANNOUNCEMENTS' | 'MENU_TEMPLATES' | 'SUPPLIERS' | 'TRANSFERS';
   const [tab, setTab] = useState<Tab>('SUMMARY');
   const [period, setPeriod] = useState<Period>('MTD');
   const [data, setData] = useState<any | null>(null);
@@ -2219,12 +2219,16 @@ function BrandDashboardModal({ token, onClose }: { token: string; onClose: () =>
             <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={20}/></button>
           </div>
           <div className="flex flex-wrap items-center gap-2 mt-4">
-            <div className="inline-flex bg-white rounded-xl p-1 border border-[#cc5a16]/10">
-              {(['SUMMARY', 'ANNOUNCEMENTS', 'MENU_TEMPLATES'] as Tab[]).map(t => (
+            <div className="inline-flex flex-wrap bg-white rounded-xl p-1 border border-[#cc5a16]/10">
+              {(['SUMMARY', 'ANNOUNCEMENTS', 'MENU_TEMPLATES', 'SUPPLIERS', 'TRANSFERS'] as Tab[]).map(t => (
                 <button key={t} onClick={() => setTab(t)}
                   className={cn('px-3 py-1.5 text-xs font-bold rounded-lg transition-colors',
                     tab === t ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52] hover:bg-[#cc5a16]/5')}>
-                  {t === 'SUMMARY' ? 'Summary' : t === 'ANNOUNCEMENTS' ? 'Announcements' : 'Menu templates'}
+                  {t === 'SUMMARY' ? 'Summary'
+                    : t === 'ANNOUNCEMENTS' ? 'Announcements'
+                    : t === 'MENU_TEMPLATES' ? 'Menu templates'
+                    : t === 'SUPPLIERS' ? 'Suppliers'
+                    : 'Staff transfers'}
                 </button>
               ))}
             </div>
@@ -2247,6 +2251,12 @@ function BrandDashboardModal({ token, onClose }: { token: string; onClose: () =>
           )}
           {tab === 'MENU_TEMPLATES' && (
             <BrandMenuTemplatesAdmin token={token} />
+          )}
+          {tab === 'SUPPLIERS' && (
+            <BrandSuppliersAdmin token={token} />
+          )}
+          {tab === 'TRANSFERS' && (
+            <BrandStaffTransferLog token={token} />
           )}
           {tab === 'SUMMARY' && (loading ? (
             <div className="py-12 text-center text-[#9c8e85]">Loading…</div>
@@ -2600,6 +2610,473 @@ function BrandMenuTemplatesAdmin({ token }: { token: string }) {
       {editing && (
         <MenuTemplateEditor token={token} template={editing} onClose={() => setEditing(null)} onSave={saveTemplate} />
       )}
+    </div>
+  );
+}
+
+// BrandSuppliersAdmin (Phase B3) — manage central supplier directory +
+// sync them to selected locations. Mirrors the menu-templates pattern:
+// insert-if-missing semantics by default, force-overwrite as a secondary.
+function BrandSuppliersAdmin({ token }: { token: string }) {
+  const [suppliers, setSuppliers] = useState<any[]>([]);
+  const [locations, setLocations] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedSuppliers, setSelectedSuppliers] = useState<Set<string>>(new Set());
+  const [selectedLocations, setSelectedLocations] = useState<Set<string>>(new Set());
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<any>(null);
+  const [editing, setEditing] = useState<any | null>(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    Promise.all([
+      fetch('/api/brand/suppliers', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
+      fetch('/api/brand/my-locations', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
+    ]).then(([sups, locs]) => {
+      setSuppliers(sups || []);
+      setLocations(locs?.all_restaurants || []);
+    }).finally(() => setLoading(false));
+  }, [token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const saveSupplier = async (payload: any) => {
+    const id = payload.id || 'new';
+    const res = await fetch(`/api/brand/suppliers/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) { setEditing(null); load(); }
+  };
+
+  const deleteSupplier = async (id: string) => {
+    if (!window.confirm('Delete this brand supplier?')) return;
+    await fetch(`/api/brand/suppliers/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    load();
+  };
+
+  const runSync = async (overwrite: boolean) => {
+    if (selectedSuppliers.size === 0 || selectedLocations.size === 0) return;
+    setSyncing(true); setSyncResult(null);
+    const res = await fetch('/api/brand/suppliers/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        brand_supplier_ids: Array.from(selectedSuppliers),
+        restaurant_ids: Array.from(selectedLocations),
+        overwrite,
+      }),
+    });
+    setSyncResult(await res.json().catch(() => null));
+    setSyncing(false);
+  };
+
+  const toggleSet = (set: Set<string>, id: string): Set<string> => {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <div>
+          <h4 className="text-sm font-bold font-serif">Supplier directory</h4>
+          <p className="text-[11px] text-[#6b5d52]">Register vendors once at the brand level. Sync to any location's supplier list with one click.</p>
+        </div>
+        <button onClick={() => setEditing({})}
+          className="px-3 py-1.5 bg-[#cc5a16] text-white text-xs font-bold rounded-xl">+ New supplier</button>
+      </div>
+      {loading ? (
+        <p className="text-xs text-[#9c8e85] italic">Loading…</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-[#faf7f2] rounded-2xl p-3 max-h-72 overflow-y-auto">
+              <div className="flex justify-between items-center mb-2">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Suppliers ({suppliers.length})</p>
+                {suppliers.length > 0 && (
+                  <button onClick={() => setSelectedSuppliers(s =>
+                    s.size === suppliers.length ? new Set() : new Set(suppliers.map((x: any) => x.id)))}
+                    className="text-[10px] font-bold text-[#cc5a16]">
+                    {selectedSuppliers.size === suppliers.length ? 'None' : 'All'}
+                  </button>
+                )}
+              </div>
+              {suppliers.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic py-4 text-center">No brand suppliers yet.</p>
+              ) : (
+                suppliers.map(s => (
+                  <div key={s.id} className="flex items-center gap-2 py-1 group">
+                    <input type="checkbox" checked={selectedSuppliers.has(s.id)}
+                      onChange={() => setSelectedSuppliers(p => toggleSet(p, s.id))} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-bold truncate">{s.name}</p>
+                      <p className="text-[10px] text-[#9c8e85] truncate">
+                        {s.contact_name || s.phone || s.email || '—'}
+                        {s.lead_time_days != null && ` · ${s.lead_time_days}d lead`}
+                      </p>
+                    </div>
+                    <button onClick={() => setEditing(s)} className="opacity-0 group-hover:opacity-100 text-[10px] text-[#cc5a16] font-bold">Edit</button>
+                    <button onClick={() => deleteSupplier(s.id)} className="opacity-0 group-hover:opacity-100 text-[10px] text-red-600 font-bold">×</button>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="bg-[#faf7f2] rounded-2xl p-3 max-h-72 overflow-y-auto">
+              <div className="flex justify-between items-center mb-2">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Locations ({locations.length})</p>
+                {locations.length > 0 && (
+                  <button onClick={() => setSelectedLocations(s =>
+                    s.size === locations.length ? new Set() : new Set(locations.map((l: any) => l.id)))}
+                    className="text-[10px] font-bold text-[#cc5a16]">
+                    {selectedLocations.size === locations.length ? 'None' : 'All'}
+                  </button>
+                )}
+              </div>
+              {locations.map((l: any) => (
+                <label key={l.id} className="flex items-center gap-2 py-1 cursor-pointer">
+                  <input type="checkbox" checked={selectedLocations.has(l.id)}
+                    onChange={() => setSelectedLocations(p => toggleSet(p, l.id))} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-bold truncate">{l.name}</p>
+                    <p className="text-[10px] text-[#9c8e85]">{l.location_label || l.city || l.id}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={() => runSync(false)}
+              disabled={syncing || selectedSuppliers.size === 0 || selectedLocations.size === 0}
+              className="flex-1 py-2.5 bg-[#cc5a16] text-white text-xs font-bold rounded-xl disabled:opacity-50">
+              {syncing ? 'Syncing…' : `Sync ${selectedSuppliers.size} × ${selectedLocations.size}`}
+            </button>
+            <button onClick={() => runSync(true)}
+              disabled={syncing || selectedSuppliers.size === 0 || selectedLocations.size === 0}
+              title="Overwrites existing suppliers at the location"
+              className="px-4 py-2.5 bg-amber-100 text-amber-800 text-xs font-bold rounded-xl disabled:opacity-50">
+              Force overwrite
+            </button>
+          </div>
+          {syncResult && syncResult.summary && (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-xs">
+              <p className="font-bold text-emerald-900">
+                Synced — {syncResult.summary.created} created · {syncResult.summary.updated} updated · {syncResult.summary.skipped} skipped
+              </p>
+              {syncResult.summary.skipped > 0 && (
+                <p className="text-emerald-700 mt-1 text-[11px]">
+                  Skipped — these suppliers already exist at the target locations. Use Force overwrite to replace.
+                </p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+      {editing && (
+        <BrandSupplierEditor supplier={editing} onClose={() => setEditing(null)} onSave={saveSupplier} />
+      )}
+    </div>
+  );
+}
+
+function BrandSupplierEditor({ supplier, onClose, onSave }: {
+  supplier: any; onClose: () => void; onSave: (p: any) => void;
+}) {
+  const isEdit = !!supplier?.id;
+  const [form, setForm] = useState({
+    id: supplier?.id,
+    name: supplier?.name || '',
+    contact_name: supplier?.contact_name || '',
+    phone: supplier?.phone || '',
+    email: supplier?.email || '',
+    address: supplier?.address || '',
+    gst_number: supplier?.gst_number || '',
+    lead_time_days: supplier?.lead_time_days ?? 1,
+    payment_terms: supplier?.payment_terms || '',
+    notes: supplier?.notes || '',
+    is_active: supplier?.is_active == null ? true : Number(supplier.is_active) === 1,
+  });
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md">
+        <div className="p-5 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
+          <h4 className="font-bold font-serif">{isEdit ? 'Edit brand supplier' : 'New brand supplier'}</h4>
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={18}/></button>
+        </div>
+        <div className="p-5 space-y-3 max-h-[60vh] overflow-y-auto">
+          <div>
+            <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Name *</label>
+            <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}
+              autoFocus className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Contact</label>
+              <input value={form.contact_name} onChange={e => setForm({ ...form, contact_name: e.target.value })}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Phone</label>
+              <input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Email</label>
+            <input value={form.email} onChange={e => setForm({ ...form, email: e.target.value })}
+              className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Address</label>
+            <textarea value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} rows={2}
+              className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm resize-none" />
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">GST</label>
+              <input value={form.gst_number} onChange={e => setForm({ ...form, gst_number: e.target.value })}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Lead (days)</label>
+              <input type="number" min={0} value={form.lead_time_days}
+                onChange={e => setForm({ ...form, lead_time_days: e.target.value as any })}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Terms</label>
+              <select value={form.payment_terms} onChange={e => setForm({ ...form, payment_terms: e.target.value })}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm">
+                <option value="">—</option>
+                <option>COD</option>
+                <option>NET-7</option>
+                <option>NET-15</option>
+                <option>NET-30</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Notes</label>
+            <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2}
+              className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm resize-none" />
+          </div>
+        </div>
+        <div className="p-5 border-t border-[#cc5a16]/10 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-xs font-bold text-[#6b5d52]">Cancel</button>
+          <button onClick={() => onSave(form)} disabled={!form.name.trim()}
+            className="px-5 py-2 bg-[#cc5a16] text-white text-xs font-bold rounded-xl disabled:opacity-50">
+            Save supplier
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// BrandStaffTransferLog (Phase B3) — read-only audit list of every
+// cross-location staff move performed by anyone in this brand.
+function BrandStaffTransferLog({ token }: { token: string }) {
+  const [log, setLog] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    fetch('/api/brand/staff/transfer-log', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : [])
+      .then(setLog)
+      .finally(() => setLoading(false));
+  }, [token]);
+  return (
+    <div className="space-y-3">
+      <div>
+        <h4 className="text-sm font-bold font-serif">Staff transfer history</h4>
+        <p className="text-[11px] text-[#6b5d52]">
+          Cross-location moves performed by anyone in this brand. Initiate a transfer from each location's Staff tab.
+        </p>
+      </div>
+      {loading ? (
+        <p className="text-xs text-[#9c8e85] italic">Loading…</p>
+      ) : log.length === 0 ? (
+        <p className="text-xs text-[#9c8e85] italic py-6 text-center">No transfers yet.</p>
+      ) : (
+        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+          <table className="w-full text-xs">
+            <thead className="bg-[#faf7f2]">
+              <tr className="text-left text-[10px] uppercase tracking-widest text-[#9c8e85]">
+                <th className="px-3 py-2">When</th>
+                <th className="px-3 py-2">Staff</th>
+                <th className="px-3 py-2">Role</th>
+                <th className="px-3 py-2">From → To</th>
+                <th className="px-3 py-2">Mode</th>
+                <th className="px-3 py-2">By</th>
+              </tr>
+            </thead>
+            <tbody>
+              {log.map(r => (
+                <tr key={r.id} className="border-t border-[#cc5a16]/5">
+                  <td className="px-3 py-2 font-mono text-[10px]">
+                    {new Date(r.transferred_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' })}
+                  </td>
+                  <td className="px-3 py-2 font-bold">{r.staff_name}</td>
+                  <td className="px-3 py-2 text-[10px] uppercase">{r.staff_role || '—'}</td>
+                  <td className="px-3 py-2 text-[#6b5d52]">
+                    <span className="font-mono">{r.from_restaurant_id}</span>
+                    <span className="mx-1">→</span>
+                    <span className="font-mono">{r.to_restaurant_id}</span>
+                  </td>
+                  <td className="px-3 py-2">
+                    <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold",
+                      r.mode === 'TRANSFER' ? 'bg-orange-100 text-orange-700' : 'bg-sky-100 text-sky-700')}>
+                      {r.mode}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-[10px] text-[#9c8e85]">{r.transferred_by || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// StaffTransferModal (Phase B3) — owner-initiated cross-location staff
+// move from the STAFF tab on each location. Picks a destination
+// restaurant the user has access to.
+function StaffTransferModal({ staff, sourceRestaurantId, token, onClose, onTransferred }: {
+  staff: any; sourceRestaurantId: string; token: string;
+  onClose: () => void; onTransferred: () => void;
+}) {
+  const [locations, setLocations] = useState<any[]>([]);
+  const [targetId, setTargetId] = useState<string>('');
+  const [mode, setMode] = useState<'TRANSFER' | 'COPY'>('TRANSFER');
+  const [notes, setNotes] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    fetch('/api/brand/my-locations', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        const others = (d?.all_restaurants || []).filter((r: any) => r.id !== sourceRestaurantId);
+        setLocations(others);
+        if (others.length > 0) setTargetId(others[0].id);
+      })
+      .finally(() => setLoading(false));
+  }, [token, sourceRestaurantId]);
+
+  const transfer = async () => {
+    if (!targetId) return;
+    setSubmitting(true); setError('');
+    try {
+      const res = await fetch('/api/brand/staff/transfer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          source_staff_id: staff.id,
+          from_restaurant_id: sourceRestaurantId,
+          to_restaurant_id: targetId,
+          mode, notes: notes.trim() || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(data.error || 'Transfer failed'); return; }
+      setResult(data);
+    } finally { setSubmitting(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md">
+        <div className="p-5 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
+          <div>
+            <h4 className="font-bold font-serif">Transfer staff</h4>
+            <p className="text-xs text-[#6b5d52]">{staff.name} · {staff.role}</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={18}/></button>
+        </div>
+        {result ? (
+          <div className="p-5 space-y-3">
+            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 text-sm">
+              <p className="font-bold text-emerald-900">
+                ✓ {staff.name} {result.source_deactivated ? 'transferred' : 'copied'} successfully.
+              </p>
+              <p className="text-xs text-emerald-700 mt-1">
+                New staff ID at target: <span className="font-mono">{result.target_staff_id}</span>
+              </p>
+              {result.login_id_changed && (
+                <p className="text-xs text-amber-700 mt-1">
+                  Login ID had to be suffixed at the target (was a conflict): <span className="font-mono">{result.target_login_id}</span>
+                </p>
+              )}
+              {result.source_deactivated && (
+                <p className="text-xs text-emerald-700 mt-1">
+                  Source row deactivated — attendance and payroll history preserved at the original location.
+                </p>
+              )}
+            </div>
+            <button onClick={() => { onTransferred(); onClose(); }}
+              className="w-full py-2.5 bg-[#cc5a16] text-white text-xs font-bold rounded-xl">Done</button>
+          </div>
+        ) : (
+          <div className="p-5 space-y-3">
+            {loading ? (
+              <p className="text-xs text-[#9c8e85] italic">Loading locations…</p>
+            ) : locations.length === 0 ? (
+              <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                You only have access to this one location. Register the same email on another location's owner row to enable transfers.
+              </p>
+            ) : (
+              <>
+                <div>
+                  <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Target location</label>
+                  <select value={targetId} onChange={e => setTargetId(e.target.value)}
+                    className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm">
+                    {locations.map(l => (
+                      <option key={l.id} value={l.id}>{l.name}{l.location_label ? ` · ${l.location_label}` : ''}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Mode</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={() => setMode('TRANSFER')}
+                      className={cn("p-3 rounded-xl border text-left transition-colors",
+                        mode === 'TRANSFER' ? "border-[#cc5a16] bg-[#cc5a16]/5" : "border-[#cc5a16]/15 bg-white")}>
+                      <p className="text-xs font-bold">Transfer</p>
+                      <p className="text-[10px] text-[#6b5d52]">Deactivate at source</p>
+                    </button>
+                    <button onClick={() => setMode('COPY')}
+                      className={cn("p-3 rounded-xl border text-left transition-colors",
+                        mode === 'COPY' ? "border-[#cc5a16] bg-[#cc5a16]/5" : "border-[#cc5a16]/15 bg-white")}>
+                      <p className="text-xs font-bold">Copy</p>
+                      <p className="text-[10px] text-[#6b5d52]">Keep at both (splits time)</p>
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Notes (optional)</label>
+                  <input value={notes} onChange={e => setNotes(e.target.value)}
+                    placeholder="e.g. Reassigned to Mumbai launch team"
+                    className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+                </div>
+                {error && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl p-2">{error}</p>}
+                <div className="bg-[#faf7f2] rounded-xl p-3 text-[11px] text-[#6b5d52]">
+                  <strong className="text-[#1a1208]">{staff.name}</strong>'s hourly rate, payroll ID, role, and contact info will be copied to the target location. Past attendance and timesheet history stay at the source.
+                </div>
+                <button onClick={transfer} disabled={!targetId || submitting}
+                  className="w-full py-2.5 bg-[#cc5a16] text-white text-xs font-bold rounded-xl disabled:opacity-50">
+                  {submitting ? 'Transferring…' : `${mode === 'TRANSFER' ? 'Transfer' : 'Copy'} ${staff.name}`}
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -6381,6 +6858,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [staffRoleFilter, setStaffRoleFilter] = useState<'ALL'|'CHEF'|'WAITER'|'MANAGER'>('ALL');
   const [staffPage, setStaffPage]             = useState(1);
   const [editingStaff, setEditingStaff]       = useState<any | null>(null);
+  // Phase B3 — cross-location staff transfer
+  const [transferringStaff, setTransferringStaff] = useState<any | null>(null);
   const [isBulkAddingStaff, setIsBulkAddingStaff] = useState(false);
   const [bulkRows, setBulkRows] = useState<Array<{name: string; role: UserRole; loginId: string; password: string; phone: string; email: string}>>([
     { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
@@ -12032,10 +12511,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
 
                 {/* Actions */}
-                <div className="px-5 pb-5 grid grid-cols-3 gap-2">
+                <div className="px-5 pb-5 grid grid-cols-4 gap-2">
                   <button onClick={() => setEditingStaff(s)}
                     className="text-[11px] font-bold uppercase tracking-widest text-[#1a1208] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors">
                     ✎ Edit
+                  </button>
+                  <button onClick={() => setTransferringStaff(s)}
+                    className="text-[11px] font-bold uppercase tracking-widest text-[#cc5a16] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors"
+                    title="Move this staff to another of your locations">
+                    ↗ Transfer
                   </button>
                   <button onClick={() => toggleStaffActive(s)}
                     className={cn(
@@ -12076,6 +12560,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </>
             );
           })()}
+
+          {/* Phase B3 — Staff transfer modal */}
+          {transferringStaff && (
+            <StaffTransferModal
+              staff={transferringStaff}
+              sourceRestaurantId={restaurantId}
+              token={token!}
+              onClose={() => setTransferringStaff(null)}
+              onTransferred={() => { fetchStaff(); setTransferringStaff(null); }}
+            />
+          )}
 
           {/* Edit Staff Modal */}
           {editingStaff && (
