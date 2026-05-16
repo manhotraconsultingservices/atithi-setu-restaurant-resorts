@@ -1757,6 +1757,300 @@ async function startServer() {
     }
   });
 
+  // ═════════════════════════════════════════════════════════════════════
+  // PHASE B1 — Multi-location / Brand Mode
+  // ═════════════════════════════════════════════════════════════════════
+  // Resolve every restaurant the *signed-in user* can access. Multi-tenant
+  // owners typically register the same email across each location's
+  // `users` row, so we look up by email as the canonical identity.
+  //   - SUPER_ADMIN / CTO → can see every active restaurant (admin view)
+  //   - OWNER / MANAGER   → all restaurants where their email is registered
+  //                         as owner / manager
+  //   - Staff roles       → only their bound restaurantId from the JWT
+  async function _listUserRestaurants(req: AuthRequest): Promise<any[]> {
+    const role = String(req.user?.role || '').toUpperCase();
+    const email = req.user?.email;
+    if (role === 'SUPER_ADMIN' || role === 'CTO') {
+      return await centralDb.query(
+        `SELECT id, name, brand_id, location_label, city, state, is_active, access_revoked,
+                logo_url, property_type
+           FROM restaurants
+          WHERE id <> 'SYSTEM'
+          ORDER BY name ASC`
+      ) || [];
+    }
+    if (email) {
+      const rows: any[] = await centralDb.query(
+        `SELECT DISTINCT r.id, r.name, r.brand_id, r.location_label, r.city, r.state,
+                r.is_active, r.access_revoked, r.logo_url, r.property_type
+           FROM users u
+           JOIN restaurants r ON r.id = u.restaurant_id
+          WHERE u.email = ? AND COALESCE(u.is_active, 1) = 1
+            AND r.id <> 'SYSTEM'
+          ORDER BY r.name ASC`,
+        [email]
+      );
+      // Always include the JWT's restaurantId even if the user row matching
+      // email isn't found (defensive — covers legacy tenants where the
+      // owner's email may differ from the users row).
+      if (req.user?.restaurantId && !rows.some(r => r.id === req.user!.restaurantId)) {
+        const own: any = await centralDb.get(
+          "SELECT id, name, brand_id, location_label, city, state, is_active, access_revoked, logo_url, property_type FROM restaurants WHERE id = ?",
+          [req.user.restaurantId]
+        );
+        if (own) rows.unshift(own);
+      }
+      return rows;
+    }
+    // Staff fallback — only the bound restaurant
+    if (req.user?.restaurantId) {
+      const own: any = await centralDb.get(
+        "SELECT id, name, brand_id, location_label, city, state, is_active, access_revoked, logo_url, property_type FROM restaurants WHERE id = ?",
+        [req.user.restaurantId]
+      );
+      return own ? [own] : [];
+    }
+    return [];
+  }
+
+  // GET — the user's "switcher" payload: every location + brand grouping
+  app.get("/api/brand/my-locations", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const restaurants = await _listUserRestaurants(req);
+      const brandIds = Array.from(new Set(restaurants.map(r => r.brand_id).filter(Boolean)));
+      let brands: any[] = [];
+      if (brandIds.length > 0) {
+        // Per-brand metadata in one query
+        const placeholders = brandIds.map(() => '?').join(',');
+        brands = await centralDb.query(
+          `SELECT id, name, logo_url, description FROM brands WHERE id IN (${placeholders})`,
+          brandIds
+        ).catch(() => []);
+      }
+      // Group restaurants under brands; unbranded ones go to a synthetic group
+      const groups: any[] = [];
+      for (const b of brands) {
+        const members = restaurants.filter(r => r.brand_id === b.id);
+        if (members.length > 0) groups.push({ ...b, restaurants: members });
+      }
+      const unbranded = restaurants.filter(r => !r.brand_id);
+      if (unbranded.length > 0) {
+        groups.push({ id: null, name: 'Unbranded', restaurants: unbranded });
+      }
+      res.json({
+        current_restaurant_id: req.user?.restaurantId || null,
+        total_locations: restaurants.length,
+        groups,
+        all_restaurants: restaurants,
+      });
+    } catch (err) {
+      console.error('my-locations error:', err);
+      res.status(500).json({ error: 'Failed to load locations' });
+    }
+  });
+
+  // POST — switch the JWT to a different restaurant the user can access
+  app.post("/api/auth/switch-restaurant", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const target = String(req.body?.restaurant_id || '').trim();
+      if (!target) return res.status(400).json({ error: 'restaurant_id required' });
+      const accessible = await _listUserRestaurants(req);
+      const match = accessible.find(r => r.id === target);
+      if (!match) return res.status(403).json({ error: 'No access to this restaurant' });
+      // Re-issue with the new restaurantId, keep everything else identical
+      const newToken = jwt.sign(
+        {
+          id: req.user?.id,
+          restaurantId: target,
+          role: req.user?.role,
+          email: req.user?.email,
+          userName: req.user?.userName,
+        },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+      res.json({
+        token: newToken,
+        restaurantId: target,
+        restaurant_name: match.name,
+        location_label: match.location_label,
+        brand_id: match.brand_id,
+      });
+    } catch (err) {
+      console.error('switch-restaurant error:', err);
+      res.status(500).json({ error: 'Switch failed' });
+    }
+  });
+
+  // GET — aggregate KPIs across every restaurant the user can access.
+  //   period = TODAY | YESTERDAY | WTD | MTD | YTD (mirrors A2)
+  //   Optional brand_id query param narrows the aggregation.
+  app.get("/api/brand/cross-summary", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const period = String(req.query.period || 'MTD').toUpperCase();
+      const brandFilter = req.query.brand_id ? String(req.query.brand_id) : null;
+      const accessible = await _listUserRestaurants(req);
+      const targets = (brandFilter
+        ? accessible.filter(r => r.brand_id === brandFilter)
+        : accessible
+      ).filter(r => Number(r.is_active || 0) === 1);
+      // Date bounds — reuse the same logic A2 already exposes via period-summary.
+      // Compute inline to avoid a closure dependency.
+      const now = new Date();
+      const todayStr = now.toISOString().slice(0, 10);
+      let start = todayStr, end = todayStr, label = 'Month to date';
+      if (period === 'TODAY') {
+        label = 'Today';
+      } else if (period === 'YESTERDAY') {
+        const y = new Date(now); y.setDate(y.getDate() - 1);
+        start = end = y.toISOString().slice(0, 10);
+        label = 'Yesterday';
+      } else if (period === 'WTD') {
+        const dow = now.getDay(); const offset = dow === 0 ? -6 : 1 - dow;
+        const mon = new Date(now); mon.setDate(mon.getDate() + offset);
+        start = mon.toISOString().slice(0, 10);
+        label = 'Week to date';
+      } else if (period === 'YTD') {
+        start = new Date(now.getFullYear(), 0, 1).toISOString().slice(0, 10);
+        label = 'Year to date';
+      } else {
+        start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+        label = 'Month to date';
+      }
+      // Per-restaurant aggregation
+      const perRestaurant = [];
+      let totalRevenue = 0, totalOrders = 0;
+      for (const r of targets) {
+        try {
+          const db = await getTenantDb(r.id);
+          const row: any = await db.get(
+            `SELECT COUNT(*) AS orders,
+                    COALESCE(SUM(total_amount), 0) AS revenue,
+                    COALESCE(AVG(NULLIF(total_amount, 0)), 0) AS aov
+               FROM orders
+              WHERE created_at >= ? AND created_at < (? :: date + INTERVAL '1 day')
+                AND status IN ('CONFIRMED', 'DELIVERED', 'COMPLETED', 'SETTLED', 'PRINTED')`,
+            [start, end]
+          ).catch(() => ({ orders: 0, revenue: 0, aov: 0 }));
+          const rev = Number(row?.revenue || 0);
+          const ord = Number(row?.orders || 0);
+          perRestaurant.push({
+            restaurant_id: r.id,
+            restaurant_name: r.name,
+            brand_id: r.brand_id,
+            location_label: r.location_label,
+            city: r.city,
+            property_type: r.property_type,
+            orders: ord,
+            revenue: rev,
+            aov: Number(row?.aov || 0),
+          });
+          totalRevenue += rev;
+          totalOrders += ord;
+        } catch (err) {
+          console.error(`[brand cross-summary] ${r.id} failed:`, err);
+          perRestaurant.push({
+            restaurant_id: r.id, restaurant_name: r.name,
+            brand_id: r.brand_id, location_label: r.location_label,
+            city: r.city, property_type: r.property_type,
+            orders: 0, revenue: 0, aov: 0, error: 'fetch failed',
+          });
+        }
+      }
+      perRestaurant.sort((a, b) => b.revenue - a.revenue);
+      res.json({
+        period: label, start, end,
+        location_count: targets.length,
+        totals: {
+          revenue: Math.round(totalRevenue * 100) / 100,
+          orders: totalOrders,
+          aov: totalOrders > 0 ? Math.round((totalRevenue / totalOrders) * 100) / 100 : 0,
+        },
+        by_restaurant: perRestaurant,
+      });
+    } catch (err) {
+      console.error('cross-summary error:', err);
+      res.status(500).json({ error: 'Failed to compute cross-summary' });
+    }
+  });
+
+  // POST — create a brand
+  app.post("/api/brand", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'name required' });
+      const id = `brand_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      await centralDb.run(
+        `INSERT INTO brands (id, name, owner_email, owner_phone, logo_url, description)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [id, name, req.user?.email || null, req.body?.owner_phone || null,
+         req.body?.logo_url || null, req.body?.description || null]
+      );
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error('brand POST error:', err);
+      res.status(500).json({ error: 'Failed to create brand' });
+    }
+  });
+
+  // PATCH — update brand metadata
+  app.patch("/api/brand/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const sets: string[] = [];
+      const params: any[] = [];
+      for (const k of ['name', 'logo_url', 'description', 'owner_phone'] as const) {
+        if (req.body?.[k] != null) { sets.push(`${k} = ?`); params.push(String(req.body[k])); }
+      }
+      if (sets.length === 0) return res.status(400).json({ error: 'No fields to update' });
+      sets.push('updated_at = CURRENT_TIMESTAMP');
+      params.push(req.params.id);
+      await centralDb.run(`UPDATE brands SET ${sets.join(', ')} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('brand PATCH error:', err);
+      res.status(500).json({ error: 'Failed to update brand' });
+    }
+  });
+
+  // POST — link a restaurant to a brand (sets brand_id + optional location label)
+  app.post("/api/brand/:brandId/link", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const restaurantId = String(req.body?.restaurant_id || '').trim();
+      if (!restaurantId) return res.status(400).json({ error: 'restaurant_id required' });
+      // Verify the user has access to that restaurant
+      const accessible = await _listUserRestaurants(req);
+      if (!accessible.find(r => r.id === restaurantId)) {
+        return res.status(403).json({ error: 'No access to this restaurant' });
+      }
+      const location_label = req.body?.location_label ? String(req.body.location_label).trim() : null;
+      await centralDb.run(
+        `UPDATE restaurants SET brand_id = ?, location_label = COALESCE(?, location_label) WHERE id = ?`,
+        [req.params.brandId, location_label, restaurantId]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error('brand link error:', err);
+      res.status(500).json({ error: 'Link failed' });
+    }
+  });
+
+  // POST — unlink (clear brand_id)
+  app.post("/api/brand/unlink", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const restaurantId = String(req.body?.restaurant_id || '').trim();
+      if (!restaurantId) return res.status(400).json({ error: 'restaurant_id required' });
+      const accessible = await _listUserRestaurants(req);
+      if (!accessible.find(r => r.id === restaurantId)) {
+        return res.status(403).json({ error: 'No access to this restaurant' });
+      }
+      await centralDb.run(`UPDATE restaurants SET brand_id = NULL WHERE id = ?`, [restaurantId]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('brand unlink error:', err);
+      res.status(500).json({ error: 'Unlink failed' });
+    }
+  });
+
   // Owner: Notification Settings
   app.get("/api/owner/notification-settings", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -16197,7 +16491,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'op1-polish-margin-autopo-anomaly',
+    commit_marker: 'brand-multi-location-mvp',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -16252,6 +16546,7 @@ async function startServer() {
       'op1-cost-per-dish-inventory-ui',   // OP1: INVENTORY > INSIGHTS > Margin tab — recipe cost vs sell price + margin per dish, color-coded
       'op1-supplier-auto-po-ui',          // OP1: Supplier edit modal exposes auto-PO toggle / day / minimum; cards show 🔄 Auto-PO badge
       'op1-revenue-anomaly-cron',         // OP1: daily 09:30 IST scan; ±30% vs 4-week same-weekday avg fires REVENUE_ANOMALY (drop or spike) with dedup
+      'brand-multi-location-mvp',         // B1: brands table + restaurants.brand_id + cross-location dashboard + JWT-swap location switcher
     ],
     booted_at: new Date().toISOString(),
   };

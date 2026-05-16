@@ -1951,13 +1951,22 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#faf7f2]">
       <nav className="bg-white border-b border-[#cc5a16]/10 px-3 py-3 sm:px-4 sm:py-4 md:px-6 flex justify-between items-center sticky top-0 z-50">
-        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('LANDING')}>
+        <div className="flex items-center gap-2 cursor-pointer min-w-0" onClick={() => setView('LANDING')}>
           <Utensils className="w-5 h-5 md:w-6 md:h-6 text-[#1a1208] shrink-0" />
           <span className="text-base md:text-xl font-bold font-serif text-[#1a1a1a] truncate max-w-[140px] sm:max-w-xs md:max-w-none">
             {role === 'SUPER_ADMIN' ? 'RestoFlow ERP Admin' : restaurantName}
           </span>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
+          {/* Phase B1 — Multi-location switcher. Only renders for owners
+              who actually have access to more than one restaurant. */}
+          {token && restaurantId && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && (
+            <LocationSwitcher
+              token={token}
+              currentRestaurantId={restaurantId}
+              currentRestaurantName={restaurantName}
+            />
+          )}
           <div className="hidden md:flex flex-col items-end">
             <span className="text-xs font-bold uppercase tracking-wider text-[#1a1208]">
               {userName}
@@ -1966,7 +1975,7 @@ export default function App() {
               {role} {restaurantId && `| ${restaurantId}`}
             </span>
           </div>
-          <div className="h-8 w-px bg-[#cc5a16]/10 mx-2" />
+          <div className="h-8 w-px bg-[#cc5a16]/10 mx-1" />
           <button
             type="button"
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleLogout(); }}
@@ -2015,6 +2024,259 @@ export default function App() {
 // - mentions data is safe
 // - provides concrete contact paths
 // ─────────────────────────────────────────────────────────────────────
+// LocationSwitcher (Phase B1) — top-bar dropdown that lets an owner switch
+// between the restaurants they own. Hidden when the user has only one
+// location (most owners). When clicked it shows: every accessible location
+// grouped by brand + a "View brand dashboard" link that opens the
+// cross-location aggregate view.
+function LocationSwitcher({ token, currentRestaurantId, currentRestaurantName }: {
+  token: string; currentRestaurantId: string; currentRestaurantName: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<{
+    total_locations: number;
+    groups: Array<{ id: string | null; name: string; restaurants: any[] }>;
+    all_restaurants: any[];
+  } | null>(null);
+  const [showBrandDashboard, setShowBrandDashboard] = useState(false);
+  const [switching, setSwitching] = useState<string | null>(null);
+
+  // Lazy-fetch on first open
+  useEffect(() => {
+    if (!open || data) return;
+    setLoading(true);
+    fetch('/api/brand/my-locations', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setData(d))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [open, data, token]);
+
+  // Hide the entire switcher when there's only one location — most owners
+  // don't need it cluttering the nav.
+  if (data && data.total_locations < 2) return null;
+  // Before the first fetch, render a slim placeholder so the nav doesn't
+  // jump when the data arrives.
+
+  const switchTo = async (restaurantId: string) => {
+    if (restaurantId === currentRestaurantId) { setOpen(false); return; }
+    setSwitching(restaurantId);
+    try {
+      const res = await fetch('/api/auth/switch-restaurant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ restaurant_id: restaurantId }),
+      });
+      if (!res.ok) {
+        setSwitching(null);
+        return;
+      }
+      const d = await res.json();
+      // Replace the token + reload so every cached fetch / state resets cleanly
+      localStorage.setItem('token', d.token);
+      localStorage.setItem('restaurantId', d.restaurantId);
+      if (d.restaurant_name) localStorage.setItem('restaurantName', d.restaurant_name);
+      window.location.reload();
+    } catch {
+      setSwitching(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className="flex items-center gap-2 px-3 py-1.5 bg-[#faf7f2] hover:bg-[#cc5a16]/5 rounded-xl border border-[#cc5a16]/10 transition-colors"
+          title="Switch location"
+        >
+          <span className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold hidden sm:inline">Location</span>
+          <span className="text-sm font-bold text-[#1a1208] truncate max-w-[140px]">{currentRestaurantName}</span>
+          <ChevronDown size={14} className={cn("text-[#6b5d52] transition-transform", open && "rotate-180")} />
+        </button>
+        {open && (
+          <>
+            {/* Backdrop to close on outside click */}
+            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+            <div className="absolute right-0 mt-2 w-80 bg-white border border-[#cc5a16]/15 rounded-2xl shadow-xl z-50 overflow-hidden">
+              <div className="px-4 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]/50">
+                <p className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">Your locations</p>
+                <p className="text-sm font-bold text-[#1a1208] mt-0.5">
+                  {data?.total_locations ?? '…'} restaurant{data && data.total_locations === 1 ? '' : 's'}
+                </p>
+              </div>
+              {loading || !data ? (
+                <div className="py-8 text-center text-[#9c8e85] text-sm">Loading…</div>
+              ) : (
+                <div className="max-h-96 overflow-y-auto">
+                  {data.groups.map((group, gi) => (
+                    <div key={gi} className="border-b border-[#cc5a16]/5 last:border-0">
+                      {group.name !== 'Unbranded' && (
+                        <div className="px-4 pt-2 pb-1 text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">
+                          {group.name}
+                        </div>
+                      )}
+                      {group.restaurants.map(r => {
+                        const isCurrent = r.id === currentRestaurantId;
+                        const isInactive = Number(r.is_active || 0) !== 1;
+                        return (
+                          <button
+                            key={r.id}
+                            onClick={() => switchTo(r.id)}
+                            disabled={isCurrent || switching !== null}
+                            className={cn(
+                              "w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors",
+                              isCurrent ? "bg-[#cc5a16]/5" : "hover:bg-[#faf7f2]",
+                              switching === r.id && "opacity-50"
+                            )}
+                          >
+                            <div className="w-8 h-8 rounded-lg bg-[#faf7f2] flex items-center justify-center shrink-0">
+                              {r.logo_url ? (
+                                <img src={r.logo_url} alt="" className="w-8 h-8 rounded-lg object-cover" />
+                              ) : (
+                                <Utensils size={14} className="text-[#9c8e85]" />
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-bold text-[#1a1208] truncate">{r.name}</p>
+                              <p className="text-[11px] text-[#6b5d52]">
+                                {r.location_label || r.city || r.id}
+                                {isInactive && <span className="ml-1 text-red-500">· Inactive</span>}
+                              </p>
+                            </div>
+                            {isCurrent && <Check size={14} className="text-[#cc5a16]" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="border-t border-[#cc5a16]/10 p-2">
+                <button
+                  onClick={() => { setShowBrandDashboard(true); setOpen(false); }}
+                  className="w-full px-3 py-2 text-sm font-bold text-[#cc5a16] hover:bg-[#cc5a16]/5 rounded-xl flex items-center justify-center gap-2"
+                >
+                  <LayoutGrid size={14} /> View brand dashboard
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+      {showBrandDashboard && (
+        <BrandDashboardModal token={token} onClose={() => setShowBrandDashboard(false)} />
+      )}
+    </>
+  );
+}
+
+// BrandDashboardModal (Phase B1) — at-a-glance cross-location summary.
+// Period pills (Today / WTD / MTD / YTD), KPI total tiles, per-restaurant
+// bar chart, top-performer call-out. Read-only — to drill into a location
+// the owner switches to it from the dropdown.
+function BrandDashboardModal({ token, onClose }: { token: string; onClose: () => void }) {
+  type Period = 'TODAY' | 'WTD' | 'MTD' | 'YTD';
+  const [period, setPeriod] = useState<Period>('MTD');
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`/api/brand/cross-summary?period=${period}`,
+      { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(setData)
+      .finally(() => setLoading(false));
+  }, [period, token]);
+
+  const fmt = (n: number) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  const maxRev = data?.by_restaurant ? Math.max(1, ...data.by_restaurant.map((r: any) => r.revenue)) : 1;
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+      <div className="bg-white rounded-[32px] shadow-2xl w-full max-w-3xl my-auto">
+        <div className="p-6 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
+          <div>
+            <h3 className="text-2xl font-bold font-serif">Brand dashboard</h3>
+            <p className="text-xs text-[#6b5d52] mt-0.5">
+              Cross-location aggregate · {data?.location_count ?? 0} restaurant{data?.location_count === 1 ? '' : 's'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex gap-1">
+              {(['TODAY', 'WTD', 'MTD', 'YTD'] as Period[]).map(p => (
+                <button key={p} onClick={() => setPeriod(p)}
+                  className={cn('px-3 py-1.5 text-xs font-bold rounded-xl',
+                    period === p ? 'bg-[#cc5a16] text-white' : 'bg-white border border-[#cc5a16]/15 text-[#6b5d52]')}>
+                  {p === 'WTD' ? 'Week' : p === 'MTD' ? 'Month' : p === 'YTD' ? 'Year' : 'Today'}
+                </button>
+              ))}
+            </div>
+            <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={20}/></button>
+          </div>
+        </div>
+        <div className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
+          {loading ? (
+            <div className="py-12 text-center text-[#9c8e85]">Loading…</div>
+          ) : !data ? (
+            <div className="py-12 text-center text-[#9c8e85] italic">Failed to load brand summary.</div>
+          ) : (
+            <>
+              {/* KPI tiles */}
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: 'Revenue', value: fmt(data.totals?.revenue || 0), color: 'text-[#cc5a16]' },
+                  { label: 'Orders',  value: Number(data.totals?.orders || 0).toLocaleString(), color: 'text-[#1a1208]' },
+                  { label: 'AOV',     value: fmt(data.totals?.aov || 0), color: 'text-[#1a1208]' },
+                ].map(k => (
+                  <div key={k.label} className="bg-[#faf7f2] rounded-2xl p-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">{k.label}</p>
+                    <p className={cn("text-2xl font-bold font-serif", k.color)}>{k.value}</p>
+                  </div>
+                ))}
+              </div>
+              {/* Per-restaurant bars */}
+              <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                <h4 className="text-sm font-bold font-serif mb-3">By location · {data.period}</h4>
+                {(data.by_restaurant || []).length === 0 ? (
+                  <p className="text-xs text-[#9c8e85] italic">No data for this period.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {data.by_restaurant.map((r: any, i: number) => (
+                      <div key={r.restaurant_id} className="flex items-center gap-3 text-xs">
+                        <span className="w-5 text-[#9c8e85] font-mono">{i + 1}.</span>
+                        <div className="w-44 min-w-0">
+                          <p className="font-bold text-[#1a1208] truncate">{r.restaurant_name}</p>
+                          <p className="text-[10px] text-[#9c8e85] truncate">{r.location_label || r.city || r.restaurant_id}</p>
+                        </div>
+                        <span className="text-[#6b5d52] w-14 text-right shrink-0">{r.orders}×</span>
+                        <div className="flex-1 bg-[#faf7f2] rounded-lg h-6 relative overflow-hidden min-w-[120px]">
+                          <div className="absolute inset-y-0 left-0 bg-[#cc5a16] rounded-lg transition-all"
+                            style={{ width: `${Math.max(2, (r.revenue / maxRev) * 100)}%` }} />
+                          <span className="absolute inset-0 flex items-center px-2 font-bold text-white text-[10px]">
+                            {fmt(r.revenue)}
+                          </span>
+                        </div>
+                        <span className="w-16 text-right text-[#9c8e85] text-[10px]">AOV {fmt(r.aov)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <p className="text-[11px] text-[#9c8e85] italic">
+                Switch to a specific location from the dropdown to manage menus, staff, and orders.
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BillingNotice({ restaurantId, token }: { restaurantId: string; token: string }) {
   const [status, setStatus] = React.useState<any>(null);
   const [bannerDismissedUntil, setBannerDismissedUntil] = React.useState<number>(() => {

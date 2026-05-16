@@ -207,8 +207,33 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS overtime_threshold_multiplier DOUBLE PRECISION DEFAULT 1.25;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS no_show_grace_minutes INT DEFAULT 30;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS variance_approval_threshold_pct DOUBLE PRECISION DEFAULT 25.0;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS shift_reminder_enabled INT DEFAULT 0
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS shift_reminder_enabled INT DEFAULT 0;
+    -- Phase B1 — Multi-location / Brand Mode.
+    -- A "brand" is an owner-defined grouping of restaurants under the same
+    -- ownership (e.g. "Vivek's Cafe" with three city locations). It's
+    -- entirely optional — a tenant with brand_id IS NULL just behaves like
+    -- it always did. Multi-location aggregation kicks in when 2+ restaurants
+    -- share the same brand_id AND the same user can access both.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS brand_id TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS location_label TEXT
   `);
+  await centralDb.exec(
+    `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`
+  ).catch(() => {});
+
+  // Phase B1 — owner-defined brand groupings.
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS brands (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      owner_phone TEXT,
+      owner_email TEXT,
+      logo_url TEXT,
+      description TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
 
   // Migration: unique index on locations (safe to run multiple times)
   await centralDb.exec(
