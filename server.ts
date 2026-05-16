@@ -8753,6 +8753,284 @@ async function startServer() {
     return { reverted: true, lines };
   }
 
+  // ═════════════════════════════════════════════════════════════════════
+  // PHASE I2 — Cost-per-dish report + Auto-PO drafts
+  // ═════════════════════════════════════════════════════════════════════
+
+  // GET /inventory/cost-per-dish — for each menu item with a recipe,
+  // compute ingredient cost, sell price, and margin. Drives the
+  // profitability report and surfaces dishes that need re-pricing.
+  app.get("/api/restaurant/:id/inventory/cost-per-dish", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const recipes: any[] = await db.query(
+        `SELECT r.menu_item_id, r.ingredient_id, r.qty_per_serving, r.size_variant, r.unit AS recipe_unit,
+                i.name AS ingredient_name, i.unit AS stock_unit,
+                COALESCE(i.default_unit_price, 0) AS unit_price
+           FROM recipes r
+           LEFT JOIN ingredients i ON i.id = r.ingredient_id
+          ORDER BY r.menu_item_id, r.ingredient_id`
+      );
+      const items: any[] = await db.query(
+        `SELECT id, name, category, price_full, price_half, dietary_type, available
+           FROM menu ORDER BY name ASC`
+      );
+      // Group recipes per item; FULL recipes by default (size_variant = FULL
+      // or BOTH). Cost in same unit as ingredient default_unit_price; we
+      // assume recipe_unit and stock_unit match (the inventory module
+      // already normalises during deduction, so they almost always do).
+      const recipeMap: Record<string, any[]> = {};
+      for (const r of (recipes || [])) {
+        if (!recipeMap[r.menu_item_id]) recipeMap[r.menu_item_id] = [];
+        recipeMap[r.menu_item_id].push(r);
+      }
+      const result = (items || []).map(item => {
+        const itemRecipes = (recipeMap[item.id] || []).filter(r =>
+          r.size_variant === 'FULL' || r.size_variant === 'BOTH' || !r.size_variant
+        );
+        const contributors = itemRecipes.map(r => {
+          const cost = Number(r.qty_per_serving || 0) * Number(r.unit_price || 0);
+          return {
+            ingredient_id: r.ingredient_id,
+            ingredient_name: r.ingredient_name,
+            qty: Number(r.qty_per_serving || 0),
+            unit: r.recipe_unit,
+            unit_price: Number(r.unit_price || 0),
+            cost: Math.round(cost * 100) / 100,
+          };
+        });
+        const ingredientCost = contributors.reduce((s, c) => s + c.cost, 0);
+        const sellPrice = Number(item.price_full || 0);
+        const marginAmount = Math.round((sellPrice - ingredientCost) * 100) / 100;
+        const marginPct = sellPrice > 0 ? Math.round((marginAmount / sellPrice) * 1000) / 10 : 0;
+        return {
+          menu_item_id: item.id,
+          name: item.name,
+          category: item.category,
+          dietary_type: item.dietary_type,
+          available: !!item.available,
+          sell_price: sellPrice,
+          ingredient_cost: Math.round(ingredientCost * 100) / 100,
+          margin_amount: marginAmount,
+          margin_pct: marginPct,
+          contributors,
+          has_recipe: itemRecipes.length > 0,
+        };
+      });
+      // Sort: items WITH recipes first (sortable on margin/cost), items
+      // without recipe at the bottom so the owner sees actionable data first.
+      result.sort((a, b) => {
+        if (a.has_recipe !== b.has_recipe) return a.has_recipe ? -1 : 1;
+        return b.sell_price - a.sell_price;
+      });
+      res.json({
+        items: result,
+        summary: {
+          with_recipe: result.filter(r => r.has_recipe).length,
+          without_recipe: result.filter(r => !r.has_recipe).length,
+          avg_margin_pct: (() => {
+            const have = result.filter(r => r.has_recipe && r.sell_price > 0);
+            if (have.length === 0) return 0;
+            return Math.round((have.reduce((s, r) => s + r.margin_pct, 0) / have.length) * 10) / 10;
+          })(),
+        },
+      });
+    } catch (err) {
+      console.error('Cost-per-dish error:', err);
+      res.status(500).json({ error: 'Failed to compute cost-per-dish' });
+    }
+  });
+
+  // Helper: generate a draft PO for a supplier based on which ingredients
+  // assigned to that supplier are below par. Returns the PO id (or null if
+  // nothing to order). Used by the auto-PO cron AND exposed via a manual
+  // POST endpoint so owners can trigger draft generation on demand.
+  async function _generateDraftPoForSupplier(
+    tenantId: string,
+    supplierId: string,
+    raisedByUserId: string | null = null,
+  ): Promise<{ po_id: string | null; line_count: number; total: number; ingredients: any[] }> {
+    const db = await getTenantDb(tenantId);
+    const supplier: any = await db.get(
+      "SELECT id, name, lead_time_days, po_ordering_minimum FROM suppliers WHERE id = ? AND is_active = 1",
+      [supplierId]
+    );
+    if (!supplier) return { po_id: null, line_count: 0, total: 0, ingredients: [] };
+    const below: any[] = await db.query(
+      `SELECT id, name, unit, current_stock_qty, par_level, reorder_point,
+              COALESCE(default_unit_price, 0) AS unit_price
+         FROM ingredients
+        WHERE default_supplier_id = ?
+          AND is_active = 1
+          AND par_level > 0
+          AND current_stock_qty < par_level`,
+      [supplierId]
+    );
+    if (!below || below.length === 0) {
+      return { po_id: null, line_count: 0, total: 0, ingredients: [] };
+    }
+    // Build line items: qty = par - current, cost = qty × unit_price
+    const lines = below.map(ing => {
+      const qty = Math.max(0, Number(ing.par_level || 0) - Number(ing.current_stock_qty || 0));
+      const cost = Math.round(qty * Number(ing.unit_price || 0) * 100) / 100;
+      return {
+        ingredient_id: ing.id,
+        ingredient_name: ing.name,
+        unit: ing.unit,
+        qty,
+        unit_price: Number(ing.unit_price || 0),
+        cost,
+      };
+    });
+    const subtotal = lines.reduce((s, l) => s + l.cost, 0);
+    const minimum = Number(supplier.po_ordering_minimum || 0);
+    if (minimum > 0 && subtotal < minimum) {
+      return { po_id: null, line_count: 0, total: 0, ingredients: lines };
+    }
+    const poId = `PO-DRAFT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    const expectedDelivery = new Date();
+    expectedDelivery.setDate(expectedDelivery.getDate() + Number(supplier.lead_time_days || 1));
+    await db.run(
+      `INSERT INTO purchase_orders (id, supplier_id, status, expected_delivery_date,
+                                    total_amount, gst_amount, grand_total, raised_by_user_id, notes)
+       VALUES (?, ?, 'DRAFT', ?, ?, 0, ?, ?, ?)`,
+      [poId, supplierId, expectedDelivery.toISOString().slice(0, 10),
+       subtotal, subtotal, raisedByUserId,
+       `Auto-generated draft — ${lines.length} ingredients below par. Review and click Send.`]
+    );
+    for (const l of lines) {
+      await db.run(
+        `INSERT INTO purchase_order_items (id, po_id, ingredient_id, qty_ordered, unit, unit_price)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [`${poId}-${l.ingredient_id.slice(-6)}`, poId, l.ingredient_id, l.qty, l.unit, l.unit_price]
+      );
+    }
+    return { po_id: poId, line_count: lines.length, total: subtotal, ingredients: lines };
+  }
+  (globalThis as any).__generateDraftPoForSupplier = _generateDraftPoForSupplier;
+
+  // POST /inventory/auto-po/preview — owner-triggered: see what auto-PO
+  // WOULD generate without committing. Useful before enabling the cron.
+  app.get("/api/restaurant/:id/inventory/auto-po/preview", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const suppliers: any[] = await db.query(
+        "SELECT id, name, auto_po_enabled, reorder_day_of_week, po_ordering_minimum FROM suppliers WHERE is_active = 1"
+      );
+      const previews = [];
+      for (const sup of (suppliers || [])) {
+        const low: any[] = await db.query(
+          `SELECT id, name, unit, current_stock_qty, par_level,
+                  COALESCE(default_unit_price, 0) AS unit_price
+             FROM ingredients
+            WHERE default_supplier_id = ?
+              AND is_active = 1
+              AND par_level > 0
+              AND current_stock_qty < par_level`,
+          [sup.id]
+        );
+        const lines = (low || []).map(ing => {
+          const qty = Math.max(0, Number(ing.par_level || 0) - Number(ing.current_stock_qty || 0));
+          return {
+            ingredient_id: ing.id,
+            ingredient_name: ing.name,
+            unit: ing.unit,
+            qty,
+            unit_price: Number(ing.unit_price || 0),
+            cost: Math.round(qty * Number(ing.unit_price || 0) * 100) / 100,
+          };
+        });
+        const subtotal = lines.reduce((s, l) => s + l.cost, 0);
+        previews.push({
+          supplier_id: sup.id,
+          supplier_name: sup.name,
+          auto_po_enabled: Number(sup.auto_po_enabled || 0) === 1,
+          reorder_day_of_week: sup.reorder_day_of_week,
+          po_ordering_minimum: Number(sup.po_ordering_minimum || 0),
+          would_generate: lines.length > 0 && subtotal >= Number(sup.po_ordering_minimum || 0),
+          line_count: lines.length,
+          subtotal,
+          lines,
+        });
+      }
+      res.json({ previews });
+    } catch (err) {
+      console.error('Auto-PO preview error:', err);
+      res.status(500).json({ error: 'Failed to preview auto-PO' });
+    }
+  });
+
+  // POST /inventory/auto-po/generate — owner-triggered immediate generation
+  // for ALL eligible suppliers (ignores reorder_day_of_week — owner is
+  // saying "do it now").
+  app.post("/api/restaurant/:id/inventory/auto-po/generate", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const supplierIds: string[] | undefined = Array.isArray(req.body?.supplier_ids)
+        ? req.body.supplier_ids : undefined;
+      const db = await getTenantDb(req.params.id);
+      const suppliers: any[] = supplierIds
+        ? await db.query(
+            `SELECT id FROM suppliers WHERE id = ANY(?) AND is_active = 1`,
+            [supplierIds]
+          ).catch(async () => {
+            // Fallback for drivers without ANY() support — query one by one
+            const rows: any[] = [];
+            for (const sid of supplierIds) {
+              const r = await db.get("SELECT id FROM suppliers WHERE id = ? AND is_active = 1", [sid]);
+              if (r) rows.push(r);
+            }
+            return rows;
+          })
+        : await db.query("SELECT id FROM suppliers WHERE is_active = 1");
+      const drafts = [];
+      for (const sup of (suppliers || [])) {
+        const draft = await _generateDraftPoForSupplier(req.params.id, sup.id, req.user?.email || null);
+        if (draft.po_id) drafts.push(draft);
+      }
+      res.json({ success: true, drafts_created: drafts.length, drafts });
+    } catch (err) {
+      console.error('Auto-PO generate error:', err);
+      res.status(500).json({ error: 'Failed to generate drafts' });
+    }
+  });
+
+  // PATCH /inventory/suppliers/:supplierId/auto-po — toggle auto-PO + cycle
+  // settings on a supplier.
+  app.patch("/api/restaurant/:id/inventory/suppliers/:supplierId/auto-po", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const sets: string[] = [];
+      const params: any[] = [];
+      if (req.body?.auto_po_enabled != null) {
+        sets.push('auto_po_enabled = ?');
+        params.push(req.body.auto_po_enabled ? 1 : 0);
+      }
+      if (req.body?.reorder_day_of_week != null) {
+        const d = Number(req.body.reorder_day_of_week);
+        if (d < 0 || d > 6) return res.status(400).json({ error: 'day must be 0-6' });
+        sets.push('reorder_day_of_week = ?');
+        params.push(d);
+      }
+      if (req.body?.po_ordering_minimum != null) {
+        sets.push('po_ordering_minimum = ?');
+        params.push(Number(req.body.po_ordering_minimum));
+      }
+      if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+      params.push(req.params.supplierId);
+      const db = await getTenantDb(req.params.id);
+      await db.run(`UPDATE suppliers SET ${sets.join(', ')} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Supplier auto-PO PATCH error:', err);
+      res.status(500).json({ error: 'Failed to update' });
+    }
+  });
+
   // ─── Wastage logs ────────────────────────────────────────────────────────
 
   app.get("/api/restaurant/:id/inventory/wastage", authenticate, async (req: AuthRequest, res: Response) => {
@@ -15656,7 +15934,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'staff-v2-payroll-approvals',
+    commit_marker: 'inventory-v2-autopo-cost-per-dish',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -15700,6 +15978,8 @@ async function startServer() {
       'staff-v2-tenant-thresholds',      // S2: per-tenant overtime/no-show/variance thresholds
       'staff-v2-approval-workflow',      // S2: timesheet rows flagged PENDING when variance exceeds threshold; owner approve/reject
       'staff-v2-shift-reminder-cron',    // S2: daily 08:00 IST SHIFT_REMINDER cron for staff with shifts today
+      'inventory-v2-cost-per-dish',      // I2: GET /inventory/cost-per-dish — recipe cost vs sell price + margin per menu item
+      'inventory-v2-auto-po-drafts',     // I2: weekly cron generates DRAFT POs for suppliers when stock < par. Owner reviews & sends.
     ],
     booted_at: new Date().toISOString(),
   };
@@ -16439,6 +16719,56 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[shift-reminder] Daily 08:00 IST shift reminder cron started');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Phase I2 — Daily auto-PO draft generation (06:00 IST) ───────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // For each active tenant, walk suppliers with auto_po_enabled = 1. If
+  // today (in IST) matches the supplier's reorder_day_of_week (or it's
+  // null = any day), and any of that supplier's ingredients are below par,
+  // create a DRAFT PO. Notifies the owner via the existing notification
+  // pipeline. Owner reviews + clicks Send to dispatch.
+  cron.schedule('0 6 * * *', async () => {
+    try {
+      const tenants: any[] = await centralDb.query(
+        "SELECT id, name FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM' AND access_revoked = 0"
+      );
+      if (!tenants || tenants.length === 0) return;
+      const todayDow = new Date().getDay();  // 0 = Sunday … 6 = Saturday
+      let totalDrafts = 0;
+      for (const t of tenants) {
+        try {
+          const db = await getTenantDb(t.id);
+          const suppliers: any[] = await db.query(
+            `SELECT id, name FROM suppliers
+              WHERE is_active = 1 AND auto_po_enabled = 1
+                AND (reorder_day_of_week IS NULL OR reorder_day_of_week = ?)`,
+            [todayDow]
+          );
+          for (const sup of (suppliers || [])) {
+            const draft = await _generateDraftPoForSupplier(t.id, sup.id, 'auto-po-cron');
+            if (draft.po_id) {
+              totalDrafts++;
+              triggerNotification(t.id, 'STOCK_LOW_REPORT', {
+                report_type: 'AUTO_PO_DRAFT',
+                supplier_name: sup.name,
+                po_id: draft.po_id,
+                line_count: draft.line_count,
+                total: draft.total,
+                ingredients: draft.ingredients,
+              }).catch(() => {});
+            }
+          }
+        } catch (err) {
+          console.error(`[auto-po] tenant ${t.id} failed:`, err);
+        }
+      }
+      if (totalDrafts > 0) console.log(`[auto-po] generated ${totalDrafts} draft PO(s) across ${tenants.length} tenants`);
+    } catch (err) {
+      console.error('[auto-po] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[auto-po] Daily auto-PO draft cron started — 06:00 IST');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase L2 — Loyalty birthday rewards (daily 09:00 IST) ───────────────

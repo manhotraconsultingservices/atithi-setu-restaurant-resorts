@@ -706,6 +706,14 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     )
   `);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_suppliers_active ON suppliers (is_active)`);
+  // Phase I2 supplier auto-PO controls. Owner opts a supplier into the
+  // weekly draft-PO cron and picks which weekday to fire on.
+  //   auto_po_enabled         0 (default) = owner raises POs manually
+  //   reorder_day_of_week     0-6, 0=Sunday (per PG dow). NULL = any day.
+  //   po_ordering_minimum     skip PO generation if total < this (₹)
+  await db.exec(`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS auto_po_enabled INT DEFAULT 0`).catch(() => {});
+  await db.exec(`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS reorder_day_of_week INT`).catch(() => {});
+  await db.exec(`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS po_ordering_minimum DOUBLE PRECISION DEFAULT 0`).catch(() => {});
 
   // Purchase Orders — owner raises a PO, tracks status through DRAFT → SENT →
   // PARTIAL → RECEIVED → CANCELLED. PO ids use getNextTenantSequence('po').
