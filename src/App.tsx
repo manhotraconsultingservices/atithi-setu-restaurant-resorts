@@ -5323,7 +5323,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [deliveryLoading, setDeliveryLoading] = useState(false);
   const [deliveryFilter, setDeliveryFilter] = useState<{ platform?: string; status?: string }>({});
   // Tier-2/3 insights panel — sub-tab within the INSIGHTS view
-  type InsightsPanel = 'AUDIT' | 'VARIANCE' | 'COGS' | 'PRICES' | 'BATCHES';
+  type InsightsPanel = 'AUDIT' | 'VARIANCE' | 'COGS' | 'PRICES' | 'BATCHES' | 'MARGIN';
   const [insightsPanel, setInsightsPanel] = useState<InsightsPanel>('AUDIT');
   const [auditLog, setAuditLog] = useState<any[]>([]);
   const [auditFilter, setAuditFilter] = useState<{ ingredient_id?: string; type?: string; from?: string; to?: string }>({});
@@ -5337,6 +5337,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
     to: new Date().toISOString().slice(0, 10),
   });
+  const [costPerDish, setCostPerDish] = useState<any | null>(null);
   const [supplierPrices, setSupplierPrices] = useState<any[]>([]);
   const [stockBatches, setStockBatches] = useState<any[]>([]);
   // Tier-2/3 settings panel — seasonality + notification templates + hotel inv
@@ -6739,6 +6740,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setCogsReport(await res.json());
     } catch { setCogsReport(null); }
   };
+  // Phase OP1 — cost-per-dish (recipe ingredient cost vs sell price)
+  const fetchCostPerDish = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/cost-per-dish`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      setCostPerDish(await res.json());
+    } catch { setCostPerDish(null); }
+  };
   const fetchSupplierPrices = async () => {
     if (!restaurantId) return;
     try {
@@ -6907,6 +6917,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         if (insightsPanel === 'COGS') promises.push(fetchCogsReport());
         if (insightsPanel === 'PRICES') promises.push(fetchSupplierPrices());
         if (insightsPanel === 'BATCHES') promises.push(fetchStockBatches());
+        if (insightsPanel === 'MARGIN')  promises.push(fetchCostPerDish());
       }
       if (inventorySubTab === 'SETTINGS') {
         if (settingsPanel === 'SEASONALITY') promises.push(fetchSeasonalityFactors());
@@ -9122,6 +9133,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           Lead time: <span className="font-bold text-[#1a1208]">{s.lead_time_days} day{s.lead_time_days !== 1 ? 's' : ''}</span>
                           {s.payment_terms && <> · {s.payment_terms}</>}
                         </p>
+                        {Number(s.auto_po_enabled || 0) === 1 && (
+                          <p className="text-[10px] mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-bold uppercase tracking-widest">
+                            🔄 Auto-PO {s.reorder_day_of_week != null
+                              ? `· ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][Number(s.reorder_day_of_week)]}`
+                              : '· any day'}
+                          </p>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -10065,6 +10083,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   ['COGS', 'COGS Report'],
                   ['PRICES', 'Supplier Prices'],
                   ['BATCHES', 'Stock Batches (FIFO)'],
+                  ['MARGIN', 'Margin / Cost-per-dish'],
                 ] as [InsightsPanel, string][]).map(([id, label]) => (
                   <button
                     key={id}
@@ -10075,6 +10094,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       if (id === 'COGS') fetchCogsReport();
                       if (id === 'PRICES') fetchSupplierPrices();
                       if (id === 'BATCHES') fetchStockBatches();
+                      if (id === 'MARGIN') fetchCostPerDish();
                     }}
                     className={cn(
                       "px-4 py-2 rounded-2xl text-xs font-bold uppercase tracking-wider border transition-all",
@@ -10423,6 +10443,82 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         })}
                       </tbody>
                     </table>
+                  </div>
+                </div>
+              )}
+
+              {/* — MARGIN / Cost-per-dish (Phase OP1) — */}
+              {insightsPanel === 'MARGIN' && (
+                <div className="space-y-4">
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <p className="text-xs text-[#6b5d52]">
+                      For every menu item that has a recipe, this shows the ingredient cost (sum of recipe qty × ingredient price), the sell price, and your margin. Items <strong>without a recipe</strong> are listed at the bottom — add recipes via the Menu tab to see their costs here.
+                    </p>
+                    {costPerDish?.summary && (
+                      <div className="mt-3 flex flex-wrap gap-4 text-xs">
+                        <span><strong className="text-[#cc5a16]">{costPerDish.summary.with_recipe}</strong> items have recipes</span>
+                        <span><strong className="text-[#9c8e85]">{costPerDish.summary.without_recipe}</strong> need a recipe</span>
+                        <span>Avg margin: <strong className={cn(
+                          costPerDish.summary.avg_margin_pct >= 60 ? 'text-emerald-700' :
+                          costPerDish.summary.avg_margin_pct >= 30 ? 'text-orange-600' : 'text-red-600'
+                        )}>{Number(costPerDish.summary.avg_margin_pct || 0).toFixed(1)}%</strong></span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+                    <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10 sticky top-0">
+                          <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                            <th className="px-4 py-2">Dish</th>
+                            <th className="px-4 py-2">Category</th>
+                            <th className="px-4 py-2 text-right">Sell price</th>
+                            <th className="px-4 py-2 text-right">Ingredient cost</th>
+                            <th className="px-4 py-2 text-right">Margin</th>
+                            <th className="px-4 py-2 text-right">Margin %</th>
+                            <th className="px-4 py-2">Recipe</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {!costPerDish || !costPerDish.items || costPerDish.items.length === 0 ? (
+                            <tr><td colSpan={7} className="px-4 py-8 text-center text-[#9c8e85] italic">
+                              {!costPerDish ? 'Loading…' : 'No menu items yet — add some in the MENU tab first.'}
+                            </td></tr>
+                          ) : (
+                            costPerDish.items.map((it: any) => (
+                              <tr key={it.menu_item_id} className={cn(
+                                "border-t border-[#cc5a16]/5",
+                                !it.has_recipe && "bg-[#faf7f2]/30"
+                              )}>
+                                <td className="px-4 py-2 font-bold text-[#1a1208]">{it.name}</td>
+                                <td className="px-4 py-2 text-[10px] uppercase tracking-widest text-[#9c8e85]">{it.category || '—'}</td>
+                                <td className="px-4 py-2 text-right font-mono">₹{Number(it.sell_price).toFixed(0)}</td>
+                                <td className="px-4 py-2 text-right font-mono text-[#6b5d52]">
+                                  {it.has_recipe ? `₹${Number(it.ingredient_cost).toFixed(0)}` : <span className="italic text-[#cbb9a8]">—</span>}
+                                </td>
+                                <td className="px-4 py-2 text-right font-mono font-bold">
+                                  {it.has_recipe ? `₹${Number(it.margin_amount).toFixed(0)}` : <span className="italic text-[#cbb9a8]">—</span>}
+                                </td>
+                                <td className={cn("px-4 py-2 text-right font-bold",
+                                  !it.has_recipe ? "text-[#cbb9a8]" :
+                                  it.margin_pct >= 60 ? "text-emerald-700" :
+                                  it.margin_pct >= 30 ? "text-orange-600" : "text-red-600"
+                                )}>
+                                  {it.has_recipe ? `${Number(it.margin_pct).toFixed(1)}%` : '—'}
+                                </td>
+                                <td className="px-4 py-2 text-xs">
+                                  {it.has_recipe ? (
+                                    <span className="text-emerald-700 font-bold">✓ {it.contributors?.length || 0}</span>
+                                  ) : (
+                                    <span className="text-[#9c8e85] italic">Add recipe</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -22060,6 +22156,10 @@ function SupplierEditorModal({ token, restaurantId, supplier, onClose, onSaved }
     lead_time_days: supplier?.lead_time_days ?? 1,
     payment_terms: supplier?.payment_terms || '',
     notes: supplier?.notes || '',
+    // Phase I2 auto-PO settings
+    auto_po_enabled: Number(supplier?.auto_po_enabled || 0) === 1,
+    reorder_day_of_week: supplier?.reorder_day_of_week ?? '',
+    po_ordering_minimum: supplier?.po_ordering_minimum ?? 0,
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -22072,10 +22172,33 @@ function SupplierEditorModal({ token, restaurantId, supplier, onClose, onSaved }
       const r = await fetch(url, {
         method: isEdit ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ ...form, lead_time_days: Math.max(0, parseInt(String(form.lead_time_days || 1), 10)) }),
+        body: JSON.stringify({
+          name: form.name, contact_name: form.contact_name, phone: form.phone, email: form.email,
+          address: form.address, gst_number: form.gst_number,
+          lead_time_days: Math.max(0, parseInt(String(form.lead_time_days || 1), 10)),
+          payment_terms: form.payment_terms, notes: form.notes,
+        }),
       });
-      if (!r.ok) { const d = await r.json().catch(() => ({})); setErr(d.error || 'Save failed'); }
-      else onSaved();
+      if (!r.ok) { const d = await r.json().catch(() => ({})); setErr(d.error || 'Save failed'); return; }
+      // After base save, PATCH the auto-PO settings via the dedicated endpoint.
+      // For new suppliers, we need the freshly-created id from the response.
+      let supplierId = supplier?.id;
+      if (!supplierId) {
+        const created = await r.json().catch(() => ({}));
+        supplierId = created.id;
+      }
+      if (supplierId) {
+        await fetch(`/api/restaurant/${restaurantId}/inventory/suppliers/${supplierId}/auto-po`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({
+            auto_po_enabled: form.auto_po_enabled,
+            reorder_day_of_week: form.reorder_day_of_week === '' ? null : Number(form.reorder_day_of_week),
+            po_ordering_minimum: Number(form.po_ordering_minimum || 0),
+          }),
+        }).catch(() => {});
+      }
+      onSaved();
     } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
   };
 
@@ -22119,6 +22242,48 @@ function SupplierEditorModal({ token, restaurantId, supplier, onClose, onSaved }
         <FormField label="Notes">
           <textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} className={cn(inputClass, "min-h-[60px]")} />
         </FormField>
+
+        {/* Phase I2 — Auto-PO settings */}
+        <div className="bg-[#faf7f2]/60 rounded-2xl border border-[#cc5a16]/10 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-bold text-[#1a1208] flex items-center gap-2">
+                <span className="text-base">🔄</span> Auto-PO drafts
+              </p>
+              <p className="text-[11px] text-[#6b5d52] mt-0.5">
+                Daily 06:00 IST cron generates a DRAFT purchase order for this supplier's ingredients that have fallen below par level. You review & send.
+              </p>
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer shrink-0">
+              <input type="checkbox" checked={form.auto_po_enabled}
+                onChange={e => setForm({ ...form, auto_po_enabled: e.target.checked })}
+                className="w-4 h-4 accent-[#cc5a16]" />
+              <span className="text-sm font-bold text-[#1a1208]">{form.auto_po_enabled ? 'Enabled' : 'Disabled'}</span>
+            </label>
+          </div>
+          {form.auto_po_enabled && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <FormField label="Reorder day" hint="Day of week the cron should generate a draft. Leave on 'Any day' to fire whenever stock is low.">
+                <select value={form.reorder_day_of_week} onChange={e => setForm({ ...form, reorder_day_of_week: e.target.value as any })} className={inputClass}>
+                  <option value="">Any day</option>
+                  <option value="0">Sunday</option>
+                  <option value="1">Monday</option>
+                  <option value="2">Tuesday</option>
+                  <option value="3">Wednesday</option>
+                  <option value="4">Thursday</option>
+                  <option value="5">Friday</option>
+                  <option value="6">Saturday</option>
+                </select>
+              </FormField>
+              <FormField label="Minimum order amount (₹)" hint="Skip the draft if the total would be below this. 0 = always generate.">
+                <input type="number" min={0} value={form.po_ordering_minimum}
+                  onChange={e => setForm({ ...form, po_ordering_minimum: e.target.value as any })}
+                  className={inputClass} placeholder="0" />
+              </FormField>
+            </div>
+          )}
+        </div>
+
         {err && <p className="text-red-600 text-sm bg-red-50 px-3 py-2 rounded-xl">{err}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <button onClick={onClose} className="px-5 py-2.5 rounded-2xl text-sm font-bold border border-[#cc5a16]/15 text-[#6b5d52]">Cancel</button>

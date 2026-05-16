@@ -16197,7 +16197,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'roster-drag-and-drop-redesign',
+    commit_marker: 'op1-polish-margin-autopo-anomaly',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -16249,6 +16249,9 @@ async function startServer() {
       'analytics-v2-cohort-retention',   // A2: weekly-cohort retention curves (% returning at W+1..W+8)
       'loyalty-postpaid-session-autoapply', // BUG FIX: postpaid session bill panel auto-applies tier discount on customer_phone match (previously only manual invoice + QR preview did)
       'roster-drag-and-drop',            // UX: roster grid is now drag-and-drop. Move shifts between staff/days, drop templates onto cells, role-colored pills, today column highlight, hours-per-row/column.
+      'op1-cost-per-dish-inventory-ui',   // OP1: INVENTORY > INSIGHTS > Margin tab — recipe cost vs sell price + margin per dish, color-coded
+      'op1-supplier-auto-po-ui',          // OP1: Supplier edit modal exposes auto-PO toggle / day / minimum; cards show 🔄 Auto-PO badge
+      'op1-revenue-anomaly-cron',         // OP1: daily 09:30 IST scan; ±30% vs 4-week same-weekday avg fires REVENUE_ANOMALY (drop or spike) with dedup
     ],
     booted_at: new Date().toISOString(),
   };
@@ -17038,6 +17041,94 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[auto-po] Daily auto-PO draft cron started — 06:00 IST');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Phase OP1 — Revenue anomaly alert (daily 09:30 IST) ─────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // For each active tenant, compare YESTERDAY's revenue against the
+  // 4-week same-weekday average. If the divergence is > 30% in either
+  // direction, fire REVENUE_ANOMALY. Dedup via sent_anomaly_alerts so a
+  // re-trigger same day is a no-op.
+  cron.schedule('30 9 * * *', async () => {
+    try {
+      await centralDb.exec(`
+        CREATE TABLE IF NOT EXISTS sent_anomaly_alerts (
+          id SERIAL PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          alert_date DATE NOT NULL,
+          direction TEXT NOT NULL,
+          UNIQUE (tenant_id, alert_date, direction)
+        )
+      `).catch(() => {});
+      const tenants: any[] = await centralDb.query(
+        "SELECT id, name FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM' AND access_revoked = 0"
+      );
+      if (!tenants || tenants.length === 0) return;
+      const now = new Date();
+      const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+      const yIso = yesterday.toISOString().slice(0, 10);
+      let alerts = 0;
+      for (const t of tenants) {
+        try {
+          const db = await getTenantDb(t.id);
+          // Sum yesterday's revenue
+          const ydayRow: any = await db.get(
+            `SELECT COALESCE(SUM(total_amount), 0) AS revenue
+               FROM orders
+              WHERE DATE(created_at AT TIME ZONE 'Asia/Kolkata') = ?
+                AND status IN ('CONFIRMED', 'DELIVERED', 'COMPLETED', 'SETTLED', 'PRINTED')`,
+            [yIso]
+          ).catch(() => ({ revenue: 0 }));
+          const yRev = Number(ydayRow?.revenue || 0);
+          if (yRev <= 0) continue;  // no orders → not an anomaly worth flagging
+          // Same weekday over the previous 4 weeks (exclude yesterday itself)
+          const dows: string[] = [];
+          for (let w = 1; w <= 4; w++) {
+            const d = new Date(yesterday); d.setDate(d.getDate() - w * 7);
+            dows.push(d.toISOString().slice(0, 10));
+          }
+          const avgRow: any = await db.get(
+            `SELECT COALESCE(AVG(daily), 0) AS avg_revenue FROM (
+               SELECT DATE(created_at AT TIME ZONE 'Asia/Kolkata') AS day,
+                      SUM(total_amount) AS daily
+                 FROM orders
+                WHERE DATE(created_at AT TIME ZONE 'Asia/Kolkata') = ANY(?)
+                  AND status IN ('CONFIRMED', 'DELIVERED', 'COMPLETED', 'SETTLED', 'PRINTED')
+                GROUP BY DATE(created_at AT TIME ZONE 'Asia/Kolkata')
+             ) sub`,
+            [dows]
+          ).catch(() => ({ avg_revenue: 0 }));
+          const avg = Number(avgRow?.avg_revenue || 0);
+          if (avg <= 0) continue;  // not enough history to compare
+          const deltaPct = Math.round(((yRev - avg) / avg) * 1000) / 10;
+          if (Math.abs(deltaPct) < 30) continue;
+          const direction = deltaPct < 0 ? 'DROP' : 'SPIKE';
+          // Dedup
+          const ins = await centralDb.run(
+            `INSERT INTO sent_anomaly_alerts (tenant_id, alert_date, direction)
+             VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+            [t.id, yIso, direction]
+          );
+          const fresh = (ins as any)?.rowCount ?? (ins as any)?.changes ?? 1;
+          if (Number(fresh) === 0) continue;
+          triggerNotification(t.id, 'REVENUE_ANOMALY', {
+            direction,
+            yesterday_date: yIso,
+            revenue: yRev,
+            avg_revenue: avg,
+            delta_pct: Math.abs(deltaPct),
+          }).catch(() => {});
+          alerts++;
+        } catch (err) {
+          console.error(`[anomaly] tenant ${t.id} failed:`, err);
+        }
+      }
+      if (alerts > 0) console.log(`[anomaly] sent ${alerts} REVENUE_ANOMALY alert(s)`);
+    } catch (err) {
+      console.error('[anomaly] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[anomaly] Daily revenue anomaly detection cron started — 09:30 IST');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase L2 — Loyalty birthday rewards (daily 09:00 IST) ───────────────

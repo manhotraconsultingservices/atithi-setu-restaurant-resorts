@@ -1003,6 +1003,48 @@ export function buildNotificationContent(
       };
     }
 
+    /* ── Owner analytics anomalies (Phase OP1) ────────────────────────── */
+
+    case 'REVENUE_ANOMALY': {
+      // Sent by the daily 09:30 IST anomaly cron when yesterday's revenue
+      // diverged > 30% from the 4-week same-weekday average. Direction
+      // ("DROP" / "SPIKE") + the actual numbers come in via `data`.
+      const direction = String(data.direction || 'DROP').toUpperCase();
+      const isDrop = direction === 'DROP';
+      const yesterdayLabel = data.yesterday_date
+        ? new Date(data.yesterday_date).toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short' })
+        : 'Yesterday';
+      const revenue = Number(data.revenue || 0).toLocaleString('en-IN');
+      const avg = Number(data.avg_revenue || 0).toLocaleString('en-IN');
+      const deltaPct = Number(data.delta_pct || 0).toFixed(1);
+      return {
+        subject: `${isDrop ? '⚠' : '🚀'} ${r} revenue ${isDrop ? 'drop' : 'spike'} — ${yesterdayLabel}`,
+        text:
+          `Hi ${r} team,\n\n` +
+          `${yesterdayLabel}'s revenue was ₹${revenue}, ` +
+          `which is ${deltaPct}% ${isDrop ? 'BELOW' : 'ABOVE'} the 4-week average for the same weekday (₹${avg}).\n\n` +
+          (isDrop
+            ? `This may be worth investigating — check for slow days, weather, local events, or operational issues.`
+            : `Great day! Worth understanding what drove it so you can replicate.`) +
+          `\n\nLog in to your dashboard for the full breakdown.\n— Atithi-Setu analytics`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">` +
+          `<h2 style="color:${isDrop ? '#dc2626' : '#059669'};margin-top:0">${isDrop ? '⚠' : '🚀'} Revenue ${isDrop ? 'drop' : 'spike'} detected</h2>` +
+          `<p>Hi <strong>${r}</strong> team,</p>` +
+          `<p><strong>${yesterdayLabel}'s</strong> revenue was <strong>₹${revenue}</strong>, ` +
+          `which is <strong style="color:${isDrop ? '#dc2626' : '#059669'}">${deltaPct}% ${isDrop ? 'BELOW' : 'ABOVE'}</strong> ` +
+          `the 4-week average for the same weekday (₹${avg}).</p>` +
+          `<div style="background:${isDrop ? '#fef2f2' : '#f0fdf4'};border-left:3px solid ${isDrop ? '#dc2626' : '#059669'};padding:14px;border-radius:8px;margin:12px 0">` +
+          (isDrop
+            ? `Investigate: slow day, weather, local events, kitchen issue, staff shortage?`
+            : `Replicate: which item / promotion / channel drove this?`) +
+          `</div>` +
+          `<p style="color:#6b7280;font-size:13px">Open the dashboard → REPORTS for the full breakdown.</p>` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— Atithi-Setu analytics</p>` +
+          `</div>`,
+      };
+    }
+
     /* ── Subscription billing ─────────────────────────────────────────── */
 
     case 'PAYMENT_DUE_SOON': {
