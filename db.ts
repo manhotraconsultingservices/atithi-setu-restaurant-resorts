@@ -235,6 +235,64 @@ export async function initDb() {
     )
   `).catch(() => {});
 
+  // Phase B2 — brand-level announcements (banner pushed to every location's
+  // dashboard) and menu templates (centralised recipes/items each location
+  // can selectively sync into its own menu).
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS brand_announcements (
+      id TEXT PRIMARY KEY,
+      brand_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT,
+      level TEXT DEFAULT 'INFO',
+      expires_at TIMESTAMP,
+      created_by TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      is_dismissed_globally INT DEFAULT 0
+    )
+  `).catch(() => {});
+  await centralDb.exec(
+    `CREATE INDEX IF NOT EXISTS idx_brand_announcements_brand ON brand_announcements (brand_id, created_at DESC)`
+  ).catch(() => {});
+
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS brand_menu_templates (
+      id TEXT PRIMARY KEY,
+      brand_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      category TEXT,
+      description TEXT,
+      dietary_type TEXT,
+      price_full DOUBLE PRECISION,
+      price_half DOUBLE PRECISION,
+      image_url TEXT,
+      gst_percent DOUBLE PRECISION,
+      is_active INT DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+  await centralDb.exec(
+    `CREATE INDEX IF NOT EXISTS idx_brand_menu_templates_brand ON brand_menu_templates (brand_id, name)`
+  ).catch(() => {});
+
+  // Per-(brand_template, restaurant) sync history so the owner can see
+  // "what's pushed to where" and re-push only changed items.
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS brand_menu_sync_log (
+      id SERIAL PRIMARY KEY,
+      template_id TEXT NOT NULL,
+      restaurant_id TEXT NOT NULL,
+      menu_item_id TEXT,
+      action TEXT NOT NULL,
+      synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      synced_by TEXT
+    )
+  `).catch(() => {});
+  await centralDb.exec(
+    `CREATE INDEX IF NOT EXISTS idx_brand_menu_sync_template ON brand_menu_sync_log (template_id, restaurant_id)`
+  ).catch(() => {});
+
   // Migration: unique index on locations (safe to run multiple times)
   await centralDb.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_locations_state_city ON locations (state, city)`

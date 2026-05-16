@@ -2051,6 +2051,322 @@ async function startServer() {
     }
   });
 
+  // ═════════════════════════════════════════════════════════════════════
+  // PHASE B2 — Brand announcements + menu templates
+  // ═════════════════════════════════════════════════════════════════════
+  // _findBrandIdForUser — discovers the brand_id used by any of the user's
+  // accessible restaurants. Used to scope brand-level operations.
+  async function _findBrandIdForUser(req: AuthRequest): Promise<string | null> {
+    const accessible = await _listUserRestaurants(req);
+    const branded = accessible.find(r => r.brand_id);
+    return branded?.brand_id || null;
+  }
+
+  // ── Announcements ────────────────────────────────────────────────────
+  // GET — active announcements for the current restaurant's brand. Used
+  // by the per-tenant banner on every dashboard load.
+  app.get("/api/restaurant/:id/brand-announcements", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const r: any = await centralDb.get(
+        "SELECT brand_id FROM restaurants WHERE id = ?", [req.params.id]
+      );
+      if (!r || !r.brand_id) return res.json([]);
+      const rows: any[] = await centralDb.query(
+        `SELECT id, title, body, level, expires_at, created_at
+           FROM brand_announcements
+          WHERE brand_id = ?
+            AND is_dismissed_globally = 0
+            AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+          ORDER BY created_at DESC LIMIT 10`,
+        [r.brand_id]
+      );
+      res.json(rows || []);
+    } catch (err) {
+      console.error('brand-announcements GET error:', err);
+      res.json([]);  // tolerate failure — banner is best-effort
+    }
+  });
+
+  // GET — brand-level admin view of all announcements (active + expired)
+  app.get("/api/brand/announcements", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.json([]);
+      const rows: any[] = await centralDb.query(
+        `SELECT id, brand_id, title, body, level, expires_at, created_by, created_at, is_dismissed_globally
+           FROM brand_announcements
+          WHERE brand_id = ?
+          ORDER BY created_at DESC`,
+        [brandId]
+      );
+      res.json(rows || []);
+    } catch (err) {
+      console.error('brand announcements list error:', err);
+      res.status(500).json({ error: 'Failed to load announcements' });
+    }
+  });
+
+  // POST — create an announcement for the brand
+  app.post("/api/brand/announcements", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.status(400).json({ error: 'No brand configured for your locations. Create a brand first via POST /api/brand.' });
+      const title = String(req.body?.title || '').trim();
+      if (!title) return res.status(400).json({ error: 'title required' });
+      const level = String(req.body?.level || 'INFO').toUpperCase();
+      if (!['INFO', 'WARNING', 'URGENT'].includes(level)) {
+        return res.status(400).json({ error: 'level must be INFO, WARNING or URGENT' });
+      }
+      const id = `ann_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      await centralDb.run(
+        `INSERT INTO brand_announcements (id, brand_id, title, body, level, expires_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, brandId, title,
+         req.body?.body ? String(req.body.body) : null,
+         level,
+         req.body?.expires_at ? String(req.body.expires_at) : null,
+         req.user?.email || 'owner']
+      );
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error('announcement POST error:', err);
+      res.status(500).json({ error: 'Failed to create announcement' });
+    }
+  });
+
+  // PATCH — dismiss / update
+  app.patch("/api/brand/announcements/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const sets: string[] = [];
+      const params: any[] = [];
+      for (const k of ['title', 'body', 'level'] as const) {
+        if (req.body?.[k] != null) { sets.push(`${k} = ?`); params.push(String(req.body[k])); }
+      }
+      if (req.body?.expires_at !== undefined) {
+        sets.push('expires_at = ?');
+        params.push(req.body.expires_at || null);
+      }
+      if (req.body?.is_dismissed_globally != null) {
+        sets.push('is_dismissed_globally = ?');
+        params.push(req.body.is_dismissed_globally ? 1 : 0);
+      }
+      if (sets.length === 0) return res.status(400).json({ error: 'No fields to update' });
+      params.push(req.params.id);
+      await centralDb.run(`UPDATE brand_announcements SET ${sets.join(', ')} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('announcement PATCH error:', err);
+      res.status(500).json({ error: 'Failed to update' });
+    }
+  });
+
+  app.delete("/api/brand/announcements/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      await centralDb.run("DELETE FROM brand_announcements WHERE id = ?", [req.params.id]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('announcement DELETE error:', err);
+      res.status(500).json({ error: 'Failed to delete' });
+    }
+  });
+
+  // ── Brand menu templates ─────────────────────────────────────────────
+  app.get("/api/brand/menu-templates", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.json([]);
+      const rows: any[] = await centralDb.query(
+        `SELECT id, brand_id, name, category, description, dietary_type, price_full,
+                price_half, image_url, gst_percent, is_active, created_at, updated_at
+           FROM brand_menu_templates
+          WHERE brand_id = ?
+          ORDER BY category ASC NULLS LAST, name ASC`,
+        [brandId]
+      );
+      res.json(rows || []);
+    } catch (err) {
+      console.error('menu-templates GET error:', err);
+      res.status(500).json({ error: 'Failed to load templates' });
+    }
+  });
+
+  app.put("/api/brand/menu-templates/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.status(400).json({ error: 'No brand configured' });
+      const idParam = String(req.params.id || '').trim();
+      const isNew = idParam === 'new' || !idParam;
+      const id = isNew ? `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` : idParam;
+      const name = String(req.body?.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'name required' });
+      const payload = {
+        name,
+        category: req.body?.category || null,
+        description: req.body?.description || null,
+        dietary_type: req.body?.dietary_type || null,
+        price_full: req.body?.price_full != null ? Number(req.body.price_full) : null,
+        price_half: req.body?.price_half != null ? Number(req.body.price_half) : null,
+        image_url: req.body?.image_url || null,
+        gst_percent: req.body?.gst_percent != null ? Number(req.body.gst_percent) : null,
+        is_active: req.body?.is_active === false ? 0 : 1,
+      };
+      if (isNew) {
+        await centralDb.run(
+          `INSERT INTO brand_menu_templates
+             (id, brand_id, name, category, description, dietary_type, price_full,
+              price_half, image_url, gst_percent, is_active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, brandId, payload.name, payload.category, payload.description,
+           payload.dietary_type, payload.price_full, payload.price_half,
+           payload.image_url, payload.gst_percent, payload.is_active]
+        );
+      } else {
+        await centralDb.run(
+          `UPDATE brand_menu_templates SET
+             name = ?, category = ?, description = ?, dietary_type = ?,
+             price_full = ?, price_half = ?, image_url = ?, gst_percent = ?,
+             is_active = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND brand_id = ?`,
+          [payload.name, payload.category, payload.description, payload.dietary_type,
+           payload.price_full, payload.price_half, payload.image_url, payload.gst_percent,
+           payload.is_active, id, brandId]
+        );
+      }
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error('menu-templates PUT error:', err);
+      res.status(500).json({ error: 'Failed to save template' });
+    }
+  });
+
+  app.delete("/api/brand/menu-templates/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.status(400).json({ error: 'No brand configured' });
+      await centralDb.run(
+        "DELETE FROM brand_menu_templates WHERE id = ? AND brand_id = ?",
+        [req.params.id, brandId]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error('menu-templates DELETE error:', err);
+      res.status(500).json({ error: 'Failed to delete' });
+    }
+  });
+
+  // POST /api/brand/menu-templates/sync — push selected templates into one
+  // or more restaurants. For each (template, restaurant), insert into the
+  // tenant's `menu` table if a row with the same name doesn't already
+  // exist. Existing items are NOT overwritten (per-location overrides
+  // protected) — caller can pass overwrite: true to force.
+  app.post("/api/brand/menu-templates/sync", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const brandId = await _findBrandIdForUser(req);
+      if (!brandId) return res.status(400).json({ error: 'No brand configured' });
+      const templateIds: string[] = Array.isArray(req.body?.template_ids) ? req.body.template_ids : [];
+      const restaurantIds: string[] = Array.isArray(req.body?.restaurant_ids) ? req.body.restaurant_ids : [];
+      const overwrite: boolean = !!req.body?.overwrite;
+      if (templateIds.length === 0 || restaurantIds.length === 0) {
+        return res.status(400).json({ error: 'template_ids and restaurant_ids required' });
+      }
+      // Verify the user can access every target restaurant
+      const accessible = await _listUserRestaurants(req);
+      const accessibleIds = new Set(accessible.map(r => r.id));
+      for (const rid of restaurantIds) {
+        if (!accessibleIds.has(rid)) {
+          return res.status(403).json({ error: `No access to ${rid}` });
+        }
+      }
+      // Load the templates
+      const placeholders = templateIds.map(() => '?').join(',');
+      const templates: any[] = await centralDb.query(
+        `SELECT * FROM brand_menu_templates WHERE brand_id = ? AND id IN (${placeholders})`,
+        [brandId, ...templateIds]
+      );
+      if (templates.length === 0) return res.status(404).json({ error: 'No matching templates' });
+      const result = {
+        synced: [] as Array<{ template_id: string; restaurant_id: string; menu_item_id: string; action: 'created' | 'updated' | 'skipped'; reason?: string }>,
+      };
+      for (const rid of restaurantIds) {
+        const tdb = await getTenantDb(rid);
+        for (const tpl of templates) {
+          const existing: any = await tdb.get(
+            "SELECT id FROM menu WHERE LOWER(name) = LOWER(?) LIMIT 1",
+            [tpl.name]
+          );
+          if (existing && !overwrite) {
+            result.synced.push({
+              template_id: tpl.id, restaurant_id: rid, menu_item_id: existing.id,
+              action: 'skipped', reason: 'name already exists at this location',
+            });
+            continue;
+          }
+          if (existing && overwrite) {
+            await tdb.run(
+              `UPDATE menu SET
+                 name = ?, category = ?, description = ?, dietary_type = ?,
+                 price_full = ?, price_half = ?, image_url = ?
+               WHERE id = ?`,
+              [tpl.name, tpl.category, tpl.description, tpl.dietary_type,
+               tpl.price_full || 0, tpl.price_half, tpl.image_url, existing.id]
+            );
+            await centralDb.run(
+              `INSERT INTO brand_menu_sync_log (template_id, restaurant_id, menu_item_id, action, synced_by)
+               VALUES (?, ?, ?, 'UPDATED', ?)`,
+              [tpl.id, rid, existing.id, req.user?.email || 'owner']
+            ).catch(() => {});
+            result.synced.push({ template_id: tpl.id, restaurant_id: rid, menu_item_id: existing.id, action: 'updated' });
+            continue;
+          }
+          // Brand-new — INSERT into the tenant's menu
+          const newId = `menu_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          await tdb.run(
+            `INSERT INTO menu
+               (id, name, category, description, dietary_type, price_full, price_half, image_url, available)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            [newId, tpl.name, tpl.category, tpl.description, tpl.dietary_type,
+             tpl.price_full || 0, tpl.price_half, tpl.image_url]
+          );
+          await centralDb.run(
+            `INSERT INTO brand_menu_sync_log (template_id, restaurant_id, menu_item_id, action, synced_by)
+             VALUES (?, ?, ?, 'CREATED', ?)`,
+            [tpl.id, rid, newId, req.user?.email || 'owner']
+          ).catch(() => {});
+          result.synced.push({ template_id: tpl.id, restaurant_id: rid, menu_item_id: newId, action: 'created' });
+        }
+      }
+      const created = result.synced.filter(s => s.action === 'created').length;
+      const updated = result.synced.filter(s => s.action === 'updated').length;
+      const skipped = result.synced.filter(s => s.action === 'skipped').length;
+      res.json({
+        success: true,
+        summary: { created, updated, skipped, total: result.synced.length },
+        details: result.synced,
+      });
+    } catch (err) {
+      console.error('menu-templates sync error:', err);
+      res.status(500).json({ error: 'Sync failed' });
+    }
+  });
+
   // Owner: Notification Settings
   app.get("/api/owner/notification-settings", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -16491,7 +16807,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'brand-multi-location-mvp',
+    commit_marker: 'brand-announcements-menu-templates',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -16547,6 +16863,8 @@ async function startServer() {
       'op1-supplier-auto-po-ui',          // OP1: Supplier edit modal exposes auto-PO toggle / day / minimum; cards show 🔄 Auto-PO badge
       'op1-revenue-anomaly-cron',         // OP1: daily 09:30 IST scan; ±30% vs 4-week same-weekday avg fires REVENUE_ANOMALY (drop or spike) with dedup
       'brand-multi-location-mvp',         // B1: brands table + restaurants.brand_id + cross-location dashboard + JWT-swap location switcher
+      'brand-announcements',              // B2: brand-level announcements with per-tenant banner display + per-user dismissal
+      'brand-menu-templates',             // B2: central menu templates + selective per-location sync (insert-if-missing, optional force overwrite)
     ],
     booted_at: new Date().toISOString(),
   };

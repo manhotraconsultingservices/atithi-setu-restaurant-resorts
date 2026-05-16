@@ -1992,6 +1992,13 @@ export default function App() {
         <BillingNotice restaurantId={restaurantId} token={token!} />
       )}
 
+      {/* Phase B2 — brand announcements banner. Renders any active brand
+          announcements above the dashboard for every location under the
+          brand. No-op for tenants not linked to a brand. */}
+      {restaurantId && restaurantId !== 'SYSTEM' && token && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && (
+        <BrandAnnouncementBanner restaurantId={restaurantId} token={token} />
+      )}
+
       <main className="max-w-7xl mx-auto p-3 sm:p-4 md:p-6 xl:p-8">
         {role === 'SUPER_ADMIN' && <SuperAdminDashboard token={token!} />}
         {role === 'CTO' && <CTODashboard token={token!} />}
@@ -2179,18 +2186,21 @@ function LocationSwitcher({ token, currentRestaurantId, currentRestaurantName }:
 // the owner switches to it from the dropdown.
 function BrandDashboardModal({ token, onClose }: { token: string; onClose: () => void }) {
   type Period = 'TODAY' | 'WTD' | 'MTD' | 'YTD';
+  type Tab = 'SUMMARY' | 'ANNOUNCEMENTS' | 'MENU_TEMPLATES';
+  const [tab, setTab] = useState<Tab>('SUMMARY');
   const [period, setPeriod] = useState<Period>('MTD');
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (tab !== 'SUMMARY') return;
     setLoading(true);
     fetch(`/api/brand/cross-summary?period=${period}`,
       { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.ok ? r.json() : null)
       .then(setData)
       .finally(() => setLoading(false));
-  }, [period, token]);
+  }, [period, token, tab]);
 
   const fmt = (n: number) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
   const maxRev = data?.by_restaurant ? Math.max(1, ...data.by_restaurant.map((r: any) => r.revenue)) : 1;
@@ -2198,28 +2208,47 @@ function BrandDashboardModal({ token, onClose }: { token: string; onClose: () =>
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
       <div className="bg-white rounded-[32px] shadow-2xl w-full max-w-3xl my-auto">
-        <div className="p-6 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
-          <div>
-            <h3 className="text-2xl font-bold font-serif">Brand dashboard</h3>
-            <p className="text-xs text-[#6b5d52] mt-0.5">
-              Cross-location aggregate · {data?.location_count ?? 0} restaurant{data?.location_count === 1 ? '' : 's'}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="flex gap-1">
-              {(['TODAY', 'WTD', 'MTD', 'YTD'] as Period[]).map(p => (
-                <button key={p} onClick={() => setPeriod(p)}
-                  className={cn('px-3 py-1.5 text-xs font-bold rounded-xl',
-                    period === p ? 'bg-[#cc5a16] text-white' : 'bg-white border border-[#cc5a16]/15 text-[#6b5d52]')}>
-                  {p === 'WTD' ? 'Week' : p === 'MTD' ? 'Month' : p === 'YTD' ? 'Year' : 'Today'}
-                </button>
-              ))}
+        <div className="p-6 border-b border-[#cc5a16]/10 bg-[#faf7f2]/50">
+          <div className="flex justify-between items-center">
+            <div>
+              <h3 className="text-2xl font-bold font-serif">Brand dashboard</h3>
+              <p className="text-xs text-[#6b5d52] mt-0.5">
+                Cross-location aggregate · {data?.location_count ?? 0} restaurant{data?.location_count === 1 ? '' : 's'}
+              </p>
             </div>
             <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={20}/></button>
           </div>
+          <div className="flex flex-wrap items-center gap-2 mt-4">
+            <div className="inline-flex bg-white rounded-xl p-1 border border-[#cc5a16]/10">
+              {(['SUMMARY', 'ANNOUNCEMENTS', 'MENU_TEMPLATES'] as Tab[]).map(t => (
+                <button key={t} onClick={() => setTab(t)}
+                  className={cn('px-3 py-1.5 text-xs font-bold rounded-lg transition-colors',
+                    tab === t ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52] hover:bg-[#cc5a16]/5')}>
+                  {t === 'SUMMARY' ? 'Summary' : t === 'ANNOUNCEMENTS' ? 'Announcements' : 'Menu templates'}
+                </button>
+              ))}
+            </div>
+            {tab === 'SUMMARY' && (
+              <div className="flex gap-1 ml-auto">
+                {(['TODAY', 'WTD', 'MTD', 'YTD'] as Period[]).map(p => (
+                  <button key={p} onClick={() => setPeriod(p)}
+                    className={cn('px-3 py-1.5 text-xs font-bold rounded-xl',
+                      period === p ? 'bg-[#cc5a16] text-white' : 'bg-white border border-[#cc5a16]/15 text-[#6b5d52]')}>
+                    {p === 'WTD' ? 'Week' : p === 'MTD' ? 'Month' : p === 'YTD' ? 'Year' : 'Today'}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
         <div className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
-          {loading ? (
+          {tab === 'ANNOUNCEMENTS' && (
+            <BrandAnnouncementsAdmin token={token} />
+          )}
+          {tab === 'MENU_TEMPLATES' && (
+            <BrandMenuTemplatesAdmin token={token} />
+          )}
+          {tab === 'SUMMARY' && (loading ? (
             <div className="py-12 text-center text-[#9c8e85]">Loading…</div>
           ) : !data ? (
             <div className="py-12 text-center text-[#9c8e85] italic">Failed to load brand summary.</div>
@@ -2270,9 +2299,454 @@ function BrandDashboardModal({ token, onClose }: { token: string; onClose: () =>
                 Switch to a specific location from the dropdown to manage menus, staff, and orders.
               </p>
             </>
-          )}
+          ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// BrandAnnouncementsAdmin (Phase B2) — owner UI to create/edit brand
+// announcements that broadcast to every location's dashboard.
+function BrandAnnouncementsAdmin({ token }: { token: string }) {
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [composing, setComposing] = useState(false);
+  const [form, setForm] = useState({ title: '', body: '', level: 'INFO', expires_at: '' });
+
+  const load = useCallback(() => {
+    setLoading(true);
+    fetch('/api/brand/announcements', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : [])
+      .then(setItems)
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const submit = async () => {
+    if (!form.title.trim()) return;
+    const res = await fetch('/api/brand/announcements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        title: form.title.trim(),
+        body: form.body.trim() || null,
+        level: form.level,
+        expires_at: form.expires_at || null,
+      }),
+    });
+    if (res.ok) {
+      setComposing(false);
+      setForm({ title: '', body: '', level: 'INFO', expires_at: '' });
+      load();
+    }
+  };
+
+  const remove = async (id: string) => {
+    if (!window.confirm('Delete this announcement?')) return;
+    await fetch(`/api/brand/announcements/${id}`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    load();
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <div>
+          <h4 className="text-sm font-bold font-serif">Announcements</h4>
+          <p className="text-[11px] text-[#6b5d52]">Banner shown on every location's dashboard until expiry / dismissal.</p>
+        </div>
+        <button onClick={() => setComposing(c => !c)}
+          className="px-3 py-1.5 bg-[#cc5a16] text-white text-xs font-bold rounded-xl">
+          {composing ? 'Cancel' : '+ New announcement'}
+        </button>
+      </div>
+      {composing && (
+        <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-3">
+          <input value={form.title} onChange={e => setForm({ ...form, title: e.target.value })}
+            placeholder="Title — e.g. 'Pizza ovens being serviced Friday 10 AM'"
+            className="w-full bg-white rounded-xl px-4 py-3 text-sm border-none outline-none focus:ring-2 ring-[#cc5a16]/20" />
+          <textarea value={form.body} onChange={e => setForm({ ...form, body: e.target.value })}
+            placeholder="Optional body. Plain text only."
+            rows={3}
+            className="w-full bg-white rounded-xl px-4 py-3 text-sm border-none outline-none focus:ring-2 ring-[#cc5a16]/20 resize-none" />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Level</label>
+              <select value={form.level} onChange={e => setForm({ ...form, level: e.target.value })}
+                className="w-full bg-white rounded-xl px-3 py-2 text-sm">
+                <option value="INFO">📢 Info (blue)</option>
+                <option value="WARNING">⚠ Warning (amber)</option>
+                <option value="URGENT">🚨 Urgent (red)</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Expires (optional)</label>
+              <input type="datetime-local" value={form.expires_at}
+                onChange={e => setForm({ ...form, expires_at: e.target.value })}
+                className="w-full bg-white rounded-xl px-3 py-2 text-sm" />
+            </div>
+          </div>
+          <button onClick={submit} disabled={!form.title.trim()}
+            className="w-full py-2 bg-[#cc5a16] text-white text-xs font-bold rounded-xl disabled:opacity-50">
+            Broadcast to all locations
+          </button>
+        </div>
+      )}
+      {loading ? (
+        <p className="text-xs text-[#9c8e85] italic">Loading…</p>
+      ) : items.length === 0 ? (
+        <p className="text-xs text-[#9c8e85] italic">No announcements yet.</p>
+      ) : (
+        items.map(a => {
+          const expired = a.expires_at && new Date(a.expires_at) < new Date();
+          const dismissed = Number(a.is_dismissed_globally || 0) === 1;
+          return (
+            <div key={a.id} className={cn(
+              "border rounded-2xl p-4",
+              expired || dismissed ? "border-[#cc5a16]/10 bg-[#faf7f2]/50 opacity-60" :
+              a.level === 'URGENT' ? "border-red-200 bg-red-50" :
+              a.level === 'WARNING' ? "border-amber-200 bg-amber-50" :
+              "border-sky-200 bg-sky-50"
+            )}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-sm">
+                    {a.level === 'URGENT' ? '🚨' : a.level === 'WARNING' ? '⚠' : '📢'} {a.title}
+                  </p>
+                  {a.body && <p className="text-xs text-[#3d3128] mt-1 whitespace-pre-wrap">{a.body}</p>}
+                  <p className="text-[10px] text-[#9c8e85] mt-2">
+                    {new Date(a.created_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                    {a.expires_at && <> · expires {new Date(a.expires_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</>}
+                    {expired && <span className="ml-2 text-red-600 font-bold">EXPIRED</span>}
+                    {dismissed && <span className="ml-2 text-gray-500 font-bold">DISMISSED</span>}
+                  </p>
+                </div>
+                <button onClick={() => remove(a.id)} className="text-xs text-red-600 font-bold">Delete</button>
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// BrandMenuTemplatesAdmin (Phase B2) — manage central menu templates +
+// sync them to selected locations. Sync semantics: insert into the
+// tenant's menu table if a row with the same name doesn't already exist;
+// otherwise skip (or update if overwrite=true).
+function BrandMenuTemplatesAdmin({ token }: { token: string }) {
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [locations, setLocations] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedTemplates, setSelectedTemplates] = useState<Set<string>>(new Set());
+  const [selectedLocations, setSelectedLocations] = useState<Set<string>>(new Set());
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<any>(null);
+  const [editing, setEditing] = useState<any | null>(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    Promise.all([
+      fetch('/api/brand/menu-templates', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
+      fetch('/api/brand/my-locations', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
+    ]).then(([tpls, locs]) => {
+      setTemplates(tpls || []);
+      setLocations(locs?.all_restaurants || []);
+    }).finally(() => setLoading(false));
+  }, [token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const saveTemplate = async (payload: any) => {
+    const id = payload.id || 'new';
+    const res = await fetch(`/api/brand/menu-templates/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) { setEditing(null); load(); }
+  };
+
+  const deleteTemplate = async (id: string) => {
+    if (!window.confirm('Delete this template?')) return;
+    await fetch(`/api/brand/menu-templates/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    load();
+  };
+
+  const runSync = async (overwrite: boolean) => {
+    if (selectedTemplates.size === 0 || selectedLocations.size === 0) return;
+    setSyncing(true); setSyncResult(null);
+    const res = await fetch('/api/brand/menu-templates/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        template_ids: Array.from(selectedTemplates),
+        restaurant_ids: Array.from(selectedLocations),
+        overwrite,
+      }),
+    });
+    const d = await res.json().catch(() => null);
+    setSyncResult(d);
+    setSyncing(false);
+  };
+
+  const toggleSet = (set: Set<string>, id: string): Set<string> => {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <div>
+          <h4 className="text-sm font-bold font-serif">Menu templates</h4>
+          <p className="text-[11px] text-[#6b5d52]">Brand-level menu items. Sync to any location whose menu doesn't have them yet.</p>
+        </div>
+        <button onClick={() => setEditing({})}
+          className="px-3 py-1.5 bg-[#cc5a16] text-white text-xs font-bold rounded-xl">+ New template</button>
+      </div>
+      {loading ? (
+        <p className="text-xs text-[#9c8e85] italic">Loading…</p>
+      ) : (
+        <>
+          {/* Two-column picker: templates × locations */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-[#faf7f2] rounded-2xl p-3 max-h-72 overflow-y-auto">
+              <div className="flex justify-between items-center mb-2">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Templates ({templates.length})</p>
+                {templates.length > 0 && (
+                  <button onClick={() => setSelectedTemplates(s =>
+                    s.size === templates.length ? new Set() : new Set(templates.map(t => t.id)))}
+                    className="text-[10px] font-bold text-[#cc5a16]">
+                    {selectedTemplates.size === templates.length ? 'None' : 'All'}
+                  </button>
+                )}
+              </div>
+              {templates.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic py-4 text-center">No templates yet.</p>
+              ) : (
+                templates.map(t => (
+                  <div key={t.id} className="flex items-center gap-2 py-1 group">
+                    <input type="checkbox" checked={selectedTemplates.has(t.id)}
+                      onChange={() => setSelectedTemplates(s => toggleSet(s, t.id))} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-bold truncate">{t.name}</p>
+                      <p className="text-[10px] text-[#9c8e85]">
+                        {t.category || '—'} · ₹{Number(t.price_full || 0).toFixed(0)}
+                      </p>
+                    </div>
+                    <button onClick={() => setEditing(t)} className="opacity-0 group-hover:opacity-100 text-[10px] text-[#cc5a16] font-bold">Edit</button>
+                    <button onClick={() => deleteTemplate(t.id)} className="opacity-0 group-hover:opacity-100 text-[10px] text-red-600 font-bold">×</button>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="bg-[#faf7f2] rounded-2xl p-3 max-h-72 overflow-y-auto">
+              <div className="flex justify-between items-center mb-2">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Locations ({locations.length})</p>
+                {locations.length > 0 && (
+                  <button onClick={() => setSelectedLocations(s =>
+                    s.size === locations.length ? new Set() : new Set(locations.map(l => l.id)))}
+                    className="text-[10px] font-bold text-[#cc5a16]">
+                    {selectedLocations.size === locations.length ? 'None' : 'All'}
+                  </button>
+                )}
+              </div>
+              {locations.map(l => (
+                <label key={l.id} className="flex items-center gap-2 py-1 cursor-pointer">
+                  <input type="checkbox" checked={selectedLocations.has(l.id)}
+                    onChange={() => setSelectedLocations(s => toggleSet(s, l.id))} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-bold truncate">{l.name}</p>
+                    <p className="text-[10px] text-[#9c8e85]">{l.location_label || l.city || l.id}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={() => runSync(false)}
+              disabled={syncing || selectedTemplates.size === 0 || selectedLocations.size === 0}
+              className="flex-1 py-2.5 bg-[#cc5a16] text-white text-xs font-bold rounded-xl disabled:opacity-50">
+              {syncing ? 'Syncing…' : `Sync ${selectedTemplates.size} × ${selectedLocations.size}`}
+            </button>
+            <button onClick={() => runSync(true)}
+              disabled={syncing || selectedTemplates.size === 0 || selectedLocations.size === 0}
+              title="Overwrites existing items at the location"
+              className="px-4 py-2.5 bg-amber-100 text-amber-800 text-xs font-bold rounded-xl disabled:opacity-50">
+              Force overwrite
+            </button>
+          </div>
+          {syncResult && (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-xs">
+              <p className="font-bold text-emerald-900">
+                Synced — {syncResult.summary?.created} created · {syncResult.summary?.updated} updated · {syncResult.summary?.skipped} skipped
+              </p>
+              {syncResult.summary?.skipped > 0 && (
+                <p className="text-emerald-700 mt-1 text-[11px]">
+                  Skipped items already exist at the target locations. Use "Force overwrite" to replace them.
+                </p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+      {editing && (
+        <MenuTemplateEditor token={token} template={editing} onClose={() => setEditing(null)} onSave={saveTemplate} />
+      )}
+    </div>
+  );
+}
+
+function MenuTemplateEditor({ template, onClose, onSave }: {
+  token: string; template: any; onClose: () => void; onSave: (p: any) => void;
+}) {
+  const isEdit = !!template?.id;
+  const [form, setForm] = useState({
+    id: template?.id,
+    name: template?.name || '',
+    category: template?.category || '',
+    description: template?.description || '',
+    dietary_type: template?.dietary_type || 'VEG',
+    price_full: template?.price_full ?? 0,
+    price_half: template?.price_half ?? '',
+    image_url: template?.image_url || '',
+    gst_percent: template?.gst_percent ?? '',
+    is_active: template?.is_active == null ? true : Number(template.is_active) === 1,
+  });
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md">
+        <div className="p-5 border-b border-[#cc5a16]/10 flex justify-between items-center bg-[#faf7f2]/50">
+          <h4 className="font-bold font-serif">{isEdit ? 'Edit template' : 'New menu template'}</h4>
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-full"><X size={18}/></button>
+        </div>
+        <div className="p-5 space-y-3">
+          <div>
+            <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Name *</label>
+            <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}
+              className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" autoFocus />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Category</label>
+              <input value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}
+                placeholder="e.g. Mains"
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Dietary</label>
+              <select value={form.dietary_type} onChange={e => setForm({ ...form, dietary_type: e.target.value })}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm">
+                <option value="VEG">Veg</option>
+                <option value="NON_VEG">Non-veg</option>
+                <option value="VEGAN">Vegan</option>
+              </select>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Full price *</label>
+              <input type="number" value={form.price_full}
+                onChange={e => setForm({ ...form, price_full: Number(e.target.value) || 0 })}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Half price</label>
+              <input type="number" value={form.price_half}
+                onChange={e => setForm({ ...form, price_half: e.target.value as any })}
+                className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm" placeholder="optional" />
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold mb-1 block">Description</label>
+            <textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })}
+              rows={2}
+              className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm resize-none" />
+          </div>
+        </div>
+        <div className="p-5 border-t border-[#cc5a16]/10 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-xs font-bold text-[#6b5d52]">Cancel</button>
+          <button onClick={() => onSave(form)} disabled={!form.name.trim()}
+            className="px-5 py-2 bg-[#cc5a16] text-white text-xs font-bold rounded-xl disabled:opacity-50">
+            Save template
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// BrandAnnouncementBanner (Phase B2) — renders active brand-level
+// announcements at the top of every location's dashboard. Per-user
+// dismissal is stored in localStorage so the same user doesn't see the
+// banner repeatedly after they've dismissed it. The brand admin can
+// globally dismiss via the brand-admin dashboard.
+function BrandAnnouncementBanner({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [announcements, setAnnouncements] = useState<any[]>([]);
+  const [dismissed, setDismissed] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem('brand_announcements_dismissed') || '[]';
+      return new Set(JSON.parse(stored));
+    } catch { return new Set(); }
+  });
+
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/brand-announcements`,
+      { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : [])
+      .then(setAnnouncements)
+      .catch(() => {});
+  }, [restaurantId, token]);
+
+  const dismiss = (id: string) => {
+    setDismissed(prev => {
+      const next = new Set(prev); next.add(id);
+      try {
+        localStorage.setItem('brand_announcements_dismissed', JSON.stringify(Array.from(next)));
+      } catch {}
+      return next;
+    });
+  };
+
+  const visible = announcements.filter(a => !dismissed.has(a.id));
+  if (visible.length === 0) return null;
+
+  return (
+    <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 xl:px-8 pt-3 space-y-2">
+      {visible.map(a => {
+        const palette = a.level === 'URGENT'
+          ? { bg: 'bg-red-50', border: 'border-red-300', text: 'text-red-900', icon: '🚨' }
+          : a.level === 'WARNING'
+          ? { bg: 'bg-amber-50', border: 'border-amber-300', text: 'text-amber-900', icon: '⚠' }
+          : { bg: 'bg-sky-50', border: 'border-sky-300', text: 'text-sky-900', icon: '📢' };
+        return (
+          <div key={a.id} className={cn(palette.bg, palette.border, palette.text, "border rounded-2xl px-4 py-3 flex items-start gap-3 shadow-sm")}>
+            <span className="text-xl shrink-0">{palette.icon}</span>
+            <div className="flex-1 min-w-0">
+              <p className="font-bold text-sm">{a.title}</p>
+              {a.body && <p className="text-xs mt-0.5 leading-relaxed whitespace-pre-wrap">{a.body}</p>}
+              <p className="text-[10px] mt-1 opacity-70">
+                Brand announcement · {new Date(a.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+              </p>
+            </div>
+            <button
+              onClick={() => dismiss(a.id)}
+              title="Dismiss"
+              className="shrink-0 p-1 hover:bg-white/40 rounded-full opacity-70 hover:opacity-100"
+              aria-label="Dismiss announcement"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
