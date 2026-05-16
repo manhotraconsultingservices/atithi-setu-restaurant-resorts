@@ -17108,7 +17108,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'brand-staff-transfer-suppliers',
+    commit_marker: 'menu-generate-image-disabled',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -17168,6 +17168,7 @@ async function startServer() {
       'brand-menu-templates',             // B2: central menu templates + selective per-location sync (insert-if-missing, optional force overwrite)
       'brand-supplier-directory',         // B3: brand-level shared supplier directory with selective sync (same pattern as menu templates)
       'brand-staff-cross-transfer',       // B3: cross-location staff transfer (TRANSFER deactivates source, COPY keeps both) preserving rate/payroll_id/role; login_id auto-suffixed on collision; audit log
+      'menu-generate-image-disabled',     // UI: hide the Gemini "Generate Image" button on menu cards. Backend endpoint preserved for future re-enable.
     ],
     booted_at: new Date().toISOString(),
   };

@@ -9182,15 +9182,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <span className="text-4xl">{getCatEmoji(item.category)}</span>
                     <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">{item.category}</span>
                   </div>
-                  {/* Generate Image overlay button */}
-                  {!item.image && (
-                    <div className="absolute inset-0 flex items-end justify-center pb-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button onClick={() => handleGenerateImage(item)} disabled={generatingImageId === item.id}
-                        className="px-3 py-1.5 bg-black/70 text-white rounded-full text-[11px] font-bold flex items-center gap-1.5 hover:bg-black/90 transition-all disabled:opacity-50">
-                        {generatingImageId === item.id ? <><div className="w-3 h-3 border border-white/40 border-t-white rounded-full animate-spin"/> Generating…</> : <><Sparkles size={11}/> Generate Image</>}
-                      </button>
-                    </div>
-                  )}
+                  {/* Generate Image button — disabled by request. The
+                      AI image generation flow has been hidden from the
+                      menu cards. handleGenerateImage + the backend
+                      /generate-image endpoint stay in place so we can
+                      re-enable later without code restoration. */}
                   {/* Availability badge */}
                   <div className="absolute top-2 left-2">
                     {!item.available && (
