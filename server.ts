@@ -9031,6 +9031,269 @@ async function startServer() {
     }
   });
 
+  // ═════════════════════════════════════════════════════════════════════
+  // PHASE A2 — Owner Analytics Deep-Dive
+  // ═════════════════════════════════════════════════════════════════════
+  // Four reports, all served from the orders table to avoid maintaining a
+  // separate analytics warehouse:
+  //   1. period-summary       MTD / YTD / TODAY / YESTERDAY vs same prior
+  //                           period; revenue, order count, AOV
+  //   2. hourly-heatmap       7×24 grid of orders + revenue by DOW × hour
+  //   3. top-items            Pareto chart — top N items by revenue with %
+  //                           of total + cumulative % (Pareto principle)
+  //   4. cohort-retention     for each weekly cohort, % returning in W+1..W+8
+
+  // Date-range helpers — used everywhere below. All inclusive at the bounds.
+  function _periodBounds(period: string): { start: string; end: string; prevStart: string; prevEnd: string; label: string } {
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const p = String(period || 'MTD').toUpperCase();
+    if (p === 'TODAY') {
+      const y = new Date(now); y.setDate(y.getDate() - 1);
+      const yStr = y.toISOString().slice(0, 10);
+      return { start: todayStr, end: todayStr, prevStart: yStr, prevEnd: yStr, label: 'Today' };
+    }
+    if (p === 'YESTERDAY') {
+      const y = new Date(now); y.setDate(y.getDate() - 1);
+      const dby = new Date(now); dby.setDate(dby.getDate() - 2);
+      return { start: y.toISOString().slice(0,10), end: y.toISOString().slice(0,10),
+               prevStart: dby.toISOString().slice(0,10), prevEnd: dby.toISOString().slice(0,10),
+               label: 'Yesterday' };
+    }
+    if (p === 'WTD') {
+      // Week-to-date (Mon..today). Prev = same weekdays in prior week.
+      const dow = now.getDay(); const offset = dow === 0 ? -6 : 1 - dow;
+      const mon = new Date(now); mon.setDate(mon.getDate() + offset);
+      const prevMon = new Date(mon); prevMon.setDate(prevMon.getDate() - 7);
+      const prevSameDay = new Date(prevMon); prevSameDay.setDate(prevMon.getDate() + (now.getTime() - mon.getTime()) / 86400000);
+      return { start: mon.toISOString().slice(0,10), end: todayStr,
+               prevStart: prevMon.toISOString().slice(0,10), prevEnd: prevSameDay.toISOString().slice(0,10),
+               label: 'Week to date' };
+    }
+    if (p === 'YTD') {
+      const yStart = new Date(now.getFullYear(), 0, 1);
+      const prevYStart = new Date(now.getFullYear() - 1, 0, 1);
+      const prevSame = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
+      return { start: yStart.toISOString().slice(0,10), end: todayStr,
+               prevStart: prevYStart.toISOString().slice(0,10), prevEnd: prevSame.toISOString().slice(0,10),
+               label: 'Year to date' };
+    }
+    // Default: MTD (month-to-date) vs same days of previous month
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevSameDay = new Date(now.getFullYear(), now.getMonth() - 1, Math.min(now.getDate(), new Date(now.getFullYear(), now.getMonth(), 0).getDate()));
+    return { start: monthStart.toISOString().slice(0,10), end: todayStr,
+             prevStart: prevMonthStart.toISOString().slice(0,10), prevEnd: prevSameDay.toISOString().slice(0,10),
+             label: 'Month to date' };
+  }
+
+  // 1. PERIOD SUMMARY — revenue, count, AOV with comparison
+  app.get("/api/restaurant/:id/analytics/v2/period-summary", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const period = String(req.query.period || 'MTD');
+      const b = _periodBounds(period);
+      const db = await getTenantDb(req.params.id);
+      const aggregate = async (start: string, end: string) => {
+        const r: any = await db.get(
+          `SELECT COUNT(*) AS orders,
+                  COALESCE(SUM(total_amount), 0) AS revenue,
+                  COALESCE(AVG(NULLIF(total_amount, 0)), 0) AS aov
+             FROM orders
+            WHERE created_at >= ? AND created_at < (? :: date + INTERVAL '1 day')
+              AND status IN ('CONFIRMED', 'DELIVERED', 'COMPLETED', 'SETTLED', 'PRINTED')`,
+          [start, end]
+        ).catch(() => null);
+        return {
+          orders: Number(r?.orders || 0),
+          revenue: Number(r?.revenue || 0),
+          aov: Number(r?.aov || 0),
+        };
+      };
+      const cur = await aggregate(b.start, b.end);
+      const prev = await aggregate(b.prevStart, b.prevEnd);
+      const pct = (a: number, b: number) => b > 0 ? Math.round(((a - b) / b) * 1000) / 10 : (a > 0 ? 100 : 0);
+      res.json({
+        period: b.label,
+        start: b.start, end: b.end,
+        prev_start: b.prevStart, prev_end: b.prevEnd,
+        current: cur,
+        previous: prev,
+        change: {
+          revenue_pct: pct(cur.revenue, prev.revenue),
+          orders_pct: pct(cur.orders, prev.orders),
+          aov_pct: pct(cur.aov, prev.aov),
+        },
+      });
+    } catch (err) {
+      console.error('Period summary error:', err);
+      res.status(500).json({ error: 'Failed to compute period summary' });
+    }
+  });
+
+  // 2. HOURLY HEATMAP — orders + revenue by day-of-week × hour-of-day
+  app.get("/api/restaurant/:id/analytics/v2/hourly-heatmap", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      if (!start || !end) return res.status(400).json({ error: 'start and end required' });
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT EXTRACT(DOW FROM created_at AT TIME ZONE 'Asia/Kolkata') AS dow,
+                EXTRACT(HOUR FROM created_at AT TIME ZONE 'Asia/Kolkata') AS hour,
+                COUNT(*) AS orders,
+                COALESCE(SUM(total_amount), 0) AS revenue
+           FROM orders
+          WHERE created_at >= ?
+            AND created_at < (? :: date + INTERVAL '1 day')
+            AND status IN ('CONFIRMED', 'DELIVERED', 'COMPLETED', 'SETTLED', 'PRINTED')
+          GROUP BY 1, 2
+          ORDER BY 1, 2`,
+        [start, end]
+      );
+      // Reshape into 7×24 grid for easy frontend rendering. dow: 0=Sun..6=Sat.
+      const grid: { dow: number; hour: number; orders: number; revenue: number }[] = [];
+      const map: Record<string, any> = {};
+      for (const r of (rows || [])) {
+        map[`${Number(r.dow)}|${Number(r.hour)}`] = { orders: Number(r.orders), revenue: Number(r.revenue) };
+      }
+      for (let d = 0; d < 7; d++) {
+        for (let h = 0; h < 24; h++) {
+          const v = map[`${d}|${h}`] || { orders: 0, revenue: 0 };
+          grid.push({ dow: d, hour: h, orders: v.orders, revenue: v.revenue });
+        }
+      }
+      const totalOrders = grid.reduce((s, c) => s + c.orders, 0);
+      const peak = [...grid].sort((a, b) => b.orders - a.orders).slice(0, 5);
+      res.json({ start, end, grid, total_orders: totalOrders, peak_cells: peak });
+    } catch (err) {
+      console.error('Heatmap error:', err);
+      res.status(500).json({ error: 'Failed to compute heatmap' });
+    }
+  });
+
+  // 3. TOP ITEMS — Pareto. Walks every order's items JSON, sums revenue per
+  // item name. Optional limit (default 10). Returns the cumulative % so the
+  // frontend can draw the 80/20 line.
+  app.get("/api/restaurant/:id/analytics/v2/top-items", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit || 10)));
+      if (!start || !end) return res.status(400).json({ error: 'start and end required' });
+      const db = await getTenantDb(req.params.id);
+      const orders: any[] = await db.query(
+        `SELECT items
+           FROM orders
+          WHERE created_at >= ?
+            AND created_at < (? :: date + INTERVAL '1 day')
+            AND status IN ('CONFIRMED', 'DELIVERED', 'COMPLETED', 'SETTLED', 'PRINTED')`,
+        [start, end]
+      );
+      const byItem: Record<string, { name: string; qty: number; revenue: number }> = {};
+      for (const o of (orders || [])) {
+        let items: any[] = [];
+        if (typeof o.items === 'string') {
+          try { items = JSON.parse(o.items); } catch { items = []; }
+        } else if (Array.isArray(o.items)) items = o.items;
+        for (const it of items) {
+          const name = String(it.name || 'Unknown');
+          const qty = Number(it.quantity || 1);
+          const rev = qty * Number(it.price || 0);
+          if (!byItem[name]) byItem[name] = { name, qty: 0, revenue: 0 };
+          byItem[name].qty += qty;
+          byItem[name].revenue += rev;
+        }
+      }
+      const all = Object.values(byItem).sort((a, b) => b.revenue - a.revenue);
+      const grandTotal = all.reduce((s, i) => s + i.revenue, 0);
+      let cum = 0;
+      const top = all.slice(0, limit).map(i => {
+        cum += i.revenue;
+        return {
+          ...i,
+          revenue: Math.round(i.revenue * 100) / 100,
+          pct: grandTotal > 0 ? Math.round((i.revenue / grandTotal) * 1000) / 10 : 0,
+          cumulative_pct: grandTotal > 0 ? Math.round((cum / grandTotal) * 1000) / 10 : 0,
+        };
+      });
+      res.json({ start, end, items: top, grand_total: Math.round(grandTotal * 100) / 100, item_count: all.length });
+    } catch (err) {
+      console.error('Top items error:', err);
+      res.status(500).json({ error: 'Failed to compute top items' });
+    }
+  });
+
+  // 4. COHORT RETENTION — group customers by their FIRST week (cohort);
+  // for each cohort, what % returned in week+1, week+2, week+4, week+8.
+  // Identity = phone number (loyalty key). Tenants without phone capture
+  // get empty rows.
+  app.get("/api/restaurant/:id/analytics/v2/cohort-retention", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const weeks = Math.max(4, Math.min(26, Number(req.query.weeks || 12)));
+      const db = await getTenantDb(req.params.id);
+      // Step 1: for each phone, find their first order week
+      const firstWeeks: any[] = await db.query(
+        `SELECT customer_phone,
+                DATE_TRUNC('week', MIN(created_at)) AS first_week
+           FROM orders
+          WHERE customer_phone IS NOT NULL AND customer_phone <> ''
+            AND created_at >= CURRENT_TIMESTAMP - INTERVAL '${weeks * 7} days'
+          GROUP BY customer_phone`
+      );
+      const firstWeekByPhone: Record<string, string> = {};
+      for (const r of (firstWeeks || [])) {
+        firstWeekByPhone[r.customer_phone] = String(r.first_week).slice(0, 10);
+      }
+      // Step 2: list every (phone, week) the customer placed an order
+      const visits: any[] = await db.query(
+        `SELECT customer_phone, DATE_TRUNC('week', created_at) AS visit_week
+           FROM orders
+          WHERE customer_phone IS NOT NULL AND customer_phone <> ''
+            AND created_at >= CURRENT_TIMESTAMP - INTERVAL '${weeks * 7} days'
+          GROUP BY customer_phone, DATE_TRUNC('week', created_at)`
+      );
+      // Build per-cohort retention map: cohort_week → {weekOffset → count of unique returning customers}
+      type Cohort = { cohort_week: string; size: number; returns: Record<number, Set<string>> };
+      const cohortMap: Record<string, Cohort> = {};
+      // First: count cohort sizes
+      for (const phone of Object.keys(firstWeekByPhone)) {
+        const cw = firstWeekByPhone[phone];
+        if (!cohortMap[cw]) cohortMap[cw] = { cohort_week: cw, size: 0, returns: {} };
+        cohortMap[cw].size++;
+      }
+      // Second: for each visit, if not the first week, count as return
+      for (const v of (visits || [])) {
+        const cw = firstWeekByPhone[v.customer_phone];
+        if (!cw) continue;
+        const visitWeek = String(v.visit_week).slice(0, 10);
+        const cohortDate = new Date(cw + 'T00:00:00Z');
+        const visitDate = new Date(visitWeek + 'T00:00:00Z');
+        const offset = Math.round((visitDate.getTime() - cohortDate.getTime()) / (7 * 86400000));
+        if (offset <= 0 || offset > weeks) continue;
+        const cohort = cohortMap[cw];
+        if (!cohort) continue;
+        if (!cohort.returns[offset]) cohort.returns[offset] = new Set();
+        cohort.returns[offset].add(v.customer_phone);
+      }
+      const cohorts = Object.values(cohortMap).map(c => {
+        const retentionPct: Record<number, number> = {};
+        for (const [off, set] of Object.entries(c.returns)) {
+          const n = (set as Set<string>).size;
+          retentionPct[Number(off)] = c.size > 0 ? Math.round((n / c.size) * 1000) / 10 : 0;
+        }
+        return {
+          cohort_week: c.cohort_week,
+          size: c.size,
+          retention: retentionPct,
+        };
+      }).sort((a, b) => a.cohort_week.localeCompare(b.cohort_week));
+      res.json({ weeks, cohorts });
+    } catch (err) {
+      console.error('Cohort retention error:', err);
+      res.status(500).json({ error: 'Failed to compute cohort retention' });
+    }
+  });
+
   // ─── Wastage logs ────────────────────────────────────────────────────────
 
   app.get("/api/restaurant/:id/inventory/wastage", authenticate, async (req: AuthRequest, res: Response) => {
@@ -15934,7 +16197,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'inventory-v2-autopo-cost-per-dish',
+    commit_marker: 'analytics-v2-deep-dive',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -15980,6 +16243,10 @@ async function startServer() {
       'staff-v2-shift-reminder-cron',    // S2: daily 08:00 IST SHIFT_REMINDER cron for staff with shifts today
       'inventory-v2-cost-per-dish',      // I2: GET /inventory/cost-per-dish — recipe cost vs sell price + margin per menu item
       'inventory-v2-auto-po-drafts',     // I2: weekly cron generates DRAFT POs for suppliers when stock < par. Owner reviews & sends.
+      'analytics-v2-period-comparison',  // A2: GET /analytics/v2/period-summary — MTD/WTD/YTD vs prior; revenue + orders + AOV
+      'analytics-v2-hourly-heatmap',     // A2: 7×24 grid of order density by DOW × hour (IST)
+      'analytics-v2-top-items-pareto',   // A2: top N items by revenue with cumulative % for the Pareto chart
+      'analytics-v2-cohort-retention',   // A2: weekly-cohort retention curves (% returning at W+1..W+8)
     ],
     booted_at: new Date().toISOString(),
   };

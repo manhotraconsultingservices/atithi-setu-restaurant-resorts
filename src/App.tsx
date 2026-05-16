@@ -3275,6 +3275,228 @@ function normalizeOrder(o: any): any {
   };
 }
 
+// ─── Phase A2 — Owner Analytics Deep-Dive ──────────────────────────────────
+// Renders at the top of the REPORTS tab. Four sections, each independent:
+//   1. Period comparison KPI bar (MTD/WTD/YTD/Today vs prior)
+//   2. Peak-hour heatmap (7×24 grid, color = order density)
+//   3. Top 10 items (Pareto-style: revenue bars + cumulative % line)
+//   4. Cost-per-dish profitability (recipe cost vs sell price, margin %)
+function AnalyticsDeepDive({ restaurantId, token, dateFrom, dateTo, currencySymbol }: {
+  restaurantId: string; token: string; dateFrom: string; dateTo: string; currencySymbol: string;
+}) {
+  type Period = 'TODAY' | 'YESTERDAY' | 'WTD' | 'MTD' | 'YTD';
+  const [period, setPeriod] = useState<Period>('MTD');
+  const [summary, setSummary] = useState<any | null>(null);
+  const [heatmap, setHeatmap] = useState<any | null>(null);
+  const [topItems, setTopItems] = useState<any | null>(null);
+  const [costPerDish, setCostPerDish] = useState<any | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const auth = useMemo(() => ({ Authorization: `Bearer ${token}` }), [token]);
+
+  // Period summary — re-fetch on period change
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/analytics/v2/period-summary?period=${period}`, { headers: auth })
+      .then(r => r.ok ? r.json() : null).then(setSummary).catch(() => {});
+  }, [restaurantId, period, auth]);
+
+  // Heatmap + top items + cost-per-dish — re-fetch on date range change
+  useEffect(() => {
+    if (!dateFrom || !dateTo) return;
+    setLoading(true);
+    Promise.all([
+      fetch(`/api/restaurant/${restaurantId}/analytics/v2/hourly-heatmap?start=${dateFrom}&end=${dateTo}`, { headers: auth })
+        .then(r => r.ok ? r.json() : null),
+      fetch(`/api/restaurant/${restaurantId}/analytics/v2/top-items?start=${dateFrom}&end=${dateTo}&limit=10`, { headers: auth })
+        .then(r => r.ok ? r.json() : null),
+      fetch(`/api/restaurant/${restaurantId}/inventory/cost-per-dish`, { headers: auth })
+        .then(r => r.ok ? r.json() : null),
+    ]).then(([hm, ti, cpd]) => {
+      setHeatmap(hm); setTopItems(ti); setCostPerDish(cpd);
+    }).finally(() => setLoading(false));
+  }, [restaurantId, dateFrom, dateTo, auth]);
+
+  const sym = currencySymbol || '₹';
+  const fmt = (n: number) => `${sym}${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  const dows = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const maxOrders = heatmap ? Math.max(1, ...heatmap.grid.map((c: any) => Number(c.orders || 0))) : 1;
+
+  return (
+    <div className="space-y-5">
+      {/* Period bar */}
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <h3 className="text-sm font-bold font-serif text-[#1a1208]">Period comparison</h3>
+          <div className="flex gap-1">
+            {(['TODAY', 'YESTERDAY', 'WTD', 'MTD', 'YTD'] as Period[]).map(p => (
+              <button key={p} onClick={() => setPeriod(p)}
+                className={cn('px-3 py-1.5 text-xs font-bold rounded-xl',
+                  period === p ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52]')}>
+                {p === 'WTD' ? 'Week' : p === 'MTD' ? 'Month' : p === 'YTD' ? 'Year' : p === 'YESTERDAY' ? 'Y\'day' : 'Today'}
+              </button>
+            ))}
+          </div>
+        </div>
+        {summary ? (
+          <div className="grid grid-cols-3 gap-4">
+            {[
+              { label: 'Revenue', cur: summary.current?.revenue, prev: summary.previous?.revenue, change: summary.change?.revenue_pct, fmt: fmt },
+              { label: 'Orders',  cur: summary.current?.orders,  prev: summary.previous?.orders,  change: summary.change?.orders_pct,  fmt: (n: number) => Number(n).toLocaleString() },
+              { label: 'AOV',     cur: summary.current?.aov,     prev: summary.previous?.aov,     change: summary.change?.aov_pct,     fmt: fmt },
+            ].map(k => (
+              <div key={k.label} className="bg-[#faf7f2] rounded-xl p-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">{k.label}</p>
+                <p className="text-xl font-bold text-[#1a1208]">{k.fmt(Number(k.cur || 0))}</p>
+                <p className="text-[11px] text-[#6b5d52] mt-1">
+                  was <span className="font-mono">{k.fmt(Number(k.prev || 0))}</span>
+                </p>
+                <p className={cn('text-xs font-bold mt-1',
+                  Number(k.change || 0) >= 0 ? 'text-emerald-700' : 'text-red-600')}>
+                  {Number(k.change || 0) >= 0 ? '▲' : '▼'} {Math.abs(Number(k.change || 0)).toFixed(1)}%
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-[#9c8e85] italic">Loading…</p>
+        )}
+        <p className="text-[10px] text-[#9c8e85] mt-2">
+          {summary?.period}: {summary?.start} → {summary?.end} · prev {summary?.prev_start} → {summary?.prev_end}
+        </p>
+      </div>
+
+      {/* Heatmap */}
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm">
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="text-sm font-bold font-serif text-[#1a1208]">Peak hours</h3>
+          <p className="text-[10px] text-[#9c8e85]">{heatmap?.total_orders ?? 0} orders · IST timezone</p>
+        </div>
+        {heatmap?.grid ? (
+          <div className="overflow-x-auto">
+            <table className="text-[10px] border-collapse">
+              <thead>
+                <tr>
+                  <th className="px-1 py-1"></th>
+                  {Array.from({ length: 24 }).map((_, h) => (
+                    <th key={h} className="px-1 py-1 font-normal text-[#9c8e85]" style={{ width: 22 }}>{h % 3 === 0 ? h : ''}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {dows.map((dow, d) => (
+                  <tr key={d}>
+                    <td className="px-2 py-1 font-bold text-[#6b5d52]">{dow}</td>
+                    {Array.from({ length: 24 }).map((_, h) => {
+                      const cell = heatmap.grid.find((c: any) => c.dow === d && c.hour === h);
+                      const v = Number(cell?.orders || 0);
+                      const intensity = v / maxOrders;
+                      const bg = v === 0 ? '#faf7f2' : `rgba(204, 90, 22, ${Math.max(0.08, intensity)})`;
+                      return (
+                        <td key={h} className="border border-white"
+                          style={{ width: 22, height: 22, background: bg }}
+                          title={`${dow} ${h}:00 — ${v} order${v === 1 ? '' : 's'}${cell ? `, ${fmt(Number(cell.revenue))}` : ''}`}>
+                          <span className="sr-only">{v}</span>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {heatmap?.peak_cells && heatmap.peak_cells.length > 0 && (
+              <p className="text-[11px] text-[#6b5d52] mt-3">
+                Peak: {heatmap.peak_cells.slice(0, 3).map((c: any) => `${dows[c.dow]} ${c.hour}:00 (${c.orders})`).join(' · ')}
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-[#9c8e85] italic">{loading ? 'Loading…' : 'No data in range.'}</p>
+        )}
+      </div>
+
+      {/* Top items (Pareto) */}
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm">
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="text-sm font-bold font-serif text-[#1a1208]">Top 10 items</h3>
+          <p className="text-[10px] text-[#9c8e85]">{topItems?.item_count ?? 0} unique items · {fmt(Number(topItems?.grand_total || 0))} total</p>
+        </div>
+        {topItems?.items && topItems.items.length > 0 ? (
+          <div className="space-y-2">
+            {topItems.items.map((it: any, i: number) => (
+              <div key={it.name} className="flex items-center gap-3 text-xs">
+                <span className="w-5 text-[#9c8e85] font-mono">{i + 1}.</span>
+                <span className="font-bold text-[#1a1208] flex-1 truncate" title={it.name}>{it.name}</span>
+                <span className="text-[#6b5d52] w-16 text-right">{it.qty}×</span>
+                <div className="flex-[2] bg-[#faf7f2] rounded-lg h-5 relative overflow-hidden">
+                  <div className="absolute inset-y-0 left-0 bg-[#cc5a16] rounded-lg"
+                    style={{ width: `${Math.min(100, it.pct * 2)}%` }} />
+                  <span className="absolute inset-0 flex items-center px-2 font-bold text-white text-[10px]">
+                    {fmt(it.revenue)}
+                  </span>
+                </div>
+                <span className="w-12 text-right text-[#cc5a16] font-bold">{it.pct.toFixed(1)}%</span>
+                <span className="w-14 text-right text-[#9c8e85] text-[10px]">cum {it.cumulative_pct.toFixed(0)}%</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-[#9c8e85] italic">{loading ? 'Loading…' : 'No order data in range.'}</p>
+        )}
+      </div>
+
+      {/* Cost per dish */}
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 shadow-sm">
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="text-sm font-bold font-serif text-[#1a1208]">Cost per dish (profitability)</h3>
+          <p className="text-[10px] text-[#9c8e85]">
+            {costPerDish?.summary?.with_recipe ?? 0} items have recipes · avg margin {Number(costPerDish?.summary?.avg_margin_pct || 0).toFixed(1)}%
+          </p>
+        </div>
+        {costPerDish?.items && costPerDish.items.filter((it: any) => it.has_recipe).length > 0 ? (
+          <div className="overflow-x-auto max-h-80">
+            <table className="w-full text-xs">
+              <thead className="bg-[#faf7f2]">
+                <tr>
+                  <th className="px-3 py-2 text-left">Dish</th>
+                  <th className="px-3 py-2 text-right">Sell price</th>
+                  <th className="px-3 py-2 text-right">Ingredient cost</th>
+                  <th className="px-3 py-2 text-right">Margin</th>
+                  <th className="px-3 py-2 text-right">Margin %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {costPerDish.items.filter((it: any) => it.has_recipe).slice(0, 20).map((it: any) => (
+                  <tr key={it.menu_item_id} className="border-t border-[#cc5a16]/5">
+                    <td className="px-3 py-1.5 font-bold">
+                      {it.name}
+                      {it.category && <span className="ml-1 text-[10px] text-[#9c8e85] font-normal">· {it.category}</span>}
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono">{fmt(it.sell_price)}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-[#6b5d52]">{fmt(it.ingredient_cost)}</td>
+                    <td className="px-3 py-1.5 text-right font-mono font-bold">{fmt(it.margin_amount)}</td>
+                    <td className={cn('px-3 py-1.5 text-right font-bold',
+                      it.margin_pct >= 60 ? 'text-emerald-700' :
+                      it.margin_pct >= 30 ? 'text-orange-600' : 'text-red-600')}>
+                      {it.margin_pct.toFixed(1)}%
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {costPerDish.summary.without_recipe > 0 && (
+              <p className="text-[11px] text-[#9c8e85] italic mt-3">
+                {costPerDish.summary.without_recipe} item{costPerDish.summary.without_recipe === 1 ? '' : 's'} have no recipe yet — add recipes in INVENTORY → Recipes to see their costs here.
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-[#9c8e85] italic">No recipes configured yet. Set up recipes in the Inventory tab to populate this report.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Analytics Dashboard ────────────────────────────────────────────────────
 const CHART_COLORS = ['#6366f1','#ec4899','#f59e0b','#10b981','#3b82f6','#ef4444','#8b5cf6','#06b6d4','#84cc16','#f97316'];
 const PAYMENT_COLORS: Record<string, string> = { CASH:'#10b981', CARD:'#3b82f6', UPI:'#8b5cf6', ONLINE:'#f59e0b', Unknown:'#94a3b8', UNKNOWN:'#94a3b8' };
@@ -3450,6 +3672,15 @@ function AnalyticsDashboard({
           </button>
         </div>
       </div>
+
+      {/* Phase A2 — Owner Analytics Deep-Dive */}
+      <AnalyticsDeepDive
+        restaurantId={restaurantId}
+        token={token}
+        dateFrom={dateFrom}
+        dateTo={dateTo}
+        currencySymbol={(restaurant as any)?.currency_symbol || '₹'}
+      />
 
       {/* ── KPI Cards — Heritage Premium palette ── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-4">
