@@ -16197,7 +16197,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'loyalty-postpaid-session-autoapply',
+    commit_marker: 'roster-drag-and-drop-redesign',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -16248,6 +16248,7 @@ async function startServer() {
       'analytics-v2-top-items-pareto',   // A2: top N items by revenue with cumulative % for the Pareto chart
       'analytics-v2-cohort-retention',   // A2: weekly-cohort retention curves (% returning at W+1..W+8)
       'loyalty-postpaid-session-autoapply', // BUG FIX: postpaid session bill panel auto-applies tier discount on customer_phone match (previously only manual invoice + QR preview did)
+      'roster-drag-and-drop',            // UX: roster grid is now drag-and-drop. Move shifts between staff/days, drop templates onto cells, role-colored pills, today column highlight, hours-per-row/column.
     ],
     booted_at: new Date().toISOString(),
   };

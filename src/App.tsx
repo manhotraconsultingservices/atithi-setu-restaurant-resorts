@@ -26471,6 +26471,39 @@ function useTenantFormatter(restaurant: any) {
 // modal (template picker or explicit times). Each save kicks off
 // SHIFT_ASSIGNED/SHIFT_UPDATED notifications via the existing
 // triggerNotification → _resolveRecipients path (fixed in Phase 3.0).
+// ─── Helpers reused across roster rendering ────────────────────────────────
+// Hours between two "HH:MM" strings; supports overnight (end < start → +24h)
+function _shiftHours(start: string, end: string): number {
+  const [sh, sm] = String(start || '0:0').split(':').map(Number);
+  const [eh, em] = String(end || '0:0').split(':').map(Number);
+  let mins = (eh * 60 + (em || 0)) - (sh * 60 + (sm || 0));
+  if (mins < 0) mins += 24 * 60;
+  return Math.round((mins / 60) * 100) / 100;
+}
+
+// Role → Tailwind colour classes. Matches Monday.com / Deputy convention
+// where each role's shifts get a consistent hue so the owner can scan
+// the grid by colour rather than reading every line.
+const ROSTER_ROLE_PALETTE: Record<string, { bg: string; bgDark: string; border: string; text: string; soft: string }> = {
+  CHEF:         { bg: 'bg-orange-500',  bgDark: 'bg-orange-600',  border: 'border-orange-600',  text: 'text-orange-50', soft: 'bg-orange-50' },
+  WAITER:       { bg: 'bg-teal-500',    bgDark: 'bg-teal-600',    border: 'border-teal-600',    text: 'text-teal-50',   soft: 'bg-teal-50' },
+  MANAGER:      { bg: 'bg-violet-500',  bgDark: 'bg-violet-600',  border: 'border-violet-600',  text: 'text-violet-50', soft: 'bg-violet-50' },
+  HOUSEKEEPING: { bg: 'bg-sky-500',     bgDark: 'bg-sky-600',     border: 'border-sky-600',     text: 'text-sky-50',    soft: 'bg-sky-50' },
+  ROOM_SERVICE: { bg: 'bg-emerald-500', bgDark: 'bg-emerald-600', border: 'border-emerald-600', text: 'text-emerald-50',soft: 'bg-emerald-50' },
+  FRONT_DESK:   { bg: 'bg-indigo-500',  bgDark: 'bg-indigo-600',  border: 'border-indigo-600',  text: 'text-indigo-50', soft: 'bg-indigo-50' },
+  SECURITY:     { bg: 'bg-slate-500',   bgDark: 'bg-slate-600',   border: 'border-slate-600',   text: 'text-slate-50',  soft: 'bg-slate-50' },
+};
+const _defaultRolePalette = { bg: 'bg-stone-500', bgDark: 'bg-stone-600', border: 'border-stone-600', text: 'text-stone-50', soft: 'bg-stone-50' };
+function _rolePalette(role: string | undefined | null) {
+  if (!role) return _defaultRolePalette;
+  return ROSTER_ROLE_PALETTE[role.toUpperCase()] || _defaultRolePalette;
+}
+
+// "09:00–17:00" → "9-5p" (compact display in cramped cells)
+function _formatTimeRange(start: string, end: string): string {
+  return `${start}–${end}`;
+}
+
 function RosterManagement({ restaurantId, token }: { restaurantId: string; token: string }) {
   const [view, setView] = useState<'WEEK' | 'FORTNIGHT' | 'MONTH'>('WEEK');
   const [anchor, setAnchor] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -26480,6 +26513,16 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<{ staff_id: string; date: string; slot?: any } | null>(null);
   const [message, setMessage] = useState('');
+  const [filterRole, setFilterRole] = useState<string>('ALL');
+
+  // ── Drag-and-drop state ──────────────────────────────────────────────────
+  // draggingSlot   the shift being dragged from one cell (move) — null if
+  //                we're dragging a TEMPLATE instead (create)
+  // draggingTemplate  the template pill being dragged onto a cell to create
+  // dragOverKey    cell currently under the pointer for the drop-hint outline
+  const [draggingSlot, setDraggingSlot] = useState<any | null>(null);
+  const [draggingTemplate, setDraggingTemplate] = useState<any | null>(null);
+  const [dragOverKey, setDragOverKey] = useState<string | null>(null);
 
   // Date range: start = Monday of the week containing anchor; days = 7/14/28
   const { start, end, days } = useMemo(() => {
@@ -26533,14 +26576,53 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
     return m;
   }, [slots]);
 
-  const saveSlot = async (payload: any) => {
+  // Aggregated stats for the dashboard pills
+  const stats = useMemo(() => {
+    const totalHours = slots.reduce((sum, s) => sum + Number(s.expected_hours || 0), 0);
+    const totalShifts = slots.filter(s => s.status !== 'CANCELLED').length;
+    const draftCount = slots.filter(s => s.status === 'DRAFT').length;
+    const staffCovered = new Set(slots.filter(s => s.status !== 'CANCELLED').map(s => s.staff_id)).size;
+    return { totalHours, totalShifts, draftCount, staffCovered };
+  }, [slots]);
+
+  // Hours per staff row (sum across the visible date range, excludes CANCELLED)
+  const hoursByStaff = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const sl of slots) {
+      if (sl.status === 'CANCELLED') continue;
+      m[sl.staff_id] = (m[sl.staff_id] || 0) + Number(sl.expected_hours || 0);
+    }
+    return m;
+  }, [slots]);
+
+  // Coverage per column (sum across all staff for that day)
+  const hoursByDay = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const sl of slots) {
+      if (sl.status === 'CANCELLED') continue;
+      const d = String(sl.shift_date).slice(0, 10);
+      m[d] = (m[d] || 0) + Number(sl.expected_hours || 0);
+    }
+    return m;
+  }, [slots]);
+
+  // Visible staff list — honours role filter
+  const visibleStaff = useMemo(() => {
+    if (filterRole === 'ALL') return staff;
+    return staff.filter(s => (s.role || '').toUpperCase() === filterRole);
+  }, [staff, filterRole]);
+
+  // Today's date as ISO for the "today column" highlight
+  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+
+  const saveSlot = async (payload: any, opts: { silentNotify?: boolean } = {}) => {
     const res = await fetch(`/api/restaurant/${restaurantId}/roster`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ slots: [payload] }),
     });
     if (res.ok) {
-      setMessage('Saved & notifications queued');
+      if (!opts.silentNotify) setMessage('Saved & notifications queued');
       setEditing(null);
       fetchAll();
     } else {
@@ -26557,99 +26639,362 @@ function RosterManagement({ restaurantId, token }: { restaurantId: string; token
     else setMessage('Delete failed');
   };
 
+  // "Copy last week" — uses the existing POST /roster/copy endpoint
+  const copyLastWeek = async () => {
+    const fromStart = new Date(start + 'T00:00:00');
+    fromStart.setDate(fromStart.getDate() - 7);
+    const fromEnd = new Date(end + 'T00:00:00');
+    fromEnd.setDate(fromEnd.getDate() - 7);
+    const res = await fetch(`/api/restaurant/${restaurantId}/roster/copy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({
+        from_start: fromStart.toISOString().slice(0, 10),
+        from_end: fromEnd.toISOString().slice(0, 10),
+        to_start: start,
+      }),
+    });
+    if (res.ok) {
+      const d = await res.json();
+      setMessage(`Copied ${d.copied} shift(s) as DRAFT — review and publish`);
+      fetchAll();
+    }
+  };
+
   const shift = (deltaDays: number) => {
     const d = new Date(anchor + 'T00:00:00');
     d.setDate(d.getDate() + deltaDays);
     setAnchor(d.toISOString().slice(0, 10));
   };
 
+  // ── Drag handlers ──────────────────────────────────────────────────────
+  // Drag a shift PILL from one cell to another → MOVE it. Same slot id is
+  // re-POSTed with the new staff_id / shift_date; the backend's upsert
+  // updates in place.
+  const onSlotDragStart = (e: React.DragEvent, slot: any) => {
+    setDraggingSlot(slot);
+    setDraggingTemplate(null);
+    try { e.dataTransfer.setData('text/plain', slot.id); } catch {}
+    e.dataTransfer.effectAllowed = 'move';
+  };
+  const onTemplateDragStart = (e: React.DragEvent, template: any) => {
+    setDraggingTemplate(template);
+    setDraggingSlot(null);
+    try { e.dataTransfer.setData('text/plain', `tpl:${template.id}`); } catch {}
+    e.dataTransfer.effectAllowed = 'copy';
+  };
+  const onCellDragOver = (e: React.DragEvent, staffId: string, date: string) => {
+    if (!draggingSlot && !draggingTemplate) return;
+    e.preventDefault(); // allows drop
+    e.dataTransfer.dropEffect = draggingTemplate ? 'copy' : 'move';
+    setDragOverKey(`${staffId}|${date}`);
+  };
+  const onCellDragLeave = (_e: React.DragEvent, staffId: string, date: string) => {
+    if (dragOverKey === `${staffId}|${date}`) setDragOverKey(null);
+  };
+  const onCellDrop = async (e: React.DragEvent, staffId: string, date: string) => {
+    e.preventDefault();
+    setDragOverKey(null);
+    if (draggingTemplate) {
+      // Create a new shift from the template at the dropped cell
+      await saveSlot({
+        staff_id: staffId, shift_date: date,
+        template_id: draggingTemplate.id,
+        start_time: draggingTemplate.start_time,
+        end_time: draggingTemplate.end_time,
+        status: 'PUBLISHED',
+      });
+      setDraggingTemplate(null);
+      return;
+    }
+    if (!draggingSlot) return;
+    // Move the dragged slot: same id, new staff/date
+    if (draggingSlot.staff_id === staffId && String(draggingSlot.shift_date).slice(0, 10) === date) {
+      setDraggingSlot(null);
+      return; // no-op drop on same cell
+    }
+    await saveSlot({
+      id: draggingSlot.id,
+      staff_id: staffId,
+      shift_date: date,
+      start_time: draggingSlot.start_time,
+      end_time: draggingSlot.end_time,
+      template_id: draggingSlot.template_id || null,
+      status: draggingSlot.status || 'PUBLISHED',
+      notes: draggingSlot.notes,
+    });
+    setDraggingSlot(null);
+  };
+  const onDragEnd = () => {
+    setDraggingSlot(null);
+    setDraggingTemplate(null);
+    setDragOverKey(null);
+  };
+
+  // Distinct roles for the filter pills
+  const distinctRoles = useMemo(() =>
+    Array.from(new Set(staff.map(s => (s.role || '').toUpperCase()).filter(Boolean)))
+  , [staff]);
+
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="space-y-4">
+      {/* ── Header ────────────────────────────────────────────────────── */}
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-3xl font-bold font-serif">Roster</h2>
-          <p className="text-sm text-[#6b5d52] mt-0.5">{start} — {end}</p>
+          <p className="text-sm text-[#6b5d52] mt-0.5">
+            {start} — {end} ·
+            <span className="ml-2 inline-flex items-center gap-1">
+              <span className="font-bold text-[#1a1208]">{stats.totalShifts}</span> shifts
+            </span>
+            <span className="mx-2">·</span>
+            <span className="inline-flex items-center gap-1">
+              <span className="font-bold text-[#1a1208]">{stats.totalHours.toFixed(0)}h</span> total
+            </span>
+            <span className="mx-2">·</span>
+            <span className="inline-flex items-center gap-1">
+              <span className="font-bold text-[#1a1208]">{stats.staffCovered}</span> / {staff.length} staff
+            </span>
+            {stats.draftCount > 0 && (
+              <>
+                <span className="mx-2">·</span>
+                <span className="inline-flex items-center gap-1 text-amber-700 font-bold">{stats.draftCount} draft</span>
+              </>
+            )}
+          </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {(['WEEK', 'FORTNIGHT', 'MONTH'] as const).map(v => (
             <button key={v} onClick={() => setView(v)}
               className={cn(
-                "px-3 py-1.5 text-xs font-bold uppercase tracking-widest rounded-xl",
-                view === v ? "bg-[#cc5a16] text-white" : "bg-white border border-[#cc5a16]/15 text-[#6b5d52]"
+                "px-3 py-1.5 text-xs font-bold uppercase tracking-widest rounded-xl transition-colors",
+                view === v ? "bg-[#cc5a16] text-white" : "bg-white border border-[#cc5a16]/15 text-[#6b5d52] hover:bg-[#cc5a16]/5"
               )}
             >{v}</button>
           ))}
+          <div className="w-px h-6 bg-[#cc5a16]/10 mx-1" />
           <button onClick={() => shift(view === 'WEEK' ? -7 : view === 'FORTNIGHT' ? -14 : -28)}
-            className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold">←</button>
+            title="Previous"
+            className="w-8 h-8 flex items-center justify-center bg-white border border-[#cc5a16]/15 rounded-xl text-sm font-bold hover:bg-[#cc5a16]/5">←</button>
           <button onClick={() => setAnchor(new Date().toISOString().slice(0, 10))}
-            className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold">Today</button>
+            className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold hover:bg-[#cc5a16]/5">Today</button>
           <button onClick={() => shift(view === 'WEEK' ? 7 : view === 'FORTNIGHT' ? 14 : 28)}
-            className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold">→</button>
+            title="Next"
+            className="w-8 h-8 flex items-center justify-center bg-white border border-[#cc5a16]/15 rounded-xl text-sm font-bold hover:bg-[#cc5a16]/5">→</button>
+          <div className="w-px h-6 bg-[#cc5a16]/10 mx-1" />
+          <button onClick={copyLastWeek}
+            className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold text-[#cc5a16] hover:bg-[#cc5a16]/5">
+            Copy last week
+          </button>
         </div>
       </div>
-      {message && <p className="text-xs text-orange-700 font-bold">{message}</p>}
+
+      {/* ── Role filter + templates strip ────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-3 bg-white rounded-2xl border border-[#cc5a16]/10 px-4 py-3">
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mr-1">Filter</span>
+          <button onClick={() => setFilterRole('ALL')}
+            className={cn(
+              "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-colors",
+              filterRole === 'ALL' ? "bg-[#cc5a16] text-white" : "bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/5"
+            )}>All</button>
+          {distinctRoles.map(role => {
+            const p = _rolePalette(role);
+            const active = filterRole === role;
+            return (
+              <button key={role} onClick={() => setFilterRole(role)}
+                className={cn(
+                  "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-colors flex items-center gap-1",
+                  active ? `${p.bg} text-white` : "bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/5"
+                )}>
+                <span className={cn("w-2 h-2 rounded-full", active ? "bg-white/80" : p.bg)} />
+                {role}
+              </button>
+            );
+          })}
+        </div>
+        <div className="w-px h-6 bg-[#cc5a16]/10" />
+        <div className="flex-1 flex items-center gap-2 overflow-x-auto">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] shrink-0">
+            Drag a template ↓
+          </span>
+          {templates.length === 0 ? (
+            <span className="text-[11px] text-[#9c8e85] italic">No templates configured yet</span>
+          ) : (
+            templates.map(t => (
+              <div key={t.id}
+                draggable
+                onDragStart={e => onTemplateDragStart(e, t)}
+                onDragEnd={onDragEnd}
+                className="shrink-0 cursor-grab active:cursor-grabbing px-2.5 py-1.5 bg-[#faf7f2] hover:bg-[#cc5a16]/10 rounded-lg border border-[#cc5a16]/10 text-[11px] flex items-center gap-1.5"
+                title={`Drag onto a cell to create a ${t.label} shift`}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-[#cc5a16]" style={t.color ? { backgroundColor: t.color } : {}} />
+                <span className="font-bold text-[#1a1208]">{t.label}</span>
+                <span className="text-[#9c8e85] font-mono">{t.start_time}–{t.end_time}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {message && (
+        <div className="px-4 py-2 rounded-xl text-sm bg-amber-50 text-amber-800 border border-amber-200">{message}</div>
+      )}
+
+      {/* ── Grid ──────────────────────────────────────────────────────── */}
       {loading ? (
         <div className="py-16 text-center text-[#9c8e85]">Loading roster…</div>
-      ) : staff.length === 0 ? (
-        <div className="py-16 text-center text-[#9c8e85]">No active staff. Add staff in the Staff tab first.</div>
+      ) : visibleStaff.length === 0 ? (
+        <div className="py-16 text-center text-[#9c8e85]">
+          {filterRole === 'ALL' ? 'No active staff. Add staff in the Staff tab first.' : `No staff match "${filterRole}".`}
+        </div>
       ) : (
-        <div className="overflow-x-auto bg-white rounded-2xl border border-[#cc5a16]/10">
-          <table className="min-w-full text-xs">
-            <thead className="bg-[#faf7f2]">
-              <tr>
-                <th className="px-3 py-2 text-left font-bold uppercase tracking-widest text-[#6b5d52] sticky left-0 bg-[#faf7f2] z-10">Staff</th>
+        <div className="overflow-x-auto bg-white rounded-2xl border border-[#cc5a16]/10 shadow-sm">
+          <table className="min-w-full text-xs border-collapse">
+            <thead>
+              <tr className="bg-[#faf7f2]">
+                <th className="px-3 py-2 text-left font-bold uppercase tracking-widest text-[#6b5d52] sticky left-0 bg-[#faf7f2] z-20 border-r border-[#cc5a16]/10 min-w-[180px]">
+                  Staff
+                </th>
                 {days.map(d => {
                   const dt = new Date(d + 'T00:00:00');
+                  const isToday = d === todayIso;
+                  const dayHours = hoursByDay[d] || 0;
                   return (
-                    <th key={d} className="px-2 py-2 text-center font-bold uppercase tracking-widest text-[#6b5d52] min-w-[100px]">
-                      <div>{dt.toLocaleDateString('en-IN', { weekday: 'short' })}</div>
-                      <div className="text-[10px] font-mono">{dt.getDate()}/{dt.getMonth()+1}</div>
+                    <th key={d} className={cn(
+                      "px-2 py-2 text-center font-bold uppercase tracking-widest min-w-[120px] border-l border-[#cc5a16]/5",
+                      isToday ? "bg-amber-50 text-amber-900" : "text-[#6b5d52]"
+                    )}>
+                      <div className="flex items-center justify-center gap-1.5">
+                        <span>{dt.toLocaleDateString('en-IN', { weekday: 'short' })}</span>
+                        {isToday && <span className="px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-900 text-[8px]">TODAY</span>}
+                      </div>
+                      <div className={cn("text-[10px] font-mono mt-0.5", isToday ? "text-amber-700" : "text-[#9c8e85]")}>
+                        {dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                      </div>
+                      <div className={cn("text-[10px] font-bold mt-0.5 font-mono",
+                        dayHours > 0 ? "text-[#cc5a16]" : "text-[#cbb9a8]")}>
+                        {dayHours > 0 ? `${dayHours.toFixed(0)}h` : '—'}
+                      </div>
                     </th>
                   );
                 })}
+                <th className="px-2 py-2 text-center font-bold uppercase tracking-widest text-[#6b5d52] min-w-[60px] bg-[#faf7f2]/70 border-l border-[#cc5a16]/10">
+                  Total
+                </th>
               </tr>
             </thead>
             <tbody>
-              {staff.map(s => (
-                <tr key={s.id} className="border-t border-[#cc5a16]/5">
-                  <td className="px-3 py-2 font-bold text-[#1a1208] sticky left-0 bg-white z-10">
-                    {s.name}
-                    <div className="text-[10px] font-normal text-[#9c8e85] uppercase">{s.role || ''}</div>
-                  </td>
-                  {days.map(d => {
-                    const key = `${s.id}|${d}`;
-                    const cellSlots = slotMap[key] || [];
-                    return (
-                      <td key={d} className="px-1 py-1 align-top">
-                        <div className="space-y-1">
-                          {cellSlots.map((slot: any) => (
-                            <div key={slot.id}
-                              onClick={() => setEditing({ staff_id: s.id, date: d, slot })}
-                              className={cn(
-                                "rounded-lg px-2 py-1 cursor-pointer text-[10px] font-bold",
-                                slot.status === 'DRAFT' ? "bg-gray-100 text-gray-600" :
-                                slot.status === 'CANCELLED' ? "bg-red-50 text-red-500 line-through" :
-                                "bg-[#cc5a16] text-white"
-                              )}
-                            >
-                              {slot.start_time}–{slot.end_time}
-                            </div>
-                          ))}
-                          <button
-                            onClick={() => setEditing({ staff_id: s.id, date: d })}
-                            className="w-full text-[10px] text-[#9c8e85] hover:text-[#cc5a16] py-0.5"
-                            aria-label={`Add shift for ${s.name} on ${d}`}
-                          >+ shift</button>
+              {visibleStaff.map(s => {
+                const p = _rolePalette(s.role);
+                const total = hoursByStaff[s.id] || 0;
+                return (
+                  <tr key={s.id} className="border-t border-[#cc5a16]/5">
+                    <td className="px-3 py-2 font-bold text-[#1a1208] sticky left-0 bg-white z-10 border-r border-[#cc5a16]/10">
+                      <div className="flex items-center gap-2">
+                        <span className={cn("w-2 h-8 rounded-full shrink-0", p.bg)} />
+                        <div>
+                          <div className="leading-tight">{s.name}</div>
+                          <div className="text-[10px] font-normal text-[#9c8e85] uppercase">{s.role || ''}</div>
                         </div>
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
+                      </div>
+                    </td>
+                    {days.map(d => {
+                      const key = `${s.id}|${d}`;
+                      const cellSlots = (slotMap[key] || []).slice().sort((a, b) =>
+                        String(a.start_time).localeCompare(String(b.start_time)));
+                      const isToday = d === todayIso;
+                      const isDropTarget = dragOverKey === key;
+                      return (
+                        <td key={d}
+                          onDragOver={e => onCellDragOver(e, s.id, d)}
+                          onDragLeave={e => onCellDragLeave(e, s.id, d)}
+                          onDrop={e => onCellDrop(e, s.id, d)}
+                          className={cn(
+                            "px-1.5 py-1.5 align-top border-l border-[#cc5a16]/5 min-h-[80px] h-[80px] transition-colors",
+                            isToday && !isDropTarget && "bg-amber-50/30",
+                            isDropTarget && "bg-[#cc5a16]/10 outline outline-2 outline-dashed outline-[#cc5a16]"
+                          )}
+                        >
+                          <div className="flex flex-col gap-1 h-full">
+                            {cellSlots.map((slot: any) => {
+                              const isCancelled = slot.status === 'CANCELLED';
+                              const isDraft     = slot.status === 'DRAFT';
+                              const hrs = Number(slot.expected_hours || _shiftHours(slot.start_time, slot.end_time));
+                              return (
+                                <div key={slot.id}
+                                  draggable={!isCancelled}
+                                  onDragStart={e => onSlotDragStart(e, slot)}
+                                  onDragEnd={onDragEnd}
+                                  onClick={() => setEditing({ staff_id: s.id, date: d, slot })}
+                                  title={`${slot.start_time}–${slot.end_time} (${hrs}h) · ${slot.status || 'PUBLISHED'}${slot.notes ? `\n${slot.notes}` : ''}`}
+                                  className={cn(
+                                    "group relative rounded-lg px-2 py-1 cursor-grab active:cursor-grabbing transition-all",
+                                    "border text-[10px] font-bold leading-tight",
+                                    isCancelled
+                                      ? "bg-red-50 text-red-500 line-through border-red-200 cursor-default"
+                                      : isDraft
+                                        ? cn("bg-white border-dashed", p.border, "text-[#1a1208]")
+                                        : cn(p.bg, "text-white border-transparent hover:" + p.bgDark + " shadow-sm")
+                                  )}
+                                >
+                                  <div className="flex items-center justify-between gap-1">
+                                    <span className="font-mono">{_formatTimeRange(slot.start_time, slot.end_time)}</span>
+                                    <span className={cn(
+                                      "shrink-0 text-[9px]",
+                                      isCancelled ? "" : isDraft ? "text-[#6b5d52]" : "text-white/80"
+                                    )}>
+                                      {hrs}h
+                                    </span>
+                                  </div>
+                                  {(isDraft || slot.notes) && (
+                                    <div className={cn(
+                                      "flex items-center gap-1 mt-0.5 text-[9px] font-normal",
+                                      isDraft ? "text-[#6b5d52]" : "text-white/80"
+                                    )}>
+                                      {isDraft && <span className="uppercase tracking-wider">Draft</span>}
+                                      {isDraft && slot.notes && <span>·</span>}
+                                      {slot.notes && <span className="truncate">{slot.notes}</span>}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                            <button
+                              onClick={() => setEditing({ staff_id: s.id, date: d })}
+                              className="mt-auto w-full text-[10px] text-[#9c8e85] hover:text-[#cc5a16] hover:bg-[#cc5a16]/5 rounded-md py-0.5 transition-colors"
+                              aria-label={`Add shift for ${s.name} on ${d}`}
+                            >+ shift</button>
+                          </div>
+                        </td>
+                      );
+                    })}
+                    <td className="px-2 py-2 text-center bg-[#faf7f2]/40 border-l border-[#cc5a16]/10 align-middle">
+                      <span className={cn("text-xs font-bold font-mono", total > 0 ? "text-[#1a1208]" : "text-[#cbb9a8]")}>
+                        {total > 0 ? `${total.toFixed(0)}h` : '—'}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
+
+      {/* ── Legend ─────────────────────────────────────────────────────── */}
+      {!loading && visibleStaff.length > 0 && (
+        <div className="flex flex-wrap items-center gap-4 px-1 text-[11px] text-[#9c8e85]">
+          <span className="font-bold uppercase tracking-widest">Legend:</span>
+          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-md bg-[#cc5a16]" /> Published</span>
+          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-md border-2 border-dashed border-[#cc5a16] bg-white" /> Draft</span>
+          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-md bg-red-100 border border-red-200" /> Cancelled</span>
+          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-md bg-amber-50 border border-amber-200" /> Today</span>
+          <span className="ml-auto italic">Drag shifts between cells to reassign · Click any shift to edit</span>
+        </div>
+      )}
+
       {editing && (
         <ShiftSlotModal
           editing={editing}
