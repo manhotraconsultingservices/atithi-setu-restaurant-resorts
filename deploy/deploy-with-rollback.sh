@@ -122,6 +122,12 @@ if wait_for_health "$HEALTH_MAX_WAIT"; then
   exit 0
 else
   log "‼ New version did not become healthy"
+  # Capture the failing container's stdout/stderr BEFORE rollback wipes it.
+  # Without this, every silent-rollback leaves us guessing why the new
+  # build wouldn't come up. Capped at 200 lines to keep the log readable.
+  log "── Last 200 lines of node_app stdout/stderr (pre-rollback) ──"
+  docker logs node_app --tail 200 2>&1 | tee -a "$LOG_FILE" || true
+  log "── end of node_app log ──"
   rollback
   fail "new version unhealthy"
 fi
