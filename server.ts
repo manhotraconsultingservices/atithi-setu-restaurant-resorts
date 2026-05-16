@@ -4,7 +4,7 @@ import path from "path";
 import fs from "fs";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import { randomUUID } from "crypto";
+import { randomUUID, createHmac } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
@@ -4720,6 +4720,654 @@ async function startServer() {
 </script>
 </body></html>`);
   });
+
+  // ═════════════════════════════════════════════════════════════════════
+  // CUSTOMER FEEDBACK v2 (Phase F2)
+  // ═════════════════════════════════════════════════════════════════════
+  // Five surfaces:
+  //   1. Token sign/verify  → /feedback?o=…&t=… can't be guessed
+  //   2. /feedback HTML page (public, no auth)
+  //   3. POST /api/feedback/submit  ← form post target
+  //   4. POST /api/restaurant/:id/feedback/:fbId/reply  ← owner reply
+  //   5. GET  /api/restaurant/:id/feedback/summary  ← dashboard KPIs
+
+  // ── Token signing ────────────────────────────────────────────────────
+  // HMAC-signed: payload.signature, payload = base64(tenant|order|exp).
+  // Reused as the dedup key in feedback_requests so re-runs of the cron
+  // never spam the same customer twice for the same bill.
+  const FEEDBACK_TOKEN_SECRET = process.env.FEEDBACK_TOKEN_SECRET
+                              || process.env.JWT_SECRET
+                              || 'atithi-setu-feedback-fallback-secret';
+  const FEEDBACK_TOKEN_TTL_DAYS = 30;
+
+  function _signFeedbackToken(tenantId: string, orderId: string): string {
+    const exp = Date.now() + FEEDBACK_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
+    const payload = `${tenantId}|${orderId}|${exp}`;
+    const b64 = Buffer.from(payload).toString('base64url');
+    const sig = createHmac('sha256', FEEDBACK_TOKEN_SECRET).update(payload).digest('base64url');
+    return `${b64}.${sig}`;
+  }
+
+  function _verifyFeedbackToken(token: string): { tenantId: string; orderId: string } | null {
+    try {
+      const [b64, sig] = String(token || '').split('.');
+      if (!b64 || !sig) return null;
+      const payload = Buffer.from(b64, 'base64url').toString();
+      const [tenantId, orderId, expStr] = payload.split('|');
+      if (!tenantId || !orderId || !expStr) return null;
+      if (Date.now() > Number(expStr)) return null;
+      const expected = createHmac('sha256', FEEDBACK_TOKEN_SECRET).update(payload).digest('base64url');
+      // Constant-time compare to avoid leaking timing info
+      if (sig.length !== expected.length) return null;
+      let diff = 0;
+      for (let i = 0; i < sig.length; i++) diff |= sig.charCodeAt(i) ^ expected.charCodeAt(i);
+      if (diff !== 0) return null;
+      return { tenantId, orderId };
+    } catch { return null; }
+  }
+
+  // ── /feedback public collection page ─────────────────────────────────
+  // Customer lands here from the SMS/WhatsApp/email link. Self-contained
+  // HTML — no React bundle, no auth. Validates the token, asks for stars
+  // + sentiment + optional comment + NPS, POSTs to /api/feedback/submit.
+  app.get('/feedback', async (req: Request, res: Response) => {
+    const token = String(req.query.t || '');
+    const claim = _verifyFeedbackToken(token);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (!claim) {
+      return res.status(400).send(`<!doctype html><html><head><meta charset="utf-8"><title>Link expired</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:sans-serif;max-width:480px;margin:48px auto;padding:24px;background:#faf7f2;color:#1a1208;text-align:center}.card{background:#fff;border-radius:24px;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,.04)}</style></head><body><div class="card"><h1 style="font-family:Georgia,serif">Link expired</h1><p>This feedback link is no longer valid. If you'd like to share feedback, please contact the restaurant directly.</p></div></body></html>`);
+    }
+    // Check if already submitted
+    let alreadySubmitted = false;
+    let restaurantName = '';
+    let restaurantSymbol = '₹';
+    try {
+      const restRow: any = await centralDb.get(
+        "SELECT name, currency_symbol FROM restaurants WHERE id = ?", [claim.tenantId]
+      );
+      restaurantName = restRow?.name || '';
+      restaurantSymbol = restRow?.currency_symbol || '₹';
+      const tenantDb = await getTenantDb(claim.tenantId);
+      const existing: any = await tenantDb.get(
+        "SELECT id FROM feedback WHERE order_id = ?", [claim.orderId]
+      );
+      if (existing) alreadySubmitted = true;
+    } catch { /* fall through */ }
+
+    if (alreadySubmitted) {
+      return res.send(`<!doctype html><html><head><meta charset="utf-8"><title>Thank you</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:sans-serif;max-width:480px;margin:48px auto;padding:24px;background:#faf7f2;color:#1a1208;text-align:center}.card{background:#fff;border-radius:24px;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,.04)}</style></head><body><div class="card"><h1 style="font-family:Georgia,serif">Thanks!</h1><p>You've already shared feedback for this visit to <strong>${restaurantName}</strong>. We appreciate your time.</p></div></body></html>`);
+    }
+
+    res.send(`<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Rate ${restaurantName || 'your visit'}</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;background:#faf7f2;color:#1a1208;min-height:100vh}
+  .wrap{max-width:480px;margin:0 auto;padding:32px 20px}
+  h1{font-family:Georgia,serif;font-size:24px;margin:0 0 4px}
+  .sub{color:#6b5d52;font-size:14px;margin-bottom:24px}
+  .card{background:#fff;border-radius:24px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#6b5d52;margin:16px 0 8px}
+  .stars{display:flex;gap:8px;justify-content:center;font-size:42px;cursor:pointer;-webkit-user-select:none;user-select:none}
+  .stars span{filter:grayscale(1);opacity:.4;transition:all .15s}
+  .stars span.active,.stars span.preview{filter:none;opacity:1;transform:scale(1.1)}
+  .sentiments{display:flex;gap:8px;justify-content:space-between}
+  .sent-btn{flex:1;padding:14px;background:#faf7f2;border:2px solid transparent;border-radius:14px;font-size:24px;cursor:pointer;text-align:center;transition:all .15s}
+  .sent-btn.active{border-color:#cc5a16;background:#fff}
+  .nps-row{display:grid;grid-template-columns:repeat(11,1fr);gap:4px;margin-top:4px}
+  .nps-btn{padding:8px 0;background:#faf7f2;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:13px;transition:all .15s}
+  .nps-btn.active{background:#cc5a16;color:#fff}
+  .nps-labels{display:flex;justify-content:space-between;font-size:10px;color:#9c8e85;margin-top:4px}
+  textarea,input[type=text],input[type=email]{width:100%;padding:12px 14px;border-radius:14px;border:none;background:#faf7f2;font-size:15px;font-family:inherit;resize:none}
+  textarea:focus,input:focus{outline:none;box-shadow:0 0 0 2px rgba(204,90,22,.2)}
+  button.submit{width:100%;padding:16px;background:#cc5a16;color:#fff;border:none;border-radius:14px;font-weight:700;font-size:15px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;margin-top:24px}
+  button.submit:disabled{opacity:.4;cursor:not-allowed}
+  .footer{text-align:center;color:#9c8e85;font-size:11px;margin-top:24px}
+  .err{background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:12px;padding:12px;font-size:14px;margin-top:12px}
+  .ok{text-align:center;padding:32px 16px}
+  .ok h2{font-family:Georgia,serif;font-size:28px;margin:0 0 8px}
+</style>
+</head><body>
+<div class="wrap">
+  <h1>Rate your visit</h1>
+  <div class="sub">${restaurantName}</div>
+  <div class="card" id="card">
+    <div id="form">
+      <label>How many stars?</label>
+      <div class="stars" id="stars">
+        <span data-v="1">⭐</span><span data-v="2">⭐</span><span data-v="3">⭐</span><span data-v="4">⭐</span><span data-v="5">⭐</span>
+      </div>
+      <label>How was it overall?</label>
+      <div class="sentiments">
+        <button class="sent-btn" data-s="POSITIVE" type="button">😍</button>
+        <button class="sent-btn" data-s="NEUTRAL"  type="button">😐</button>
+        <button class="sent-btn" data-s="NEGATIVE" type="button">😞</button>
+      </div>
+      <label>Would you recommend us to a friend? (0-10)</label>
+      <div class="nps-row" id="nps">
+        ${Array.from({length:11},(_,i)=>`<button class="nps-btn" data-n="${i}" type="button">${i}</button>`).join('')}
+      </div>
+      <div class="nps-labels"><span>Not at all</span><span>Definitely</span></div>
+      <label>Anything else? (optional)</label>
+      <textarea id="comment" rows="3" placeholder="Tell us what stood out — or what we can improve."></textarea>
+      <label>Your name (optional)</label>
+      <input id="name" type="text" placeholder="Optional" />
+      <div id="err"></div>
+      <button id="submit" class="submit" disabled>Submit feedback</button>
+    </div>
+    <div id="ok" class="ok" style="display:none">
+      <h2 style="color:#cc5a16">Thank you!</h2>
+      <p style="color:#6b5d52">Your feedback helps ${restaurantName} get better every visit.</p>
+    </div>
+  </div>
+  <div class="footer">Powered by Atithi Setu</div>
+</div>
+<script>
+(function(){
+  var TOKEN = ${JSON.stringify(token)};
+  var rating = 0, sentiment = '', nps = -1;
+  var starsEl = document.getElementById('stars');
+  var npsEl = document.getElementById('nps');
+  var submitBtn = document.getElementById('submit');
+  function refresh(){
+    [].slice.call(starsEl.querySelectorAll('span')).forEach(function(s,i){
+      s.classList.toggle('active', (i+1) <= rating);
+    });
+    submitBtn.disabled = !(rating > 0);
+  }
+  starsEl.addEventListener('click', function(e){
+    var t = e.target.closest('span'); if(!t) return;
+    rating = Number(t.getAttribute('data-v'));
+    refresh();
+  });
+  starsEl.addEventListener('mouseover', function(e){
+    var t = e.target.closest('span'); if(!t) return;
+    var v = Number(t.getAttribute('data-v'));
+    [].slice.call(starsEl.querySelectorAll('span')).forEach(function(s,i){
+      s.classList.toggle('preview', !s.classList.contains('active') && (i+1) <= v);
+    });
+  });
+  starsEl.addEventListener('mouseout', function(){
+    [].slice.call(starsEl.querySelectorAll('span')).forEach(function(s){ s.classList.remove('preview'); });
+  });
+  document.querySelectorAll('.sent-btn').forEach(function(b){
+    b.addEventListener('click', function(){
+      document.querySelectorAll('.sent-btn').forEach(function(x){ x.classList.remove('active'); });
+      b.classList.add('active');
+      sentiment = b.getAttribute('data-s');
+    });
+  });
+  npsEl.addEventListener('click', function(e){
+    var t = e.target.closest('button.nps-btn'); if(!t) return;
+    npsEl.querySelectorAll('button').forEach(function(x){ x.classList.remove('active'); });
+    t.classList.add('active');
+    nps = Number(t.getAttribute('data-n'));
+  });
+  submitBtn.addEventListener('click', function(){
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting…';
+    document.getElementById('err').innerHTML = '';
+    fetch('/api/feedback/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: TOKEN,
+        rating: rating,
+        sentiment: sentiment || null,
+        nps_score: nps >= 0 ? nps : null,
+        comment: document.getElementById('comment').value.trim() || null,
+        customer_name: document.getElementById('name').value.trim() || null,
+      }),
+    }).then(function(r){ return r.json().then(function(d){ return { status: r.status, data: d }; }); })
+      .then(function(res){
+        if (res.status !== 200) {
+          document.getElementById('err').innerHTML = '<div class="err">' + (res.data && res.data.error || 'Submit failed') + '</div>';
+          submitBtn.disabled = false; submitBtn.textContent = 'Submit feedback';
+          return;
+        }
+        document.getElementById('form').style.display = 'none';
+        document.getElementById('ok').style.display = 'block';
+      })
+      .catch(function(e){
+        document.getElementById('err').innerHTML = '<div class="err">' + (e.message || 'Network error') + '</div>';
+        submitBtn.disabled = false; submitBtn.textContent = 'Submit feedback';
+      });
+  });
+})();
+</script>
+</body></html>`);
+  });
+
+  // ── POST /api/feedback/submit (public) ───────────────────────────────
+  app.post('/api/feedback/submit', async (req: Request, res: Response) => {
+    try {
+      const claim = _verifyFeedbackToken(req.body?.token);
+      if (!claim) return res.status(401).json({ error: 'Invalid or expired token' });
+      const rating = Number(req.body?.rating || 0);
+      if (rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating must be 1-5' });
+      const sentiment = req.body?.sentiment ? String(req.body.sentiment).toUpperCase() : null;
+      if (sentiment && !['POSITIVE', 'NEUTRAL', 'NEGATIVE'].includes(sentiment)) {
+        return res.status(400).json({ error: 'Invalid sentiment' });
+      }
+      const npsRaw = req.body?.nps_score;
+      const nps = (npsRaw == null || npsRaw === '') ? null : Number(npsRaw);
+      if (nps != null && (nps < 0 || nps > 10)) return res.status(400).json({ error: 'NPS must be 0-10' });
+      const tenantDb = await getTenantDb(claim.tenantId);
+      // Idempotency: one feedback per order
+      const existing: any = await tenantDb.get(
+        "SELECT id FROM feedback WHERE order_id = ?", [claim.orderId]
+      );
+      if (existing) return res.status(409).json({ error: 'Feedback already submitted for this order' });
+      // Lookup the customer phone/email from the original order
+      const order: any = await tenantDb.get(
+        "SELECT customer_phone, customer_email FROM orders WHERE id = ?", [claim.orderId]
+      ).catch(() => null);
+      const restRow: any = await centralDb.get(
+        "SELECT feedback_minimum_rating_public FROM restaurants WHERE id = ?", [claim.tenantId]
+      ).catch(() => null);
+      const minPublic = Number(restRow?.feedback_minimum_rating_public || 4);
+      const isPublic = rating >= minPublic ? 1 : 0;
+      // Detect source channel from the matching feedback_request row (if any)
+      let sourceChannel: string | null = null;
+      let requestId: string | null = null;
+      const reqRow: any = await tenantDb.get(
+        `SELECT id, channel FROM feedback_requests
+         WHERE order_id = ? AND responded_at IS NULL
+         ORDER BY sent_at DESC LIMIT 1`, [claim.orderId]
+      ).catch(() => null);
+      if (reqRow) {
+        sourceChannel = `${reqRow.channel}_LINK`;
+        requestId = reqRow.id;
+      }
+      const id = `FB-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO feedback (id, order_id, rating, sentiment, nps_score, comment,
+                               customer_name, customer_phone, customer_email,
+                               is_public, source_channel, request_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        [id, claim.orderId, rating, sentiment, nps, req.body?.comment || null,
+         req.body?.customer_name || null,
+         order?.customer_phone || null,
+         order?.customer_email || null,
+         isPublic, sourceChannel || 'QR_DIRECT', requestId]
+      );
+      // Mark the request as responded for analytics
+      if (requestId) {
+        await tenantDb.run(
+          `UPDATE feedback_requests SET responded_at = CURRENT_TIMESTAMP, feedback_id = ? WHERE id = ?`,
+          [id, requestId]
+        ).catch(() => {});
+      }
+      res.json({ success: true, id });
+    } catch (err) {
+      console.error('Feedback submit error:', err);
+      res.status(500).json({ error: 'Failed to submit feedback' });
+    }
+  });
+
+  // ── Owner-side endpoints ─────────────────────────────────────────────
+  // Dashboard KPI summary: avg rating, response rate, NPS, sentiment mix.
+  app.get('/api/restaurant/:id/feedback/summary', authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const days = Number(req.query.days || 30);
+      const db = await getTenantDb(req.params.id);
+      const since = `CURRENT_TIMESTAMP - INTERVAL '${Math.max(1, Math.min(365, days))} days'`;
+      const overall: any = await db.get(
+        `SELECT COUNT(*) AS count,
+                COALESCE(AVG(rating), 0) AS avg_rating,
+                COALESCE(SUM(CASE WHEN nps_score IS NOT NULL THEN 1 ELSE 0 END), 0) AS nps_count,
+                COALESCE(AVG(nps_score), 0) AS avg_nps,
+                COALESCE(SUM(CASE WHEN nps_score >= 9 THEN 1 ELSE 0 END), 0) AS promoters,
+                COALESCE(SUM(CASE WHEN nps_score BETWEEN 0 AND 6 THEN 1 ELSE 0 END), 0) AS detractors,
+                COALESCE(SUM(CASE WHEN sentiment = 'POSITIVE' THEN 1 ELSE 0 END), 0) AS sent_pos,
+                COALESCE(SUM(CASE WHEN sentiment = 'NEUTRAL' THEN 1 ELSE 0 END), 0) AS sent_neu,
+                COALESCE(SUM(CASE WHEN sentiment = 'NEGATIVE' THEN 1 ELSE 0 END), 0) AS sent_neg,
+                COALESCE(SUM(CASE WHEN owner_reply IS NOT NULL THEN 1 ELSE 0 END), 0) AS replied
+         FROM feedback WHERE created_at >= ${since}`
+      );
+      const reqRow: any = await db.get(
+        `SELECT COUNT(*) AS sent,
+                COALESCE(SUM(CASE WHEN responded_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS responded
+         FROM feedback_requests WHERE sent_at >= ${since}`
+      ).catch(() => ({ sent: 0, responded: 0 }));
+      const series: any[] = await db.query(
+        `SELECT DATE(created_at) AS d, COUNT(*) AS n, AVG(rating) AS avg_r
+           FROM feedback WHERE created_at >= ${since}
+          GROUP BY DATE(created_at) ORDER BY d ASC`
+      );
+      const npsCount = Number(overall?.nps_count || 0);
+      const promoters = Number(overall?.promoters || 0);
+      const detractors = Number(overall?.detractors || 0);
+      const npsScore = npsCount > 0 ? Math.round(((promoters - detractors) / npsCount) * 100) : null;
+      const sent = Number(reqRow?.sent || 0);
+      const responded = Number(reqRow?.responded || 0);
+      const responseRate = sent > 0 ? Math.round((responded / sent) * 100) : null;
+      res.json({
+        count: Number(overall?.count || 0),
+        avg_rating: Number(overall?.avg_rating || 0),
+        nps_score: npsScore,
+        nps_count: npsCount,
+        response_rate_percent: responseRate,
+        requests_sent: sent,
+        requests_responded: responded,
+        sentiment: {
+          positive: Number(overall?.sent_pos || 0),
+          neutral:  Number(overall?.sent_neu || 0),
+          negative: Number(overall?.sent_neg || 0),
+        },
+        replied: Number(overall?.replied || 0),
+        time_series: (series || []).map(r => ({
+          date: String(r.d).slice(0, 10),
+          count: Number(r.n || 0),
+          avg_rating: Number(r.avg_r || 0),
+        })),
+      });
+    } catch (err) {
+      console.error('Feedback summary error:', err);
+      res.status(500).json({ error: 'Failed to load summary' });
+    }
+  });
+
+  // List endpoint with filters: rating, sentiment, replied, public
+  app.get('/api/restaurant/:id/feedback', authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const where: string[] = [];
+      const params: any[] = [];
+      if (req.query.rating)    { where.push('rating = ?'); params.push(Number(req.query.rating)); }
+      if (req.query.sentiment) { where.push('sentiment = ?'); params.push(String(req.query.sentiment).toUpperCase()); }
+      if (req.query.replied === '1') where.push('owner_reply IS NOT NULL');
+      if (req.query.replied === '0') where.push('owner_reply IS NULL');
+      if (req.query.public === '1')  where.push('is_public = 1');
+      const sql = `SELECT * FROM feedback ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+                   ORDER BY created_at DESC LIMIT 200`;
+      const rows = await db.query(sql, params);
+      res.json(rows || []);
+    } catch (err) {
+      console.error('Feedback list error:', err);
+      res.status(500).json({ error: 'Failed to load feedback' });
+    }
+  });
+
+  // POST owner reply — saves on the feedback row + sends via the same
+  // channel the customer used to submit (if known).
+  app.post('/api/restaurant/:id/feedback/:fbId/reply', authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const reply = String(req.body?.reply || '').trim();
+      if (!reply) return res.status(400).json({ error: 'Reply text required' });
+      const db = await getTenantDb(req.params.id);
+      const fb: any = await db.get("SELECT * FROM feedback WHERE id = ?", [req.params.fbId]);
+      if (!fb) return res.status(404).json({ error: 'Feedback not found' });
+      // Determine channel: email > whatsapp/sms (per customer info)
+      let channel = 'INTERNAL';
+      if (fb.customer_email) channel = 'EMAIL';
+      else if (fb.customer_phone) {
+        const src = (fb.source_channel || '').toString().toUpperCase();
+        channel = src.startsWith('WHATSAPP') ? 'WHATSAPP' : 'SMS';
+      }
+      await db.run(
+        `UPDATE feedback SET owner_reply = ?, owner_reply_at = CURRENT_TIMESTAMP,
+                              owner_reply_by = ?, reply_sent_via = ?, resolved = 1
+         WHERE id = ?`,
+        [reply, req.user?.email || 'owner', channel, req.params.fbId]
+      );
+      // Fire the notification — use the FEEDBACK_OWNER_REPLY template
+      triggerNotification(req.params.id, 'FEEDBACK_OWNER_REPLY', {
+        customerName: fb.customer_name || 'Friend',
+        customerEmail: fb.customer_email,
+        customerPhone: fb.customer_phone,
+        rating: fb.rating,
+        comment: fb.comment,
+        reply,
+      }).catch(err => console.error('[feedback] reply notify error:', err));
+      res.json({ success: true, channel });
+    } catch (err) {
+      console.error('Feedback reply error:', err);
+      res.status(500).json({ error: 'Failed to save reply' });
+    }
+  });
+
+  // PATCH feedback (toggle is_public, resolved, etc.)
+  app.patch('/api/restaurant/:id/feedback/:fbId', authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Insufficient permission' });
+      }
+      const db = await getTenantDb(req.params.id);
+      const sets: string[] = [];
+      const params: any[] = [];
+      if (req.body?.is_public != null) { sets.push('is_public = ?'); params.push(req.body.is_public ? 1 : 0); }
+      if (req.body?.resolved != null)  { sets.push('resolved = ?');  params.push(req.body.resolved ? 1 : 0); }
+      if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+      params.push(req.params.fbId);
+      await db.run(`UPDATE feedback SET ${sets.join(', ')} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Feedback patch error:', err);
+      res.status(500).json({ error: 'Failed to update' });
+    }
+  });
+
+  // Public /reviews HTML page — last 30/90 day positive reviews. Honours
+  // the tenant's feedback_public_reviews_enabled flag.
+  app.get('/reviews', async (_req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.send(`<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Reviews</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;background:#faf7f2;color:#1a1208;min-height:100vh}
+  .wrap{max-width:680px;margin:0 auto;padding:32px 20px}
+  h1{font-family:Georgia,serif;font-size:32px;margin:0 0 4px}
+  .sub{color:#6b5d52;font-size:14px;margin-bottom:24px}
+  .stat{display:flex;gap:24px;background:#fff;border-radius:24px;padding:24px;margin-bottom:24px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  .stat-blk{flex:1;text-align:center}
+  .stat-val{font-size:32px;font-weight:700;font-family:Georgia,serif;color:#cc5a16}
+  .stat-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#9c8e85;margin-top:4px}
+  .review{background:#fff;border-radius:24px;padding:20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  .review-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .name{font-weight:700}
+  .date{font-size:12px;color:#9c8e85}
+  .stars{font-size:18px;margin-bottom:8px}
+  .comment{color:#3d3128;line-height:1.5;margin:0}
+  .reply{background:#faf7f2;border-radius:14px;padding:14px;margin-top:12px;border-left:3px solid #cc5a16}
+  .reply-head{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#cc5a16;font-weight:700;margin-bottom:6px}
+  .filter{display:flex;gap:8px;margin-bottom:16px}
+  .filter button{padding:8px 16px;background:#fff;border:1px solid rgba(204,90,22,.15);border-radius:14px;font-size:13px;cursor:pointer}
+  .filter button.active{background:#cc5a16;color:#fff;border-color:#cc5a16}
+  .empty{text-align:center;color:#9c8e85;padding:48px 20px;background:#fff;border-radius:24px}
+  .footer{text-align:center;color:#9c8e85;font-size:11px;margin-top:32px;padding-top:16px;border-top:1px solid rgba(0,0,0,.05)}
+</style>
+</head><body>
+<div class="wrap">
+  <h1 id="title">Reviews</h1>
+  <div class="sub" id="restName">Loading…</div>
+  <div class="filter">
+    <button class="active" data-days="30">Last 30 days</button>
+    <button data-days="90">Last 90 days</button>
+    <button data-days="365">Last year</button>
+  </div>
+  <div id="content"></div>
+  <div class="footer">Powered by Atithi Setu</div>
+</div>
+<script>
+(function(){
+  var RESERVED = ['www','api','admin','app','demo','internal','support','mail','ftp','blog','cdn','static','help','docs','auth','login','signup','register','test','staging','dev','erp'];
+  function slug(){
+    var h = window.location.hostname;
+    if(h==='localhost'||h==='127.0.0.1') {
+      var p = new URLSearchParams(window.location.search);
+      var qp = p.get('tenant'); return qp && RESERVED.indexOf(qp.toLowerCase())===-1 ? qp.toLowerCase() : null;
+    }
+    var parts = h.split('.');
+    if(parts.length<3) return null;
+    var first = parts[0].toLowerCase();
+    if(RESERVED.indexOf(first)!==-1) return null;
+    return first;
+  }
+  var s = slug();
+  var restId = null, days = 30;
+  if(!s){ document.getElementById('content').innerHTML = '<div class="empty">No tenant detected.</div>'; return; }
+  fetch('/api/tenant/by-slug/' + encodeURIComponent(s)).then(r=>r.json()).then(function(t){
+    restId = t.id;
+    document.getElementById('title').textContent = (t.name || 'Restaurant') + ' Reviews';
+    document.getElementById('restName').textContent = 'What our guests are saying';
+    load();
+  }).catch(function(){ document.getElementById('content').innerHTML = '<div class="empty">Restaurant not found.</div>'; });
+
+  function star(n){ return '⭐'.repeat(Math.max(0,Math.min(5, Number(n)||0))); }
+  function fmtDate(iso){
+    try{ return new Date(iso).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}); }catch(e){ return iso||''; }
+  }
+  function load(){
+    var c = document.getElementById('content');
+    c.innerHTML = '<div class="empty">Loading…</div>';
+    Promise.all([
+      fetch('/api/public/restaurant/'+encodeURIComponent(restId)+'/reviews?days='+days).then(r=>r.json()),
+      fetch('/api/public/restaurant/'+encodeURIComponent(restId)+'/reviews/summary?days='+days).then(r=>r.json()).catch(function(){return null;}),
+    ]).then(function(both){
+      var list = both[0] || [];
+      var sum  = both[1];
+      var html = '';
+      if(sum && sum.count > 0){
+        html += '<div class="stat">';
+        html += '<div class="stat-blk"><div class="stat-val">'+Number(sum.avg_rating||0).toFixed(1)+'</div><div class="stat-lbl">Avg rating</div></div>';
+        html += '<div class="stat-blk"><div class="stat-val">'+sum.count+'</div><div class="stat-lbl">Reviews</div></div>';
+        if(sum.nps_score!=null){ html += '<div class="stat-blk"><div class="stat-val">'+sum.nps_score+'</div><div class="stat-lbl">NPS</div></div>'; }
+        html += '</div>';
+      }
+      if(!list.length){
+        html += '<div class="empty">No reviews in this window yet.</div>';
+      } else {
+        for(var i=0;i<list.length;i++){
+          var f = list[i];
+          html += '<div class="review">';
+          html += '<div class="review-head"><div class="name">'+(f.customer_name||'Anonymous')+'</div><div class="date">'+fmtDate(f.created_at)+'</div></div>';
+          html += '<div class="stars">'+star(f.rating)+'</div>';
+          if(f.comment){ html += '<p class="comment">'+f.comment.replace(/</g,'&lt;')+'</p>'; }
+          if(f.owner_reply){
+            html += '<div class="reply"><div class="reply-head">Reply from the restaurant</div>'+f.owner_reply.replace(/</g,'&lt;')+'</div>';
+          }
+          html += '</div>';
+        }
+      }
+      c.innerHTML = html;
+      // Schema.org Review JSON-LD for SEO
+      if(list.length){
+        var ld = {
+          "@context": "https://schema.org",
+          "@type": "LocalBusiness",
+          "name": (document.getElementById('title').textContent || 'Restaurant').replace(/ Reviews$/,''),
+          "aggregateRating": {
+            "@type": "AggregateRating",
+            "ratingValue": sum && sum.avg_rating ? Number(sum.avg_rating).toFixed(1) : '5',
+            "reviewCount": list.length
+          },
+          "review": list.slice(0, 10).map(function(f){ return {
+            "@type": "Review",
+            "reviewRating": { "@type": "Rating", "ratingValue": f.rating, "bestRating": 5 },
+            "author": { "@type": "Person", "name": f.customer_name || "Anonymous" },
+            "reviewBody": f.comment || ""
+          }; })
+        };
+        var s = document.createElement('script'); s.type = 'application/ld+json';
+        s.textContent = JSON.stringify(ld);
+        document.head.appendChild(s);
+      }
+    });
+  }
+  document.querySelector('.filter').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-days]'); if(!b) return;
+    document.querySelectorAll('.filter button').forEach(function(x){ x.classList.remove('active'); });
+    b.classList.add('active');
+    days = Number(b.getAttribute('data-days'));
+    load();
+  });
+})();
+</script>
+</body></html>`);
+  });
+
+  // Public reviews API — returns recent positive feedback for the /reviews page
+  app.get('/api/public/restaurant/:id/reviews', async (req: Request, res: Response) => {
+    try {
+      const days = Math.max(1, Math.min(365, Number(req.query.days || 90)));
+      const restRow: any = await centralDb.get(
+        "SELECT feedback_public_reviews_enabled, feedback_minimum_rating_public FROM restaurants WHERE id = ?",
+        [req.params.id]
+      );
+      if (!restRow || Number(restRow.feedback_public_reviews_enabled || 0) === 0) {
+        return res.json([]);
+      }
+      const minRating = Number(restRow.feedback_minimum_rating_public || 4);
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT id, rating, comment, customer_name, sentiment, owner_reply, created_at
+           FROM feedback
+          WHERE is_public = 1
+            AND rating >= ?
+            AND created_at >= CURRENT_TIMESTAMP - INTERVAL '${days} days'
+          ORDER BY created_at DESC
+          LIMIT 100`,
+        [minRating]
+      );
+      res.json(rows || []);
+    } catch (err) {
+      console.error('Public reviews error:', err);
+      res.status(500).json([]);
+    }
+  });
+
+  app.get('/api/public/restaurant/:id/reviews/summary', async (req: Request, res: Response) => {
+    try {
+      const days = Math.max(1, Math.min(365, Number(req.query.days || 90)));
+      const restRow: any = await centralDb.get(
+        "SELECT feedback_public_reviews_enabled, feedback_minimum_rating_public FROM restaurants WHERE id = ?",
+        [req.params.id]
+      );
+      if (!restRow || Number(restRow.feedback_public_reviews_enabled || 0) === 0) {
+        return res.json({ count: 0, avg_rating: 0, nps_score: null });
+      }
+      const minRating = Number(restRow.feedback_minimum_rating_public || 4);
+      const db = await getTenantDb(req.params.id);
+      const row: any = await db.get(
+        `SELECT COUNT(*) AS count, COALESCE(AVG(rating), 0) AS avg_rating,
+                COALESCE(SUM(CASE WHEN nps_score IS NOT NULL THEN 1 ELSE 0 END), 0) AS nps_count,
+                COALESCE(SUM(CASE WHEN nps_score >= 9 THEN 1 ELSE 0 END), 0) AS promoters,
+                COALESCE(SUM(CASE WHEN nps_score BETWEEN 0 AND 6 THEN 1 ELSE 0 END), 0) AS detractors
+           FROM feedback
+          WHERE is_public = 1
+            AND rating >= ?
+            AND created_at >= CURRENT_TIMESTAMP - INTERVAL '${days} days'`,
+        [minRating]
+      );
+      const npsCount = Number(row?.nps_count || 0);
+      const npsScore = npsCount > 0
+        ? Math.round(((Number(row.promoters) - Number(row.detractors)) / npsCount) * 100)
+        : null;
+      res.json({
+        count: Number(row?.count || 0),
+        avg_rating: Number(row?.avg_rating || 0),
+        nps_score: npsScore,
+      });
+    } catch (err) {
+      console.error('Public reviews summary error:', err);
+      res.status(500).json({ count: 0, avg_rating: 0, nps_score: null });
+    }
+  });
+
+  // Expose token signer for the auto-request cron
+  (globalThis as any).__signFeedbackToken = _signFeedbackToken;
 
   // ─────────────────────────────────────────────────────────────────────
   // TAX + CURRENCY (Phase 2 — template-driven multi-country)
@@ -14737,7 +15385,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-multitax-and-auto-loyalty',
+    commit_marker: 'feedback-v2-customer-experience',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -14772,6 +15420,11 @@ async function startServer() {
       'invoice-multitax-from-tax-config',// CRITICAL FIX: manual invoices + orders now honour every enabled row in tax_config (Tax Line 2+ finally renders on the receipt)
       'invoice-auto-loyalty-discount',   // CRITICAL FIX: server applies tier discount whenever the customer phone matches; manual entry still wins if larger
       'tax-config-legacy-rate-migration',// Auto-seed of tax_config preserves the tenant's existing restaurants.gst_percentage (no silent revert to preset 5%)
+      'feedback-v2-auto-request',        // F2: 15-min cron sends signed feedback link 30 min after settled invoice
+      'feedback-v2-public-collection',   // F2: /feedback page (token-signed) + POST /api/feedback/submit
+      'feedback-v2-owner-reply',         // F2: owner replies via WhatsApp/SMS/Email through the same channel customer used
+      'feedback-v2-public-reviews',      // F2: /reviews page with Schema.org markup, owner-controlled visibility
+      'feedback-v2-nps-sentiment',       // F2: 0-10 NPS score + positive/neutral/negative sentiment dashboard
     ],
     booted_at: new Date().toISOString(),
   };
@@ -15594,6 +16247,92 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[loyalty-nudge] Weekly near-upgrade nudge cron started — Mon 09:00 IST');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Phase F2 — Auto-feedback-request cron (every 15 minutes) ────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Scans every active tenant whose `auto_feedback_request_enabled = 1`
+  // for orders settled within the last (delay … delay+30) minute window
+  // that haven't already received a feedback request. Sends a signed link
+  // via WhatsApp / SMS / Email per the tenant's configured channels.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const tenants: any[] = await centralDb.query(
+        `SELECT id, name, feedback_request_delay_minutes, feedback_request_channels
+           FROM restaurants
+          WHERE is_active = 1 AND id <> 'SYSTEM'
+            AND access_revoked = 0
+            AND auto_feedback_request_enabled = 1`
+      );
+      if (!tenants || tenants.length === 0) return;
+      console.log(`[feedback-request] scanning ${tenants.length} opted-in tenants`);
+      let totalSent = 0;
+      for (const t of tenants) {
+        try {
+          const delay = Math.max(5, Number(t.feedback_request_delay_minutes || 30));
+          const channels = String(t.feedback_request_channels || 'WHATSAPP,SMS')
+            .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+          const db = await getTenantDb(t.id);
+          // Pick orders that settled between (delay) and (delay + 30) minutes ago.
+          // Filtering on a 30-minute window keeps the cron cheap; we run every 15
+          // minutes so every order gets at least one chance.
+          const candidates: any[] = await db.query(
+            `SELECT o.id, o.customer_phone, o.customer_email, o.customer_name,
+                    o.payment_status, o.created_at
+               FROM orders o
+              WHERE (o.customer_phone IS NOT NULL AND o.customer_phone <> '')
+                AND (o.payment_status = 'PAID' OR o.invoice_status = 'PRINTED')
+                AND o.created_at <= CURRENT_TIMESTAMP - INTERVAL '${delay} minutes'
+                AND o.created_at >  CURRENT_TIMESTAMP - INTERVAL '${delay + 30} minutes'
+                AND NOT EXISTS (
+                  SELECT 1 FROM feedback_requests fr WHERE fr.order_id = o.id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM feedback f WHERE f.order_id = o.id
+                )`
+          ).catch(() => []);
+          if (!candidates || candidates.length === 0) continue;
+          for (const o of candidates) {
+            const token = _signFeedbackToken(t.id, o.id);
+            const link = `https://${process.env.PUBLIC_HOST || 'atithi-setu.com'}/feedback?t=${encodeURIComponent(token)}`;
+            // Pick the primary channel — first one in the list for which we
+            // have contact info. We record one feedback_requests row per send
+            // attempt so dedup + response-rate stats stay clean.
+            const phone = o.customer_phone;
+            const email = o.customer_email;
+            for (const channel of channels) {
+              const supported = (channel === 'EMAIL' && email)
+                             || (channel === 'WHATSAPP' && phone)
+                             || (channel === 'SMS' && phone);
+              if (!supported) continue;
+              const reqId = `freq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+              await db.run(
+                `INSERT INTO feedback_requests (id, order_id, customer_phone, customer_email, channel)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [reqId, o.id, phone, email, channel]
+              ).catch(() => {});
+              // Reuse the existing notification dispatcher
+              triggerNotification(t.id, 'FEEDBACK_REQUEST', {
+                customerName: o.customer_name || 'Friend',
+                customerEmail: channel === 'EMAIL' ? email : null,
+                customerPhone: channel !== 'EMAIL' ? phone : null,
+                feedback_link: link,
+                _force_channel: channel,
+              }).catch(err => console.error(`[feedback-request] send error for order ${o.id}:`, err));
+              totalSent++;
+              break; // one channel per order per scan window
+            }
+          }
+        } catch (err) {
+          console.error(`[feedback-request] tenant ${t.id} failed:`, err);
+        }
+      }
+      if (totalSent > 0) console.log(`[feedback-request] sent ${totalSent} feedback requests across ${tenants.length} tenants`);
+    } catch (err) {
+      console.error('[feedback-request] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[feedback-request] Auto-feedback-request cron started — every 15 minutes');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase 4 — Outbound delivery-platform sync queue worker ──────────────

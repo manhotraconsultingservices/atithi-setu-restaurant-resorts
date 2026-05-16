@@ -947,6 +947,62 @@ export function buildNotificationContent(
       };
     }
 
+    /* ── Customer feedback (Phase F2) ─────────────────────────────────── */
+
+    case 'FEEDBACK_REQUEST': {
+      // Sent N minutes after a bill is settled (cron). Includes a one-click
+      // link to the public /feedback page so the customer can rate without
+      // logging in. Token is order-id-signed so links can't be guessed.
+      const name = data.customerName || data.name || 'there';
+      const link = data.feedback_link || '';
+      return {
+        subject: `How was your visit to ${r}?`,
+        text:
+          `Hi ${name},\n\n` +
+          `Thanks for visiting ${r}! We'd love to hear how it went.\n\n` +
+          `Rate your visit in 10 seconds: ${link}\n\n` +
+          `Your feedback helps us improve and lets future guests know what to expect.\n\n— The ${r} team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">How was your visit?</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>Thanks for visiting <strong>${r}</strong>! We'd love to hear how it went.</p>` +
+          `<p style="text-align:center;margin:24px 0">` +
+          `<a href="${link}" style="background:#cc5a16;color:#fff;padding:14px 28px;border-radius:12px;text-decoration:none;font-weight:700;display:inline-block">Rate your visit</a>` +
+          `</p>` +
+          `<p style="color:#6b7280;font-size:13px">Takes 10 seconds. Your feedback helps us improve and lets future guests know what to expect.</p>` +
+          `<p style="color:#9ca3af;font-size:12px;margin:0">— The ${r} team</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'FEEDBACK_OWNER_REPLY': {
+      // Owner replies to a piece of feedback; the reply gets sent to the
+      // customer via the same channel they used. Includes the original rating
+      // and comment so the customer remembers what they wrote.
+      const name = data.customerName || 'Friend';
+      const reply = data.reply || '';
+      const rating = data.rating ? `${'⭐'.repeat(Math.max(0, Math.min(5, Number(data.rating))))} ` : '';
+      return {
+        subject: `${r} replied to your feedback`,
+        text:
+          `Hi ${name},\n\n` +
+          `Thank you for your ${rating}feedback. The ${r} team has replied:\n\n` +
+          `"${reply}"\n\n` +
+          `We appreciate you taking the time to help us improve.\n\n— The ${r} team`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">Thanks for your feedback</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          (data.rating ? `<p style="font-size:24px;margin:8px 0">${rating}</p>` : '') +
+          (data.comment ? `<blockquote style="background:#f9fafb;border-left:3px solid #d1d5db;padding:8px 12px;margin:8px 0;color:#6b7280;font-style:italic">${data.comment}</blockquote>` : '') +
+          `<p style="margin-top:24px"><strong>The ${r} team replied:</strong></p>` +
+          `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:14px;color:#1a1208">${reply}</div>` +
+          `<p style="color:#9ca3af;font-size:12px;margin-top:24px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
     /* ── Subscription billing ─────────────────────────────────────────── */
 
     case 'PAYMENT_DUE_SOON': {

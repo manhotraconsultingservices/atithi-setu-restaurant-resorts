@@ -180,7 +180,24 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS currency_code TEXT DEFAULT 'INR';
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS currency_symbol TEXT DEFAULT '₹';
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS locale TEXT DEFAULT 'en-IN';
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS tax_template_id TEXT DEFAULT 'IN_GST'
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS tax_template_id TEXT DEFAULT 'IN_GST';
+    -- Phase F2 (Customer Experience v2) — feedback settings.
+    --   auto_feedback_request_enabled    0 (default) = no auto-send. Owner
+    --                                    must opt in via Settings.
+    --   feedback_request_delay_minutes   how long after the bill is settled
+    --                                    before the SMS / WhatsApp goes out.
+    --                                    30 minutes default — long enough to
+    --                                    finish the meal, short enough to be
+    --                                    top-of-mind.
+    --   feedback_request_channels        comma-separated: SMS,WHATSAPP,EMAIL
+    --   feedback_public_reviews_enabled  expose /reviews page publicly.
+    --   feedback_minimum_rating_public   stars >= this go to /reviews;
+    --                                    below stays internal-only.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS auto_feedback_request_enabled INT DEFAULT 0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS feedback_request_delay_minutes INT DEFAULT 30;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS feedback_request_channels TEXT DEFAULT 'WHATSAPP,SMS';
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS feedback_public_reviews_enabled INT DEFAULT 1;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS feedback_minimum_rating_public INT DEFAULT 4
   `);
 
   // Migration: unique index on locations (safe to run multiple times)
@@ -472,6 +489,35 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       rating INT,
       comment TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    -- Phase F2 enrichment: sentiment, customer identity, NPS, reply chain.
+    -- All nullable / defaulted so legacy rows continue to render.
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS sentiment TEXT;            -- 'POSITIVE' | 'NEUTRAL' | 'NEGATIVE' | NULL
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS customer_name TEXT;
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS customer_phone TEXT;
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS customer_email TEXT;
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS nps_score INT;             -- 0-10 likelihood-to-recommend
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS owner_reply TEXT;
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS owner_reply_at TIMESTAMP;
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS owner_reply_by TEXT;
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS reply_sent_via TEXT;       -- 'SMS' | 'WHATSAPP' | 'EMAIL' | 'INTERNAL'
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS is_public INT DEFAULT 1;   -- 0 = hidden from public /reviews page
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS resolved INT DEFAULT 0;    -- internal status
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS source_channel TEXT;       -- 'POS' | 'QR' | 'EMAIL_LINK' | 'WHATSAPP_LINK' | 'SMS_LINK'
+    ALTER TABLE feedback ADD COLUMN IF NOT EXISTS request_id TEXT;           -- → feedback_requests.id when this row was solicited
+
+    -- Dedup + analytics table for solicited feedback requests. One row per
+    -- request sent. Used to compute the response rate KPI and to prevent
+    -- the auto-cron from spamming the same order multiple times.
+    CREATE TABLE IF NOT EXISTS feedback_requests (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      customer_phone TEXT,
+      customer_email TEXT,
+      channel TEXT NOT NULL,                  -- 'SMS' | 'WHATSAPP' | 'EMAIL'
+      sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      responded_at TIMESTAMP,                 -- populated when the matching feedback row is inserted
+      feedback_id TEXT
     );
 
     CREATE TABLE IF NOT EXISTS attendance_staff (

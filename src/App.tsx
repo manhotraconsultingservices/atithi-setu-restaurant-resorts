@@ -11285,6 +11285,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </button>
           </div>
 
+          {/* Phase F2 dashboard: KPIs, sentiment, response rate, time-series */}
+          <FeedbackDashboardV2 restaurantId={restaurantId} token={token!} onReplyPosted={fetchFeedback} />
+
           {/* Feedback filters */}
           <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
             <div className="relative flex-1">
@@ -25118,6 +25121,251 @@ function KPICard({ label, value }: { label: string; value: string }) {
     <div className="bg-white rounded-2xl border border-[#cc5a16]/10 px-5 py-4 shadow-sm">
       <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{label}</div>
       <div className="text-2xl font-serif font-bold text-[#1a1208] mt-1">{value}</div>
+    </div>
+  );
+}
+
+// FeedbackDashboardV2 (Phase F2) — sits at the top of the FEEDBACK tab.
+// Shows KPIs (avg rating, NPS, response rate), sentiment breakdown,
+// time-series of rating-over-time, and a recent-feedback panel where the
+// owner can reply inline. Owner can also toggle a feedback row as
+// "public" (shown on /reviews) or "private" (internal only).
+function FeedbackDashboardV2({ restaurantId, token, onReplyPosted }: {
+  restaurantId: string; token: string; onReplyPosted?: () => void;
+}) {
+  const [days, setDays] = useState<30 | 90 | 365>(30);
+  const [summary, setSummary] = useState<any | null>(null);
+  const [recent, setRecent] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [replyingFor, setReplyingFor] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [sumRes, listRes] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/feedback/summary?days=${days}`,
+          { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/restaurant/${restaurantId}/feedback`,
+          { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
+      if (sumRes.ok) setSummary(await sumRes.json());
+      if (listRes.ok) setRecent(await listRes.json());
+    } finally { setLoading(false); }
+  }, [restaurantId, token, days]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const reply = async (fbId: string) => {
+    if (!replyText.trim()) return;
+    setSending(true); setMsg(null);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/feedback/${fbId}/reply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ reply: replyText.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setMsg({ type: 'err', text: data.error || 'Reply failed' }); return; }
+      setMsg({ type: 'ok', text: `Reply sent via ${data.channel}.` });
+      setReplyingFor(null);
+      setReplyText('');
+      load();
+      onReplyPosted?.();
+    } finally { setSending(false); }
+  };
+
+  const togglePublic = async (fbId: string, currentlyPublic: boolean) => {
+    await fetch(`/api/restaurant/${restaurantId}/feedback/${fbId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ is_public: !currentlyPublic }),
+    });
+    load();
+  };
+
+  // Sentiment percentages
+  const sent = summary?.sentiment || { positive: 0, neutral: 0, negative: 0 };
+  const totalSent = Number(sent.positive || 0) + Number(sent.neutral || 0) + Number(sent.negative || 0);
+  const pct = (n: number) => totalSent > 0 ? Math.round((n / totalSent) * 100) : 0;
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center gap-2 justify-end">
+        {[30, 90, 365].map(d => (
+          <button key={d} onClick={() => setDays(d as any)}
+            className={cn('px-3 py-1.5 rounded-xl text-xs font-bold',
+              days === d ? 'bg-[#cc5a16] text-white' : 'bg-white border border-[#cc5a16]/15 text-[#6b5d52]')}
+          >Last {d === 365 ? 'year' : `${d} days`}</button>
+        ))}
+      </div>
+      {msg && (
+        <div className={cn('px-4 py-2 rounded-xl text-sm',
+          msg.type === 'ok' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                              'bg-red-50 text-red-700 border border-red-200')}>{msg.text}</div>
+      )}
+      {loading ? (
+        <div className="py-12 flex justify-center">
+          <div className="w-8 h-8 border-2 border-[#cc5a16]/30 border-t-[#cc5a16] rounded-full animate-spin" />
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Reviews</div>
+              <div className="text-2xl font-bold text-[#1a1208] mt-1">{summary?.count ?? 0}</div>
+            </div>
+            <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Avg rating</div>
+              <div className="text-2xl font-bold text-[#cc5a16] mt-1">
+                {Number(summary?.avg_rating || 0).toFixed(1)}<span className="text-base text-[#9c8e85]">/5</span>
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">NPS</div>
+              <div className={cn('text-2xl font-bold mt-1',
+                summary?.nps_score == null ? 'text-[#9c8e85]' :
+                summary.nps_score >= 50 ? 'text-emerald-700' :
+                summary.nps_score >= 0  ? 'text-orange-600' : 'text-red-600')}>
+                {summary?.nps_score == null ? '—' : summary.nps_score}
+              </div>
+              <div className="text-[10px] text-[#9c8e85] mt-1">{summary?.nps_count || 0} respondents</div>
+            </div>
+            <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Response rate</div>
+              <div className="text-2xl font-bold text-[#1a1208] mt-1">
+                {summary?.response_rate_percent == null ? '—' : `${summary.response_rate_percent}%`}
+              </div>
+              <div className="text-[10px] text-[#9c8e85] mt-1">
+                {(summary?.requests_responded || 0)} / {(summary?.requests_sent || 0)} sent
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Replied by you</div>
+              <div className="text-2xl font-bold text-[#1a1208] mt-1">{summary?.replied || 0}</div>
+              <div className="text-[10px] text-[#9c8e85] mt-1">
+                {summary?.count > 0 ? `${Math.round((Number(summary.replied) / Number(summary.count)) * 100)}% engaged` : 'No reviews yet'}
+              </div>
+            </div>
+          </div>
+
+          {/* Sentiment bar */}
+          {totalSent > 0 && (
+            <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Sentiment breakdown</div>
+              <div className="flex h-6 rounded-full overflow-hidden">
+                {Number(sent.positive) > 0 && (
+                  <div className="bg-emerald-500 flex items-center justify-center text-[10px] font-bold text-white"
+                       style={{ width: `${pct(Number(sent.positive))}%` }}>
+                    {pct(Number(sent.positive)) >= 8 ? `😍 ${pct(Number(sent.positive))}%` : ''}
+                  </div>
+                )}
+                {Number(sent.neutral) > 0 && (
+                  <div className="bg-amber-400 flex items-center justify-center text-[10px] font-bold text-amber-900"
+                       style={{ width: `${pct(Number(sent.neutral))}%` }}>
+                    {pct(Number(sent.neutral)) >= 8 ? `😐 ${pct(Number(sent.neutral))}%` : ''}
+                  </div>
+                )}
+                {Number(sent.negative) > 0 && (
+                  <div className="bg-red-500 flex items-center justify-center text-[10px] font-bold text-white"
+                       style={{ width: `${pct(Number(sent.negative))}%` }}>
+                    {pct(Number(sent.negative)) >= 8 ? `😞 ${pct(Number(sent.negative))}%` : ''}
+                  </div>
+                )}
+              </div>
+              <div className="flex justify-between text-[11px] text-[#6b5d52] mt-2">
+                <span>😍 {Number(sent.positive)} positive</span>
+                <span>😐 {Number(sent.neutral)} neutral</span>
+                <span>😞 {Number(sent.negative)} negative</span>
+              </div>
+            </div>
+          )}
+
+          {/* Recent (unreplied first) */}
+          {recent.length > 0 && (
+            <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-5">
+              <h3 className="text-sm font-bold font-serif mb-3">Recent feedback · Reply & moderate</h3>
+              <div className="space-y-3">
+                {[...recent].sort((a, b) => {
+                  // Unreplied first, then newest first
+                  if (!a.owner_reply && b.owner_reply) return -1;
+                  if (a.owner_reply && !b.owner_reply) return 1;
+                  return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+                }).slice(0, 8).map((f: any) => (
+                  <div key={f.id} className="border border-[#f5ece0] rounded-2xl p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-base">{'⭐'.repeat(Math.max(0, Math.min(5, Number(f.rating || 0))))}</span>
+                          {f.sentiment && (
+                            <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full',
+                              f.sentiment === 'POSITIVE' ? 'bg-emerald-50 text-emerald-700' :
+                              f.sentiment === 'NEGATIVE' ? 'bg-red-50 text-red-700' :
+                                                            'bg-amber-50 text-amber-700')}>
+                              {f.sentiment === 'POSITIVE' ? '😍' : f.sentiment === 'NEGATIVE' ? '😞' : '😐'} {f.sentiment}
+                            </span>
+                          )}
+                          {f.nps_score != null && (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700">
+                              NPS {f.nps_score}
+                            </span>
+                          )}
+                          <span className="text-[11px] text-[#9c8e85] ml-auto">
+                            {new Date(f.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        {f.customer_name && <p className="text-[12px] text-[#6b5d52] mt-1">— {f.customer_name}</p>}
+                        {f.comment && <p className="text-[13px] text-[#3d3128] mt-2 leading-relaxed">{f.comment}</p>}
+                        {f.owner_reply && (
+                          <div className="bg-[#faf7f2] border-l-2 border-[#cc5a16] rounded-r-xl p-3 mt-2">
+                            <div className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] mb-1">Your reply</div>
+                            <p className="text-[13px] text-[#3d3128]">{f.owner_reply}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 mt-3">
+                      {!f.owner_reply && (
+                        replyingFor === f.id ? (
+                          <div className="flex-1 flex gap-2">
+                            <input
+                              value={replyText}
+                              onChange={e => setReplyText(e.target.value)}
+                              placeholder="Type your reply…"
+                              className="flex-1 bg-[#faf7f2] rounded-xl px-3 py-2 text-sm outline-none"
+                              autoFocus
+                            />
+                            <button onClick={() => reply(f.id)} disabled={sending || !replyText.trim()}
+                              className="px-4 py-2 bg-[#cc5a16] text-white text-xs font-bold rounded-xl disabled:opacity-50">
+                              {sending ? '…' : 'Send'}
+                            </button>
+                            <button onClick={() => { setReplyingFor(null); setReplyText(''); }}
+                              className="px-3 py-2 text-xs font-bold text-[#6b5d52]">Cancel</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => { setReplyingFor(f.id); setReplyText(''); }}
+                            className="px-3 py-1.5 bg-[#cc5a16]/10 text-[#cc5a16] text-xs font-bold rounded-xl">
+                            Reply
+                          </button>
+                        )
+                      )}
+                      <button onClick={() => togglePublic(f.id, Number(f.is_public || 0) === 1)}
+                        className={cn('px-3 py-1.5 text-xs font-bold rounded-xl',
+                          Number(f.is_public || 0) === 1
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : 'bg-gray-100 text-gray-500')}>
+                        {Number(f.is_public || 0) === 1 ? 'Public ✓' : 'Hidden'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
