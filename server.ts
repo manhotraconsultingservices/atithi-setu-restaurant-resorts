@@ -6217,6 +6217,21 @@ async function startServer() {
   // Also drives the daily cron.
   async function _recomputeTimesheet(tenantId: string, startDate: string, endDate: string) {
     const db = await getTenantDb(tenantId);
+    // Phase S2: read per-tenant thresholds + per-staff hourly rate.
+    const rest: any = await centralDb.get(
+      `SELECT overtime_threshold_multiplier, no_show_grace_minutes, variance_approval_threshold_pct
+         FROM restaurants WHERE id = ?`,
+      [tenantId]
+    ).catch(() => null);
+    const otMul     = Number(rest?.overtime_threshold_multiplier  || 1.25);
+    const varPctTh  = Number(rest?.variance_approval_threshold_pct || 25.0);
+
+    const staffRates: any[] = await db.query(
+      "SELECT id, hourly_rate FROM attendance_staff"
+    ).catch(() => []);
+    const rateBy: Record<string, number> = {};
+    for (const s of (staffRates || [])) rateBy[s.id] = Number(s.hourly_rate || 0);
+
     const slots: any[] = await db.query(
       `SELECT staff_id, shift_date, expected_hours, start_time
          FROM roster_slots
@@ -6256,18 +6271,32 @@ async function startServer() {
       const a = actual[key] || 0;
       const variance = Math.round((a - p) * 100) / 100;
       const isNoShow = p > 0 && a === 0 ? 1 : 0;
-      const isOvertime = p > 0 && a > p * 1.25 ? 1 : 0;
+      const isOvertime = p > 0 && a > p * otMul ? 1 : 0;
+      // Pay calc: actual_hours × hourly_rate. Owner can override on approval.
+      const rate = rateBy[staffId] || 0;
+      const pay = Math.round(a * rate * 100) / 100;
+      // Approval status: if variance >X% of planned, mark PENDING; otherwise
+      // AUTO (auto-approved). Existing rows that are already APPROVED /
+      // REJECTED keep their status (UPDATE excludes them via WHERE clause).
+      const variancePct = p > 0 ? Math.abs(variance) / p * 100 : 0;
+      const newStatus = (p > 0 && variancePct > varPctTh) || isNoShow ? 'PENDING' : 'AUTO';
       await db.run(
-        `INSERT INTO timesheet_day (staff_id, shift_date, planned_hours, actual_hours, variance_hours, is_no_show, is_overtime, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `INSERT INTO timesheet_day (staff_id, shift_date, planned_hours, actual_hours, variance_hours, is_no_show, is_overtime, hourly_rate_snapshot, pay_amount, status, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT (staff_id, shift_date) DO UPDATE SET
            planned_hours = EXCLUDED.planned_hours,
            actual_hours  = EXCLUDED.actual_hours,
            variance_hours = EXCLUDED.variance_hours,
            is_no_show    = EXCLUDED.is_no_show,
            is_overtime   = EXCLUDED.is_overtime,
-           updated_at    = CURRENT_TIMESTAMP`,
-        [staffId, date, p, a, variance, isNoShow, isOvertime]
+           hourly_rate_snapshot = EXCLUDED.hourly_rate_snapshot,
+           pay_amount    = EXCLUDED.pay_amount,
+           status = CASE
+             WHEN timesheet_day.status IN ('APPROVED', 'REJECTED') THEN timesheet_day.status
+             ELSE EXCLUDED.status
+           END,
+           updated_at = CURRENT_TIMESTAMP`,
+        [staffId, date, p, a, variance, isNoShow, isOvertime, rate, pay, newStatus]
       ).catch(() => {});
       written++;
     }
@@ -6285,6 +6314,246 @@ async function startServer() {
     } catch (err) {
       console.error("Timesheet recompute error:", err);
       res.status(500).json({ error: "Failed to recompute timesheet" });
+    }
+  });
+
+  // ── Phase S2 — Payroll & approval endpoints ─────────────────────────
+  // Approve or reject a single timesheet row. Sets status, who, when, notes.
+  app.patch("/api/restaurant/:id/timesheet/:staffId/:date/approval", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const status = String(req.body?.status || '').toUpperCase();
+      if (!['APPROVED', 'REJECTED', 'PENDING'].includes(status)) {
+        return res.status(400).json({ error: "status must be APPROVED, REJECTED, or PENDING" });
+      }
+      const db = await getTenantDb(req.params.id);
+      const result = await db.run(
+        `UPDATE timesheet_day
+            SET status = ?,
+                approved_by = ?,
+                approved_at = CURRENT_TIMESTAMP,
+                approval_notes = COALESCE(?, approval_notes)
+          WHERE staff_id = ? AND shift_date = ?`,
+        [status, req.user?.email || 'owner',
+         req.body?.notes ? String(req.body.notes).trim() : null,
+         req.params.staffId, req.params.date]
+      );
+      if (Number((result as any)?.changes || 0) === 0) {
+        return res.status(404).json({ error: "Timesheet row not found" });
+      }
+      res.json({ success: true, status });
+    } catch (err) {
+      console.error("Timesheet approval error:", err);
+      res.status(500).json({ error: "Failed to update approval" });
+    }
+  });
+
+  // Bulk approve/reject all PENDING rows in a date range. Saves the owner
+  // from clicking through every row when variance was a known one-off
+  // (e.g. festival day, training, sick leave handled out-of-band).
+  app.post("/api/restaurant/:id/timesheet/bulk-approval", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const status = String(req.body?.status || '').toUpperCase();
+      if (!['APPROVED', 'REJECTED'].includes(status)) {
+        return res.status(400).json({ error: "status must be APPROVED or REJECTED" });
+      }
+      const start = String(req.body?.start || '').trim();
+      const end   = String(req.body?.end   || '').trim();
+      if (!start || !end) return res.status(400).json({ error: "start and end required" });
+      const db = await getTenantDb(req.params.id);
+      const result = await db.run(
+        `UPDATE timesheet_day
+            SET status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP,
+                approval_notes = COALESCE(?, approval_notes)
+          WHERE shift_date >= ? AND shift_date <= ?
+            AND status = 'PENDING'`,
+        [status, req.user?.email || 'owner',
+         req.body?.notes ? String(req.body.notes).trim() : null,
+         start, end]
+      );
+      res.json({ success: true, rows_updated: Number((result as any)?.changes || 0) });
+    } catch (err) {
+      console.error("Timesheet bulk approval error:", err);
+      res.status(500).json({ error: "Failed to bulk-approve" });
+    }
+  });
+
+  // Payroll summary: per-staff aggregated totals over a date range.
+  // Honours approval status — REJECTED rows are excluded from pay.
+  app.get("/api/restaurant/:id/timesheet/payroll-summary", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      const onlyApproved = String(req.query.only_approved || '0') === '1';
+      if (!start || !end) return res.status(400).json({ error: "start and end required" });
+      const db = await getTenantDb(req.params.id);
+      const statusClause = onlyApproved
+        ? "AND status IN ('APPROVED','AUTO')"
+        : "AND status != 'REJECTED'";
+      const rows: any[] = await db.query(
+        `SELECT t.staff_id, s.name, s.role, s.phone, s.email, s.payroll_id,
+                COALESCE(SUM(t.planned_hours), 0) AS planned_hours,
+                COALESCE(SUM(t.actual_hours),  0) AS actual_hours,
+                COALESCE(SUM(t.variance_hours), 0) AS variance_hours,
+                COALESCE(SUM(CASE WHEN t.is_overtime = 1 THEN GREATEST(t.actual_hours - t.planned_hours, 0) ELSE 0 END), 0) AS overtime_hours,
+                COALESCE(SUM(CASE WHEN t.is_no_show = 1 THEN 1 ELSE 0 END), 0) AS no_shows,
+                COALESCE(SUM(CASE WHEN t.status = 'PENDING' THEN 1 ELSE 0 END), 0) AS pending_rows,
+                COALESCE(SUM(t.pay_amount), 0) AS gross_pay,
+                COALESCE(AVG(NULLIF(t.hourly_rate_snapshot, 0)), 0) AS avg_rate,
+                COUNT(*) AS days_worked
+           FROM timesheet_day t
+           LEFT JOIN attendance_staff s ON s.id = t.staff_id
+          WHERE t.shift_date >= ? AND t.shift_date <= ?
+            ${statusClause}
+          GROUP BY t.staff_id, s.name, s.role, s.phone, s.email, s.payroll_id
+          ORDER BY s.name ASC NULLS LAST`,
+        [start, end]
+      );
+      const totals = {
+        planned_hours: 0, actual_hours: 0, overtime_hours: 0,
+        no_shows: 0, pending_rows: 0, gross_pay: 0,
+        staff_count: rows?.length || 0,
+      };
+      for (const r of (rows || [])) {
+        totals.planned_hours  += Number(r.planned_hours || 0);
+        totals.actual_hours   += Number(r.actual_hours  || 0);
+        totals.overtime_hours += Number(r.overtime_hours || 0);
+        totals.no_shows       += Number(r.no_shows || 0);
+        totals.pending_rows   += Number(r.pending_rows || 0);
+        totals.gross_pay      += Number(r.gross_pay || 0);
+      }
+      const restCfg: any = await centralDb.get(
+        "SELECT currency_symbol, currency_code FROM restaurants WHERE id = ?",
+        [req.params.id]
+      );
+      res.json({
+        start, end,
+        currency_code: restCfg?.currency_code || 'INR',
+        currency_symbol: restCfg?.currency_symbol || '₹',
+        only_approved: onlyApproved,
+        by_staff: rows || [],
+        totals,
+      });
+    } catch (err) {
+      console.error("Payroll summary error:", err);
+      res.status(500).json({ error: "Failed to compute payroll" });
+    }
+  });
+
+  // Payroll export — full per-day, per-staff CSV with pay amounts.
+  // Two columns of pay: 'pay_amount' (raw, all rows) and 'payable_amount'
+  // (zero for REJECTED rows). Owner can hand this directly to accounts.
+  app.get("/api/restaurant/:id/timesheet/payroll-export.csv", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      if (!start || !end) return res.status(400).send("start and end required");
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT t.shift_date, s.name, s.role, s.payroll_id, s.phone,
+                t.planned_hours, t.actual_hours, t.variance_hours,
+                t.is_overtime, t.is_no_show, t.status,
+                t.hourly_rate_snapshot AS hourly_rate, t.pay_amount,
+                t.approved_by, t.approved_at, COALESCE(t.approval_notes, '') AS notes
+           FROM timesheet_day t
+           LEFT JOIN attendance_staff s ON s.id = t.staff_id
+          WHERE t.shift_date >= ? AND t.shift_date <= ?
+          ORDER BY t.shift_date ASC, s.name ASC NULLS LAST`,
+        [start, end]
+      );
+      const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const head = "Date,Staff,Role,Payroll ID,Phone,Planned Hours,Actual Hours,Variance,Overtime,No-show,Status,Hourly Rate,Pay Amount,Payable,Approved By,Approved At,Notes";
+      const body = (rows || []).map(r => {
+        const payable = String(r.status || '').toUpperCase() === 'REJECTED' ? 0 : Number(r.pay_amount || 0);
+        return [
+          String(r.shift_date).slice(0, 10),
+          r.name || '', r.role || '', r.payroll_id || '', r.phone || '',
+          Number(r.planned_hours || 0).toFixed(2),
+          Number(r.actual_hours  || 0).toFixed(2),
+          Number(r.variance_hours || 0).toFixed(2),
+          r.is_overtime ? 'Y' : '',
+          r.is_no_show  ? 'Y' : '',
+          r.status || 'AUTO',
+          Number(r.hourly_rate || 0).toFixed(2),
+          Number(r.pay_amount || 0).toFixed(2),
+          payable.toFixed(2),
+          r.approved_by || '',
+          r.approved_at ? new Date(r.approved_at).toISOString() : '',
+          r.notes,
+        ].map(esc).join(',');
+      }).join('\n');
+      // Totals row for spreadsheet convenience
+      const totalPayable = (rows || []).reduce((s, r) =>
+        s + (String(r.status || '').toUpperCase() === 'REJECTED' ? 0 : Number(r.pay_amount || 0)), 0);
+      const totalsLine = ['TOTAL', '', '', '', '', '', '', '', '', '', '', '', '', totalPayable.toFixed(2), '', '', ''].map(esc).join(',');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="payroll-${start}-to-${end}.csv"`);
+      res.send(head + '\n' + body + '\n' + totalsLine);
+    } catch (err) {
+      console.error("Payroll export error:", err);
+      res.status(500).send("Export failed");
+    }
+  });
+
+  // GET /timesheet-config — per-tenant Staff v2 thresholds for the Settings UI
+  app.get("/api/restaurant/:id/timesheet-config", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const row: any = await centralDb.get(
+        `SELECT overtime_threshold_multiplier, no_show_grace_minutes,
+                variance_approval_threshold_pct, shift_reminder_enabled,
+                currency_symbol, currency_code
+           FROM restaurants WHERE id = ?`,
+        [req.params.id]
+      );
+      res.json({
+        overtime_threshold_multiplier: Number(row?.overtime_threshold_multiplier || 1.25),
+        no_show_grace_minutes: Number(row?.no_show_grace_minutes || 30),
+        variance_approval_threshold_pct: Number(row?.variance_approval_threshold_pct || 25.0),
+        shift_reminder_enabled: Number(row?.shift_reminder_enabled || 0) === 1,
+        currency_symbol: row?.currency_symbol || '₹',
+        currency_code: row?.currency_code || 'INR',
+      });
+    } catch (err) {
+      console.error("Timesheet config GET error:", err);
+      res.status(500).json({ error: "Failed to load config" });
+    }
+  });
+
+  app.put("/api/restaurant/:id/timesheet-config", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (req.user?.role !== 'OWNER' && req.user?.role !== 'MANAGER' && req.user?.role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: "Insufficient permission" });
+      }
+      const sets: string[] = [];
+      const params: any[] = [];
+      const map = {
+        overtime_threshold_multiplier: 'overtime_threshold_multiplier',
+        no_show_grace_minutes: 'no_show_grace_minutes',
+        variance_approval_threshold_pct: 'variance_approval_threshold_pct',
+        shift_reminder_enabled: 'shift_reminder_enabled',
+      };
+      for (const [bodyKey, colName] of Object.entries(map)) {
+        if (req.body?.[bodyKey] != null) {
+          sets.push(`${colName} = ?`);
+          params.push(
+            bodyKey === 'shift_reminder_enabled'
+              ? (req.body[bodyKey] ? 1 : 0)
+              : Number(req.body[bodyKey])
+          );
+        }
+      }
+      if (sets.length === 0) return res.status(400).json({ error: "No fields to update" });
+      params.push(req.params.id);
+      await centralDb.run(`UPDATE restaurants SET ${sets.join(', ')} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Timesheet config PUT error:", err);
+      res.status(500).json({ error: "Failed to save config" });
     }
   });
 
@@ -14307,9 +14576,11 @@ async function startServer() {
       }
       const targetId = resolveTargetRestaurantId(req);
       if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
-      const { name, role, phone, email, loginId, password } = req.body;
+      const { name, role, phone, email, loginId, password, hourly_rate, payroll_id } = req.body;
       const db = await getTenantDb(targetId);
       const id = randomUUID();
+      const rate = Number(hourly_rate || 0);
+      const payrollId = payroll_id ? String(payroll_id).trim() : null;
 
       if (loginId && password) {
         // Check for duplicate login_id in this tenant
@@ -14319,13 +14590,13 @@ async function startServer() {
         }
         const hashedPassword = await bcrypt.hash(password, 12);
         await db.run(
-          "INSERT INTO attendance_staff (id, name, role, phone, email, login_id, password) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          [id, name, role, phone || null, email || null, loginId, hashedPassword]
+          "INSERT INTO attendance_staff (id, name, role, phone, email, login_id, password, hourly_rate, payroll_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [id, name, role, phone || null, email || null, loginId, hashedPassword, rate, payrollId]
         );
       } else {
         await db.run(
-          "INSERT INTO attendance_staff (id, name, role, phone, email) VALUES (?, ?, ?, ?, ?)",
-          [id, name, role, phone || null, email || null]
+          "INSERT INTO attendance_staff (id, name, role, phone, email, hourly_rate, payroll_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [id, name, role, phone || null, email || null, rate, payrollId]
         );
       }
       res.json({ success: true, id });
@@ -15385,7 +15656,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'feedback-v2-customer-experience',
+    commit_marker: 'staff-v2-payroll-approvals',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -15425,6 +15696,10 @@ async function startServer() {
       'feedback-v2-owner-reply',         // F2: owner replies via WhatsApp/SMS/Email through the same channel customer used
       'feedback-v2-public-reviews',      // F2: /reviews page with Schema.org markup, owner-controlled visibility
       'feedback-v2-nps-sentiment',       // F2: 0-10 NPS score + positive/neutral/negative sentiment dashboard
+      'staff-v2-hourly-rate-payroll',    // S2: per-staff hourly_rate + payroll CSV export
+      'staff-v2-tenant-thresholds',      // S2: per-tenant overtime/no-show/variance thresholds
+      'staff-v2-approval-workflow',      // S2: timesheet rows flagged PENDING when variance exceeds threshold; owner approve/reject
+      'staff-v2-shift-reminder-cron',    // S2: daily 08:00 IST SHIFT_REMINDER cron for staff with shifts today
     ],
     booted_at: new Date().toISOString(),
   };
@@ -16109,6 +16384,61 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[timesheet-cron] Daily timesheet materialisation started — 23:59 IST');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Phase S2 — Daily shift reminder (08:00 IST) ─────────────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Sends SHIFT_REMINDER to every staff member who has a PUBLISHED slot
+  // starting in the next 12 hours. Only fires for tenants with
+  // shift_reminder_enabled = 1. The notification template already exists
+  // from Phase 3; this cron is the missing trigger.
+  cron.schedule('0 8 * * *', async () => {
+    try {
+      const tenants: any[] = await centralDb.query(
+        `SELECT id, name FROM restaurants
+          WHERE is_active = 1 AND id <> 'SYSTEM'
+            AND access_revoked = 0
+            AND shift_reminder_enabled = 1`
+      );
+      if (!tenants || tenants.length === 0) return;
+      console.log(`[shift-reminder] 08:00 IST — scanning ${tenants.length} opted-in tenants`);
+      const today = new Date().toISOString().slice(0, 10);
+      let sent = 0;
+      for (const t of tenants) {
+        try {
+          const db = await getTenantDb(t.id);
+          const slots: any[] = await db.query(
+            `SELECT rs.id, rs.staff_id, rs.shift_date, rs.start_time, rs.end_time,
+                    s.name AS staff_name, s.phone AS staff_phone, s.email AS staff_email
+               FROM roster_slots rs
+               LEFT JOIN attendance_staff s ON s.id = rs.staff_id
+              WHERE rs.shift_date = ?
+                AND rs.status = 'PUBLISHED'
+                AND (s.is_active = 1 OR s.is_active IS NULL)`,
+            [today]
+          );
+          for (const slot of (slots || [])) {
+            triggerNotification(t.id, 'SHIFT_REMINDER', {
+              staff_id: slot.staff_id,
+              staff_name: slot.staff_name || 'Team',
+              staff_phone: slot.staff_phone,
+              staff_email: slot.staff_email,
+              shift_date: slot.shift_date,
+              start_time: slot.start_time,
+              end_time: slot.end_time,
+            }).catch(() => {});
+            sent++;
+          }
+        } catch (err) {
+          console.error(`[shift-reminder] tenant ${t.id} failed:`, err);
+        }
+      }
+      console.log(`[shift-reminder] done — ${sent} reminder(s) sent across ${tenants.length} tenants`);
+    } catch (err) {
+      console.error('[shift-reminder] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[shift-reminder] Daily 08:00 IST shift reminder cron started');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase L2 — Loyalty birthday rewards (daily 09:00 IST) ───────────────

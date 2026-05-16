@@ -197,7 +197,17 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS feedback_request_delay_minutes INT DEFAULT 30;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS feedback_request_channels TEXT DEFAULT 'WHATSAPP,SMS';
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS feedback_public_reviews_enabled INT DEFAULT 1;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS feedback_minimum_rating_public INT DEFAULT 4
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS feedback_minimum_rating_public INT DEFAULT 4;
+    -- Phase S2 (Staff v2 — payroll & approvals) tenant-level thresholds.
+    -- Defaults match the constants previously hard-coded in _recomputeTimesheet.
+    --   overtime_threshold_multiplier  actual_hours > planned * this  -> is_overtime
+    --   no_show_grace_minutes          no check-in within first N minutes -> is_no_show
+    --   variance_approval_threshold_pct  |variance| / planned > this -> needs approval
+    --   payroll_currency_code          override per tenant (default INR / restaurant.currency_code)
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS overtime_threshold_multiplier DOUBLE PRECISION DEFAULT 1.25;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS no_show_grace_minutes INT DEFAULT 30;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS variance_approval_threshold_pct DOUBLE PRECISION DEFAULT 25.0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS shift_reminder_enabled INT DEFAULT 0
   `);
 
   // Migration: unique index on locations (safe to run multiple times)
@@ -532,6 +542,11 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       default_hours DOUBLE PRECISION DEFAULT 8,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    -- Phase S2 enrichment: hourly rate for payroll math + employment metadata.
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS hourly_rate DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS payroll_id TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS joined_at DATE;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS notes TEXT;
 
     CREATE TABLE IF NOT EXISTS reservation_day_config (
       config_date DATE PRIMARY KEY,
@@ -1442,6 +1457,18 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     )
   `);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_timesheet_date ON timesheet_day (shift_date)`);
+
+  // Phase S2 — approval workflow on each timesheet row. status starts as
+  // 'AUTO' for rows that fall within the variance threshold (auto-approved),
+  // 'PENDING' for rows over threshold (owner action required), then moves
+  // to 'APPROVED' or 'REJECTED' via PATCH.
+  await db.exec(`ALTER TABLE timesheet_day ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'AUTO'`).catch(() => {});
+  await db.exec(`ALTER TABLE timesheet_day ADD COLUMN IF NOT EXISTS approved_by TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE timesheet_day ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP`).catch(() => {});
+  await db.exec(`ALTER TABLE timesheet_day ADD COLUMN IF NOT EXISTS approval_notes TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE timesheet_day ADD COLUMN IF NOT EXISTS hourly_rate_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await db.exec(`ALTER TABLE timesheet_day ADD COLUMN IF NOT EXISTS pay_amount DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_timesheet_status ON timesheet_day (status, shift_date)`).catch(() => {});
 
   // Cache stores the init promise (set by getTenantDb above); we return
   // the resolved DbInterface here. No need to re-cache.

@@ -5426,7 +5426,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
-  const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'CHEF' as UserRole, phone: '', email: '' });
+  const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'CHEF' as UserRole, phone: '', email: '', hourly_rate: 0, payroll_id: '' });
   const [newItem, setNewItem] = useState<{ 
     name: string, 
     description: string, 
@@ -5789,7 +5789,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       if (res.ok) {
         setIsAddingStaff(false);
-        setNewStaff({ loginId: '', name: '', password: '', role: 'CHEF', phone: '', email: '' });
+        setNewStaff({ loginId: '', name: '', password: '', role: 'CHEF', phone: '', email: '', hourly_rate: 0, payroll_id: '' });
         setTimeout(() => fetchStaff(), 100);
       } else {
         const contentType = res.headers.get("content-type");
@@ -11259,7 +11259,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <option value="MANAGER">Manager</option>
                     </select>
                   </div>
-                  <button 
+                  {/* Phase S2 — hourly rate + payroll ID for payroll math */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Hourly rate (₹)</label>
+                      <input
+                        type="number" min="0" step="1"
+                        placeholder="optional"
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        value={newStaff.hourly_rate || ''}
+                        onChange={e => setNewStaff({ ...newStaff, hourly_rate: Number(e.target.value) || 0 })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Payroll ID</label>
+                      <input
+                        type="text"
+                        placeholder="optional"
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        value={newStaff.payroll_id}
+                        onChange={e => setNewStaff({ ...newStaff, payroll_id: e.target.value })}
+                      />
+                    </div>
+                  </div>
+                  <button
                     type="submit"
                     className="w-full bg-[#cc5a16] text-white py-4 rounded-2xl font-bold hover:bg-[#a84612] transition-all"
                   >
@@ -26428,6 +26451,256 @@ function ShiftSlotModal({ editing, templates, onClose, onSave, onDelete }: {
 // ════════════════════════════════════════════════════════════════════════════
 // TimesheetDashboard (Phase 3) — planned vs actual variance
 // ════════════════════════════════════════════════════════════════════════════
+// TimesheetPayrollPanel (Phase S2) — appears above the Timesheet detail
+// table. Shows a per-staff payroll summary (planned/actual hrs, OT,
+// no-shows, gross pay) and lists every row with status = 'PENDING' for
+// quick owner approval. Also surfaces the per-tenant thresholds and lets
+// the owner edit them inline.
+function TimesheetPayrollPanel({ restaurantId, token, start, end, onApprovalChange }: {
+  restaurantId: string; token: string; start: string; end: string;
+  onApprovalChange?: () => void;
+}) {
+  const [payroll, setPayroll] = useState<any | null>(null);
+  const [pendingRows, setPendingRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [cfg, setCfg] = useState<any | null>(null);
+  const [editingCfg, setEditingCfg] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [payRes, rowsRes, cfgRes] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/timesheet/payroll-summary?start=${start}&end=${end}`,
+          { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/restaurant/${restaurantId}/timesheet?start=${start}&end=${end}`,
+          { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/restaurant/${restaurantId}/timesheet-config`,
+          { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
+      if (payRes.ok) setPayroll(await payRes.json());
+      if (rowsRes.ok) {
+        const all = await rowsRes.json();
+        setPendingRows((all || []).filter((r: any) => String(r.status || '').toUpperCase() === 'PENDING'));
+      }
+      if (cfgRes.ok) setCfg(await cfgRes.json());
+    } finally { setLoading(false); }
+  }, [restaurantId, token, start, end]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const approveRow = async (row: any, status: 'APPROVED' | 'REJECTED', notes?: string) => {
+    const date = String(row.shift_date).slice(0, 10);
+    const res = await fetch(`/api/restaurant/${restaurantId}/timesheet/${encodeURIComponent(row.staff_id)}/${date}/approval`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ status, notes: notes || null }),
+    });
+    if (res.ok) {
+      setMsg(`${status === 'APPROVED' ? 'Approved' : 'Rejected'}: ${row.staff_name} · ${date}`);
+      load();
+      onApprovalChange?.();
+    }
+  };
+
+  const bulkApprove = async (status: 'APPROVED' | 'REJECTED') => {
+    if (!window.confirm(`${status === 'APPROVED' ? 'Approve' : 'Reject'} all ${pendingRows.length} pending rows in this range?`)) return;
+    const res = await fetch(`/api/restaurant/${restaurantId}/timesheet/bulk-approval`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ status, start, end }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setMsg(`${status === 'APPROVED' ? 'Approved' : 'Rejected'} ${data.rows_updated} row(s)`);
+      load();
+      onApprovalChange?.();
+    }
+  };
+
+  const saveCfg = async () => {
+    if (!cfg) return;
+    const res = await fetch(`/api/restaurant/${restaurantId}/timesheet-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        overtime_threshold_multiplier: Number(cfg.overtime_threshold_multiplier),
+        no_show_grace_minutes: Number(cfg.no_show_grace_minutes),
+        variance_approval_threshold_pct: Number(cfg.variance_approval_threshold_pct),
+        shift_reminder_enabled: !!cfg.shift_reminder_enabled,
+      }),
+    });
+    if (res.ok) { setMsg('Settings saved'); setEditingCfg(false); load(); }
+  };
+
+  if (loading && !payroll) return null;
+  const sym = payroll?.currency_symbol || '₹';
+
+  return (
+    <>
+      {msg && (
+        <div className="px-4 py-2 rounded-xl text-sm bg-emerald-50 text-emerald-700 border border-emerald-200">{msg}</div>
+      )}
+
+      {/* Pending approvals */}
+      {pendingRows.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="text-sm font-bold text-amber-900">
+              ⚠ {pendingRows.length} timesheet row{pendingRows.length === 1 ? '' : 's'} need your approval
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => bulkApprove('APPROVED')}
+                className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-bold rounded-xl hover:bg-emerald-700">
+                ✓ Approve all
+              </button>
+              <button onClick={() => bulkApprove('REJECTED')}
+                className="px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded-xl hover:bg-red-700">
+                ✕ Reject all
+              </button>
+            </div>
+          </div>
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {pendingRows.slice(0, 20).map((r: any) => (
+              <div key={`${r.staff_id}-${r.shift_date}`} className="bg-white rounded-xl p-3 flex items-center gap-3 flex-wrap text-xs">
+                <div className="font-bold text-[#1a1208]">{r.staff_name || r.staff_id}</div>
+                <div className="text-[#9c8e85] font-mono">{String(r.shift_date).slice(0, 10)}</div>
+                <div className="flex gap-3 text-[#6b5d52]">
+                  <span>Planned: <strong>{Number(r.planned_hours).toFixed(1)}h</strong></span>
+                  <span>Actual: <strong>{Number(r.actual_hours).toFixed(1)}h</strong></span>
+                  <span className={cn(Number(r.variance_hours) < 0 ? 'text-red-600' : 'text-emerald-700')}>
+                    Variance: <strong>{Number(r.variance_hours) >= 0 ? '+' : ''}{Number(r.variance_hours).toFixed(1)}h</strong>
+                  </span>
+                  {r.is_no_show ? <span className="text-red-600 font-bold">No-show</span> : null}
+                  {r.is_overtime ? <span className="text-orange-700 font-bold">OT</span> : null}
+                </div>
+                <div className="ml-auto flex gap-2">
+                  <button onClick={() => approveRow(r, 'APPROVED')}
+                    className="px-3 py-1 bg-emerald-100 text-emerald-700 text-[11px] font-bold rounded-lg">Approve</button>
+                  <button onClick={() => approveRow(r, 'REJECTED')}
+                    className="px-3 py-1 bg-red-100 text-red-700 text-[11px] font-bold rounded-lg">Reject</button>
+                </div>
+              </div>
+            ))}
+            {pendingRows.length > 20 && (
+              <p className="text-[11px] text-[#9c8e85] italic">…and {pendingRows.length - 20} more. Use bulk approval above.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Per-staff payroll summary */}
+      {payroll && payroll.by_staff && payroll.by_staff.length > 0 && (
+        <div className="bg-white rounded-2xl border border-[#cc5a16]/10">
+          <div className="flex justify-between items-center px-5 py-3 border-b border-[#cc5a16]/10">
+            <h3 className="text-sm font-bold font-serif">Payroll · {start} → {end}</h3>
+            <div className="text-xs text-[#6b5d52]">
+              Total gross pay: <strong className="text-[#cc5a16]">{sym}{Number(payroll?.totals?.gross_pay || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-xs">
+              <thead className="bg-[#faf7f2]">
+                <tr>
+                  <th className="px-3 py-2 text-left">Staff</th>
+                  <th className="px-3 py-2 text-left">Role</th>
+                  <th className="px-3 py-2 text-right">Hours</th>
+                  <th className="px-3 py-2 text-right">OT</th>
+                  <th className="px-3 py-2 text-right">No-shows</th>
+                  <th className="px-3 py-2 text-right">Rate</th>
+                  <th className="px-3 py-2 text-right">Gross pay</th>
+                  <th className="px-3 py-2 text-center">Pending</th>
+                </tr>
+              </thead>
+              <tbody>
+                {payroll.by_staff.map((s: any) => (
+                  <tr key={s.staff_id} className="border-t border-[#cc5a16]/5">
+                    <td className="px-3 py-2 font-bold">{s.name || s.staff_id}</td>
+                    <td className="px-3 py-2 text-[#6b5d52] uppercase text-[10px]">{s.role || ''}</td>
+                    <td className="px-3 py-2 text-right font-mono">{Number(s.actual_hours || 0).toFixed(1)} / {Number(s.planned_hours || 0).toFixed(1)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-orange-700">{Number(s.overtime_hours || 0).toFixed(1)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-red-600">{Number(s.no_shows || 0)}</td>
+                    <td className="px-3 py-2 text-right font-mono">{sym}{Number(s.avg_rate || 0).toFixed(0)}/h</td>
+                    <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">{sym}{Number(s.gross_pay || 0).toFixed(2)}</td>
+                    <td className="px-3 py-2 text-center">
+                      {Number(s.pending_rows) > 0 ? (
+                        <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-bold">{s.pending_rows}</span>
+                      ) : (
+                        <span className="text-emerald-600">✓</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Settings */}
+      {cfg && (
+        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+          <div className="flex justify-between items-center mb-3">
+            <h3 className="text-sm font-bold font-serif">Thresholds & Reminders</h3>
+            {!editingCfg ? (
+              <button onClick={() => setEditingCfg(true)} className="text-xs font-bold text-[#cc5a16]">Edit</button>
+            ) : (
+              <div className="flex gap-2">
+                <button onClick={saveCfg} className="px-3 py-1 bg-[#cc5a16] text-white text-xs font-bold rounded-lg">Save</button>
+                <button onClick={() => { setEditingCfg(false); load(); }} className="text-xs text-[#6b5d52]">Cancel</button>
+              </div>
+            )}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Overtime when actual &gt;</label>
+              {editingCfg ? (
+                <input type="number" step="0.05" value={cfg.overtime_threshold_multiplier}
+                  onChange={e => setCfg((p: any) => ({ ...p, overtime_threshold_multiplier: e.target.value }))}
+                  className="w-full bg-[#faf7f2] rounded-lg px-2 py-1.5 text-sm" />
+              ) : (
+                <p className="font-bold text-[#1a1208]">{Number(cfg.overtime_threshold_multiplier).toFixed(2)}× planned</p>
+              )}
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">No-show grace (min)</label>
+              {editingCfg ? (
+                <input type="number" value={cfg.no_show_grace_minutes}
+                  onChange={e => setCfg((p: any) => ({ ...p, no_show_grace_minutes: e.target.value }))}
+                  className="w-full bg-[#faf7f2] rounded-lg px-2 py-1.5 text-sm" />
+              ) : (
+                <p className="font-bold text-[#1a1208]">{cfg.no_show_grace_minutes} min</p>
+              )}
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Approval needed when variance &gt;</label>
+              {editingCfg ? (
+                <input type="number" step="1" value={cfg.variance_approval_threshold_pct}
+                  onChange={e => setCfg((p: any) => ({ ...p, variance_approval_threshold_pct: e.target.value }))}
+                  className="w-full bg-[#faf7f2] rounded-lg px-2 py-1.5 text-sm" />
+              ) : (
+                <p className="font-bold text-[#1a1208]">{Number(cfg.variance_approval_threshold_pct).toFixed(0)}%</p>
+              )}
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Daily 8 AM shift reminder</label>
+              {editingCfg ? (
+                <label className="flex items-center gap-2 mt-1">
+                  <input type="checkbox" checked={!!cfg.shift_reminder_enabled}
+                    onChange={e => setCfg((p: any) => ({ ...p, shift_reminder_enabled: e.target.checked }))} />
+                  <span className="text-sm">Enabled</span>
+                </label>
+              ) : (
+                <p className="font-bold text-[#1a1208]">{cfg.shift_reminder_enabled ? 'On' : 'Off'}</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; token: string }) {
   // Default range: this week (Mon..Sun)
   const initRange = useMemo(() => {
@@ -26530,9 +26803,27 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
             className="px-3 py-1.5 bg-white border border-[#cc5a16]/15 rounded-xl text-xs font-bold text-[#6b5d52]">
             CSV
           </button>
+          <button
+            onClick={() => {
+              // Phase S2 payroll export — same date range, includes pay amounts
+              const url = `/api/restaurant/${restaurantId}/timesheet/payroll-export.csv?start=${start}&end=${end}`;
+              fetch(url, { headers: { 'Authorization': `Bearer ${token}` } })
+                .then(r => r.blob())
+                .then(blob => {
+                  const u = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = u; a.download = `payroll-${start}-to-${end}.csv`;
+                  a.click(); URL.revokeObjectURL(u);
+                });
+            }}
+            className="px-3 py-1.5 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700">
+            💰 Payroll CSV
+          </button>
         </div>
       </div>
       {message && <p className="text-xs text-orange-700 font-bold">{message}</p>}
+      {/* Phase S2 — Pending approvals + payroll panel */}
+      <TimesheetPayrollPanel restaurantId={restaurantId} token={token} start={start} end={end} onApprovalChange={load} />
       {loading ? (
         <div className="py-16 text-center text-[#9c8e85]">Loading timesheet…</div>
       ) : (
