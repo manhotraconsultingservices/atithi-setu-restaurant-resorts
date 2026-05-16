@@ -16197,7 +16197,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'analytics-v2-deep-dive',
+    commit_marker: 'loyalty-postpaid-session-autoapply',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -16247,6 +16247,7 @@ async function startServer() {
       'analytics-v2-hourly-heatmap',     // A2: 7×24 grid of order density by DOW × hour (IST)
       'analytics-v2-top-items-pareto',   // A2: top N items by revenue with cumulative % for the Pareto chart
       'analytics-v2-cohort-retention',   // A2: weekly-cohort retention curves (% returning at W+1..W+8)
+      'loyalty-postpaid-session-autoapply', // BUG FIX: postpaid session bill panel auto-applies tier discount on customer_phone match (previously only manual invoice + QR preview did)
     ],
     booted_at: new Date().toISOString(),
   };

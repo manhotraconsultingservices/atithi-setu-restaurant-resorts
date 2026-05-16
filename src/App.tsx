@@ -23452,6 +23452,13 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   const [payMethod, setPayMethod]     = useState<'CASH' | 'CARD' | 'UPI'>('CASH');
   const [expanded, setExpanded]       = useState<Record<number, boolean>>({});
 
+  // Phase L1 fix — loyalty tier auto-apply for postpaid sessions.
+  // When the bill is requested for a session whose customer_phone matches
+  // a loyalty customer, pre-fill the Discount field with the tier's %.
+  // Owner can override. Already-saved discounts win (don't re-pre-fill).
+  const [loyaltyTier, setLoyaltyTier] = useState<{ name: string; discount_percent: number; spend_remaining?: number; next_tier_name?: string } | null>(null);
+  const [loyaltyAutoApplied, setLoyaltyAutoApplied] = useState(false);
+
   // ── Fetch session ──────────────────────────────────────────────────────────
   useEffect(() => {
     setLoading(true); setFetchErr('');
@@ -23489,6 +23496,40 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
     const items = Array.isArray(o.items) ? o.items : [];
     return sum + items.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
   }, 0);
+
+  // Loyalty auto-apply — runs once after the session loads, only if the
+  // owner hasn't already saved a discount on the session. The customer's
+  // tier discount is computed against the live subtotal and dropped into
+  // the Discount input so the owner sees the "after-loyalty" total
+  // immediately. The banner below the discount field tells them why.
+  useEffect(() => {
+    if (!session?.customer_phone) return;
+    if (rawSubtotal <= 0) return;
+    if (loyaltyAutoApplied) return;
+    // Don't fight an owner-edited discount that was saved earlier
+    const savedDiscount = Number(session?.discount_amount || 0);
+    if (savedDiscount > 0) { setLoyaltyAutoApplied(true); return; }
+    fetch(
+      `/api/restaurant/${restaurantId}/loyalty/lookup?phone=${encodeURIComponent(session.customer_phone)}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data?.recognised || !data?.tier) return;
+        const pct = Number(data.tier.discount_percent || 0);
+        if (pct <= 0) return;
+        const tierDiscount = Math.round(rawSubtotal * pct / 100 * 100) / 100;
+        setDiscount(tierDiscount);
+        setLoyaltyTier({
+          name: data.tier.name,
+          discount_percent: pct,
+          spend_remaining: data.next_tier?.spend_remaining,
+          next_tier_name: data.next_tier?.name,
+        });
+      })
+      .catch(() => {})
+      .finally(() => setLoyaltyAutoApplied(true));
+  }, [restaurantId, token, session?.customer_phone, session?.discount_amount, rawSubtotal, loyaltyAutoApplied]);
   const afterDiscount = Math.max(0, rawSubtotal - discount);
   const svcAmt        = Number((afterDiscount * svcPct / 100).toFixed(2));
   const taxable       = afterDiscount + svcAmt;
@@ -23528,6 +23569,15 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
         name: it.name || '', qty: Number(it.quantity || 1), price: Number(it.price || 0),
       })),
     }));
+    // Phase L1 — label the discount line "Silver discount (5%)" etc. when
+    // the loyalty auto-apply matches the displayed discount amount (so the
+    // customer sees on the receipt WHY they got the discount).
+    const expectedLoyaltyDiscount = loyaltyTier
+      ? Math.round(rawSubtotal * Number(loyaltyTier.discount_percent) / 100 * 100) / 100
+      : 0;
+    const loyaltyLabel = loyaltyTier && discount > 0 && Math.abs(discount - expectedLoyaltyDiscount) < 0.5
+      ? `${loyaltyTier.name} discount (${loyaltyTier.discount_percent}%)`
+      : undefined;
     const html = buildThermalHTML({
       restaurantName: restaurant?.name || 'Restaurant',
       gstin: restaurant?.gst_number,
@@ -23542,6 +23592,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
       rounds: roundData,
       subtotal: rawSubtotal,
       discountAmount: discount > 0 ? discount : undefined,
+      loyaltyDiscountLabel: loyaltyLabel,
       serviceChargeAmount: svcAmt > 0 ? svcAmt : undefined,
       serviceChargePercent: svcPct > 0 ? svcPct : undefined,
       gstAmount: gstAmt,
@@ -23818,9 +23869,29 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                     <span className="font-mono font-bold text-sm">₹{rawSubtotal.toFixed(2)}</span>
                   </div>
 
+                  {/* Loyalty member banner — auto-applies the tier discount once on load */}
+                  {loyaltyTier && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-start gap-2">
+                      <Sparkles size={14} className="text-amber-700 shrink-0 mt-0.5" />
+                      <div className="text-[12px] text-amber-900 leading-snug">
+                        <strong>{loyaltyTier.name}</strong> member detected · <strong>{loyaltyTier.discount_percent}% off</strong> auto-applied
+                        {loyaltyTier.next_tier_name && loyaltyTier.spend_remaining != null && loyaltyTier.spend_remaining > 0 && (
+                          <span className="block text-[11px] text-amber-700/80 mt-0.5">
+                            ₹{Number(loyaltyTier.spend_remaining).toFixed(0)} more to reach {loyaltyTier.next_tier_name}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Flat discount */}
                   <div className="flex items-center justify-between gap-3">
-                    <label className="text-sm text-[#3d3128] shrink-0">Discount (₹)</label>
+                    <label className="text-sm text-[#3d3128] shrink-0">
+                      Discount (₹)
+                      {loyaltyTier && Number(discount) >= Math.round(rawSubtotal * loyaltyTier.discount_percent / 100 * 100) / 100 - 0.01 && (
+                        <span className="block text-[10px] text-amber-700 font-bold">{loyaltyTier.name} discount</span>
+                      )}
+                    </label>
                     <input
                       type="number" min="0" max={rawSubtotal} step="1"
                       value={discount || ''}
