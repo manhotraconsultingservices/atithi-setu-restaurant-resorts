@@ -24970,13 +24970,19 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   // tier discount is computed against the live subtotal and dropped into
   // the Discount input so the owner sees the "after-loyalty" total
   // immediately. The banner below the discount field tells them why.
+  //
+  // IMPORTANT: even when the recognised tier is a 0%-discount tier
+  // (Bronze ships at 0% by design — "welcome tier, unlock perks at
+  // Silver"), we still set loyaltyTier so the banner shows. Otherwise
+  // staff thinks loyalty is broken ("the customer is a member, why is
+  // nothing happening?"). For 0% tiers we just don't touch the
+  // discount field — the banner copy explains the next-tier progress.
   useEffect(() => {
     if (!session?.customer_phone) return;
     if (rawSubtotal <= 0) return;
     if (loyaltyAutoApplied) return;
     // Don't fight an owner-edited discount that was saved earlier
     const savedDiscount = Number(session?.discount_amount || 0);
-    if (savedDiscount > 0) { setLoyaltyAutoApplied(true); return; }
     fetch(
       `/api/restaurant/${restaurantId}/loyalty/lookup?phone=${encodeURIComponent(session.customer_phone)}`,
       { headers: { Authorization: `Bearer ${token}` } }
@@ -24985,15 +24991,21 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
       .then(data => {
         if (!data?.recognised || !data?.tier) return;
         const pct = Number(data.tier.discount_percent || 0);
-        if (pct <= 0) return;
-        const tierDiscount = Math.round(rawSubtotal * pct / 100 * 100) / 100;
-        setDiscount(tierDiscount);
+        // Always surface the tier so staff knows the customer was
+        // recognised (otherwise Bronze customers look invisible).
         setLoyaltyTier({
           name: data.tier.name,
           discount_percent: pct,
           spend_remaining: data.next_tier?.spend_remaining,
           next_tier_name: data.next_tier?.name,
         });
+        // Only auto-fill the discount input when (a) the tier has a
+        // discount > 0 AND (b) the owner hasn't already entered a
+        // manual discount on this session.
+        if (pct > 0 && savedDiscount <= 0) {
+          const tierDiscount = Math.round(rawSubtotal * pct / 100 * 100) / 100;
+          setDiscount(tierDiscount);
+        }
       })
       .catch(() => {})
       .finally(() => setLoyaltyAutoApplied(true));
@@ -25337,15 +25349,41 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                     <span className="font-mono font-bold text-sm">₹{rawSubtotal.toFixed(2)}</span>
                   </div>
 
-                  {/* Loyalty member banner — auto-applies the tier discount once on load */}
+                  {/* Loyalty member banner. Two flavours:
+                      • Tier has discount > 0 → "Silver member · 5% off auto-applied"
+                      • Tier has discount = 0 → "Bronze member · welcome tier, no discount yet"
+                      Either way the banner appears, so staff can confirm the
+                      customer was recognised by the loyalty engine.            */}
                   {loyaltyTier && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-start gap-2">
-                      <Sparkles size={14} className="text-amber-700 shrink-0 mt-0.5" />
-                      <div className="text-[12px] text-amber-900 leading-snug">
-                        <strong>{loyaltyTier.name}</strong> member detected · <strong>{loyaltyTier.discount_percent}% off</strong> auto-applied
+                    <div className={cn(
+                      "rounded-xl px-3 py-2 flex items-start gap-2 border",
+                      loyaltyTier.discount_percent > 0
+                        ? "bg-amber-50 border-amber-200"
+                        : "bg-[#faf7f2] border-[#cc5a16]/15"
+                    )}>
+                      <Sparkles size={14} className={cn(
+                        "shrink-0 mt-0.5",
+                        loyaltyTier.discount_percent > 0 ? "text-amber-700" : "text-[#cc5a16]"
+                      )} />
+                      <div className={cn(
+                        "text-[12px] leading-snug",
+                        loyaltyTier.discount_percent > 0 ? "text-amber-900" : "text-[#3d3128]"
+                      )}>
+                        {loyaltyTier.discount_percent > 0 ? (
+                          <>
+                            <strong>{loyaltyTier.name}</strong> member detected · <strong>{loyaltyTier.discount_percent}% off</strong> auto-applied
+                          </>
+                        ) : (
+                          <>
+                            <strong>{loyaltyTier.name}</strong> member · welcome tier (no discount yet)
+                          </>
+                        )}
                         {loyaltyTier.next_tier_name && loyaltyTier.spend_remaining != null && loyaltyTier.spend_remaining > 0 && (
-                          <span className="block text-[11px] text-amber-700/80 mt-0.5">
-                            ₹{Number(loyaltyTier.spend_remaining).toFixed(0)} more to reach {loyaltyTier.next_tier_name}
+                          <span className={cn(
+                            "block text-[11px] mt-0.5",
+                            loyaltyTier.discount_percent > 0 ? "text-amber-700/80" : "text-[#6b5d52]"
+                          )}>
+                            ₹{Number(loyaltyTier.spend_remaining).toFixed(0)} more to unlock {loyaltyTier.next_tier_name}
                           </span>
                         )}
                       </div>
