@@ -14108,61 +14108,84 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : activeTab === 'SETTINGS' ? (
         <div className="max-w-xl space-y-6">
-          {/* ── Property Type: Restaurant / Hotel toggle ─────────────── */}
+          {/* ── Property Type — READ-ONLY for Owners ─────────────────────
+              Activation of the Hotel module is a billing-tier decision so
+              the toggle has been moved to the SuperAdmin console
+              (ADMIN_ANKUSH). Owners see what their tenant currently has
+              and a Contact Sales CTA, but cannot self-activate. The
+              backend `/hotel/enable` endpoint enforces the same gate — even
+              if a user re-enables the button via DevTools, the API
+              returns 403.                                                  */}
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm relative overflow-hidden">
             <div className="absolute top-0 left-0 right-0 h-[3px] bg-[#b8860b]"></div>
-            <h3 className="text-2xl font-bold font-serif mb-1">Property Type</h3>
+            <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
+              <h3 className="text-2xl font-bold font-serif">Property Type</h3>
+              <span className="text-[9px] font-mono uppercase tracking-widest font-bold px-2 py-1 rounded-full bg-[#b8860b]/10 text-[#b8860b] border border-[#b8860b]/25">
+                Managed by AtithiSetu
+              </span>
+            </div>
             <p className="text-xs text-[#6b5d52] mb-5">
-              Select what your business offers. You can enable both if you are a resort with an on-site restaurant.
+              Your subscription tier determines which modules are active on your account.
+              To enable or disable the Hotel module, contact our sales team — we'll update
+              your plan and unlock it within an hour.
             </p>
+
             <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={async () => {
-                  // Toggle restaurant — not much backend work since RESTAURANT is the default.
-                  // This UI is for visual symmetry with the hotel toggle.
-                }}
-                disabled
-                className={cn(
-                  "relative p-5 rounded-2xl border-2 text-left transition-all",
-                  isRestaurantEnabled
-                    ? "border-[#cc5a16] bg-[#cc5a16]/5"
-                    : "border-[#cc5a16]/10 bg-[#faf7f2] opacity-50"
-                )}
-              >
+              {/* Restaurant tile — always shown as the current/default property */}
+              <div className={cn(
+                "relative p-5 rounded-2xl border-2 text-left",
+                isRestaurantEnabled
+                  ? "border-[#cc5a16] bg-[#cc5a16]/5"
+                  : "border-[#cc5a16]/10 bg-[#faf7f2] opacity-50"
+              )}>
                 {isRestaurantEnabled && <Check size={18} className="absolute top-3 right-3 text-[#cc5a16]" />}
                 <div className="text-2xl mb-2">🍽</div>
                 <div className="font-bold text-[#1a1208]">Restaurant</div>
                 <div className="text-[11px] text-[#6b5d52] mt-1">Tables · QR ordering · Kitchen display</div>
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const result = await toggleHotelModule(!isHotelEnabled);
-                    alert(result.message || 'Updated');
-                  } catch (err: any) {
-                    alert(err.message || 'Failed');
-                  }
-                }}
-                disabled={hotelLoading}
-                className={cn(
-                  "relative p-5 rounded-2xl border-2 text-left transition-all",
-                  isHotelEnabled
-                    ? "border-[#b8860b] bg-[#b8860b]/5"
-                    : "border-[#cc5a16]/10 bg-[#faf7f2] hover:border-[#b8860b]/30"
-                )}
-              >
-                {isHotelEnabled && <Check size={18} className="absolute top-3 right-3 text-[#b8860b]" />}
+              </div>
+
+              {/* Hotel tile — reflects current state, but no longer clickable */}
+              <div className={cn(
+                "relative p-5 rounded-2xl border-2 text-left",
+                isHotelEnabled
+                  ? "border-[#b8860b] bg-[#b8860b]/5"
+                  : "border-[#cc5a16]/10 bg-[#faf7f2] opacity-60"
+              )}>
+                {isHotelEnabled
+                  ? <Check size={18} className="absolute top-3 right-3 text-[#b8860b]" />
+                  : <span className="absolute top-3 right-3 text-[9px] font-mono uppercase tracking-widest font-bold text-[#6b5d52]">add-on</span>
+                }
                 <div className="text-2xl mb-2">🏨</div>
                 <div className="font-bold text-[#1a1208]">Hotel / Resort</div>
                 <div className="text-[11px] text-[#6b5d52] mt-1">Rooms · In-room QR · Service requests</div>
-                {hotelLoading && <div className="mt-2 text-[11px] text-[#cc5a16] font-bold">Updating…</div>}
-              </button>
+              </div>
             </div>
-            {isHotelEnabled && (
+
+            {isHotelEnabled ? (
               <div className="mt-4 px-4 py-3 rounded-xl bg-[#b8860b]/10 border border-[#b8860b]/20 text-[#6b5d52] text-xs">
-                <strong className="text-[#b8860b]">Hotel module active.</strong> New tabs appeared above: <em>Rooms · Services · Service Requests</em>. Default services have been seeded — customise them under the Services tab.
+                <strong className="text-[#b8860b]">Hotel module active.</strong> Tabs visible above: <em>Rooms · Services · Service Requests</em>. To deactivate, contact billing.
+              </div>
+            ) : (
+              <div className="mt-4 flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/15 flex-wrap">
+                <p className="text-xs text-[#6b5d52] flex-1 min-w-[200px]">
+                  Want to add hotel / resort management — rooms, in-room QR ordering, housekeeping, Form-C automation? Talk to sales.
+                </p>
+                <div className="flex gap-2">
+                  <a
+                    href="https://wa.me/917011189371?text=Hi%20AtithiSetu%2C%20I%27d%20like%20to%20enable%20the%20Hotel%20module%20on%20my%20account."
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-4 py-2 rounded-lg bg-[#b8860b] text-white font-bold text-xs uppercase tracking-widest hover:opacity-90 transition-opacity flex items-center gap-1.5"
+                  >
+                    WhatsApp Sales
+                  </a>
+                  <a
+                    href="mailto:contact@atithi-setu.com?subject=Enable%20Hotel%20module"
+                    className="px-4 py-2 rounded-lg border border-[#cc5a16]/30 text-[#1a1208] font-bold text-xs uppercase tracking-widest hover:bg-[#cc5a16]/5 transition-colors"
+                  >
+                    Email
+                  </a>
+                </div>
               </div>
             )}
           </div>
@@ -21644,6 +21667,59 @@ function SuperAdminDashboard({ token }: { token: string }) {
                         )}
                       >
                         <Trash2 size={13} /> Invoice Deletion: {enabled ? 'ENABLED' : 'OFF'}
+                      </button>
+                    );
+                  })()}
+
+                  {/* Property Type / Hotel module — billing-gated activation.
+                      The tenant Owner sees a read-only view + Contact Sales CTA;
+                      activation only happens here, after the billing team has
+                      confirmed the customer is on a Hotel-capable tier.        */}
+                  {(() => {
+                    const pt = (r.property_type || 'RESTAURANT') as 'RESTAURANT' | 'HOTEL' | 'BOTH';
+                    const hotelOn = pt === 'HOTEL' || pt === 'BOTH';
+                    const nextEnabled = !hotelOn;
+                    const label = hotelOn
+                      ? `Hotel: ON (${pt})`
+                      : 'Hotel: OFF (Restaurant only)';
+                    return (
+                      <button
+                        onClick={async () => {
+                          const verb = nextEnabled ? 'ENABLE' : 'DISABLE';
+                          if (!confirm(
+                            `${verb} Hotel module for "${r.name}"?\n\n` +
+                            `Current: ${pt}\n` +
+                            `After:   ${nextEnabled ? 'BOTH' : 'RESTAURANT'}\n\n` +
+                            (nextEnabled
+                              ? 'This unlocks Rooms / In-room QR / Form-C / Folios. Confirm the customer is on a Hotel-tier subscription before proceeding.'
+                              : 'This hides the Hotel tabs from the owner. Data is preserved.')
+                          )) return;
+                          try {
+                            const res = await fetch(`/api/restaurant/${r.id}/hotel/enable`, {
+                              method: 'POST',
+                              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ enabled: nextEnabled }),
+                            });
+                            const data = await res.json();
+                            if (!res.ok) { alert(`❌ ${data.error || 'Failed'}`); return; }
+                            alert(`✅ ${data.message || 'Updated'}`);
+                            // Refresh the tenant list so the chip updates.
+                            window.location.reload();
+                          } catch {
+                            alert('Network error. Please try again.');
+                          }
+                        }}
+                        title={hotelOn
+                          ? "Click to disable the Hotel module for this tenant (data preserved)"
+                          : "Click to enable the Hotel module — only after billing tier is confirmed"}
+                        className={cn(
+                          "w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 border",
+                          hotelOn
+                            ? "text-[#b8860b] border-[#b8860b]/40 bg-[#b8860b]/10 hover:bg-[#b8860b]/15"
+                            : "text-[#6b5d52] border-[#cc5a16]/10 hover:bg-[#cc5a16]/5"
+                        )}
+                      >
+                        <Bed size={13} /> {label}
                       </button>
                     );
                   })()}

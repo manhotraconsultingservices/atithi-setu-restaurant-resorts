@@ -946,6 +946,31 @@ async function startServer() {
     console.error("[hospitality-migration] Warning:", err);
   }
 
+  // ====== Property-type audit log ======
+  // One row per admin-driven Hotel-module toggle. Lets billing reconcile
+  // activations against the customer's actual subscription tier — and gives
+  // us a paper trail if a customer disputes when/why their module changed.
+  try {
+    await centralDb.run(`
+      CREATE TABLE IF NOT EXISTS property_type_audit (
+        id SERIAL PRIMARY KEY,
+        restaurant_id TEXT NOT NULL,
+        changed_by_email TEXT,
+        changed_by_role TEXT,
+        from_type TEXT,
+        to_type TEXT,
+        ip TEXT,
+        changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await centralDb.run(
+      `CREATE INDEX IF NOT EXISTS idx_property_type_audit_rid ON property_type_audit(restaurant_id, changed_at DESC)`
+    );
+    console.log("[property-type-audit] table ensured");
+  } catch (err) {
+    console.error("[property-type-audit] Warning:", err);
+  }
+
   // ====== Invoice deletion feature flag + audit tables ======
   // Per-tenant feature gate. When invoice_delete_enabled = 1, the tenant's
   // OWNER can permanently delete invoices (incl. PRINTED). OFF by default;
@@ -12076,13 +12101,28 @@ async function startServer() {
 
   // ─── Enable / toggle the hotel module for a tenant ────────────────────────
   // POST /api/restaurant/:id/hotel/enable    body: { enabled: boolean }
+  //
+  // ⚠ ADMIN-ONLY. Previously this allowed the tenant's own OWNER role to
+  // flip the Hotel module on for their restaurant, which is a billing leak:
+  // an Owner subscribed to a Restaurant tier could self-activate the Hotel
+  // module without ever passing through the billing system. Activation is
+  // now restricted to SUPER_ADMIN / CTO so it can only happen after the
+  // sales/billing team has confirmed the customer is on a Hotel tier.
+  //
   // Idempotent: creating tables multiple times is safe.
   app.post("/api/restaurant/:id/hotel/enable", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const restaurantId = req.params.id;
-      if (req.user?.restaurantId !== restaurantId && req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
-        return res.status(403).json({ error: "Forbidden" });
+
+      // Hard gate — only platform admins can toggle module access.
+      // The tenant Owner sees a read-only view + a "Contact sales" CTA
+      // in the dashboard; they cannot reach this endpoint.
+      if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+        return res.status(403).json({
+          error: "This action is restricted to platform administrators. To enable or disable the Hotel module on your subscription, contact sales at contact@atithi-setu.com or WhatsApp +91 70111 89371."
+        });
       }
+
       const enabled: boolean = req.body?.enabled !== false;  // default true
 
       const current: any = await centralDb.get("SELECT property_type FROM restaurants WHERE id = ?", [restaurantId]);
@@ -12099,6 +12139,28 @@ async function startServer() {
       }
 
       await centralDb.run("UPDATE restaurants SET property_type = ? WHERE id = ?", [newType, restaurantId]);
+
+      // Audit row so billing can reconcile activations against subscription tier.
+      // We log who, when, from/to, and the request IP. Fire-and-forget — failure
+      // to write the audit row must not block the activation, but we surface
+      // the error so it's caught in logs.
+      try {
+        await centralDb.run(
+          `INSERT INTO property_type_audit
+             (restaurant_id, changed_by_email, changed_by_role, from_type, to_type, ip, changed_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [
+            restaurantId,
+            req.user?.email || 'unknown',
+            req.user?.role || 'unknown',
+            currentType,
+            newType,
+            String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim(),
+          ]
+        );
+      } catch (auditErr: any) {
+        console.error("[hotel/enable] audit write failed:", auditErr?.message);
+      }
 
       let seeded = 0;
       if (enabled) {
@@ -17108,7 +17170,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'menu-generate-image-disabled',
+    commit_marker: 'property-type-admin-gated',
     code_features: [
       'subscription-billing',
       'read-only-mode',
