@@ -467,21 +467,75 @@ async function recomputeFolioTotals(tenantDb: DbInterface, folioId: string): Pro
   await tenantDb.run("UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?", [subtotal, gst, grand, folioId]);
 }
 
-async function settleFolioForBooking(restaurantId: string, bookingId: string, paymentMethod: string, discount: number, waive: boolean): Promise<any> {
+async function settleFolioForBooking(
+  restaurantId: string,
+  bookingId: string,
+  paymentMethod: string,
+  discount: number,
+  waive: boolean,
+  loyaltyResolver?: (subtotal: number, phone: string) => Promise<{
+    discount: number; tier_id: string | null; tier_name: string | null; discount_percent: number;
+  } | null>,
+): Promise<any> {
   const tenantDb = await getTenantDb(restaurantId);
   const folio: any = await tenantDb.get("SELECT * FROM folios WHERE booking_id = ? AND status = 'open'", [bookingId]);
   if (!folio) return null;
+
+  // Hoist out so we can return loyalty info to the caller (used to fire
+  // the post-settle hook and to surface a banner in the response).
+  let appliedLoyalty: { tier_id: string | null; tier_name: string | null; discount_percent: number; discount_amount: number } | null = null;
+
   if (waive) {
     // Zero out charges — just close as voided
     await tenantDb.run("UPDATE folios SET status = 'voided', settled_at = ?, payment_method = ? WHERE id = ?",
       [new Date().toISOString(), paymentMethod, folio.id]);
   } else {
-    if (discount > 0) await tenantDb.run("UPDATE folios SET discount = ? WHERE id = ?", [discount, folio.id]);
+    // ── Auto-apply loyalty discount when none was manually entered ──────
+    // Mirrors the restaurant PostpaidInvoiceModal behaviour: if the
+    // staff didn't override with a manual discount, look up the guest's
+    // tier and apply the tier's percentage to the gross subtotal. If a
+    // manual discount > 0 was passed, honour it (staff override wins).
+    let effectiveDiscount = Number(discount || 0);
+    if (effectiveDiscount <= 0 && loyaltyResolver) {
+      const booking: any = await tenantDb.get(
+        "SELECT guest_phone FROM room_bookings WHERE id = ?", [bookingId]
+      );
+      const phone = booking?.guest_phone || '';
+      if (phone) {
+        const subSum: any = await tenantDb.get(
+          "SELECT COALESCE(SUM(amount), 0) AS subtotal FROM folio_entries WHERE folio_id = ?",
+          [folio.id]
+        );
+        const gross = Number(subSum?.subtotal || 0);
+        if (gross > 0) {
+          const loy = await loyaltyResolver(gross, phone);
+          if (loy && loy.discount > 0) {
+            effectiveDiscount = loy.discount;
+            appliedLoyalty = {
+              tier_id: loy.tier_id,
+              tier_name: loy.tier_name,
+              discount_percent: loy.discount_percent,
+              discount_amount: loy.discount,
+            };
+          }
+        }
+      }
+    }
+
+    if (effectiveDiscount > 0) {
+      await tenantDb.run("UPDATE folios SET discount = ? WHERE id = ?", [effectiveDiscount, folio.id]);
+    }
     await recomputeFolioTotals(tenantDb, folio.id);
     await tenantDb.run("UPDATE folios SET status = 'settled', settled_at = ?, payment_method = ? WHERE id = ?",
       [new Date().toISOString(), paymentMethod, folio.id]);
   }
-  return await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+  const settled = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+  // Caller reads .loyalty when present to fire the loyalty hook and to
+  // include a banner field in the API response. Stored only on the
+  // returned object — not persisted as a column (the discount itself is
+  // already persisted on folios.discount).
+  if (appliedLoyalty) (settled as any).loyalty = appliedLoyalty;
+  return settled;
 }
 
 // Seed defaults into the tenant's services table if it's empty.
@@ -12721,18 +12775,70 @@ async function startServer() {
       if (!b) return res.status(404).json({ error: "Booking not found" });
       if (b.status !== 'CHECKED_IN') return res.status(400).json({ error: "Guest not checked in" });
 
-      // Settle folio
-      const settled = await settleFolioForBooking(req.params.id, b.id, payment_method || 'CASH', discount || 0, !!waive);
+      // ── Unified loyalty: settle folio with auto-apply tier discount ──
+      // Pass a closure that the settle helper can call to resolve the
+      // guest's tier and convert the gross folio subtotal into a ₹
+      // discount. The closure pierces back into _loyaltyHook's helpers
+      // (_resolveTierForSpend) without exposing them across modules.
+      const loyaltyResolver = async (subtotal: number, phone: string) => {
+        try {
+          const normPhone = _normalisePhone(phone);
+          if (!normPhone) return null;
+          const customer: any = await tenantDb.get(
+            "SELECT total_spent, is_blocked FROM loyalty_customers WHERE phone = ?",
+            [normPhone]
+          );
+          if (!customer || Number(customer.is_blocked) === 1) return null;
+          const tier = await _resolveTierForSpend(tenantDb, Number(customer.total_spent || 0));
+          const pct = Number(tier?.discount_percent || 0);
+          if (!tier || pct <= 0) return null;
+          return {
+            discount: Math.round(subtotal * pct / 100 * 100) / 100,
+            tier_id: tier.id,
+            tier_name: tier.name,
+            discount_percent: pct,
+          };
+        } catch (e) {
+          console.warn('[hotel-checkout] loyalty resolver failed:', e);
+          return null;
+        }
+      };
+
+      // Settle folio (loyalty-aware)
+      const settled = await settleFolioForBooking(
+        req.params.id, b.id, payment_method || 'CASH', discount || 0, !!waive, loyaltyResolver
+      );
 
       const now = new Date().toISOString();
       await tenantDb.run("UPDATE room_bookings SET status = 'CHECKED_OUT', actual_checkout_at = ? WHERE id = ?", [now, req.params.bookingId]);
       await tenantDb.run("UPDATE rooms SET status = 'CLEANING' WHERE id = ?", [b.room_id]);
       await tenantDb.run("UPDATE room_sessions SET status = 'checked_out', closed_at = ? WHERE room_id = ? AND status = 'active'", [now, b.room_id]);
 
+      // ── Fire the unified loyalty hook so the folio counts toward the
+      //    guest's lifetime spend the same way a restaurant order does.
+      //    The hook is generic — it accepts an opaque source id (we pass
+      //    the folio id) and a grand total, then upserts loyalty_customers
+      //    + recomputes tier + writes a redemption row when discounted.
+      //    Best-effort: never blocks the checkout response.
+      if (settled && settled.status === 'settled') {
+        const loy = (settled as any).loyalty || null;
+        _loyaltyHook({
+          tenantId:        req.params.id,
+          orderId:         settled.id,          // folio id used as the source identifier
+          customerPhone:   b.guest_phone,
+          customerName:    b.guest_name,
+          customerEmail:   b.guest_email,
+          grandTotal:      Number(settled.grand_total || 0),
+          discountAmount:  loy?.discount_amount || 0,
+          discountPercent: loy?.discount_percent || 0,
+        }).catch(err => console.warn('[hotel-checkout] loyalty hook failed:', err));
+      }
+
       try { await triggerNotification(req.params.id, 'GUEST_CHECKED_OUT', { bookingId: b.id, guestName: b.guest_name, roomId: b.room_id }); } catch {}
       res.json({
         booking: await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]),
         folio: settled,
+        loyalty: (settled as any)?.loyalty || null,    // surface to UI for banner
       });
     } catch (err: any) {
       console.error("checkout error:", err);
@@ -17225,7 +17331,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'nav-summary-tabs-per-mode',
+    commit_marker: 'loyalty-unified-hotel-restaurant',
     code_features: [
       'subscription-billing',
       'read-only-mode',

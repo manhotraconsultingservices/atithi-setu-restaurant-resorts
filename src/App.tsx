@@ -16274,43 +16274,74 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       )}
 
       {/* ═════════ Check-out modal (with folio preview) ═════════ */}
-      {showCheckoutModal && checkoutBooking && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-bold font-serif text-[#1a1208]">Check Out — {checkoutBooking.guest_name}</h3>
-              <button onClick={() => { setShowCheckoutModal(false); setCheckoutBooking(null); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
-            </div>
-            <div className="bg-[#faf7f2] rounded-2xl p-4 mb-4 text-sm">
-              <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Room</span><span className="font-semibold">{checkoutBooking.room_name || checkoutBooking.room_id}</span></div>
-              <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Dates</span><span>{new Date(checkoutBooking.check_in_date).toLocaleDateString('en-IN')} → {new Date(checkoutBooking.check_out_date).toLocaleDateString('en-IN')}</span></div>
-              <p className="text-[10px] text-[#9c8e85] mt-2">Folio totals will include room nights + completed service charges.</p>
-            </div>
-            <div className="space-y-3 mb-4">
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment Method</label>
-                <select value={checkoutPayment} onChange={e => setCheckoutPayment(e.target.value as any)} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3">
-                  <option value="CASH">Cash</option><option value="CARD">Card</option><option value="UPI">UPI</option><option value="BANK">Bank Transfer</option>
-                </select>
+      {showCheckoutModal && checkoutBooking && (() => {
+        // Loyalty preview for this guest. Mirrors the restaurant
+        // PostpaidInvoiceModal: when the guest's phone is on file AND
+        // their tier has discount_percent > 0, surface a banner so
+        // staff knows the discount will be auto-applied at settlement.
+        // The actual application happens server-side (see
+        // /hotel/bookings/:id/checkout → settleFolioForBooking with the
+        // loyaltyResolver) so the banner is a preview, not authoritative.
+        const phone = (checkoutBooking as any).guest_phone || '';
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Check Out — {checkoutBooking.guest_name}</h3>
+                <button onClick={() => { setShowCheckoutModal(false); setCheckoutBooking(null); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
               </div>
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Discount (₹)</label>
-                <input type="number" min={0} value={checkoutDiscount} onChange={e => setCheckoutDiscount(Number(e.target.value)||0)} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3"/>
+              <div className="bg-[#faf7f2] rounded-2xl p-4 mb-4 text-sm">
+                <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Room</span><span className="font-semibold">{checkoutBooking.room_name || checkoutBooking.room_id}</span></div>
+                <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Dates</span><span>{new Date(checkoutBooking.check_in_date).toLocaleDateString('en-IN')} → {new Date(checkoutBooking.check_out_date).toLocaleDateString('en-IN')}</span></div>
+                <p className="text-[10px] text-[#9c8e85] mt-2">Folio totals will include room nights + completed service charges.</p>
               </div>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => { setShowCheckoutModal(false); setCheckoutBooking(null); }} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
-              <button onClick={async () => {
-                try {
-                  const result = await checkOutBooking(checkoutBooking.id, checkoutPayment, checkoutDiscount);
-                  setShowCheckoutModal(false); setCheckoutBooking(null); setCheckoutDiscount(0);
-                  if (result?.folio?.id) await loadFolio(result.folio.id);
-                } catch (err: any) { alert(err.message); }
-              }} className="flex-1 px-4 py-2.5 rounded-2xl bg-[#b8860b] text-white text-sm font-bold hover:bg-[#8f6608]">Settle &amp; Check Out</button>
+
+              {/* Loyalty preview banner. Looks up the tier on-mount and
+                  caches in component state via the existing loyaltyTier
+                  state if we add one — for now we just fetch inline. */}
+              <HotelLoyaltyBanner
+                restaurantId={restaurantId}
+                token={token}
+                guestPhone={phone}
+                manualDiscountActive={checkoutDiscount > 0}
+              />
+
+              <div className="space-y-3 mb-4">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment Method</label>
+                  <select value={checkoutPayment} onChange={e => setCheckoutPayment(e.target.value as any)} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3">
+                    <option value="CASH">Cash</option><option value="CARD">Card</option><option value="UPI">UPI</option><option value="BANK">Bank Transfer</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    Discount (₹)
+                    <span className="block text-[9px] font-normal text-[#9c8e85] mt-0.5 normal-case">
+                      Override the auto-applied loyalty discount, if any.
+                    </span>
+                  </label>
+                  <input type="number" min={0} value={checkoutDiscount} onChange={e => setCheckoutDiscount(Number(e.target.value)||0)} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3"/>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => { setShowCheckoutModal(false); setCheckoutBooking(null); }} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                <button onClick={async () => {
+                  try {
+                    const result = await checkOutBooking(checkoutBooking.id, checkoutPayment, checkoutDiscount);
+                    setShowCheckoutModal(false); setCheckoutBooking(null); setCheckoutDiscount(0);
+                    if (result?.folio?.id) await loadFolio(result.folio.id);
+                    // Surface a small success cue when loyalty was applied
+                    if (result?.loyalty) {
+                      const loy = result.loyalty;
+                      console.log(`[hotel-checkout] Loyalty applied: ${loy.tier_name} − ₹${Number(loy.discount_amount).toFixed(2)}`);
+                    }
+                  } catch (err: any) { alert(err.message); }
+                }} className="flex-1 px-4 py-2.5 rounded-2xl bg-[#b8860b] text-white text-sm font-bold hover:bg-[#8f6608]">Settle &amp; Check Out</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ═════════ FAQ add/edit modal (Phase 4) ═════════ */}
       {showFaqModal && editingFaq && (
@@ -17880,6 +17911,96 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     </div>
   );
 }
+
+/* ─── HotelLoyaltyBanner ─────────────────────────────────────────
+   Compact preview banner shown inside the hotel check-out modal.
+   Calls /loyalty/lookup with the guest's phone and renders the
+   matched tier + auto-applied discount %. Identical visual style
+   to the restaurant PostpaidInvoiceModal banner so a multi-mode
+   tenant sees consistent loyalty UI on both sides.
+
+   Behaviour:
+   • No phone on file → renders nothing (silent, not an error).
+   • Not a loyalty member → renders nothing.
+   • Bronze with 0% discount → grey "welcome tier" banner.
+   • Silver/Gold with >0% → amber "X% off auto-applied" banner.
+   • If staff has typed a manual discount > 0, the banner notes
+     that the manual value will OVERRIDE the auto-applied one.    */
+const HotelLoyaltyBanner: React.FC<{
+  restaurantId: string;
+  token: string;
+  guestPhone: string;
+  manualDiscountActive: boolean;
+}> = ({ restaurantId, token, guestPhone, manualDiscountActive }) => {
+  const [data, setData] = useState<{
+    tier_name: string;
+    discount_percent: number;
+    spend_remaining?: number;
+    next_tier_name?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!guestPhone || !restaurantId) { setData(null); return; }
+    let cancelled = false;
+    fetch(
+      `/api/restaurant/${restaurantId}/loyalty/lookup?phone=${encodeURIComponent(guestPhone)}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (cancelled) return;
+        if (!d?.recognised || !d?.tier) { setData(null); return; }
+        setData({
+          tier_name: d.tier.name,
+          discount_percent: Number(d.tier.discount_percent || 0),
+          spend_remaining: d.next_tier?.spend_remaining,
+          next_tier_name: d.next_tier?.name,
+        });
+      })
+      .catch(() => { if (!cancelled) setData(null); });
+    return () => { cancelled = true; };
+  }, [guestPhone, restaurantId, token]);
+
+  if (!data) return null;
+  const hasDiscount = data.discount_percent > 0;
+  return (
+    <div className={cn(
+      "rounded-xl px-3 py-2.5 mb-3 flex items-start gap-2 border",
+      hasDiscount ? "bg-amber-50 border-amber-200" : "bg-[#faf7f2] border-[#cc5a16]/15"
+    )}>
+      <Sparkles size={14} className={cn(
+        "shrink-0 mt-0.5",
+        hasDiscount ? "text-amber-700" : "text-[#cc5a16]"
+      )} />
+      <div className={cn(
+        "text-[12px] leading-snug",
+        hasDiscount ? "text-amber-900" : "text-[#3d3128]"
+      )}>
+        {hasDiscount ? (
+          <>
+            <strong>{data.tier_name}</strong> member · <strong>{data.discount_percent}% off</strong>{' '}
+            {manualDiscountActive
+              ? <span className="text-amber-700/80">— manual discount below will override</span>
+              : <span>will be auto-applied at settlement</span>
+            }
+          </>
+        ) : (
+          <>
+            <strong>{data.tier_name}</strong> member · welcome tier (no discount yet)
+          </>
+        )}
+        {data.next_tier_name && data.spend_remaining != null && data.spend_remaining > 0 && (
+          <span className={cn(
+            "block text-[10px] mt-0.5",
+            hasDiscount ? "text-amber-700/80" : "text-[#6b5d52]"
+          )}>
+            ₹{Number(data.spend_remaining).toFixed(0)} more to unlock {data.next_tier_name}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // --- CHEF DASHBOARD ---
 function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: string }) {
