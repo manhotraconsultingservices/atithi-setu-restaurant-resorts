@@ -1468,6 +1468,11 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec(`ALTER TABLE loyalty_customers ADD COLUMN IF NOT EXISTS birthday DATE`).catch(() => {});
   await db.exec(`ALTER TABLE loyalty_customers ADD COLUMN IF NOT EXISTS marketing_opt_out INT DEFAULT 0`).catch(() => {});
   await db.exec(`ALTER TABLE loyalty_customers ADD COLUMN IF NOT EXISTS last_nudge_sent_at TIMESTAMP`).catch(() => {});
+  // Phase H1 — hotel anniversary perk. anniversary stores YYYY-MM-DD but only
+  // the month/day are compared at check-in. last_perk_at dedups so a single
+  // booking can't trigger the perk multiple times during the same stay.
+  await db.exec(`ALTER TABLE loyalty_customers ADD COLUMN IF NOT EXISTS anniversary DATE`).catch(() => {});
+  await db.exec(`ALTER TABLE loyalty_customers ADD COLUMN IF NOT EXISTS last_perk_at TIMESTAMP`).catch(() => {});
 
   // ─────────────────────────────────────────────────────────────────────
   // PROMO CODES (Phase L2 — owner-managed discount codes layered on tiers)

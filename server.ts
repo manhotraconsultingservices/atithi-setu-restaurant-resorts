@@ -802,6 +802,74 @@ async function computeLateCheckoutFee(
   };
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  computeGuestPerkOnCheckIn — Phase H1
+//
+//  Looks up the guest by phone in loyalty_customers and returns whether
+//  today (Asia/Kolkata) matches their birthday or anniversary. The
+//  match is month+day only, so the perk fires every year on the date
+//  regardless of the year stored.
+//
+//  Returns { applies, type, message } so the caller can:
+//    • fire a notification ("Happy birthday! Welcome back, {name}.")
+//    • surface a banner on the check-in UI
+//    • optionally add a complimentary folio entry (not done here —
+//      kept manual so the hotel decides what to comp).
+// ════════════════════════════════════════════════════════════════════════
+// Module-level phone normaliser. Mirrors the closure-scoped helper
+// inside registerRoutes — kept duplicated so top-level helpers don't
+// depend on the route closure.
+function _normalisePhoneModule(raw: any): string | null {
+  if (!raw) return null;
+  let p = String(raw).replace(/\D/g, '');
+  if (p.length === 0) return null;
+  if (p.length > 10 && p.startsWith('91')) p = p.slice(p.length - 10);
+  if (p.length > 10 && p.startsWith('0'))  p = p.slice(p.length - 10);
+  if (p.length !== 10) return p;
+  return p;
+}
+
+async function computeGuestPerkOnCheckIn(
+  restaurantId: string,
+  guestPhone?: string | null,
+): Promise<{ applies: boolean; type: 'BIRTHDAY' | 'ANNIVERSARY' | null; message: string }> {
+  if (!guestPhone) {
+    return { applies: false, type: null, message: '' };
+  }
+  try {
+    const tenantDb = await getTenantDb(restaurantId);
+    const norm = _normalisePhoneModule(String(guestPhone));
+    if (!norm) return { applies: false, type: null, message: '' };
+    const c: any = await tenantDb.get(
+      `SELECT name, birthday, anniversary FROM loyalty_customers WHERE phone = ?`,
+      [norm]
+    );
+    if (!c) return { applies: false, type: null, message: '' };
+
+    const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const todayMMDD = (tzDate.split(',')[0] || '').slice(5, 10);  // MM-DD
+    const bday = c.birthday ? String(c.birthday).slice(5, 10) : '';
+    const anni = c.anniversary ? String(c.anniversary).slice(5, 10) : '';
+
+    if (bday && bday === todayMMDD) {
+      return {
+        applies: true, type: 'BIRTHDAY',
+        message: `Today is ${c.name || 'the guest'}'s birthday — consider a complimentary perk.`,
+      };
+    }
+    if (anni && anni === todayMMDD) {
+      return {
+        applies: true, type: 'ANNIVERSARY',
+        message: `Today is ${c.name || 'the guest'}'s anniversary — consider a complimentary perk.`,
+      };
+    }
+    return { applies: false, type: null, message: '' };
+  } catch (e) {
+    console.warn('[hotel-checkin] perk compute failed:', e);
+    return { applies: false, type: null, message: '' };
+  }
+}
+
 // Inserts the late-checkout fee as a folio_entries row using the same
 // shape as room nights so the rest of the folio math (subtotal, GST,
 // recompute) Just Works.
@@ -5227,7 +5295,7 @@ async function startServer() {
       const phone = _normalisePhone(req.params.phone);
       if (!phone) return res.status(400).json({ error: "Invalid phone" });
       const db = await getTenantDb(req.params.id);
-      const { is_blocked, notes, name, email, current_tier_id } = req.body || {};
+      const { is_blocked, notes, name, email, current_tier_id, birthday, anniversary } = req.body || {};
       const sets: string[] = [];
       const params: any[] = [];
       if (is_blocked != null) { sets.push('is_blocked = ?'); params.push(is_blocked ? 1 : 0); }
@@ -5237,6 +5305,23 @@ async function startServer() {
       if (current_tier_id !== undefined) {
         sets.push('current_tier_id = ?');
         params.push(current_tier_id || null);
+      }
+      // Phase H1 — Hotel anniversary/birthday perk. Both stored as DATE so
+      // we get YYYY-MM-DD; only month+day are compared at check-in time.
+      // Empty string clears the field (idempotent with NULL).
+      if (birthday !== undefined) {
+        const v = birthday == null || birthday === '' ? null : String(birthday);
+        if (v != null && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+          return res.status(400).json({ error: 'birthday must be YYYY-MM-DD' });
+        }
+        sets.push('birthday = ?'); params.push(v);
+      }
+      if (anniversary !== undefined) {
+        const v = anniversary == null || anniversary === '' ? null : String(anniversary);
+        if (v != null && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+          return res.status(400).json({ error: 'anniversary must be YYYY-MM-DD' });
+        }
+        sets.push('anniversary = ?'); params.push(v);
       }
       if (sets.length === 0) return res.status(400).json({ error: "No fields to update" });
       params.push(phone);
@@ -13553,14 +13638,69 @@ async function startServer() {
       // Open a folio with ROOM_CHARGE entries (Phase 3 — folio engine)
       const folio = await createFolioWithRoomCharges(req.params.id, b);
 
+      // ── Phase H1: guest perk on check-in ─────────────────────────
+      //   Fire a notification + return the perk info so the UI shows
+      //   a banner. The hotel decides what to physically comp (cake,
+      //   bottle of wine, free upgrade). last_perk_at dedups so it
+      //   only fires once per stay.
+      let perk: { applies: boolean; type: 'BIRTHDAY' | 'ANNIVERSARY' | null; message: string } = { applies: false, type: null, message: '' };
+      try {
+        perk = await computeGuestPerkOnCheckIn(req.params.id, b.guest_phone);
+        if (perk.applies && b.guest_phone) {
+          const norm = _normalisePhone(String(b.guest_phone));
+          if (norm) {
+            const last: any = await tenantDb.get(
+              `SELECT last_perk_at FROM loyalty_customers WHERE phone = ?`, [norm]
+            );
+            const todayIST = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).split(',')[0]?.trim();
+            const lastIST = last?.last_perk_at
+              ? new Date(last.last_perk_at).toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).split(',')[0]?.trim()
+              : null;
+            if (lastIST !== todayIST) {
+              await tenantDb.run(
+                `UPDATE loyalty_customers SET last_perk_at = ? WHERE phone = ?`,
+                [new Date().toISOString(), norm]
+              );
+              try {
+                await triggerNotification(req.params.id, 'GUEST_PERK_TRIGGERED', {
+                  bookingId: b.id, guestName: b.guest_name, perkType: perk.type, message: perk.message,
+                });
+              } catch {}
+            } else {
+              // Already fired earlier today — return preview but skip notification.
+              perk = { ...perk, applies: false };
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[hotel-checkin] perk hook failed:', e);
+      }
+
       try { await triggerNotification(req.params.id, 'GUEST_CHECKED_IN', { bookingId: b.id, guestName: b.guest_name, roomId: b.room_id }); } catch {}
       res.json({
         booking: await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]),
         folio_id: folio?.id || null,
+        perk,
       });
     } catch (err: any) {
       console.error("checkin error:", err);
       res.status(500).json({ error: "Failed to check in" });
+    }
+  });
+
+  // Pre-check-in perk preview — UI shows a banner BEFORE the cashier
+  // taps Check-In so they can prepare the complimentary perk in advance.
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/perk-preview", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get('SELECT guest_phone, guest_name FROM room_bookings WHERE id = ?', [req.params.bookingId]);
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      const perk = await computeGuestPerkOnCheckIn(req.params.id, b.guest_phone);
+      res.json({ booking_id: req.params.bookingId, ...perk });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to load perk preview' });
     }
   });
 
@@ -18339,7 +18479,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-late-checkout-fee',
+    commit_marker: 'hotel-guest-perk',
     code_features: [
       'subscription-billing',
       'read-only-mode',

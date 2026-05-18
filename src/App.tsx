@@ -8609,9 +8609,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchHotelBookings();
   };
   const checkInBooking = async (bookingId: string, force = false) => {
-    await hotelApi(`/bookings/${bookingId}/checkin`, { method: 'POST', body: JSON.stringify({ force }) });
+    const result = await hotelApi(`/bookings/${bookingId}/checkin`, { method: 'POST', body: JSON.stringify({ force }) });
     await fetchHotelBookings();
     await fetchHotelRooms();
+    // Phase H1 — celebrate birthday / anniversary perks. Server returns
+    // perk.applies=true when today matches the guest's stored date and
+    // it hasn't already fired in IST today. We surface a toast-like
+    // alert so the front desk can prep the complimentary perk now.
+    if (result?.perk?.applies) {
+      const icon = result.perk.type === 'BIRTHDAY' ? '🎂' : '💐';
+      const label = result.perk.type === 'BIRTHDAY' ? 'Birthday' : 'Anniversary';
+      alert(`${icon} ${label} perk\n\n${result.perk.message}\n\nThe guest has been notified. Consider sending a complimentary perk (cake, fruit basket, free upgrade).`);
+    }
+    return result;
   };
   // Wrapper that guards against accidental early check-ins. If the
   // booking is scheduled for a future date, ask the cashier to
@@ -30514,6 +30524,40 @@ function CustomerDetailDrawer(props: {
                   {detail.customer.is_blocked ? 'Unblock customer' : 'Block from loyalty rewards'}
                 </button>
               </div>
+            </div>
+
+            {/* Phase H1 — special dates (birthday / anniversary).
+                Used by the hotel check-in flow to fire a perk notification
+                when the guest arrives on one of these days. Restaurant
+                orders don't act on these today, but they're surfaced for
+                future Phase L3 (birthday rewards). */}
+            <div className="bg-[#faf7f2] rounded-2xl p-5">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-3">Special dates</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-[#6b5d52] block mb-1">Birthday</label>
+                  <input
+                    type="date"
+                    value={(detail.customer.birthday || '').slice(0, 10)}
+                    disabled={saving}
+                    onChange={e => patchCustomer({ birthday: e.target.value || null })}
+                    className="w-full bg-white rounded-xl px-3 py-2 text-sm border border-[#cc5a16]/10 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-[#6b5d52] block mb-1">Anniversary</label>
+                  <input
+                    type="date"
+                    value={(detail.customer.anniversary || '').slice(0, 10)}
+                    disabled={saving}
+                    onChange={e => patchCustomer({ anniversary: e.target.value || null })}
+                    className="w-full bg-white rounded-xl px-3 py-2 text-sm border border-[#cc5a16]/10 outline-none"
+                  />
+                </div>
+              </div>
+              <p className="text-[10px] text-[#9c8e85] mt-2">
+                Only month + day are matched — the year is ignored. On a matching hotel check-in, an alert fires for the front desk.
+              </p>
             </div>
 
             {/* Recent orders */}
