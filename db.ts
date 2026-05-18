@@ -236,7 +236,24 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_max_stay_nights INT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_refund_full_days INT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_refund_partial_pct DOUBLE PRECISION;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_late_checkout_time TEXT
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_late_checkout_time TEXT;
+    -- Phase H2 — Hotel-specific GST + service charge.
+    -- Indian hotels follow a tariff-slab GST regime (post-2022 GST Council):
+    --   ≤ ₹1,000/night  → 0%   (exempt)
+    --   ₹1,001-₹7,500   → 12%
+    --   > ₹7,500        → 18%
+    -- Stored per-tenant so a property can override (some properties operate
+    -- under different state policies or claim ITC variants). The thresholds
+    -- and rates themselves are configurable.
+    --   hotel_service_charge_percent applies to ROOM CHARGES ONLY (not to
+    --   F&B or chargeable services like laundry). 0 = no service charge
+    --   (default — preserves existing behaviour).
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab1_max  DOUBLE PRECISION DEFAULT 1000;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab1_rate DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab2_max  DOUBLE PRECISION DEFAULT 7500;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab2_rate DOUBLE PRECISION DEFAULT 12;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab3_rate DOUBLE PRECISION DEFAULT 18;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_service_charge_percent DOUBLE PRECISION DEFAULT 0
   `);
   await centralDb.exec(
     `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`

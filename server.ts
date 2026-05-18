@@ -417,14 +417,54 @@ const DEFAULT_HOTEL_SERVICES: Array<{
 
 // ====== Folio engine helpers (Phase 3) ======
 
-// GST rate for Indian hotels based on room tariff (post-2022 tariff bands).
-function gstRateForTariff(tariff: number): number {
-  if (tariff < 1000) return 0;
-  if (tariff <= 7500) return 12;
-  return 18;
+// Phase H2 — Hotel tax config (per-tenant slabs + service charge).
+// Loaded once per folio operation. Defaults match the post-2022 Indian
+// GST Council slabs (0 / 12 / 18 based on tariff) so existing tenants
+// keep the exact same behaviour they had before this commit.
+interface HotelTaxConfig {
+  slab1Max: number; slab1Rate: number;
+  slab2Max: number; slab2Rate: number;
+  slab3Rate: number;
+  serviceChargePct: number;
+}
+async function loadHotelTaxConfig(restaurantId: string): Promise<HotelTaxConfig> {
+  const r: any = await centralDb.get(
+    `SELECT hotel_gst_slab1_max, hotel_gst_slab1_rate,
+            hotel_gst_slab2_max, hotel_gst_slab2_rate,
+            hotel_gst_slab3_rate,
+            hotel_service_charge_percent
+       FROM restaurants WHERE id = ?`,
+    [restaurantId]
+  );
+  return {
+    slab1Max:  Number(r?.hotel_gst_slab1_max ?? 1000),
+    slab1Rate: Number(r?.hotel_gst_slab1_rate ?? 0),
+    slab2Max:  Number(r?.hotel_gst_slab2_max ?? 7500),
+    slab2Rate: Number(r?.hotel_gst_slab2_rate ?? 12),
+    slab3Rate: Number(r?.hotel_gst_slab3_rate ?? 18),
+    serviceChargePct: Number(r?.hotel_service_charge_percent ?? 0),
+  };
 }
 
-// Create a folio for a booking and seed ROOM_CHARGE entries for each night.
+// GST rate for an Indian hotel night based on tariff slab. Reads the
+// tenant config when provided; falls back to the post-2022 GST Council
+// defaults (0 / 12 / 18) when called without a tenant context.
+function gstRateForTariff(tariff: number, cfg?: HotelTaxConfig): number {
+  const slab1Max  = cfg?.slab1Max  ?? 1000;
+  const slab1Rate = cfg?.slab1Rate ?? 0;
+  const slab2Max  = cfg?.slab2Max  ?? 7500;
+  const slab2Rate = cfg?.slab2Rate ?? 12;
+  const slab3Rate = cfg?.slab3Rate ?? 18;
+  if (tariff <= slab1Max) return slab1Rate;
+  if (tariff <= slab2Max) return slab2Rate;
+  return slab3Rate;
+}
+
+// Create a folio for a booking and seed ROOM_CHARGE entries for each
+// night. Phase H2: when the tenant configured a hotel service charge,
+// add a separate SERVICE_CHARGE row per night so the line is auditable
+// on the folio + invoice PDF — and GST is computed on (room rate +
+// service charge), matching real-world hotel billing.
 async function createFolioWithRoomCharges(restaurantId: string, booking: any): Promise<any> {
   try {
     const tenantDb = await getTenantDb(restaurantId);
@@ -433,6 +473,7 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
     );
     if (existing) return existing;
 
+    const cfg = await loadHotelTaxConfig(restaurantId);
     const folioId = `F-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
     await tenantDb.run(
       `INSERT INTO folios (id, booking_id, room_id, status, subtotal, gst_amount, grand_total)
@@ -441,17 +482,36 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
     );
     const nights = Math.max(1, Math.ceil((new Date(booking.check_out_date).getTime() - new Date(booking.check_in_date).getTime()) / 86400000));
     const rate = Number(booking.room_rate) || 0;
-    const gstPct = gstRateForTariff(rate);
+    const gstPct = gstRateForTariff(rate, cfg);
+    const svcPct = cfg.serviceChargePct;
+    const svcPerNight = Math.round((rate * svcPct / 100) * 100) / 100;
+
     for (let i = 0; i < nights; i++) {
       const date = new Date(booking.check_in_date);
       date.setDate(date.getDate() + i);
-      const gstAmt = rate * gstPct / 100;
-      const entryId = `FE-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      const dateStr = date.toISOString().slice(0,10);
+      const tag = Math.random().toString(36).slice(2, 5).toUpperCase();
+      // Room night line — GST computed on the room rate only.
+      const roomGst = Math.round((rate * gstPct / 100) * 100) / 100;
+      const roomEntryId = `FE-${Date.now()}-${i}-${tag}`;
       await tenantDb.run(
         `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
          VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
-        [entryId, folioId, `Room charge · ${date.toISOString().slice(0,10)}`, rate, rate, gstPct, gstAmt]
+        [roomEntryId, folioId, `Room charge · ${dateStr}`, rate, rate, gstPct, roomGst]
       );
+      // Optional service charge line — only when configured. Same GST slab
+      // as the room (Indian hotels treat service charge as part of the
+      // taxable supply at the room's tariff slab). 0% service charge skips
+      // the row entirely so legacy folios stay unchanged.
+      if (svcPct > 0 && svcPerNight > 0) {
+        const svcGst = Math.round((svcPerNight * gstPct / 100) * 100) / 100;
+        const svcEntryId = `FE-${Date.now()}-${i}-S-${tag}`;
+        await tenantDb.run(
+          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+           VALUES (?, ?, 'SERVICE_CHARGE', ?, 1, ?, ?, ?, ?)`,
+          [svcEntryId, folioId, `Service charge (${svcPct}%) · ${dateStr}`, svcPerNight, svcPerNight, gstPct, svcGst]
+        );
+      }
     }
     await recomputeFolioTotals(tenantDb, folioId);
     return await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folioId]);
@@ -939,7 +999,8 @@ async function addLateCheckoutFolioEntry(
   rate: number,
 ): Promise<void> {
   const tenantDb = await getTenantDb(restaurantId);
-  const gstPct = gstRateForTariff(rate);
+  const cfg = await loadHotelTaxConfig(restaurantId);
+  const gstPct = gstRateForTariff(rate, cfg);
   const gstAmt = rate * gstPct / 100;
   const entryId = `FE-${Date.now()}-LATE-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
   await tenantDb.run(
@@ -14048,7 +14109,11 @@ async function startServer() {
       const r: any = await centralDb.get(
         `SELECT hotel_min_stay_nights, hotel_max_stay_nights,
                 hotel_refund_full_days, hotel_refund_partial_pct,
-                hotel_late_checkout_time
+                hotel_late_checkout_time,
+                hotel_gst_slab1_max, hotel_gst_slab1_rate,
+                hotel_gst_slab2_max, hotel_gst_slab2_rate,
+                hotel_gst_slab3_rate,
+                hotel_service_charge_percent
            FROM restaurants WHERE id = ?`,
         [req.params.id]
       );
@@ -14058,6 +14123,13 @@ async function startServer() {
         refund_full_days:       r?.hotel_refund_full_days ?? null,
         refund_partial_pct:     r?.hotel_refund_partial_pct ?? null,
         late_checkout_time:     r?.hotel_late_checkout_time ?? null,
+        // Phase H2 — hotel tax config (defaults match post-2022 IN GST slabs)
+        gst_slab1_max:          r?.hotel_gst_slab1_max  ?? 1000,
+        gst_slab1_rate:         r?.hotel_gst_slab1_rate ?? 0,
+        gst_slab2_max:          r?.hotel_gst_slab2_max  ?? 7500,
+        gst_slab2_rate:         r?.hotel_gst_slab2_rate ?? 12,
+        gst_slab3_rate:         r?.hotel_gst_slab3_rate ?? 18,
+        service_charge_percent: r?.hotel_service_charge_percent ?? 0,
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch hotel settings" });
@@ -14090,15 +14162,35 @@ async function startServer() {
         return res.status(400).json({ error: 'Late checkout time must be in HH:MM format (24-hour clock).' });
       }
 
+      // Phase H2 — hotel tax config. Coerce to safe ranges; allow null
+      // (treated as "use platform default" via fallback in loadHotelTaxConfig).
+      const slab1Max  = b.gst_slab1_max  == null ? null : Math.max(0, Number(b.gst_slab1_max)  || 0);
+      const slab1Rate = b.gst_slab1_rate == null ? null : Math.max(0, Math.min(100, Number(b.gst_slab1_rate) || 0));
+      const slab2Max  = b.gst_slab2_max  == null ? null : Math.max(0, Number(b.gst_slab2_max)  || 0);
+      const slab2Rate = b.gst_slab2_rate == null ? null : Math.max(0, Math.min(100, Number(b.gst_slab2_rate) || 0));
+      const slab3Rate = b.gst_slab3_rate == null ? null : Math.max(0, Math.min(100, Number(b.gst_slab3_rate) || 0));
+      const svcPct    = b.service_charge_percent == null ? null : Math.max(0, Math.min(100, Number(b.service_charge_percent) || 0));
+      if (slab1Max != null && slab2Max != null && slab2Max <= slab1Max) {
+        return res.status(400).json({ error: 'Slab 2 maximum must be greater than slab 1 maximum.' });
+      }
+
       await centralDb.run(
         `UPDATE restaurants
             SET hotel_min_stay_nights    = ?,
                 hotel_max_stay_nights    = ?,
                 hotel_refund_full_days   = ?,
                 hotel_refund_partial_pct = ?,
-                hotel_late_checkout_time = ?
+                hotel_late_checkout_time = ?,
+                hotel_gst_slab1_max          = COALESCE(?, hotel_gst_slab1_max),
+                hotel_gst_slab1_rate         = COALESCE(?, hotel_gst_slab1_rate),
+                hotel_gst_slab2_max          = COALESCE(?, hotel_gst_slab2_max),
+                hotel_gst_slab2_rate         = COALESCE(?, hotel_gst_slab2_rate),
+                hotel_gst_slab3_rate         = COALESCE(?, hotel_gst_slab3_rate),
+                hotel_service_charge_percent = COALESCE(?, hotel_service_charge_percent)
           WHERE id = ?`,
-        [minStay ?? 1, maxStay, refundFullDays, refundPartial, lateTime, req.params.id]
+        [minStay ?? 1, maxStay, refundFullDays, refundPartial, lateTime,
+         slab1Max, slab1Rate, slab2Max, slab2Rate, slab3Rate, svcPct,
+         req.params.id]
       );
       res.json({ success: true });
     } catch (err) {
@@ -18596,7 +18688,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-tax-cfg-tenant-fetch',
+    commit_marker: 'hotel-tax-slabs-and-service-charge',
     code_features: [
       'subscription-billing',
       'read-only-mode',

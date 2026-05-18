@@ -6826,7 +6826,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     refund_full_days: number | null;
     refund_partial_pct: number | null;
     late_checkout_time: string | null;
-  }>({ min_stay_nights: 1, max_stay_nights: null, refund_full_days: null, refund_partial_pct: null, late_checkout_time: null });
+    // Phase H2 — hotel tax config
+    gst_slab1_max: number;
+    gst_slab1_rate: number;
+    gst_slab2_max: number;
+    gst_slab2_rate: number;
+    gst_slab3_rate: number;
+    service_charge_percent: number;
+  }>({
+    min_stay_nights: 1, max_stay_nights: null,
+    refund_full_days: null, refund_partial_pct: null, late_checkout_time: null,
+    gst_slab1_max: 1000, gst_slab1_rate: 0,
+    gst_slab2_max: 7500, gst_slab2_rate: 12,
+    gst_slab3_rate: 18,
+    service_charge_percent: 0,
+  });
   const [hotelSettingsSaving, setHotelSettingsSaving] = useState(false);
   const [hotelSettingsSaved, setHotelSettingsSaved] = useState(false);
 
@@ -8537,6 +8551,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         refund_full_days:   data.refund_full_days == null ? null : Number(data.refund_full_days),
         refund_partial_pct: data.refund_partial_pct == null ? null : Number(data.refund_partial_pct),
         late_checkout_time: data.late_checkout_time || null,
+        gst_slab1_max:      Number(data.gst_slab1_max  ?? 1000),
+        gst_slab1_rate:     Number(data.gst_slab1_rate ?? 0),
+        gst_slab2_max:      Number(data.gst_slab2_max  ?? 7500),
+        gst_slab2_rate:     Number(data.gst_slab2_rate ?? 12),
+        gst_slab3_rate:     Number(data.gst_slab3_rate ?? 18),
+        service_charge_percent: Number(data.service_charge_percent ?? 0),
       });
     } catch { /* hotel not enabled — ignore */ }
   };
@@ -14822,6 +14842,101 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     />
                     <p className="text-[10px] text-[#9c8e85] mt-1">
                       After this clock time on the check-out date, one extra night at the room rate is auto-added to the folio. Leave blank to disable.
+                    </p>
+                  </div>
+                </div>
+
+                {/* ── Hotel GST (tariff-based slabs) ──────────────────────
+                    Indian hotels follow a tariff-slab GST regime since 2022:
+                      ≤ ₹1,000/night  → 0% (exempt)
+                      ₹1,001-₹7,500   → 12%
+                      > ₹7,500        → 18%
+                    Each slab is editable in case the property operates under
+                    a different state policy or claims an ITC variant. */}
+                <div className="pt-4 border-t border-[#cc5a16]/10">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Hotel GST — tariff slabs</p>
+                  <p className="text-[10px] text-[#9c8e85] mb-3">
+                    GST is applied per night based on the room rate. Defaults match the post-2022 Indian GST Council slabs.
+                  </p>
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-[1fr_120px_80px] gap-2 items-center">
+                      <span className="text-[11px] text-[#6b5d52]">Slab 1 — up to</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[#9c8e85] text-xs">₹</span>
+                        <input
+                          type="number" min={0}
+                          value={hotelSettings.gst_slab1_max}
+                          onChange={e => setHotelSettings(s => ({ ...s, gst_slab1_max: Math.max(0, Number(e.target.value) || 0) }))}
+                          className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        />
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number" min={0} max={100} step="0.01"
+                          value={hotelSettings.gst_slab1_rate}
+                          onChange={e => setHotelSettings(s => ({ ...s, gst_slab1_rate: Math.max(0, Math.min(100, Number(e.target.value) || 0)) }))}
+                          className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        />
+                        <span className="text-[#9c8e85] text-xs">%</span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-[1fr_120px_80px] gap-2 items-center">
+                      <span className="text-[11px] text-[#6b5d52]">Slab 2 — up to</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[#9c8e85] text-xs">₹</span>
+                        <input
+                          type="number" min={0}
+                          value={hotelSettings.gst_slab2_max}
+                          onChange={e => setHotelSettings(s => ({ ...s, gst_slab2_max: Math.max(0, Number(e.target.value) || 0) }))}
+                          className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        />
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number" min={0} max={100} step="0.01"
+                          value={hotelSettings.gst_slab2_rate}
+                          onChange={e => setHotelSettings(s => ({ ...s, gst_slab2_rate: Math.max(0, Math.min(100, Number(e.target.value) || 0)) }))}
+                          className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        />
+                        <span className="text-[#9c8e85] text-xs">%</span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-[1fr_120px_80px] gap-2 items-center">
+                      <span className="text-[11px] text-[#6b5d52]">Slab 3 — above slab 2</span>
+                      <span className="text-[10px] text-[#9c8e85] text-center italic">no max</span>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number" min={0} max={100} step="0.01"
+                          value={hotelSettings.gst_slab3_rate}
+                          onChange={e => setHotelSettings(s => ({ ...s, gst_slab3_rate: Math.max(0, Math.min(100, Number(e.target.value) || 0)) }))}
+                          className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        />
+                        <span className="text-[#9c8e85] text-xs">%</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── Hotel service charge (room nights only) ──────────
+                    Applied PER NIGHT on the room rate. F&B and other
+                    chargeable services on the folio are NOT subject to
+                    this charge. GST is calculated on (room + service
+                    charge), matching real-world hotel billing. */}
+                <div className="pt-4 border-t border-[#cc5a16]/10">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Service charge on rooms</p>
+                  <div className="max-w-xs">
+                    <label className="block text-[11px] text-[#6b5d52] mb-1">Service charge % (room nights only)</label>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number" min={0} max={100} step="0.01"
+                        value={hotelSettings.service_charge_percent}
+                        onChange={e => setHotelSettings(s => ({ ...s, service_charge_percent: Math.max(0, Math.min(100, Number(e.target.value) || 0)) }))}
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                      />
+                      <span className="text-[#9c8e85] text-xs">%</span>
+                    </div>
+                    <p className="text-[10px] text-[#9c8e85] mt-1">
+                      Charged on each night's room rate. Does not apply to F&B, laundry, or other chargeable services. Leave at 0 to disable.
                     </p>
                   </div>
                 </div>
