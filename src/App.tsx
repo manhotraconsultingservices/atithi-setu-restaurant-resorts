@@ -12617,13 +12617,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       ) : activeTab === 'TIMESHEET' ? (
         <TimesheetDashboard restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'REPORTS' ? (
-        <AnalyticsDashboard
-          restaurantId={restaurantId}
-          token={token!}
-          feedback={feedback}
-          restaurant={restaurant}
-          onDateRangeChange={(from, to) => fetchReports(from, to)}
-        />
+        // Hotel-mode owners get hotel-focused KPIs (occupancy, ADR,
+        // RevPAR, ancillary, guest rating) instead of restaurant
+        // analytics (channel P&L, table turn, KDS prep times). The
+        // dashboardMode toggle swaps the view; single-mode tenants
+        // see only the relevant side automatically.
+        isHotelView ? (
+          <HotelAnalyticsDashboard restaurantId={restaurantId} token={token!} />
+        ) : (
+          <AnalyticsDashboard
+            restaurantId={restaurantId}
+            token={token!}
+            feedback={feedback}
+            restaurant={restaurant}
+            onDateRangeChange={(from, to) => fetchReports(from, to)}
+          />
+        )
       ) : activeTab === 'STAFF' ? (
         <div className="space-y-6">
           <div className="flex justify-between items-center flex-wrap gap-3">
@@ -18273,6 +18282,182 @@ const HotelCommandCenter: React.FC<{
             )}
           </div>
         </div>
+      )}
+    </div>
+  );
+};
+
+/* ─── HotelAnalyticsDashboard ─────────────────────────────────────
+   Hotel-side Reports view. Renders inside the REPORTS tab when
+   dashboardMode === 'HOTEL' (or hotel-only tenant). Built around the
+   existing /hotel/analytics endpoint which already returns the right
+   KPI shape; this component lays them out cleanly without bleeding
+   any restaurant metrics (table turn, KDS prep times, channel P&L)
+   into the hotel owner's view.
+
+   What it shows (all "last 30 days" by default — the endpoint's
+   built-in window):
+   • KPI tiles — Occupancy %, ADR, RevPAR, Ancillary %, Guest Rating, Bookings
+   • Top Services — most-requested services with counts
+   • Requests by category — with average response time (mins)
+   • AI sentiment panel — re-uses the existing HotelSentimentPanel    */
+const HotelAnalyticsDashboard: React.FC<{
+  restaurantId: string;
+  token: string;
+}> = ({ restaurantId, token }) => {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>('');
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/analytics`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setData(await res.json());
+      } else {
+        setError(`Server returned ${res.status} — ${res.statusText || ''}`.trim());
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Could not reach the server');
+    } finally {
+      setLoading(false);
+    }
+  }, [restaurantId, token]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Local KpiCard — same visual as the restaurant Reports tiles for
+  // consistency, just instantiated here so HotelAnalyticsDashboard
+  // doesn't depend on OwnerDashboard's inline KpiCard closure.
+  const Tile: React.FC<{ label: string; value: string; sub?: string; bg: string; accent: string; icon: React.ComponentType<any> }> = ({ label, value, sub, bg, accent, icon: Icon }) => (
+    <div className="rounded-3xl p-5 shadow-sm overflow-hidden relative" style={{ background: bg }}>
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: accent }}>{label}</p>
+          <p className="text-2xl font-bold mt-1 text-white">{value}</p>
+          {sub && <p className="text-[10px] mt-1" style={{ color: accent }}>{sub}</p>}
+        </div>
+        <Icon size={20} className="text-white/40 shrink-0" />
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-2xl sm:text-3xl font-bold font-serif text-[#1a1208]">
+            Hotel Analytics &amp; Reports
+          </h2>
+          <p className="text-xs text-[#9c8e85] mt-1">
+            Last 30 days · Occupancy, revenue, services and guest sentiment
+          </p>
+        </div>
+        <button
+          onClick={fetchData}
+          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-[#cc5a16]/20 text-[#3d3128] text-xs font-bold uppercase tracking-widest hover:bg-[#faf7f2] transition-all"
+        >
+          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 flex items-start gap-2">
+          <AlertCircle size={14} className="text-red-600 shrink-0 mt-0.5" />
+          <div className="text-xs text-red-700">
+            <strong>Couldn't load hotel analytics.</strong> {error}
+          </div>
+        </div>
+      )}
+
+      {loading && !data && (
+        <div className="rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/10 p-10 text-center text-sm text-[#9c8e85]">
+          Loading analytics…
+        </div>
+      )}
+
+      {data && (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-4">
+            <Tile label="Occupancy" value={`${data.occupancy_pct}%`} sub={`${data.occupied}/${data.totalRooms} rooms`}
+              bg="linear-gradient(135deg, #b8860b 0%, #8f6608 100%)" accent="#fef3c7" icon={Bed} />
+            <Tile label="ADR" value={`₹${Number(data.adr).toLocaleString('en-IN')}`} sub="per booking"
+              bg="linear-gradient(135deg, #cc5a16 0%, #a84612 100%)" accent="#fcd34d" icon={IndianRupee} />
+            <Tile label="RevPAR" value={`₹${Number(data.revpar).toLocaleString('en-IN')}`} sub="per avail room"
+              bg="linear-gradient(135deg, #0f766e 0%, #0a5853 100%)" accent="#fcd34d" icon={TrendingUp} />
+            <Tile label="Ancillary" value={`${data.ancillary_pct}%`} sub={`₹${Number(data.ancillary_revenue_30d).toLocaleString('en-IN')}`}
+              bg="linear-gradient(135deg, #1e3a5f 0%, #152a47 100%)" accent="#b8860b" icon={Sparkles} />
+            <Tile label="Guest Rating" value={Number(data.avg_rating || 0).toFixed(1)} sub="of 5"
+              bg="linear-gradient(135deg, #9f1239 0%, #7a0d2c 100%)" accent="#fcd34d" icon={Star} />
+            <Tile label="Bookings" value={String(data.folio_count_30d)} sub="settled"
+              bg="linear-gradient(135deg, #1f1a12 0%, #14110c 100%)" accent="#cc5a16" icon={Calendar} />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Top services */}
+            <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-6 shadow-sm">
+              <h3 className="text-lg font-serif font-bold text-[#1a1208] mb-4">Top Services</h3>
+              {(!data.top_services || data.top_services.length === 0) ? (
+                <p className="text-xs text-[#9c8e85]">No service requests in the last 30 days.</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {data.top_services.map((s: any, i: number) => {
+                    const max = Math.max(1, ...data.top_services.map((x: any) => Number(x.n || 0)));
+                    const pct = Math.round((Number(s.n || 0) / max) * 100);
+                    return (
+                      <div key={i}>
+                        <div className="flex items-center justify-between text-sm mb-1">
+                          <span className="text-[#3d3128] truncate">{s.service_name}</span>
+                          <span className="font-mono font-bold text-[#cc5a16] ml-2 shrink-0">{s.n}</span>
+                        </div>
+                        <div className="h-1.5 bg-[#faf7f2] rounded-full overflow-hidden">
+                          <div className="h-full bg-[#cc5a16] rounded-full transition-all" style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Requests by category + avg mins */}
+            <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-6 shadow-sm">
+              <h3 className="text-lg font-serif font-bold text-[#1a1208] mb-4">Requests by Category</h3>
+              {(!data.requests_by_category || data.requests_by_category.length === 0) ? (
+                <p className="text-xs text-[#9c8e85]">No completed requests yet.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] border-b border-[#cc5a16]/10">
+                      <th className="text-left py-2">Category</th>
+                      <th className="text-right py-2">Count</th>
+                      <th className="text-right py-2">Avg response</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.requests_by_category.map((c: any, i: number) => (
+                      <tr key={i} className="border-b border-[#cc5a16]/5 last:border-0">
+                        <td className="py-2.5 text-[#3d3128]">{c.category || 'Uncategorised'}</td>
+                        <td className="py-2.5 text-right font-mono font-bold text-[#cc5a16]">{c.n}</td>
+                        <td className="py-2.5 text-right font-mono text-[#9c8e85]">
+                          {c.avg_mins != null ? `${Math.round(Number(c.avg_mins))} min` : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+
+          {/* AI sentiment on guest feedback (re-use the existing panel
+              so we don't fork the AI-call logic). */}
+          <HotelSentimentPanel restaurantId={restaurantId} token={token} />
+        </>
       )}
     </div>
   );
