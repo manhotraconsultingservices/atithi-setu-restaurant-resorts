@@ -14731,10 +14731,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 </div>
 
-                <div className="pt-4 flex items-center justify-between gap-3 flex-wrap">
-                  <p className="text-[11px] text-[#9c8e85]">
-                    Late-checkout charge — coming in the next release.
-                  </p>
+                {/* ── Late checkout fee ─────────────────────────────── */}
+                <div className="pt-4 border-t border-[#cc5a16]/10">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Late checkout fee</p>
+                  <div className="max-w-xs">
+                    <label className="block text-[11px] text-[#6b5d52] mb-1">Cutoff time on check-out day (24-hour HH:MM)</label>
+                    <input
+                      type="time"
+                      value={hotelSettings.late_checkout_time ?? ''}
+                      onChange={e => {
+                        const v = e.target.value.trim();
+                        setHotelSettings(s => ({ ...s, late_checkout_time: v === '' ? null : v }));
+                      }}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    />
+                    <p className="text-[10px] text-[#9c8e85] mt-1">
+                      After this clock time on the check-out date, one extra night at the room rate is auto-added to the folio. Leave blank to disable.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="pt-4 flex items-center justify-end gap-3 flex-wrap">
                   <button
                     type="button"
                     onClick={saveHotelSettings}
@@ -16863,6 +16880,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Dates</span><span>{new Date(checkoutBooking.check_in_date).toLocaleDateString('en-IN')} → {new Date(checkoutBooking.check_out_date).toLocaleDateString('en-IN')}</span></div>
                 <p className="text-[10px] text-[#9c8e85] mt-2">Folio totals will include room nights + completed service charges.</p>
               </div>
+
+              {/* Late checkout fee preview — appears only when the
+                  tenant configured a cutoff and the guest is past it. */}
+              <HotelLateFeeBanner
+                restaurantId={restaurantId}
+                token={token}
+                bookingId={checkoutBooking.id}
+              />
 
               {/* Loyalty preview banner. Looks up the tier on-mount and
                   caches in component state via the existing loyaltyTier
@@ -20053,6 +20078,47 @@ const HotelLoyaltyBanner: React.FC<{
             ₹{Number(data.spend_remaining).toFixed(0)} more to unlock {data.next_tier_name}
           </span>
         )}
+      </div>
+    </div>
+  );
+};
+
+/* Phase H1 late-checkout fee preview banner.
+   Shown in the check-out modal when a late-fee will be auto-applied.
+   Silently renders nothing when the tenant has no policy or the guest
+   is checking out on time. */
+const HotelLateFeeBanner: React.FC<{
+  restaurantId: string;
+  token: string;
+  bookingId: string;
+}> = ({ restaurantId, token, bookingId }) => {
+  const [data, setData] = useState<{
+    applies: boolean;
+    fee_amount: number;
+    late_by_hours: number;
+    policy_text: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!bookingId || !restaurantId) { setData(null); return; }
+    let cancelled = false;
+    fetch(
+      `/api/restaurant/${restaurantId}/hotel/bookings/${bookingId}/late-checkout-preview`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); });
+    return () => { cancelled = true; };
+  }, [bookingId, restaurantId, token]);
+
+  if (!data || !data.applies) return null;
+  return (
+    <div className="rounded-xl px-3 py-2.5 mb-3 flex items-start gap-2 border bg-amber-50 border-amber-200">
+      <span className="shrink-0 text-amber-700 text-base leading-none mt-0.5">⏰</span>
+      <div className="text-[12px] leading-snug text-amber-900">
+        <strong>Late checkout fee: ₹{data.fee_amount.toFixed(2)}</strong> will be added to the folio.
+        <span className="block text-[10px] mt-0.5 text-amber-700/80">{data.policy_text}</span>
       </div>
     </div>
   );

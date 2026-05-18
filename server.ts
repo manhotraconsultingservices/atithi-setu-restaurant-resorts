@@ -713,6 +713,115 @@ async function computeCancellationRefund(
   };
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  computeLateCheckoutFee — Phase H1
+//
+//  Determines whether a late-checkout penalty applies and how much.
+//
+//  Rules:
+//    • If hotel_late_checkout_time is NULL → no auto-fee (return applies=false).
+//    • If now > check_out_date end-of-day on the next day → fully overstayed,
+//      auto-charge one extra night. (Cashier-managed beyond that.)
+//    • If today (in Asia/Kolkata) is check_out_date AND the current HH:MM > the
+//      configured cutoff → auto-charge one extra night.
+//    • Otherwise → no fee.
+//
+//  The fee is one extra night at the booking's room_rate — industry-standard
+//  late-checkout policy. Surfaces a transparent fee row on the folio so the
+//  guest can see exactly what was added (not silently baked into the total).
+// ════════════════════════════════════════════════════════════════════════
+async function computeLateCheckoutFee(
+  restaurantId: string,
+  booking: { check_out_date: string; room_rate: number },
+): Promise<{ applies: boolean; fee_amount: number; late_by_hours: number; policy_text: string; late_checkout_time: string | null }> {
+  const r: any = await centralDb.get(
+    `SELECT hotel_late_checkout_time FROM restaurants WHERE id = ?`,
+    [restaurantId]
+  );
+  const cutoff: string | null = r?.hotel_late_checkout_time || null;
+  const rate = Number(booking.room_rate || 0);
+
+  if (!cutoff || rate <= 0) {
+    return { applies: false, fee_amount: 0, late_by_hours: 0, policy_text: 'No late-checkout policy configured.', late_checkout_time: cutoff };
+  }
+  if (!/^\d{2}:\d{2}$/.test(cutoff)) {
+    return { applies: false, fee_amount: 0, late_by_hours: 0, policy_text: 'Invalid late-checkout cutoff configured.', late_checkout_time: cutoff };
+  }
+
+  // All comparisons use Asia/Kolkata to match the rest of the system.
+  const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata', hour12: false });
+  // tzDate format: "2026-05-18, 14:30:00"
+  const [datePart, timePart] = tzDate.split(',').map(s => s.trim());
+  const todayIST = datePart;
+  const [hhStr, mmStr] = (timePart || '00:00:00').split(':');
+  const nowHour = Number(hhStr || 0);
+  const nowMin  = Number(mmStr || 0);
+
+  const checkoutISO = String(booking.check_out_date || '').slice(0, 10);
+
+  // If today is AFTER check-out date, the guest is fully overstayed.
+  if (todayIST > checkoutISO) {
+    // Hours late ≈ (calendar days past × 24) + (current hour - 12 baseline).
+    // For simplicity, just compute hours past the cutoff on the checkout day.
+    const daysOver = Math.max(1, Math.round(
+      (new Date(todayIST).getTime() - new Date(checkoutISO).getTime()) / 86400000
+    ));
+    return {
+      applies: true,
+      fee_amount: Math.round(rate * 100) / 100,
+      late_by_hours: daysOver * 24,
+      policy_text: `Guest is ${daysOver} day(s) past their scheduled check-out. Adding 1 extra night at ₹${rate.toFixed(2)}.`,
+      late_checkout_time: cutoff,
+    };
+  }
+
+  // If today IS the check-out date, compare current time to the cutoff.
+  if (todayIST === checkoutISO) {
+    const [cutHourStr, cutMinStr] = cutoff.split(':');
+    const cutoffMinutes = Number(cutHourStr) * 60 + Number(cutMinStr);
+    const nowMinutes    = nowHour * 60 + nowMin;
+    if (nowMinutes > cutoffMinutes) {
+      const lateBy = Math.max(0, (nowMinutes - cutoffMinutes) / 60);
+      return {
+        applies: true,
+        fee_amount: Math.round(rate * 100) / 100,
+        late_by_hours: Math.round(lateBy * 10) / 10,
+        policy_text: `Checkout at ${timePart?.slice(0,5)} is past the ${cutoff} cutoff (${lateBy.toFixed(1)}h late). Adding 1 extra night at ₹${rate.toFixed(2)}.`,
+        late_checkout_time: cutoff,
+      };
+    }
+  }
+
+  // Otherwise — early or on-time.
+  return {
+    applies: false,
+    fee_amount: 0,
+    late_by_hours: 0,
+    policy_text: `Within the ${cutoff} grace window — no late fee.`,
+    late_checkout_time: cutoff,
+  };
+}
+
+// Inserts the late-checkout fee as a folio_entries row using the same
+// shape as room nights so the rest of the folio math (subtotal, GST,
+// recompute) Just Works.
+async function addLateCheckoutFolioEntry(
+  restaurantId: string,
+  folioId: string,
+  rate: number,
+): Promise<void> {
+  const tenantDb = await getTenantDb(restaurantId);
+  const gstPct = gstRateForTariff(rate);
+  const gstAmt = rate * gstPct / 100;
+  const entryId = `FE-${Date.now()}-LATE-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+  await tenantDb.run(
+    `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+     VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
+    [entryId, folioId, 'Late checkout fee (extra night)', rate, rate, gstPct, gstAmt]
+  );
+  await recomputeFolioTotals(tenantDb, folioId);
+}
+
 async function settleFolioForBooking(
   restaurantId: string,
   bookingId: string,
@@ -13495,6 +13604,30 @@ async function startServer() {
         }
       };
 
+      // ── Phase H1: late-checkout fee. If the tenant has a cutoff
+      //    configured AND the current time (Asia/Kolkata) is past it on
+      //    the scheduled check-out date (or any day after), append one
+      //    extra night charge to the open folio BEFORE settlement.
+      //    Best-effort — failure is logged but doesn't block checkout.
+      let lateFeeInfo: { applies: boolean; fee_amount: number; late_by_hours: number; policy_text: string } | null = null;
+      try {
+        const fee = await computeLateCheckoutFee(req.params.id, {
+          check_out_date: b.check_out_date,
+          room_rate: Number(b.room_rate || 0),
+        });
+        lateFeeInfo = fee;
+        if (fee.applies && fee.fee_amount > 0 && !waive) {
+          const openFolio: any = await tenantDb.get(
+            "SELECT id FROM folios WHERE booking_id = ? AND status = 'open'", [b.id]
+          );
+          if (openFolio?.id) {
+            await addLateCheckoutFolioEntry(req.params.id, openFolio.id, fee.fee_amount);
+          }
+        }
+      } catch (e) {
+        console.warn('[hotel-checkout] late-fee compute failed:', e);
+      }
+
       // Settle folio (loyalty-aware)
       const settled = await settleFolioForBooking(
         req.params.id, b.id, payment_method || 'CASH', discount || 0, !!waive, loyaltyResolver
@@ -13530,10 +13663,33 @@ async function startServer() {
         booking: await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]),
         folio: settled,
         loyalty: (settled as any)?.loyalty || null,    // surface to UI for banner
+        late_fee: lateFeeInfo,                         // surface fee info to staff
       });
     } catch (err: any) {
       console.error("checkout error:", err);
       res.status(500).json({ error: "Failed to check out" });
+    }
+  });
+
+  // Late-checkout preview — UI fetches this before opening the checkout
+  // modal so the cashier can see the late-fee that will be added.
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/late-checkout-preview", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get(
+        'SELECT id, check_out_date, room_rate, status FROM room_bookings WHERE id = ?',
+        [req.params.bookingId]
+      );
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      const fee = await computeLateCheckoutFee(req.params.id, {
+        check_out_date: b.check_out_date,
+        room_rate: Number(b.room_rate || 0),
+      });
+      res.json({ booking_id: b.id, status: b.status, ...fee });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to load late-checkout preview' });
     }
   });
 
@@ -18183,7 +18339,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-refund-policy',
+    commit_marker: 'hotel-late-checkout-fee',
     code_features: [
       'subscription-billing',
       'read-only-mode',
