@@ -8552,10 +8552,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     else await hotelApi(`/bookings/${data.id}`, { method: 'PATCH', body: JSON.stringify(data) });
     await fetchHotelBookings();
   };
-  const checkInBooking = async (bookingId: string) => {
-    await hotelApi(`/bookings/${bookingId}/checkin`, { method: 'POST', body: JSON.stringify({}) });
+  const checkInBooking = async (bookingId: string, force = false) => {
+    await hotelApi(`/bookings/${bookingId}/checkin`, { method: 'POST', body: JSON.stringify({ force }) });
     await fetchHotelBookings();
     await fetchHotelRooms();
+  };
+  // Wrapper that guards against accidental early check-ins. If the
+  // booking is scheduled for a future date, ask the cashier to
+  // confirm before calling — server enforces the same rule for
+  // defense in depth (rejects unless { force: true } is passed).
+  const confirmAndCheckIn = async (b: any) => {
+    if (!b?.id) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const scheduled = String(b.check_in_date || '').slice(0, 10);
+    let force = false;
+    if (scheduled && scheduled > today) {
+      const fmt = new Date(scheduled).toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short', year: 'numeric' });
+      const ok = window.confirm(
+        `${b.guest_name || 'This guest'} is booked for ${fmt}.\n\n` +
+        `Today is earlier than the scheduled check-in date. ` +
+        `Confirm early arrival? The room status and folio will start now.`
+      );
+      if (!ok) return;
+      force = true;
+    }
+    try {
+      await checkInBooking(b.id, force);
+    } catch (err: any) {
+      setHotelError(err?.message || 'Check-in failed');
+    }
   };
   const checkOutBooking = async (bookingId: string, payment: string, discount: number) => {
     const result = await hotelApi(`/bookings/${bookingId}/checkout`, {
@@ -14227,7 +14252,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <p className="font-semibold text-[#1a1208] text-sm">{b.guest_name}</p>
                         <p className="text-xs text-[#9c8e85]">{b.room_name || b.room_id}</p>
                       </div>
-                      <button onClick={() => checkInBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-[#0f766e] text-white text-xs font-bold hover:bg-[#0a5853]">Check In</button>
+                      <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-[#0f766e] text-white text-xs font-bold hover:bg-[#0a5853]">Check In</button>
                     </div>
                   ))}
                 </div>
@@ -14283,7 +14308,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <td className="px-4 py-3"><span className={cn("px-2 py-1 rounded-md text-[10px] font-bold uppercase", statusColor)}>{b.status.replace('_', ' ')}</span></td>
                         <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>
                         <td className="px-4 py-3 text-right">
-                          {b.status === 'BOOKED' && <button onClick={() => checkInBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600 mr-1">Check In</button>}
+                          {b.status === 'BOOKED' && <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600 mr-1">Check In</button>}
                           {b.status === 'CHECKED_IN' && <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608] mr-1">Check Out</button>}
                           {(b.status === 'BOOKED') && <button onClick={() => cancelBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Cancel</button>}
                         </td>

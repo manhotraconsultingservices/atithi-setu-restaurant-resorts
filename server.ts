@@ -13304,6 +13304,25 @@ async function startServer() {
       if (b.status === 'CHECKED_IN') return res.status(400).json({ error: "Already checked in" });
       if (b.status === 'CHECKED_OUT' || b.status === 'CANCELLED') return res.status(400).json({ error: "Booking is finalized" });
 
+      // Early-check-in rule: by default a guest can only be checked in
+      // on or after their scheduled check-in date. Most hotels do
+      // accommodate early arrivals when a room is ready, so this is an
+      // overridable guard rather than a hard block — pass { force: true }
+      // in the body (the UI prompts the cashier to confirm before
+      // sending). The dropdown's underlying overlap check still runs
+      // at booking-create time, so an early check-in won't collide
+      // with another guest because the date range was already vetted.
+      const today = new Date().toISOString().slice(0, 10);
+      const scheduledDate = String(b.check_in_date || '').slice(0, 10);
+      if (scheduledDate > today && !req.body?.force) {
+        return res.status(400).json({
+          error: `This booking is scheduled for ${scheduledDate}. Tap Check-In again to confirm an early arrival.`,
+          early_checkin_required: true,
+          scheduled_date: scheduledDate,
+          today,
+        });
+      }
+
       const now = new Date().toISOString();
       await tenantDb.run(
         "UPDATE room_bookings SET status = 'CHECKED_IN', actual_checkin_at = ? WHERE id = ?",
@@ -17921,7 +17940,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-booking-business-rules',
+    commit_marker: 'hotel-early-checkin-confirm',
     code_features: [
       'subscription-billing',
       'read-only-mode',
