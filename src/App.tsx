@@ -6646,6 +6646,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   }, [bothEnabled, isHotelEnabled]);
 
+  // Resolves the EFFECTIVE Command & Control view per the active mode:
+  //   • restaurant-only tenant → false (restaurant Monitor)
+  //   • hotel-only tenant      → true  (hotel Monitor)
+  //   • BOTH-mode tenant       → tracks the dashboardMode toggle
+  // The MONITOR tab uses this to swap the entire Command Center content
+  // so a hotel-mode owner isn't staring at restaurant tables and KDS.
+  const isHotelView = isHotelEnabled && (
+    !isRestaurantEnabled || (bothEnabled && dashboardMode === 'HOTEL')
+  );
+
   // ── Mode-switch safety net ─────────────────────────────────────────────
   // If the owner is on (say) ROOMS and flips to Restaurant mode, the ROOMS
   // tab disappears. Auto-redirect to Command & Control so they don't end
@@ -15087,7 +15097,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       ) : activeTab === 'MONITOR' ? (
-        /* ── COMMAND CENTER — dark glassmorphism theme (per CLAUDE.md spec) ─────── */
+        // Hotel-mode owners see the hotel Command & Control (rooms,
+        // bookings, SRs, folios) instead of the restaurant view. The
+        // restaurant view below is wrapped so it never renders in
+        // Hotel mode — addresses the "show restaurant tables when I'm
+        // managing the hotel" UX bug.
+        isHotelView ? (
+          <HotelCommandCenter restaurantId={restaurantId} token={token} />
+        ) : (
+        /* ── COMMAND CENTER — restaurant, dark glassmorphism theme ─── */
         <div
           className="relative -mx-4 -my-4 sm:-mx-6 sm:-my-6 p-4 sm:p-6 space-y-5 rounded-3xl"
           style={{
@@ -15965,6 +15983,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
 
         </div>
+        )  /* end of isHotelView ? <HotelCommandCenter /> : <restaurant Monitor> */
       ) : (
         <AttendanceManagement role="OWNER" token={token} restaurantId={restaurantId} />
       )}
@@ -17969,6 +17988,295 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     </div>
   );
 }
+
+/* ─── HotelCommandCenter ─────────────────────────────────────────
+   Hotel-side Command & Control. Renders inside the MONITOR tab when
+   dashboardMode === 'HOTEL' (or hotel-only tenant). Same dark-glass
+   theme as the restaurant Monitor for visual consistency. Data is
+   pulled from existing /hotel/* endpoints with a 30 s auto-refresh
+   so the owner sees a near-live ops view without manual polling.
+
+   What it shows:
+   • Top KPI tiles — Occupancy / Check-ins today / Check-outs today /
+     Open folios + total / Form-C pending (foreign guests)
+   • Rooms grid — every room colour-coded by status, currently-occupied
+     rooms also show the guest name
+   • Today's movement — two compact lists (check-ins, check-outs)
+   • Active service requests — top 5 with status badges
+   • Open folios — top 5 with running totals
+                                                                    */
+const HotelCommandCenter: React.FC<{
+  restaurantId: string;
+  token: string;
+}> = ({ restaurantId, token }) => {
+  const [rooms, setRooms]       = useState<any[]>([]);
+  const [bookings, setBookings] = useState<any[]>([]);
+  const [srs, setSrs]           = useState<any[]>([]);
+  const [folios, setFolios]     = useState<any[]>([]);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [loading, setLoading]   = useState(true);
+
+  const fetchAll = useCallback(async () => {
+    try {
+      const headers = { Authorization: `Bearer ${token}` };
+      const [r1, r2, r3, r4] = await Promise.all([
+        fetch(`/api/restaurant/${restaurantId}/hotel/rooms`,            { headers }),
+        fetch(`/api/restaurant/${restaurantId}/hotel/bookings`,         { headers }),
+        fetch(`/api/restaurant/${restaurantId}/hotel/service-requests?status=PENDING,ACKNOWLEDGED,IN_PROGRESS,DELIVERED`, { headers }),
+        fetch(`/api/restaurant/${restaurantId}/hotel/folios?status=open`, { headers }),
+      ]);
+      if (r1.ok) setRooms(await r1.json());
+      if (r2.ok) setBookings(await r2.json());
+      if (r3.ok) setSrs(await r3.json());
+      if (r4.ok) setFolios(await r4.json());
+      setLastRefresh(new Date());
+    } catch (err) {
+      console.error('[hotel-cc] fetch failed:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [restaurantId, token]);
+
+  useEffect(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, 30000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
+
+  // ── Derivations ───────────────────────────────────────────────
+  const today = new Date().toISOString().slice(0, 10);
+  const occupied = rooms.filter(r => r.status === 'OCCUPIED').length;
+  const total    = rooms.length;
+  const occupancyPct = total > 0 ? Math.round((occupied * 100) / total) : 0;
+  const checkInsToday  = bookings.filter(b => b.check_in_date === today  && b.status !== 'CANCELLED');
+  const checkOutsToday = bookings.filter(b => b.check_out_date === today && b.status !== 'CANCELLED');
+  const openFolioTotal = folios.reduce((s, f) => s + Number(f.grand_total || 0), 0);
+  const foreignPendingFormC = bookings.filter(b =>
+    b.status === 'CHECKED_IN' && b.guest_nationality && b.guest_nationality !== 'IN'
+  ).length;
+  const activeSrs = srs.filter(s => s.status !== 'CANCELLED');
+  const roomNumberFor = (roomId: string) => {
+    const r = rooms.find(rm => rm.id === roomId);
+    return r?.room_number || r?.name || (roomId || '').slice(-3);
+  };
+
+  // Status palette for the room tiles.
+  const roomColor = (status: string) => {
+    switch (status) {
+      case 'OCCUPIED':    return { bg: 'rgba(251, 146, 60, 0.15)', border: 'rgba(251, 146, 60, 0.4)',  label: '#fcd34d' };
+      case 'VACANT':      return { bg: 'rgba(16, 185, 129, 0.12)', border: 'rgba(16, 185, 129, 0.35)', label: '#6ee7b7' };
+      case 'CLEANING':    return { bg: 'rgba(56, 189, 248, 0.12)', border: 'rgba(56, 189, 248, 0.35)', label: '#7dd3fc' };
+      case 'MAINTENANCE': return { bg: 'rgba(244, 63, 94, 0.12)',  border: 'rgba(244, 63, 94, 0.35)',  label: '#fb7185' };
+      case 'BLOCKED':     return { bg: 'rgba(148, 163, 184, 0.15)', border: 'rgba(148, 163, 184, 0.35)', label: '#cbd5e1' };
+      default:            return { bg: 'rgba(148, 163, 184, 0.1)',  border: 'rgba(148, 163, 184, 0.25)', label: '#94a3b8' };
+    }
+  };
+  const srBadgeStyle = (status: string): React.CSSProperties => {
+    const c: Record<string, { background: string; color: string }> = {
+      PENDING:      { background: 'rgba(251, 191, 36, 0.2)',  color: '#fde68a' },
+      ACKNOWLEDGED: { background: 'rgba(56, 189, 248, 0.2)',  color: '#bae6fd' },
+      IN_PROGRESS:  { background: 'rgba(168, 85, 247, 0.22)', color: '#e9d5ff' },
+      DELIVERED:    { background: 'rgba(16, 185, 129, 0.22)', color: '#a7f3d0' },
+    };
+    return c[status] || c.PENDING;
+  };
+
+  // ── KPI tile sub-component ────────────────────────────────────
+  const Kpi: React.FC<{ label: string; value: string; sub?: string; tone: 'emerald'|'sky'|'amber'|'violet'|'rose'|'slate' }> = ({ label, value, sub, tone }) => {
+    const tones = {
+      emerald: { bg: 'bg-emerald-500/10', border: 'border-emerald-400/30', text: 'text-emerald-200', sub: 'text-emerald-300/70' },
+      sky:     { bg: 'bg-sky-500/10',     border: 'border-sky-400/30',     text: 'text-sky-200',     sub: 'text-sky-300/70'     },
+      amber:   { bg: 'bg-amber-500/10',   border: 'border-amber-400/30',   text: 'text-amber-200',   sub: 'text-amber-300/70'   },
+      violet:  { bg: 'bg-violet-500/10',  border: 'border-violet-400/30',  text: 'text-violet-200',  sub: 'text-violet-300/70'  },
+      rose:    { bg: 'bg-rose-500/10',    border: 'border-rose-400/30',    text: 'text-rose-200',    sub: 'text-rose-300/70'    },
+      slate:   { bg: 'bg-slate-500/10',   border: 'border-slate-400/30',   text: 'text-slate-200',   sub: 'text-slate-300/70'   },
+    } as const;
+    const t = tones[tone];
+    return (
+      <div className={cn('rounded-2xl backdrop-blur-md border p-4', t.bg, t.border)}>
+        <p className="text-[10px] font-bold uppercase tracking-widest text-[#f0ede8]/55">{label}</p>
+        <p className={cn('text-2xl font-bold mt-1', t.text)}>{value}</p>
+        {sub && <p className={cn('text-[10px] font-mono mt-0.5', t.sub)}>{sub}</p>}
+      </div>
+    );
+  };
+
+  return (
+    <div
+      className="relative -mx-4 -my-4 sm:-mx-6 sm:-my-6 p-4 sm:p-6 space-y-5 rounded-3xl"
+      style={{
+        background: 'radial-gradient(1200px 600px at 20% 0%, #11213f 0%, transparent 55%), radial-gradient(1000px 500px at 100% 100%, #0f1f3d 0%, transparent 50%), linear-gradient(135deg, #0c1628 0%, #0a1020 100%)',
+        minHeight: 'calc(100vh - 8rem)',
+      }}
+    >
+      {/* Top bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md bg-rose-500/10 border border-rose-400/30"
+            style={{ boxShadow: '0 0 20px rgba(244, 63, 94, 0.25)' }}>
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-400" />
+            </span>
+            <span className="text-rose-200 text-[11px] font-bold uppercase tracking-widest">Live · Hotel</span>
+          </div>
+          <div>
+            <h2 className="text-2xl font-bold font-serif text-[#f0ede8]">Command &amp; Control</h2>
+            <p className="text-xs text-[#f0ede8]/55 mt-0.5">
+              {lastRefresh ? `Updated · ${lastRefresh.toLocaleTimeString()}` : 'Fetching live data…'}
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={fetchAll}
+          className="flex items-center gap-2 px-4 py-2 rounded-xl backdrop-blur-md bg-[#cc5a16]/15 border border-[#cc5a16]/40 text-[#f4b07a] text-xs font-bold uppercase tracking-widest hover:bg-[#cc5a16]/25 transition-all"
+        >
+          <RefreshCw size={13} /> Refresh
+        </button>
+      </div>
+
+      {/* KPI tiles */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        <Kpi label="Occupancy"        value={`${occupied}/${total}`}   sub={`${occupancyPct}%`} tone="emerald" />
+        <Kpi label="Check-ins today"  value={String(checkInsToday.length)}                       tone="sky" />
+        <Kpi label="Check-outs today" value={String(checkOutsToday.length)}                      tone="amber" />
+        <Kpi label="Open folios"      value={String(folios.length)} sub={folios.length > 0 ? `₹${openFolioTotal.toLocaleString('en-IN')}` : undefined} tone="violet" />
+        <Kpi label="Form-C pending"   value={String(foreignPendingFormC)}                        tone={foreignPendingFormC > 0 ? 'rose' : 'slate'} />
+      </div>
+
+      {/* Empty-state shortcut */}
+      {!loading && rooms.length === 0 && (
+        <div className="rounded-2xl backdrop-blur-md bg-white/5 border border-white/10 p-8 text-center">
+          <p className="text-[#f0ede8]/70 text-sm">
+            No rooms set up yet. Open the <strong className="text-[#f4b07a]">Rooms</strong> tab to add your first room — or
+            run the demo seed script if this is a test tenant.
+          </p>
+        </div>
+      )}
+
+      {/* Rooms grid + today's movement */}
+      {rooms.length > 0 && (
+        <div className="grid lg:grid-cols-3 gap-4">
+          <div className="lg:col-span-2 rounded-2xl backdrop-blur-md bg-white/5 border border-white/10 p-4">
+            <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60 mb-3">Rooms</h3>
+            <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+              {rooms.map(r => {
+                const c = roomColor(r.status);
+                const booking = bookings.find(b => b.room_id === r.id && b.status === 'CHECKED_IN');
+                return (
+                  <div key={r.id}
+                    className="rounded-xl p-3 border text-center flex flex-col justify-between"
+                    style={{ background: c.bg, borderColor: c.border, minHeight: 88 }}>
+                    <div>
+                      <p className="text-xs font-bold text-[#f0ede8]">{r.room_number || r.name}</p>
+                      <p className="text-[9px] uppercase tracking-widest mt-1" style={{ color: c.label }}>{r.status}</p>
+                    </div>
+                    {booking && (
+                      <p className="text-[10px] mt-1 truncate" style={{ color: c.label }}>
+                        {booking.guest_name}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Today's movement */}
+          <div className="space-y-3">
+            <div className="rounded-2xl backdrop-blur-md bg-white/5 border border-white/10 p-4">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60 mb-3">
+                Check-ins today
+              </h3>
+              {checkInsToday.length === 0 ? (
+                <p className="text-xs text-[#f0ede8]/40">No arrivals today.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {checkInsToday.slice(0, 5).map(b => (
+                    <li key={b.id} className="text-xs text-[#f0ede8] flex justify-between items-center">
+                      <span className="truncate">{b.guest_name}</span>
+                      <span className="text-[10px] font-mono text-[#f0ede8]/60 ml-2 shrink-0">
+                        {roomNumberFor(b.room_id)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="rounded-2xl backdrop-blur-md bg-white/5 border border-white/10 p-4">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60 mb-3">
+                Check-outs today
+              </h3>
+              {checkOutsToday.length === 0 ? (
+                <p className="text-xs text-[#f0ede8]/40">No departures today.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {checkOutsToday.slice(0, 5).map(b => (
+                    <li key={b.id} className="text-xs text-[#f0ede8] flex justify-between items-center">
+                      <span className="truncate">{b.guest_name}</span>
+                      <span className="text-[10px] font-mono text-[#f0ede8]/60 ml-2 shrink-0">
+                        {roomNumberFor(b.room_id)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Active SRs + open folios */}
+      {rooms.length > 0 && (
+        <div className="grid lg:grid-cols-2 gap-4">
+          <div className="rounded-2xl backdrop-blur-md bg-white/5 border border-white/10 p-4">
+            <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60 mb-3">
+              Active service requests {activeSrs.length > 0 ? `(${activeSrs.length})` : ''}
+            </h3>
+            {activeSrs.length === 0 ? (
+              <p className="text-xs text-[#f0ede8]/40">No active requests.</p>
+            ) : (
+              <ul className="space-y-2">
+                {activeSrs.slice(0, 5).map(s => (
+                  <li key={s.id} className="flex items-center gap-2 text-xs">
+                    <span className="text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded-full"
+                      style={srBadgeStyle(s.status)}>
+                      {s.status}
+                    </span>
+                    <span className="text-[#f0ede8] truncate flex-1">{s.service_name}</span>
+                    <span className="text-[10px] font-mono text-[#f0ede8]/50 shrink-0">
+                      {roomNumberFor(s.room_id)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="rounded-2xl backdrop-blur-md bg-white/5 border border-white/10 p-4">
+            <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60 mb-3">
+              Open folios {folios.length > 0 ? `(${folios.length})` : ''}
+            </h3>
+            {folios.length === 0 ? (
+              <p className="text-xs text-[#f0ede8]/40">No open folios.</p>
+            ) : (
+              <ul className="space-y-2">
+                {folios.slice(0, 5).map(f => (
+                  <li key={f.id} className="flex items-center justify-between text-xs text-[#f0ede8]">
+                    <span className="truncate">{f.guest_name || f.id}</span>
+                    <span className="font-mono text-[#f4b07a] font-bold ml-2 shrink-0">
+                      ₹{Number(f.grand_total || 0).toLocaleString('en-IN')}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 /* ─── HotelLoyaltyBanner ─────────────────────────────────────────
    Compact preview banner shown inside the hotel check-out modal.
