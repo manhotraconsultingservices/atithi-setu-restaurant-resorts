@@ -16292,9 +16292,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <h3 className="text-xl font-bold font-serif text-[#1a1208]">{editingBooking.id ? 'Edit Booking' : 'New Booking'}</h3>
               <button onClick={() => { setShowBookingModal(false); setEditingBooking(null); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
             </div>
+            {/* Inline error strip — surfaces server-side validation failures
+                (date order, double-booking, capacity, room status) directly
+                in the modal so the cashier doesn't miss them. */}
+            {hotelError && (
+              <div className="mb-4 rounded-xl bg-red-50 border border-red-200 px-3 py-2.5 flex items-start gap-2">
+                <AlertCircle size={14} className="text-red-600 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-bold text-red-700">Could not save booking</p>
+                  <p className="text-[11px] text-red-600/90 mt-0.5">{hotelError}</p>
+                </div>
+                <button type="button" onClick={() => setHotelError('')} className="text-red-500 hover:text-red-700 shrink-0" aria-label="Dismiss"><X size={14} /></button>
+              </div>
+            )}
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
+                setHotelError('');   // clear any prior error before retry
                 try {
                   // Fill rate from selected room if blank
                   const patched = {...editingBooking};
@@ -16304,7 +16318,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   }
                   await saveBooking(patched);
                   setShowBookingModal(false); setEditingBooking(null);
-                } catch (err: any) { setHotelError(err.message); }
+                } catch (err: any) { setHotelError(err.message || 'Save failed'); }
               }}
               className="space-y-4"
             >
@@ -16357,19 +16371,113 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   setEditingBooking({...editingBooking, room_id: e.target.value, room_rate: room?.base_rate || editingBooking.room_rate });
                 }} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none">
                   <option value="">Select a room…</option>
-                  {hotelRooms.map(r => (
-                    <option key={r.id} value={r.id}>{r.name} · ₹{r.base_rate}/night{r.status !== 'VACANT' ? ` · ${r.status}` : ''}</option>
-                  ))}
+                  {/* Disable rooms in MAINTENANCE / BLOCKED state — they
+                      cannot accept a booking. OCCUPIED is allowed (you can
+                      still create a future booking on a currently-occupied
+                      room as long as dates don't overlap; the server-side
+                      overlap check catches the conflict). */}
+                  {hotelRooms.map(r => {
+                    const blocked = r.status === 'MAINTENANCE' || r.status === 'BLOCKED';
+                    return (
+                      <option key={r.id} value={r.id} disabled={blocked}>
+                        {r.name} · ₹{r.base_rate}/night{r.status !== 'VACANT' ? ` · ${r.status}${blocked ? ' (unavailable)' : ''}` : ''}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
+              {/* Booking type — overnight vs day-use. Default OVERNIGHT
+                  for existing bookings so nothing changes for legacy rows. */}
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Booking Type *</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { id: 'OVERNIGHT', label: 'Overnight', sub: 'Check-out > check-in' },
+                    { id: 'DAY_USE',   label: 'Day-Use',   sub: 'Same-day in/out' },
+                  ] as const).map(opt => {
+                    const active = (editingBooking.booking_type || 'OVERNIGHT') === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          // When switching to DAY_USE, snap check_out to
+                          // match check_in so the form validates. Reverse
+                          // for OVERNIGHT — bump check_out one day ahead
+                          // if it's the same as check_in.
+                          const next: any = { ...editingBooking, booking_type: opt.id };
+                          if (opt.id === 'DAY_USE' && next.check_in_date) {
+                            next.check_out_date = next.check_in_date;
+                          }
+                          if (opt.id === 'OVERNIGHT' && next.check_in_date && next.check_out_date && next.check_out_date <= next.check_in_date) {
+                            const d = new Date(next.check_in_date);
+                            d.setDate(d.getDate() + 1);
+                            next.check_out_date = d.toISOString().slice(0, 10);
+                          }
+                          setEditingBooking(next);
+                        }}
+                        className={cn(
+                          'p-3 rounded-2xl border-2 text-left transition-all',
+                          active ? 'border-[#cc5a16] bg-[#cc5a16]/5' : 'border-[#cc5a16]/10 bg-[#faf7f2] hover:border-[#cc5a16]/30'
+                        )}
+                      >
+                        <p className={cn('text-sm font-bold', active ? 'text-[#1a1208]' : 'text-[#3d3128]')}>{opt.label}</p>
+                        <p className="text-[10px] text-[#9c8e85] mt-0.5">{opt.sub}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-[#9c8e85] mt-1">
+                  Day-use bookings are billed as 1 unit at the rate below (set a discounted day rate manually if applicable).
+                </p>
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in *</label>
-                  <input required type="date" value={(editingBooking.check_in_date || '').slice(0,10)} onChange={e => setEditingBooking({...editingBooking, check_in_date: e.target.value})} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
+                  <input
+                    required
+                    type="date"
+                    value={(editingBooking.check_in_date || '').slice(0,10)}
+                    onChange={e => {
+                      const v = e.target.value;
+                      const next: any = { ...editingBooking, check_in_date: v };
+                      const bt = editingBooking.booking_type || 'OVERNIGHT';
+                      // Auto-sync sibling date so the form stays valid:
+                      //   • DAY_USE  → check_out = check_in
+                      //   • OVERNIGHT → bump check_out if it's now ≤ check_in
+                      if (bt === 'DAY_USE') {
+                        next.check_out_date = v;
+                      } else if (next.check_out_date && next.check_out_date <= v) {
+                        const d = new Date(v); d.setDate(d.getDate() + 1);
+                        next.check_out_date = d.toISOString().slice(0, 10);
+                      }
+                      setEditingBooking(next);
+                    }}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out *</label>
-                  <input required type="date" value={(editingBooking.check_out_date || '').slice(0,10)} onChange={e => setEditingBooking({...editingBooking, check_out_date: e.target.value})} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
+                  <input
+                    required
+                    type="date"
+                    disabled={(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE'}
+                    // HTML5 min — overnight: day AFTER check-in; day-use: same day
+                    min={(() => {
+                      const ci = (editingBooking.check_in_date || '').slice(0, 10);
+                      if (!ci) return undefined;
+                      if ((editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE') return ci;
+                      const d = new Date(ci); d.setDate(d.getDate() + 1);
+                      return d.toISOString().slice(0, 10);
+                    })()}
+                    value={(editingBooking.check_out_date || '').slice(0,10)}
+                    onChange={e => setEditingBooking({...editingBooking, check_out_date: e.target.value})}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
+                  />
+                  {(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE' && (
+                    <p className="text-[10px] text-[#9c8e85] mt-1">Locked to check-in date for day-use bookings.</p>
+                  )}
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">

@@ -229,10 +229,18 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
       room_rate          DOUBLE PRECISION,
       total_amount       DOUBLE PRECISION DEFAULT 0,
       special_requests   TEXT,
+      -- 'OVERNIGHT' (default) — multi-night stay where check_out > check_in.
+      -- 'DAY_USE'           — same-day in/out (transit guests, day visitors,
+      --                       business meetings). check_out == check_in
+      --                       allowed; total billed as 1 unit at room_rate.
+      booking_type       TEXT DEFAULT 'OVERNIGHT',
       created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     -- Phase 5 migration for existing tenants
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS guest_state TEXT;
+    -- Day-use booking type (idempotent — existing rows default to OVERNIGHT)
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS booking_type TEXT DEFAULT 'OVERNIGHT';
+    UPDATE room_bookings SET booking_type = 'OVERNIGHT' WHERE booking_type IS NULL;
 
     CREATE TABLE IF NOT EXISTS services (
       id               TEXT PRIMARY KEY,
@@ -465,6 +473,133 @@ async function recomputeFolioTotals(tenantDb: DbInterface, folioId: string): Pro
   const discount = Number(f?.discount || 0);
   const grand = Math.max(0, subtotal + gst - discount);
   await tenantDb.run("UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?", [subtotal, gst, grand, folioId]);
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  HOTEL BUSINESS-RULE VALIDATOR
+//  ────────────────────────────────────────────────────────────────────
+//  Central guard for booking create/update. Enforces:
+//    • Date validity (per booking_type — OVERNIGHT vs DAY_USE)
+//    • Room exists + not in MAINTENANCE / BLOCKED
+//    • num_guests ≤ room.capacity
+//    • No overlapping bookings on the same room (excludes CANCELLED and
+//      CHECKED_OUT bookings; ignores `excludeBookingId` so PATCH can
+//      validate against the post-update set without flagging itself)
+//
+//  Returns { ok: false, status, error } on failure so callers can:
+//    if (!v.ok) return res.status(v.status).json({ error: v.error });
+// ════════════════════════════════════════════════════════════════════════
+async function validateBookingRequest(
+  restaurantId: string,
+  opts: {
+    room_id: string;
+    check_in_date: string;
+    check_out_date: string;
+    booking_type?: string;
+    num_guests?: number | string;
+    excludeBookingId?: string;   // PATCH: ignore the row being updated
+  }
+): Promise<{ ok: boolean; status: number; error: string }> {
+  // Flat shape (not a discriminated union) so call sites can read
+  // .status/.error without TS narrowing — matches ensureHotelEnabled.
+  const { room_id, check_in_date, check_out_date, excludeBookingId } = opts;
+  const bookingType = String(opts.booking_type || 'OVERNIGHT').toUpperCase();
+  const numGuests = Number(opts.num_guests || 1);
+
+  if (!room_id || !check_in_date || !check_out_date) {
+    return { ok: false, status: 400, error: 'room_id, check_in_date, check_out_date are required.' };
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(check_in_date)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(check_out_date))) {
+    return { ok: false, status: 400, error: 'Dates must be in YYYY-MM-DD format.' };
+  }
+
+  // Date comparison via YYYY-MM-DD string compare is safe + timezone-free.
+  if (bookingType === 'DAY_USE') {
+    if (check_in_date !== check_out_date) {
+      return {
+        ok: false, status: 400,
+        error: 'Day-use bookings must have the same check-in and check-out date. For multi-day stays, switch to Overnight.',
+      };
+    }
+  } else {
+    // OVERNIGHT — must be strictly after check-in
+    if (check_out_date <= check_in_date) {
+      return {
+        ok: false, status: 400,
+        error: 'Check-out date must be after the check-in date for overnight stays. Use the Day-Use option for same-day bookings.',
+      };
+    }
+  }
+
+  // Room existence + status
+  const tenantDb = await getTenantDb(restaurantId);
+  const room: any = await tenantDb.get('SELECT id, capacity, status FROM rooms WHERE id = ?', [room_id]);
+  if (!room) {
+    return { ok: false, status: 404, error: 'Room not found.' };
+  }
+  if (room.status === 'MAINTENANCE' || room.status === 'BLOCKED') {
+    return {
+      ok: false, status: 400,
+      error: `Cannot book a room that is currently ${room.status}. Clear the room status first.`,
+    };
+  }
+
+  // Capacity
+  if (Number(room.capacity) > 0 && numGuests > Number(room.capacity)) {
+    return {
+      ok: false, status: 400,
+      error: `Room capacity is ${room.capacity} guest(s); ${numGuests} requested.`,
+    };
+  }
+
+  // (overlap check + success return live below)
+
+  // Overlap check — for OVERNIGHT, [check_in, check_out) intervals on the
+  // same room cannot overlap. For DAY_USE, ANY booking covering that date
+  // blocks (including overnight stays that span it).
+  // Existing CANCELLED + CHECKED_OUT rows do not contend.
+  const params: any[] = [room_id, check_out_date, check_in_date];
+  let sql = `
+    SELECT id, guest_name, status, booking_type, check_in_date, check_out_date
+      FROM room_bookings
+     WHERE room_id = ?
+       AND status NOT IN ('CANCELLED', 'CHECKED_OUT')
+       AND check_in_date < ?
+       AND check_out_date > ?
+  `;
+  if (excludeBookingId) {
+    sql += ' AND id <> ?';
+    params.push(excludeBookingId);
+  }
+  // Special handling for DAY_USE on a date already taken — even if check_in
+  // == check_out (so the < / > check above doesn't fire), a same-date
+  // collision with another DAY_USE on the same date must be flagged.
+  // We add a second clause for that exact-date case.
+  if (bookingType === 'DAY_USE') {
+    sql += ` UNION
+      SELECT id, guest_name, status, booking_type, check_in_date, check_out_date
+        FROM room_bookings
+       WHERE room_id = ?
+         AND status NOT IN ('CANCELLED', 'CHECKED_OUT')
+         AND booking_type = 'DAY_USE'
+         AND check_in_date = ?
+    `;
+    params.push(room_id, check_in_date);
+    if (excludeBookingId) {
+      sql += ' AND id <> ?';
+      params.push(excludeBookingId);
+    }
+  }
+  const conflicts: any[] = await tenantDb.query(sql, params);
+  if (conflicts && conflicts.length > 0) {
+    const c = conflicts[0];
+    return {
+      ok: false, status: 409,
+      error: `Room is already booked for "${c.guest_name}" (${c.status}) from ${c.check_in_date} to ${c.check_out_date}. Pick a different room or date range.`,
+    };
+  }
+
+  return { ok: true, status: 200, error: '' };
 }
 
 async function settleFolioForBooking(
@@ -13073,26 +13208,42 @@ async function startServer() {
       const {
         room_id, guest_name, guest_phone, guest_email, guest_id_proof,
         guest_nationality, guest_state, num_guests, check_in_date, check_out_date,
-        booking_source, room_rate, special_requests
+        booking_source, room_rate, special_requests, booking_type
       } = req.body || {};
-      if (!room_id || !guest_name || !check_in_date || !check_out_date) {
-        return res.status(400).json({ error: "room_id, guest_name, check_in_date, check_out_date required" });
+      if (!guest_name || String(guest_name).trim().length === 0) {
+        return res.status(400).json({ error: "Guest name is required." });
       }
+      // Run all business-rule validations (dates per booking_type, capacity,
+      // room status, double-booking) before INSERT. Returns a friendly
+      // error string that surfaces directly in the booking modal.
+      const v = await validateBookingRequest(req.params.id, {
+        room_id, check_in_date, check_out_date, booking_type, num_guests,
+      });
+      if (!v.ok) return res.status(v.status).json({ error: v.error });
+
+      const bookingType = String(booking_type || 'OVERNIGHT').toUpperCase();
       const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const tenantDb = await getTenantDb(req.params.id);
-      // compute total
-      const nights = Math.max(1, Math.ceil((new Date(check_out_date).getTime() - new Date(check_in_date).getTime()) / 86400000));
+      // Total computation:
+      //   OVERNIGHT — nights × rate
+      //   DAY_USE   — flat 1 × rate (the cashier can override room_rate
+      //               to a discounted day-rate if the hotel charges
+      //               less for partial-day use)
       const rate = Number(room_rate) || 0;
+      let nights = 1;
+      if (bookingType !== 'DAY_USE') {
+        nights = Math.max(1, Math.ceil((new Date(check_out_date).getTime() - new Date(check_in_date).getTime()) / 86400000));
+      }
       const total = rate * nights;
       await tenantDb.run(
         `INSERT INTO room_bookings
          (id, room_id, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
-          num_guests, check_in_date, check_out_date, status, booking_source, room_rate, total_amount, special_requests)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?)`,
+          num_guests, check_in_date, check_out_date, status, booking_source, room_rate, total_amount, special_requests, booking_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?)`,
         [bid, room_id, guest_name, guest_phone || null, guest_email || null,
          guest_id_proof || null, guest_nationality || null, guest_state || null,
          num_guests || 1, check_in_date, check_out_date, booking_source || 'DIRECT', rate, total,
-         special_requests || null]
+         special_requests || null, bookingType]
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
@@ -13110,10 +13261,30 @@ async function startServer() {
       const tenantDb = await getTenantDb(req.params.id);
       const b: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!b) return res.status(404).json({ error: "Booking not found" });
-      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','num_guests','check_in_date','check_out_date','room_rate','special_requests','status'];
+      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','num_guests','check_in_date','check_out_date','room_rate','special_requests','status','booking_type'];
       const patch: any = {};
       for (const k of allow) if (k in (req.body || {})) patch[k] = req.body[k];
       if (Object.keys(patch).length === 0) return res.json(b);
+
+      // Re-validate business rules if dates / room / capacity / type changed.
+      // Skip validation when the only change is status (e.g. cancel) — that
+      // path has its own state-machine guard.
+      const businessFields = ['room_id', 'check_in_date', 'check_out_date', 'booking_type', 'num_guests'];
+      const businessTouched = businessFields.some(f => f in patch);
+      if (businessTouched) {
+        // Compose the post-update view to validate against.
+        const post = { ...b, ...patch };
+        const v = await validateBookingRequest(req.params.id, {
+          room_id:        post.room_id,
+          check_in_date:  post.check_in_date,
+          check_out_date: post.check_out_date,
+          booking_type:   post.booking_type || 'OVERNIGHT',
+          num_guests:     post.num_guests || 1,
+          excludeBookingId: b.id,
+        });
+        if (!v.ok) return res.status(v.status).json({ error: v.error });
+      }
+
       const setStr = Object.keys(patch).map(k => `${k} = ?`).join(', ');
       await tenantDb.run(`UPDATE room_bookings SET ${setStr} WHERE id = ?`, [...Object.values(patch), req.params.bookingId]);
       res.json(await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]));
@@ -13241,6 +13412,19 @@ async function startServer() {
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get('SELECT id, status FROM room_bookings WHERE id = ?', [req.params.bookingId]);
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      // State-machine guard. CHECKED_IN guests must go through proper
+      // checkout (settle folio); CHECKED_OUT/CANCELLED are terminal.
+      if (b.status === 'CHECKED_IN') {
+        return res.status(400).json({ error: 'Cannot cancel a guest who is already checked in. Use Check-Out to settle the folio.' });
+      }
+      if (b.status === 'CHECKED_OUT') {
+        return res.status(400).json({ error: 'Booking is already checked out and cannot be cancelled.' });
+      }
+      if (b.status === 'CANCELLED') {
+        return res.json({ success: true, already_cancelled: true });
+      }
       await tenantDb.run("UPDATE room_bookings SET status = 'CANCELLED' WHERE id = ?", [req.params.bookingId]);
       res.json({ success: true });
     } catch (err) {
@@ -17737,7 +17921,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-legacy-fields-respect-tax-config',
+    commit_marker: 'hotel-booking-business-rules',
     code_features: [
       'subscription-billing',
       'read-only-mode',
