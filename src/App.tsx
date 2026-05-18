@@ -17159,7 +17159,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
                       </div>
                       <div>
-                        <label className="block text-[11px] font-bold text-[#9c8e85] uppercase tracking-widest mb-1">Service (%)</label>
+                        <label
+                          className="block text-[11px] font-bold text-[#9c8e85] uppercase tracking-widest mb-1"
+                          title="Optional restaurant service charge added BEFORE tax. NOT the same as 'Service Tax' configured in Brand & Settings → Tax Lines — those apply automatically on the breakdown below."
+                        >
+                          Service Charge (%)
+                        </label>
                         <input type="number" min="0" value={invEdit.svcPct}
                           onChange={e => setInvEdit(p => ({ ...p, svcPct: Number(e.target.value)||0 }))}
                           className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
@@ -17920,7 +17925,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           />
                         </div>
                         <div>
-                          <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Service %</label>
+                          <label
+                            className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
+                            title="Optional restaurant service charge added BEFORE tax. Separate from any 'Service Tax' line you've configured in Brand & Settings → Tax Lines (those apply automatically on the breakdown below)."
+                          >
+                            Service Charge %
+                          </label>
                           <input
                             type="number" min="0" value={odSvcPct}
                             onChange={e => setOdSvcPct(Number(e.target.value) || 0)}
