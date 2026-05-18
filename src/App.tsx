@@ -6945,6 +6945,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // its own client-side math which missed loyalty entirely.
   const [invEditPreview, setInvEditPreview] = useState<any | null>(null);
   const [invEditPreviewLoading, setInvEditPreviewLoading] = useState(false);
+  // POS-style tile UI state for the Edit Invoice modal — mirrors the
+  // New Invoice modal so a cashier can tap tiles to add items to an
+  // existing order invoice (SESSION invoices keep items read-only since
+  // they come from customer rounds, not staff entry).
+  const [invEditCategoryFilter, setInvEditCategoryFilter] = useState<string>('ALL');
+  const [invEditTileSearch, setInvEditTileSearch]         = useState<string>('');
+  const [invEditShowCustomForm, setInvEditShowCustomForm] = useState(false);
+  const [invEditCustomDraft, setInvEditCustomDraft]       = useState<{name:string;qty:number;price:number}>({name:'',qty:1,price:0});
+  // Reset filters/search whenever a new invoice is opened for editing.
+  // Keeps the previous edit's category/search from carrying over.
+  useEffect(() => {
+    if (!invoiceEditTarget) return;
+    setInvEditCategoryFilter('ALL');
+    setInvEditTileSearch('');
+    setInvEditShowCustomForm(false);
+    setInvEditCustomDraft({ name: '', qty: 1, price: 0 });
+  }, [invoiceEditTarget]);
   useEffect(() => {
     if (!invoiceEditTarget || !restaurantId) { setInvEditPreview(null); return; }
     const inv = invoiceEditTarget;
@@ -17026,40 +17043,98 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           const editTaxable = editAfter + editSvc;
           const editGst     = invEdit.applyGst ? editTaxable * invEdit.gstPct / 100 : 0;
           const editGrand   = Number((editTaxable + editGst).toFixed(2));
+          // ── Tile-UI helpers (ORDER only; SESSION items are read-only)
+          // Mirrors the New Invoice modal's tap-to-add behaviour so a
+          // cashier can edit an invoice by tapping menu tiles instead
+          // of typing each item by hand.
+          const availableMenuEdit = menu.filter(m => m.available !== false);
+          const catCountsEdit = new Map<string, number>();
+          availableMenuEdit.forEach(m => {
+            const c = String(m.category || 'Uncategorised').trim() || 'Uncategorised';
+            catCountsEdit.set(c, (catCountsEdit.get(c) || 0) + 1);
+          });
+          const categoriesEdit: { id: string; label: string; count: number }[] = [
+            { id: 'ALL', label: 'All', count: availableMenuEdit.length },
+            ...Array.from(catCountsEdit.entries())
+              .sort((a, b) => b[1] - a[1])
+              .map(([label, count]) => ({ id: label, label, count })),
+          ];
+          const tileQuery = invEditTileSearch.trim().toLowerCase();
+          const filteredTilesEdit = availableMenuEdit.filter(m => {
+            const cat = String(m.category || 'Uncategorised');
+            if (invEditCategoryFilter !== 'ALL' && cat !== invEditCategoryFilter) return false;
+            if (!tileQuery) return true;
+            return m.name.toLowerCase().includes(tileQuery) || cat.toLowerCase().includes(tileQuery);
+          });
+          const editAddFromTile = (m: MenuItem) => {
+            setInvEdit(prev => {
+              const idx = prev.items.findIndex(it => it.name === m.name && Number(it.price) === Number(m.price));
+              if (idx >= 0) {
+                return { ...prev, items: prev.items.map((it, i) => i === idx ? { ...it, quantity: it.quantity + 1 } : it) };
+              }
+              return { ...prev, items: [...prev.items, { name: m.name, quantity: 1, price: Number(m.price) }] };
+            });
+          };
+          const editBumpQty = (index: number, delta: number) => {
+            setInvEdit(prev => {
+              const cur = prev.items[index];
+              if (!cur) return prev;
+              const next = cur.quantity + delta;
+              if (next <= 0) return { ...prev, items: prev.items.filter((_, i) => i !== index) };
+              return { ...prev, items: prev.items.map((it, i) => i === index ? { ...it, quantity: next } : it) };
+            });
+          };
+          const editAddCustom = () => {
+            const n = invEditCustomDraft.name.trim();
+            const pr = Math.max(0, Number(invEditCustomDraft.price) || 0);
+            const qty = Math.max(1, Number(invEditCustomDraft.qty) || 1);
+            if (!n || pr <= 0) return;
+            setInvEdit(prev => ({ ...prev, items: [...prev.items, { name: n, quantity: qty, price: pr }] }));
+            setInvEditCustomDraft({ name: '', qty: 1, price: 0 });
+            setInvEditShowCustomForm(false);
+          };
+          const editCartCount = invEdit.items.reduce((n, it) => n + it.quantity, 0);
+
           return (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg flex flex-col" style={{ maxHeight: '92vh' }}>
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-sm">
+              <div className={cn(
+                "bg-[#fdfaf4] rounded-3xl shadow-2xl w-full flex flex-col overflow-hidden",
+                isSess ? "max-w-3xl" : "max-w-7xl"   // SESSION = narrower since no tile grid
+              )} style={{ maxHeight: '95vh' }}>
 
                 {/* Header */}
-                <div className="flex items-center justify-between px-6 py-4 border-b border-[#cc5a16]/10 shrink-0">
-                  <div>
-                    <h3 className="font-bold text-[#1a1208] flex items-center gap-2">
-                      <Edit3 size={16} className="text-[#cc5a16]" />
-                      Edit Invoice {inv.display_number || `#${String(inv.id).slice(-8).toUpperCase()}`}
-                    </h3>
-                    <p className="text-[11px] text-[#9c8e85] mt-0.5">
-                      {isSess ? `Table Invoice · ${inv.round_count} round${inv.round_count !== 1 ? 's' : ''}` : 'Order Invoice'}
-                      {' · '}{inv.tableNumber || '—'}
-                      {inv.customerName ? ` · ${inv.customerName}` : ''}
-                      {(inv.customerPhone || inv.customer_phone) ? (
-                        <span className="font-mono text-[#cc5a16]">  ·  {inv.customerPhone || inv.customer_phone}</span>
-                      ) : null}
-                    </p>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between px-4 sm:px-6 py-3 border-b border-[#cc5a16]/10 shrink-0 gap-3 bg-white">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-lg bg-[#cc5a16] flex items-center justify-center">
+                      <Edit3 size={15} className="text-white" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold font-serif text-lg text-[#1a1208]">
+                        Edit Invoice {inv.display_number || `#${String(inv.id).slice(-8).toUpperCase()}`}
+                      </h3>
+                      <p className="text-[11px] text-[#9c8e85]">
+                        {isSess ? `Table Invoice · ${inv.round_count} round${inv.round_count !== 1 ? 's' : ''}` : 'Order Invoice'}
+                        {' · '}{inv.tableNumber || '—'}
+                        {inv.customerName ? ` · ${inv.customerName}` : ''}
+                        {(inv.customerPhone || inv.customer_phone) ? (
+                          <span className="font-mono text-[#cc5a16]">  ·  {inv.customerPhone || inv.customer_phone}</span>
+                        ) : null}
+                      </p>
+                    </div>
                   </div>
-                  <button onClick={() => setInvoiceEditTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] transition-all"><X size={18} /></button>
+                  <button onClick={() => setInvoiceEditTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] shrink-0 self-end sm:self-auto" aria-label="Close"><X size={16} /></button>
                 </div>
 
-                {/* Scrollable body */}
-                <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+                {/* Body — ORDER = 3-col tile UI; SESSION = read-only items list */}
+                <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
 
-                  {/* Items section */}
                   {isSess ? (
-                    /* SESSION: show rounds as read-only */
-                    <div>
-                      <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">
+                    /* ─── SESSION INVOICE: items come from customer rounds, read-only ─── */
+                    <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">
                         Items (from customer orders — read only)
                       </p>
-                      <div className="rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+                      <div className="rounded-2xl border border-[#cc5a16]/10 overflow-hidden bg-white">
                         {(inv.rounds || []).map((r: any, ri: number) => (
                           <div key={ri}>
                             {r.label && (
@@ -17078,235 +17153,306 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </div>
                     </div>
                   ) : (
-                    /* ORDER: editable items */
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Items</p>
-                        <button
-                          onClick={() => setInvEdit(p => ({ ...p, items: [...p.items, { name: '', quantity: 1, price: 0 }] }))}
-                          className="text-xs font-bold text-[#cc5a16] hover:underline flex items-center gap-1"
-                        ><Plus size={12} /> Add Item</button>
-                      </div>
-                      <div className="space-y-2">
-                        <div className="grid grid-cols-12 gap-2 text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] px-1">
-                          <span className="col-span-6">Item Name</span><span className="col-span-2 text-center">Qty</span><span className="col-span-3 text-right">Price (₹)</span><span className="col-span-1"/>
+                    /* ─── ORDER INVOICE: full POS-style tile UI (mirror of New Invoice) ─── */
+                    <>
+                      {/* Categories rail (desktop) */}
+                      <aside className="hidden lg:flex lg:flex-col lg:w-44 border-r border-[#cc5a16]/10 bg-white overflow-y-auto shrink-0">
+                        <p className="px-4 pt-4 pb-2 font-mono text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">Categories</p>
+                        <div className="flex flex-col">
+                          {categoriesEdit.map(c => {
+                            const active = invEditCategoryFilter === c.id;
+                            return (
+                              <button key={c.id} onClick={() => setInvEditCategoryFilter(c.id)}
+                                className={cn(
+                                  "text-left px-4 py-2.5 text-sm flex items-center justify-between border-l-4 transition-all",
+                                  active
+                                    ? "border-[#cc5a16] bg-[#cc5a16]/5 text-[#1a1208] font-bold"
+                                    : "border-transparent text-[#6b5d52] hover:bg-[#faf7f2]"
+                                )}>
+                                <span className="truncate">{c.label}</span>
+                                <span className={cn(
+                                  "ml-2 text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-full shrink-0",
+                                  active ? "bg-[#cc5a16] text-white" : "bg-[#faf7f2] text-[#9c8e85]"
+                                )}>{c.count}</span>
+                              </button>
+                            );
+                          })}
                         </div>
-                        {invEdit.items.map((it, i) => (
-                          <div key={i} className="grid grid-cols-12 gap-2 items-center">
-                            <div className="col-span-6 relative">
-                              <input type="text" value={it.name}
-                                onChange={e => setInvEdit(p => ({ ...p, items: p.items.map((x,j) => j===i ? {...x, name: e.target.value} : x) }))}
-                                onFocus={() => setInvEditSearchActive(i)}
-                                onBlur={() => setTimeout(() => setInvEditSearchActive(null), 150)}
-                                placeholder="Item name or search menu…"
-                                className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                              {invEditSearchActive === i && it.name.length > 0 && (() => {
-                                // Match by name OR category — type "beverages" to see all coffees, etc.
-                                const q = it.name.toLowerCase();
-                                const hits = menu.filter(m =>
-                                  m.available !== false && (
-                                    m.name.toLowerCase().includes(q) ||
-                                    String(m.category || '').toLowerCase().includes(q)
-                                  )
-                                ).slice(0, 50);
-                                return hits.length > 0 ? (
-                                  <div className="absolute top-full left-0 mt-1 z-[300] w-full bg-white rounded-xl shadow-2xl border border-[#cc5a16]/10 max-h-52 overflow-y-auto">
-                                    {hits.map(m => (
-                                      <button key={m.id} type="button"
-                                        onMouseDown={() => {
-                                          setInvEdit(p => ({ ...p, items: p.items.map((x,j) => j===i ? {...x, name: m.name, price: m.price} : x) }));
-                                          setInvEditSearchActive(null);
-                                        }}
-                                        className="w-full flex justify-between items-center px-3 py-2 text-sm text-[#3d3128] hover:bg-[#faf7f2] transition-colors first:rounded-t-xl last:rounded-b-xl">
-                                        <span className="flex flex-col items-start min-w-0">
-                                          <span className="truncate">{m.name}</span>
-                                          {m.category && (
-                                            <span className="text-[10px] text-[#9c8e85] uppercase tracking-wider">{m.category}</span>
-                                          )}
-                                        </span>
-                                        <span className="text-xs font-semibold text-[#cc5a16] ml-2 shrink-0">₹{m.price}</span>
-                                      </button>
-                                    ))}
-                                  </div>
-                                ) : null;
-                              })()}
+                      </aside>
+
+                      {/* Center: search + tile grid */}
+                      <section className="flex-1 flex flex-col overflow-hidden">
+                        {/* Mobile category chips */}
+                        <div className="lg:hidden px-3 pt-3 flex gap-2 overflow-x-auto scrollbar-hide">
+                          {categoriesEdit.map(c => {
+                            const active = invEditCategoryFilter === c.id;
+                            return (
+                              <button key={c.id} onClick={() => setInvEditCategoryFilter(c.id)}
+                                className={cn(
+                                  "shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap",
+                                  active ? "bg-[#cc5a16] text-white" : "bg-white border border-[#cc5a16]/15 text-[#6b5d52]"
+                                )}>
+                                {c.label} · {c.count}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {/* Search */}
+                        <div className="px-3 sm:px-4 pt-3 pb-2 shrink-0">
+                          <div className="relative">
+                            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
+                            <input type="text" placeholder="Search items… (try 'coffee' or 'beverages')"
+                              value={invEditTileSearch}
+                              onChange={e => setInvEditTileSearch(e.target.value)}
+                              className="w-full bg-white border border-[#cc5a16]/20 rounded-xl pl-9 pr-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Tile grid */}
+                        <div className="flex-1 overflow-y-auto px-3 sm:px-4 pb-4">
+                          {filteredTilesEdit.length === 0 && !invEditShowCustomForm && (
+                            <div className="text-center py-12 text-[#9c8e85] text-sm">
+                              {menu.length === 0
+                                ? <>No menu items yet. Use <strong className="text-[#cc5a16]">+ Custom item</strong> to add anything.</>
+                                : <>No items match "{invEditTileSearch}" in <strong>{invEditCategoryFilter === 'ALL' ? 'any category' : invEditCategoryFilter}</strong>.</>
+                              }
                             </div>
-                            <input type="number" min="1" value={it.quantity}
-                              onChange={e => setInvEdit(p => ({ ...p, items: p.items.map((x,j) => j===i ? {...x, quantity: Number(e.target.value)||1} : x) }))}
-                              className="col-span-2 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                            <input type="number" min="0" step="0.01" value={it.price}
-                              onChange={e => setInvEdit(p => ({ ...p, items: p.items.map((x,j) => j===i ? {...x, price: Number(e.target.value)||0} : x) }))}
-                              className="col-span-3 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-right outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                            <button onClick={() => setInvEdit(p => ({ ...p, items: p.items.filter((_,j) => j!==i) }))}
-                              disabled={invEdit.items.length === 1}
-                              className="col-span-1 flex justify-center text-[#c5b9b2] hover:text-red-500 disabled:opacity-20 transition-colors">
-                              <X size={14} />
+                          )}
+                          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-3">
+                            {filteredTilesEdit.map(m => {
+                              const inCart = invEdit.items.find(it => it.name === m.name && Number(it.price) === Number(m.price));
+                              return (
+                                <button key={m.id} type="button" onClick={() => editAddFromTile(m)}
+                                  className={cn(
+                                    "relative bg-white border-2 rounded-2xl p-3 sm:p-4 text-left transition-all hover:shadow-md active:scale-95",
+                                    inCart ? "border-[#cc5a16] shadow-sm" : "border-[#cc5a16]/15 hover:border-[#cc5a16]/40"
+                                  )}
+                                  style={{ minHeight: 86 }}>
+                                  {inCart && (
+                                    <span className="absolute top-2 right-2 w-6 h-6 rounded-full bg-[#cc5a16] text-white text-[11px] font-bold flex items-center justify-center">
+                                      {inCart.quantity}
+                                    </span>
+                                  )}
+                                  <p className="font-bold text-[#1a1208] text-sm leading-tight line-clamp-2 pr-7">{m.name}</p>
+                                  <p className="font-mono text-[#cc5a16] text-base font-bold mt-1.5">₹{Number(m.price).toFixed(0)}</p>
+                                  {m.category && (
+                                    <p className="text-[9px] font-mono uppercase tracking-widest text-[#9c8e85] mt-0.5 truncate">{m.category}</p>
+                                  )}
+                                </button>
+                              );
+                            })}
+                            {/* Custom item escape hatch */}
+                            <button type="button" onClick={() => setInvEditShowCustomForm(true)}
+                              className="border-2 border-dashed border-[#cc5a16]/40 rounded-2xl p-3 sm:p-4 text-center hover:border-[#cc5a16] hover:bg-[#faf7f2] transition-all active:scale-95 flex flex-col items-center justify-center gap-1"
+                              style={{ minHeight: 86 }}>
+                              <Plus size={20} className="text-[#cc5a16]" />
+                              <p className="text-sm font-bold text-[#1a1208]">Custom item</p>
+                              <p className="text-[10px] text-[#9c8e85] font-mono uppercase tracking-widest">Off-menu</p>
                             </button>
+                          </div>
+
+                          {invEditShowCustomForm && (
+                            <div className="mt-4 bg-white border border-[#cc5a16]/30 rounded-2xl p-4 shadow-md">
+                              <div className="flex items-center justify-between mb-3">
+                                <p className="text-sm font-bold text-[#1a1208]">Add a custom item</p>
+                                <button onClick={() => setInvEditShowCustomForm(false)} className="p-1 hover:bg-[#faf7f2] rounded-lg text-[#9c8e85]" aria-label="Cancel"><X size={14} /></button>
+                              </div>
+                              <div className="grid grid-cols-12 gap-2">
+                                <input type="text" placeholder="Item name" value={invEditCustomDraft.name}
+                                  onChange={e => setInvEditCustomDraft(d => ({ ...d, name: e.target.value }))}
+                                  autoFocus
+                                  className="col-span-6 border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                                <input type="number" min="1" placeholder="Qty" value={invEditCustomDraft.qty}
+                                  onChange={e => setInvEditCustomDraft(d => ({ ...d, qty: Number(e.target.value) || 1 }))}
+                                  className="col-span-2 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                                <input type="number" min="0" step="0.01" placeholder="Price" value={invEditCustomDraft.price || ''}
+                                  onChange={e => setInvEditCustomDraft(d => ({ ...d, price: Number(e.target.value) || 0 }))}
+                                  onKeyDown={e => { if (e.key === 'Enter') editAddCustom(); }}
+                                  className="col-span-3 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-right outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                                <button onClick={editAddCustom}
+                                  disabled={!invEditCustomDraft.name.trim() || (Number(invEditCustomDraft.price) || 0) <= 0}
+                                  className="col-span-1 bg-[#cc5a16] text-white rounded-xl flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[#a84612]"
+                                  aria-label="Add"><Plus size={14} /></button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </section>
+                    </>
+                  )}
+
+                  {/* Right cart panel — same shape in both ORDER and SESSION layouts */}
+                  <aside className={cn(
+                    "border-t lg:border-t-0 lg:border-l border-[#cc5a16]/10 bg-white flex flex-col overflow-hidden shrink-0 max-h-[55vh] lg:max-h-none",
+                    isSess ? "lg:w-96" : "lg:w-80"
+                  )}>
+                    <div className="px-4 py-3 border-b border-[#cc5a16]/10 shrink-0 flex items-center justify-between">
+                      <p className="font-bold text-[#1a1208] text-sm flex items-center gap-2">
+                        <ShoppingCart size={14} className="text-[#cc5a16]" /> {isSess ? 'Adjustments' : 'Cart'}
+                      </p>
+                      {!isSess && (
+                        <span className="text-[10px] font-mono uppercase tracking-widest text-[#9c8e85] tabular-nums">
+                          {editCartCount} item{editCartCount === 1 ? '' : 's'}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Cart rows (ORDER only — SESSION uses the read-only items panel on the left) */}
+                    {!isSess && (
+                      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+                        {invEdit.items.length === 0 ? (
+                          <div className="text-center py-10 text-[#9c8e85] text-sm">
+                            <ShoppingCart size={28} className="mx-auto mb-2 opacity-30" />
+                            <p className="font-serif italic">Tap a tile to add</p>
+                          </div>
+                        ) : invEdit.items.map((it, i) => (
+                          <div key={i} className="bg-[#faf7f2] rounded-xl p-2.5 flex items-center gap-2">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-bold text-[#1a1208] truncate">{it.name}</p>
+                              <p className="text-[11px] text-[#9c8e85] font-mono">
+                                ₹{it.price.toFixed(2)} × {it.quantity} = <span className="text-[#3d3128]">₹{(it.price * it.quantity).toFixed(2)}</span>
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button onClick={() => editBumpQty(i, -1)}
+                                className="w-7 h-7 rounded-lg bg-white border border-[#cc5a16]/20 flex items-center justify-center text-[#cc5a16] hover:bg-[#cc5a16] hover:text-white transition-all"
+                                aria-label="Decrease"><Minus size={12} /></button>
+                              <span className="text-sm font-bold text-[#1a1208] tabular-nums w-5 text-center">{it.quantity}</span>
+                              <button onClick={() => editBumpQty(i, +1)}
+                                className="w-7 h-7 rounded-lg bg-white border border-[#cc5a16]/20 flex items-center justify-center text-[#cc5a16] hover:bg-[#cc5a16] hover:text-white transition-all"
+                                aria-label="Increase"><Plus size={12} /></button>
+                            </div>
                           </div>
                         ))}
                       </div>
-                    </div>
-                  )}
+                    )}
 
-                  {/* Adjustments */}
-                  <div>
-                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Adjustments</p>
-                    <div className="grid grid-cols-3 gap-3">
-                      <div>
-                        <label className="block text-[11px] font-bold text-[#9c8e85] uppercase tracking-widest mb-1">Discount (₹)</label>
-                        <input type="number" min="0" value={invEdit.discount}
-                          onChange={e => setInvEdit(p => ({ ...p, discount: Number(e.target.value)||0 }))}
-                          className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                      </div>
-                      <div>
-                        <label
-                          className="block text-[11px] font-bold text-[#9c8e85] uppercase tracking-widest mb-1"
-                          title="Optional restaurant service charge added BEFORE tax. NOT the same as 'Service Tax' configured in Brand & Settings → Tax Lines — those apply automatically on the breakdown below."
-                        >
-                          Service Charge (%)
-                        </label>
-                        <input type="number" min="0" value={invEdit.svcPct}
-                          onChange={e => setInvEdit(p => ({ ...p, svcPct: Number(e.target.value)||0 }))}
-                          className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] font-bold text-[#9c8e85] uppercase tracking-widest mb-1">GST (%)</label>
-                        <div className="flex gap-1.5">
-                          <input type="number" min="0" value={invEdit.gstPct}
-                            onChange={e => setInvEdit(p => ({ ...p, gstPct: Number(e.target.value)||0 }))}
-                            className="flex-1 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                          <button onClick={() => setInvEdit(p => ({ ...p, applyGst: !p.applyGst }))}
-                            className={cn("shrink-0 px-2 rounded-xl text-[11px] font-bold transition-all", invEdit.applyGst ? "bg-[#cc5a16] text-white" : "bg-[#0d0a07]/5 text-[#6b5d52]")}>
-                            {invEdit.applyGst ? 'ON' : 'OFF'}
-                          </button>
+                    {/* Adjustments + totals + payment method */}
+                    <div className="border-t border-[#cc5a16]/10 px-4 py-3 space-y-3 shrink-0 bg-[#fdfaf4] overflow-y-auto">
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
+                          <input type="number" min="0" value={invEdit.discount}
+                            onChange={e => setInvEdit(p => ({ ...p, discount: Number(e.target.value) || 0 }))}
+                            className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
                         </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Live total — server-computed (multi-tax + auto-loyalty)
-                      with a client-side fallback so the UI is still
-                      usable while the debounced preview is loading. The
-                      loyalty banner shows when the invoice's customer
-                      phone matches a recognised loyalty member.        */}
-                  {(() => {
-                    const p = invEditPreview;
-                    const phone = inv.customerPhone || inv.customer_phone;
-                    if (!p) {
-                      // Fallback: client-side math (no loyalty / no multi-tax)
-                      return (
-                        <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-1.5 text-sm">
-                          {invEditPreviewLoading && (
-                            <p className="text-[10px] text-[#9c8e85] italic">Computing totals…</p>
-                          )}
-                          <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="font-mono">₹{editSub.toFixed(2)}</span></div>
-                          {invEdit.discount > 0 && <div className="flex justify-between text-red-600"><span>Discount</span><span className="font-mono">−₹{invEdit.discount.toFixed(2)}</span></div>}
-                          {invEdit.svcPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>Service ({invEdit.svcPct}%)</span><span className="font-mono">₹{editSvc.toFixed(2)}</span></div>}
-                          {invEdit.applyGst && invEdit.gstPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>GST ({invEdit.gstPct}%)</span><span className="font-mono">₹{editGst.toFixed(2)}</span></div>}
-                          <div className="flex justify-between font-bold text-[#1a1208] pt-1.5 border-t border-[#cc5a16]/10 text-base">
-                            <span>Grand Total</span><span className="font-mono text-[#cc5a16]">₹{editGrand.toFixed(2)}</span>
+                        <div>
+                          <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
+                            title="Optional restaurant service charge added BEFORE tax. NOT the same as 'Service Tax' configured in Brand & Settings → Tax Lines.">
+                            Service Charge %
+                          </label>
+                          <input type="number" min="0" value={invEdit.svcPct}
+                            onChange={e => setInvEdit(p => ({ ...p, svcPct: Number(e.target.value) || 0 }))}
+                            className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                        </div>
+                        <div>
+                          <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">GST %</label>
+                          <div className="flex gap-1">
+                            <input type="number" min="0" value={invEdit.gstPct}
+                              onChange={e => setInvEdit(p => ({ ...p, gstPct: Number(e.target.value) || 0 }))}
+                              className="min-w-0 flex-1 border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                            <button onClick={() => setInvEdit(p => ({ ...p, applyGst: !p.applyGst }))}
+                              className={cn("shrink-0 px-2 rounded-lg text-[10px] font-bold transition-all", invEdit.applyGst ? "bg-[#cc5a16] text-white" : "bg-[#0d0a07]/5 text-[#6b5d52]")}>
+                              {invEdit.applyGst ? 'ON' : 'OFF'}
+                            </button>
                           </div>
                         </div>
-                      );
-                    }
-                    const loy = p.loyalty;
-                    const loyaltyBinding = loy && Number(p.loyaltyDiscount || 0) >= Number(p.manualDiscount || 0) - 0.01;
-                    return (
-                      <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-1.5 text-sm">
-                        {/* Loyalty banner — shows when the existing
-                            customer phone matches a tier member */}
-                        {loy && loy.tier_name && (
+                      </div>
+
+                      {/* Loyalty banner */}
+                      {invEditPreview?.loyalty?.tier_name && (
+                        <div className={cn(
+                          "rounded-xl px-2.5 py-2 flex items-start gap-2 border",
+                          Number(invEditPreview.loyalty.discount_percent || 0) > 0
+                            ? "bg-amber-50 border-amber-200"
+                            : "bg-white border-[#cc5a16]/15"
+                        )}>
+                          <Sparkles size={13} className={cn(
+                            "shrink-0 mt-0.5",
+                            Number(invEditPreview.loyalty.discount_percent || 0) > 0 ? "text-amber-700" : "text-[#cc5a16]"
+                          )} />
                           <div className={cn(
-                            "rounded-xl px-3 py-2 -mx-1 mb-2 flex items-start gap-2 border",
-                            Number(loy.discount_percent || 0) > 0
-                              ? "bg-amber-50 border-amber-200"
-                              : "bg-white border-[#cc5a16]/15"
+                            "text-[11px] leading-snug",
+                            Number(invEditPreview.loyalty.discount_percent || 0) > 0 ? "text-amber-900" : "text-[#3d3128]"
                           )}>
-                            <Sparkles size={14} className={cn(
-                              "shrink-0 mt-0.5",
-                              Number(loy.discount_percent || 0) > 0 ? "text-amber-700" : "text-[#cc5a16]"
-                            )} />
-                            <div className="text-[12px] text-amber-900 leading-snug">
-                              <strong>{loy.tier_name}</strong> member
-                              {Number(loy.discount_percent || 0) > 0
-                                ? <> · <strong>{Number(loy.discount_percent).toFixed(0)}% off</strong> auto-applied{Number(p.loyaltyDiscount || 0) > 0 ? ` (₹${Number(p.loyaltyDiscount).toFixed(2)})` : ''}</>
-                                : <> · welcome tier (no discount yet)</>
-                              }
-                              {phone && (
-                                <span className="block text-[10px] text-amber-700/80 mt-0.5 font-mono">
-                                  Phone: {phone}
-                                </span>
-                              )}
-                            </div>
+                            <strong>{invEditPreview.loyalty.tier_name}</strong>
+                            {Number(invEditPreview.loyalty.discount_percent || 0) > 0
+                              ? <> · <strong>{Number(invEditPreview.loyalty.discount_percent).toFixed(0)}% off</strong> auto-applied{Number(invEditPreview.loyaltyDiscount || 0) > 0 ? ` (₹${Number(invEditPreview.loyaltyDiscount).toFixed(2)})` : ''}</>
+                              : <> · welcome tier (no discount yet)</>
+                            }
                           </div>
-                        )}
-
-                        {/* If phone exists but NOT a loyalty member, show a quiet note */}
-                        {!loy && phone && (
-                          <p className="text-[10px] text-[#9c8e85] italic mb-1">
-                            Phone {phone} — not enrolled in loyalty.
-                          </p>
-                        )}
-
-                        <div className="flex justify-between text-[#6b5d52]">
-                          <span>Subtotal</span>
-                          <span className="font-mono">₹{Number(p.subtotal || 0).toFixed(2)}</span>
                         </div>
-                        {Number(p.totalDiscount || 0) > 0 && (
-                          <div className="flex justify-between text-red-600">
-                            <span>
-                              {loyaltyBinding
-                                ? `${loy.tier_name} discount (${Number(loy.discount_percent || 0)}%)`
-                                : 'Discount'}
-                            </span>
-                            <span className="font-mono">−₹{Number(p.totalDiscount).toFixed(2)}</span>
-                          </div>
-                        )}
-                        {Number(p.serviceCharge || 0) > 0 && (
-                          <div className="flex justify-between text-[#6b5d52]">
-                            <span>Service ({Number(p.serviceChargePct || 0)}%)</span>
-                            <span className="font-mono">₹{Number(p.serviceCharge).toFixed(2)}</span>
-                          </div>
-                        )}
-                        {Array.isArray(p.taxLines) && p.taxLines.length > 0 ? (
-                          p.taxLines.map((l: any, i: number) => (
-                            <div key={i} className="flex justify-between text-[#6b5d52]">
-                              <span>{l.label} ({Number(l.rate || 0).toFixed(2)}%)</span>
-                              <span className="font-mono">₹{Number(l.amount || 0).toFixed(2)}</span>
+                      )}
+
+                      {/* Live totals — server-computed with client-side fallback */}
+                      {(() => {
+                        const p = invEditPreview;
+                        if (!p) {
+                          return (
+                            <div className="space-y-1 text-xs">
+                              {invEditPreviewLoading && <p className="text-[10px] text-[#9c8e85] italic">Computing totals…</p>}
+                              <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="font-mono">₹{editSub.toFixed(2)}</span></div>
+                              {invEdit.discount > 0 && <div className="flex justify-between text-red-600"><span>Discount</span><span className="font-mono">−₹{invEdit.discount.toFixed(2)}</span></div>}
+                              {invEdit.svcPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>Service ({invEdit.svcPct}%)</span><span className="font-mono">₹{editSvc.toFixed(2)}</span></div>}
+                              {invEdit.applyGst && invEdit.gstPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>GST ({invEdit.gstPct}%)</span><span className="font-mono">₹{editGst.toFixed(2)}</span></div>}
+                              <div className="flex justify-between font-bold text-[#1a1208] pt-1 border-t border-[#cc5a16]/10 text-sm">
+                                <span>Grand Total</span><span className="font-mono text-[#cc5a16] text-base">₹{editGrand.toFixed(2)}</span>
+                              </div>
                             </div>
-                          ))
-                        ) : Number(p.totalTax || 0) > 0 ? (
-                          <div className="flex justify-between text-[#6b5d52]">
-                            <span>Tax</span>
-                            <span className="font-mono">₹{Number(p.totalTax).toFixed(2)}</span>
+                          );
+                        }
+                        const loyaltyBinding = p.loyalty && Number(p.loyaltyDiscount || 0) >= Number(p.manualDiscount || 0) - 0.01;
+                        return (
+                          <div className="space-y-1 text-xs">
+                            <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="font-mono">₹{Number(p.subtotal || 0).toFixed(2)}</span></div>
+                            {Number(p.totalDiscount || 0) > 0 && (
+                              <div className="flex justify-between text-red-600">
+                                <span>{loyaltyBinding ? `${p.loyalty.tier_name} discount` : 'Discount'}</span>
+                                <span className="font-mono">−₹{Number(p.totalDiscount).toFixed(2)}</span>
+                              </div>
+                            )}
+                            {Number(p.serviceCharge || 0) > 0 && (
+                              <div className="flex justify-between text-[#6b5d52]"><span>Service ({Number(p.serviceChargePct || 0)}%)</span><span className="font-mono">₹{Number(p.serviceCharge).toFixed(2)}</span></div>
+                            )}
+                            {Array.isArray(p.taxLines) && p.taxLines.length > 0 ? (
+                              p.taxLines.map((l: any, i: number) => (
+                                <div key={i} className="flex justify-between text-[#6b5d52]">
+                                  <span>{l.label} ({Number(l.rate || 0).toFixed(2)}%)</span>
+                                  <span className="font-mono">₹{Number(l.amount || 0).toFixed(2)}</span>
+                                </div>
+                              ))
+                            ) : Number(p.totalTax || 0) > 0 ? (
+                              <div className="flex justify-between text-[#6b5d52]"><span>Tax</span><span className="font-mono">₹{Number(p.totalTax).toFixed(2)}</span></div>
+                            ) : null}
+                            <div className="flex justify-between font-bold text-[#1a1208] pt-1 border-t border-[#cc5a16]/10 text-sm">
+                              <span>Grand Total</span><span className="font-mono text-[#cc5a16] text-base">₹{Number(p.grandTotal || 0).toFixed(2)}</span>
+                            </div>
+                            {p.usedLegacyGst && (
+                              <p className="text-[9px] text-[#9c8e85] italic pt-1">
+                                No tax_config rows configured — using single GST % from this form.
+                              </p>
+                            )}
                           </div>
-                        ) : null}
-                        <div className="flex justify-between font-bold text-[#1a1208] pt-1.5 border-t border-[#cc5a16]/10 text-base">
-                          <span>Grand Total</span>
-                          <span className="font-mono text-[#cc5a16]">₹{Number(p.grandTotal || 0).toFixed(2)}</span>
+                        );
+                      })()}
+
+                      {/* Payment method */}
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1.5">Payment Method</p>
+                        <div className="flex gap-1.5">
+                          {(['CASH','CARD','UPI'] as const).map(m => (
+                            <button key={m} onClick={() => setInvEdit(p => ({ ...p, payMethod: m }))}
+                              className={cn("flex-1 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-widest transition-all",
+                                invEdit.payMethod === m ? "bg-[#cc5a16] text-white" : "bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10")}>
+                              {m}
+                            </button>
+                          ))}
                         </div>
-                        {p.usedLegacyGst && (
-                          <p className="text-[10px] text-[#9c8e85] italic">
-                            No tax_config rows configured — using single GST % from this form.
-                          </p>
-                        )}
                       </div>
-                    );
-                  })()}
-
-                  {/* Payment method (for Mark Paid) */}
-                  <div>
-                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Payment Method</p>
-                    <div className="flex gap-2">
-                      {(['CASH','CARD','UPI'] as const).map(m => (
-                        <button key={m} onClick={() => setInvEdit(p => ({ ...p, payMethod: m }))}
-                          className={cn("flex-1 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all",
-                            invEdit.payMethod === m ? "bg-[#cc5a16] text-white" : "bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10")}>
-                          {m}
-                        </button>
-                      ))}
                     </div>
-                  </div>
+                  </aside>
                 </div>
 
                 {/* Footer actions */}
