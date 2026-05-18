@@ -5227,6 +5227,387 @@ async function startServer() {
     }
   });
 
+  // ════════════════════════════════════════════════════════════════════════
+  //  HOTEL E2E DEMO SEED — production-shaped data for QA testing
+  //  ────────────────────────────────────────────────────────────────────
+  //  Drops a realistic working day's worth of hotel data into the tenant:
+  //    • 8 rooms across 3 room types (Standard / Premium / Suite)
+  //    • 10 bookings spanning all status flows (CHECKED_OUT past, currently
+  //      CHECKED_IN, future BOOKED, CANCELLED) — including 3 foreign-guest
+  //      bookings to exercise Form-C / FRRO compliance flows.
+  //    • Folios for every settled & in-progress booking with line items
+  //      (room nights, services, F&B) and matching service_requests
+  //    • Hooks into the unified loyalty system so existing demo customers'
+  //      tiers get re-validated against the new hotel spend.
+  //
+  //  Pre-req: Hotel module must be enabled on the tenant. We refuse if
+  //  property_type is RESTAURANT (so this can't accidentally seed onto a
+  //  restaurant-only account and corrupt analytics).
+  //
+  //  Idempotent: every row uses a deterministic id prefix (SEED-HOTEL-…)
+  //  so re-running INSERTs OR-skips on conflict. To start fresh:
+  //    DELETE FROM service_requests WHERE id LIKE 'SEED-HOTEL-%';
+  //    DELETE FROM folio_entries    WHERE folio_id LIKE 'SEED-HOTEL-%';
+  //    DELETE FROM folios           WHERE id LIKE 'SEED-HOTEL-%';
+  //    DELETE FROM room_bookings    WHERE id LIKE 'SEED-HOTEL-%';
+  //    DELETE FROM rooms            WHERE id LIKE 'SEED-HOTEL-%';
+  // ════════════════════════════════════════════════════════════════════════
+  app.post("/api/admin/restaurant/:id/hotel/seed-demo", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      if (String(req.body?.confirm) !== 'YES') {
+        return res.status(400).json({
+          error: 'Pass { "confirm": "YES" } in the body to acknowledge this writes ~8 rooms + 10 bookings + folios into the tenant.',
+        });
+      }
+
+      // ── Gate: must have Hotel mode enabled. We don't auto-enable here
+      //    because activation is a billing decision (see property-type-
+      //    admin-gated commit).
+      const r: any = await centralDb.get("SELECT property_type FROM restaurants WHERE id = ?", [req.params.id]);
+      if (!r) return res.status(404).json({ error: 'Restaurant not found' });
+      const pt = r.property_type || 'RESTAURANT';
+      if (pt !== 'HOTEL' && pt !== 'BOTH') {
+        return res.status(400).json({
+          error: 'Hotel module not enabled on this tenant. Enable it from SuperAdmin → tenant card → "Hotel: OFF" toggle, then retry.',
+        });
+      }
+
+      const db = await getTenantDb(req.params.id);
+
+      // Make sure hotel tables + default services are present (these are
+      // created at enable-time but creating again is a no-op).
+      await createHotelTables(db);
+      await seedDefaultServices(db);
+
+      // Date helpers — all relative to now so the test data stays fresh
+      // every time you re-seed.
+      const now = new Date();
+      const dayOffset = (d: number) => {
+        const x = new Date(now.getTime() + d * 86400000);
+        return x.toISOString().slice(0, 10);   // YYYY-MM-DD
+      };
+      const tsOffset = (d: number) => new Date(now.getTime() + d * 86400000).toISOString();
+
+      // ── ROOMS ────────────────────────────────────────────────────────
+      // Mix of statuses so the Rooms tab shows realistic operational load.
+      const ROOMS = [
+        { id: 'SEED-HOTEL-R-101', name: 'Room 101', room_number: '101', floor: 1, type: 'Standard Deluxe', capacity: 2, base_rate: 3500, status: 'VACANT' },
+        { id: 'SEED-HOTEL-R-102', name: 'Room 102', room_number: '102', floor: 1, type: 'Standard Deluxe', capacity: 2, base_rate: 3500, status: 'VACANT' },
+        { id: 'SEED-HOTEL-R-103', name: 'Room 103', room_number: '103', floor: 1, type: 'Standard Deluxe', capacity: 3, base_rate: 3500, status: 'OCCUPIED' },
+        { id: 'SEED-HOTEL-R-201', name: 'Room 201', room_number: '201', floor: 2, type: 'Premium Deluxe',  capacity: 2, base_rate: 5500, status: 'VACANT' },
+        { id: 'SEED-HOTEL-R-202', name: 'Room 202', room_number: '202', floor: 2, type: 'Premium Deluxe',  capacity: 2, base_rate: 5500, status: 'OCCUPIED' },
+        { id: 'SEED-HOTEL-R-203', name: 'Room 203', room_number: '203', floor: 2, type: 'Premium Deluxe',  capacity: 4, base_rate: 5500, status: 'MAINTENANCE' },
+        { id: 'SEED-HOTEL-R-301', name: 'Suite 301', room_number: '301', floor: 3, type: 'Suite',          capacity: 2, base_rate: 9500, status: 'CLEANING' },
+        { id: 'SEED-HOTEL-R-302', name: 'Suite 302', room_number: '302', floor: 3, type: 'Suite',          capacity: 4, base_rate: 9500, status: 'OCCUPIED' },
+      ];
+      let roomsInserted = 0;
+      for (const rm of ROOMS) {
+        const out = await db.run(
+          `INSERT INTO rooms (id, name, room_number, floor, type, capacity, base_rate, status, amenities, smoking_preference)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'NON_SMOKING')
+           ON CONFLICT (id) DO NOTHING`,
+          [rm.id, rm.name, rm.room_number, rm.floor, rm.type, rm.capacity, rm.base_rate, rm.status,
+            JSON.stringify(['Wi-Fi', 'AC', 'TV', rm.type === 'Suite' ? 'Mini bar' : 'Hair dryer'])]
+        );
+        if (Number(out?.changes || 0) > 0) roomsInserted++;
+      }
+
+      // ── BOOKINGS ─────────────────────────────────────────────────────
+      // Realistic mix:
+      //   1-4: PAST CHECKED_OUT  (settled folios — past revenue)
+      //   5-7: CURRENT CHECKED_IN (open folios + service requests)
+      //   8-9: FUTURE BOOKED      (no folio yet)
+      //   10:  CANCELLED          (history only)
+      // Foreign guests at bookings 2, 4, 6, 9 → Form-C / FRRO test data.
+      const BOOKINGS = [
+        // ─── 1-4: Past (CHECKED_OUT, settled) ────────────────────────
+        {
+          id: 'SEED-HOTEL-B-001', room_id: 'SEED-HOTEL-R-101',
+          guest_name: 'Rajesh Iyer', guest_phone: '9001220001', guest_email: 'rajesh.iyer@example.com',
+          guest_id_proof: 'AADHAAR-3211-4422-1098', guest_nationality: 'IN', guest_state: 'Maharashtra',
+          num_guests: 2, check_in_date: dayOffset(-7), check_out_date: dayOffset(-5),
+          actual_checkin_at: tsOffset(-7), actual_checkout_at: tsOffset(-5),
+          status: 'CHECKED_OUT', room_rate: 3500, total_amount: 8260,
+          booking_source: 'DIRECT', special_requests: 'High floor preferred',
+        },
+        {
+          id: 'SEED-HOTEL-B-002', room_id: 'SEED-HOTEL-R-201',
+          guest_name: 'Michael Thompson', guest_phone: '9001220002', guest_email: 'mthompson@example.com',
+          guest_id_proof: 'PASSPORT-US-419283746', guest_nationality: 'US', guest_state: null,
+          num_guests: 2, check_in_date: dayOffset(-12), check_out_date: dayOffset(-9),
+          actual_checkin_at: tsOffset(-12), actual_checkout_at: tsOffset(-9),
+          status: 'CHECKED_OUT', room_rate: 5500, total_amount: 19470,
+          booking_source: 'BOOKING_COM', special_requests: 'Vegetarian breakfast',
+        },
+        {
+          id: 'SEED-HOTEL-B-003', room_id: 'SEED-HOTEL-R-301',
+          // Reuses a loyalty seed customer so the unified-loyalty hook is
+          // demonstrated (Anjali Mehta — Gold tier in loyalty seed).
+          guest_name: 'Anjali Mehta', guest_phone: '9001112301', guest_email: 'anjali.mehta@example.com',
+          guest_id_proof: 'AADHAAR-1111-2222-3301', guest_nationality: 'IN', guest_state: 'Karnataka',
+          num_guests: 1, check_in_date: dayOffset(-3), check_out_date: dayOffset(-2),
+          actual_checkin_at: tsOffset(-3), actual_checkout_at: tsOffset(-2),
+          status: 'CHECKED_OUT', room_rate: 9500, total_amount: 8977,
+          booking_source: 'DIRECT', special_requests: 'Gold member — late checkout courtesy',
+        },
+        {
+          id: 'SEED-HOTEL-B-004', room_id: 'SEED-HOTEL-R-102',
+          guest_name: 'Emma Carter', guest_phone: '9001220004', guest_email: 'emma.c@example.com',
+          guest_id_proof: 'PASSPORT-UK-538291744', guest_nationality: 'GB', guest_state: null,
+          num_guests: 2, check_in_date: dayOffset(-15), check_out_date: dayOffset(-11),
+          actual_checkin_at: tsOffset(-15), actual_checkout_at: tsOffset(-11),
+          status: 'CHECKED_OUT', room_rate: 3500, total_amount: 15400,
+          booking_source: 'MAKEMYTRIP', special_requests: 'Twin bed setup',
+        },
+        // ─── 5-7: Currently CHECKED_IN (open folios) ─────────────────
+        {
+          id: 'SEED-HOTEL-B-005', room_id: 'SEED-HOTEL-R-202',
+          // Silver tier returning guest — checkout will auto-apply 5% off
+          guest_name: 'Meera Bhatia', guest_phone: '9001112307', guest_email: 'meera.bhatia@example.com',
+          guest_id_proof: 'AADHAAR-7765-2233-9911', guest_nationality: 'IN', guest_state: 'Delhi',
+          num_guests: 2, check_in_date: dayOffset(-1), check_out_date: dayOffset(2),
+          actual_checkin_at: tsOffset(-1), actual_checkout_at: null,
+          status: 'CHECKED_IN', room_rate: 5500, total_amount: 0,
+          booking_source: 'DIRECT', special_requests: 'Quiet room, no early wake-up',
+        },
+        {
+          id: 'SEED-HOTEL-B-006', room_id: 'SEED-HOTEL-R-302',
+          guest_name: 'James Wilson', guest_phone: '9001220006', guest_email: 'j.wilson@example.com',
+          guest_id_proof: 'PASSPORT-AU-128364902', guest_nationality: 'AU', guest_state: null,
+          num_guests: 2, check_in_date: dayOffset(-2), check_out_date: dayOffset(3),
+          actual_checkin_at: tsOffset(-2), actual_checkout_at: null,
+          status: 'CHECKED_IN', room_rate: 9500, total_amount: 0,
+          booking_source: 'AGODA', special_requests: 'Honeymoon — flowers in room',
+        },
+        {
+          id: 'SEED-HOTEL-B-007', room_id: 'SEED-HOTEL-R-103',
+          guest_name: 'Sneha Kulkarni', guest_phone: '9001112321', guest_email: 'sneha.k@example.com',
+          guest_id_proof: 'AADHAAR-5544-1122-7788', guest_nationality: 'IN', guest_state: 'Maharashtra',
+          num_guests: 3, check_in_date: dayOffset(0), check_out_date: dayOffset(2),
+          actual_checkin_at: tsOffset(0), actual_checkout_at: null,
+          status: 'CHECKED_IN', room_rate: 3500, total_amount: 0,
+          booking_source: 'DIRECT', special_requests: 'Family — needs extra bed',
+        },
+        // ─── 8-9: FUTURE BOOKED ─────────────────────────────────────
+        {
+          id: 'SEED-HOTEL-B-008', room_id: 'SEED-HOTEL-R-203',
+          guest_name: 'Aditya Rao', guest_phone: '9001112320', guest_email: 'aditya.rao@example.com',
+          guest_id_proof: 'AADHAAR-9999-4321-1122', guest_nationality: 'IN', guest_state: 'Karnataka',
+          num_guests: 2, check_in_date: dayOffset(1), check_out_date: dayOffset(4),
+          status: 'BOOKED', room_rate: 5500, total_amount: 0,
+          booking_source: 'DIRECT', special_requests: 'Corporate stay — early check-in if possible',
+        },
+        {
+          id: 'SEED-HOTEL-B-009', room_id: 'SEED-HOTEL-R-301',
+          guest_name: 'Sarah O\'Brien', guest_phone: '9001220009', guest_email: 'sarah.obrien@example.com',
+          guest_id_proof: 'PASSPORT-CA-771840002', guest_nationality: 'CA', guest_state: null,
+          num_guests: 2, check_in_date: dayOffset(3), check_out_date: dayOffset(8),
+          status: 'BOOKED', room_rate: 9500, total_amount: 0,
+          booking_source: 'BOOKING_COM', special_requests: 'Airport pickup needed',
+        },
+        // ─── 10: CANCELLED ───────────────────────────────────────────
+        {
+          id: 'SEED-HOTEL-B-010', room_id: 'SEED-HOTEL-R-201',
+          guest_name: 'Karan Malhotra', guest_phone: '9001112314', guest_email: 'karan.m@example.com',
+          guest_id_proof: 'AADHAAR-2222-3344-5566', guest_nationality: 'IN', guest_state: 'Punjab',
+          num_guests: 1, check_in_date: dayOffset(-1), check_out_date: dayOffset(1),
+          status: 'CANCELLED', room_rate: 5500, total_amount: 0,
+          booking_source: 'DIRECT', special_requests: null,
+        },
+      ];
+      let bookingsInserted = 0;
+      for (const b of BOOKINGS) {
+        const out = await db.run(
+          `INSERT INTO room_bookings
+             (id, room_id, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
+              num_guests, check_in_date, check_out_date, actual_checkin_at, actual_checkout_at,
+              status, booking_source, room_rate, total_amount, special_requests, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
+          [b.id, b.room_id, b.guest_name, b.guest_phone, b.guest_email, b.guest_id_proof,
+            b.guest_nationality, b.guest_state, b.num_guests,
+            b.check_in_date, b.check_out_date,
+            (b as any).actual_checkin_at || null, (b as any).actual_checkout_at || null,
+            b.status, b.booking_source, b.room_rate, b.total_amount, b.special_requests,
+            tsOffset(-20)]
+        );
+        if (Number(out?.changes || 0) > 0) bookingsInserted++;
+      }
+
+      // ── FOLIOS + FOLIO_ENTRIES ──────────────────────────────────────
+      // For each settled (1-4) and in-progress (5-7) booking, write a
+      // folio with realistic line items: room nights (per-night rate),
+      // any service-charge entries, optional F&B line.
+      const FOLIOS = [
+        // Settled folios
+        {
+          id: 'SEED-HOTEL-F-001', booking_id: 'SEED-HOTEL-B-001', room_id: 'SEED-HOTEL-R-101',
+          status: 'settled', payment_method: 'CASH', settled_at: tsOffset(-5),
+          entries: [
+            { type: 'ROOM',    name: 'Room night — 101 (Standard Deluxe)', qty: 2, unit: 3500, gst_pct: 12 },
+            { type: 'SERVICE', name: 'Mini breakfast (room service)',      qty: 2, unit: 350,  gst_pct: 5  },
+          ],
+          discount: 0,
+        },
+        {
+          id: 'SEED-HOTEL-F-002', booking_id: 'SEED-HOTEL-B-002', room_id: 'SEED-HOTEL-R-201',
+          status: 'settled', payment_method: 'UPI', settled_at: tsOffset(-9),
+          entries: [
+            { type: 'ROOM',    name: 'Room night — 201 (Premium Deluxe)', qty: 3, unit: 5500, gst_pct: 12 },
+            { type: 'SERVICE', name: 'Laundry — 4 items',                  qty: 1, unit: 480,  gst_pct: 18 },
+            { type: 'F&B',     name: 'Bar tab (Wine + dinner)',            qty: 1, unit: 2200, gst_pct: 18 },
+          ],
+          discount: 0,
+        },
+        {
+          id: 'SEED-HOTEL-F-003', booking_id: 'SEED-HOTEL-B-003', room_id: 'SEED-HOTEL-R-301',
+          status: 'settled', payment_method: 'CARD', settled_at: tsOffset(-2),
+          entries: [
+            { type: 'ROOM',    name: 'Room night — 301 (Suite)',            qty: 1, unit: 9500, gst_pct: 18 },
+            { type: 'SERVICE', name: 'Spa massage — 60 min',                qty: 1, unit: 1800, gst_pct: 18 },
+          ],
+          // Gold tier — 10% off applied at checkout (₹1,130 off)
+          discount: 1130,
+        },
+        {
+          id: 'SEED-HOTEL-F-004', booking_id: 'SEED-HOTEL-B-004', room_id: 'SEED-HOTEL-R-102',
+          status: 'settled', payment_method: 'CARD', settled_at: tsOffset(-11),
+          entries: [
+            { type: 'ROOM',    name: 'Room night — 102 (Standard Deluxe)', qty: 4, unit: 3500, gst_pct: 12 },
+          ],
+          discount: 0,
+        },
+        // Open folios (current guests)
+        {
+          id: 'SEED-HOTEL-F-005', booking_id: 'SEED-HOTEL-B-005', room_id: 'SEED-HOTEL-R-202',
+          status: 'open', payment_method: null, settled_at: null,
+          entries: [
+            { type: 'ROOM',    name: 'Room night — 202 (Premium Deluxe)', qty: 1, unit: 5500, gst_pct: 12 },
+            { type: 'SERVICE', name: 'Continental breakfast (in-room)',    qty: 2, unit: 450,  gst_pct: 5  },
+          ],
+          discount: 0,
+        },
+        {
+          id: 'SEED-HOTEL-F-006', booking_id: 'SEED-HOTEL-B-006', room_id: 'SEED-HOTEL-R-302',
+          status: 'open', payment_method: null, settled_at: null,
+          entries: [
+            { type: 'ROOM',    name: 'Room night — Suite 302', qty: 2, unit: 9500, gst_pct: 18 },
+            { type: 'SERVICE', name: 'Airport pickup',         qty: 1, unit: 1500, gst_pct: 18 },
+            { type: 'F&B',     name: 'Welcome champagne',      qty: 1, unit: 3500, gst_pct: 18 },
+          ],
+          discount: 0,
+        },
+        {
+          id: 'SEED-HOTEL-F-007', booking_id: 'SEED-HOTEL-B-007', room_id: 'SEED-HOTEL-R-103',
+          status: 'open', payment_method: null, settled_at: null,
+          entries: [
+            { type: 'ROOM',    name: 'Room night — 103 (Standard Deluxe)', qty: 0, unit: 3500, gst_pct: 12 },
+            { type: 'SERVICE', name: 'Extra bed setup',                    qty: 1, unit: 500,  gst_pct: 18 },
+          ],
+          discount: 0,
+        },
+      ];
+      let foliosInserted = 0, entriesInserted = 0;
+      for (const f of FOLIOS) {
+        let subtotal = 0, gstSum = 0;
+        for (const e of f.entries) {
+          subtotal += e.qty * e.unit;
+          gstSum   += Math.round(e.qty * e.unit * e.gst_pct / 100 * 100) / 100;
+        }
+        const grand = Math.max(0, subtotal + gstSum - f.discount);
+        const fOut = await db.run(
+          `INSERT INTO folios
+             (id, booking_id, room_id, status, subtotal, gst_amount, discount, grand_total, payment_method, settled_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
+          [f.id, f.booking_id, f.room_id, f.status, subtotal, gstSum, f.discount, grand,
+            f.payment_method, f.settled_at, tsOffset(-3)]
+        );
+        if (Number(fOut?.changes || 0) > 0) foliosInserted++;
+
+        // Folio entries
+        for (let i = 0; i < f.entries.length; i++) {
+          const e = f.entries[i];
+          const amt = e.qty * e.unit;
+          const gst = Math.round(amt * e.gst_pct / 100 * 100) / 100;
+          await db.run(
+            `INSERT INTO folio_entries
+               (id, folio_id, entry_type, item_name, quantity, unit_price, amount, gst_percent, gst_amount, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO NOTHING`,
+            [`${f.id}-E${i + 1}`, f.id, e.type, e.name, e.qty, e.unit, amt, e.gst_pct, gst, tsOffset(-3)]
+          ).catch(() => {});   // folio_entries.id may not be unique-constrained in older schemas
+          entriesInserted++;
+        }
+      }
+
+      // ── SERVICE REQUESTS for currently-checked-in guests ─────────────
+      const SRS = [
+        { id: 'SEED-HOTEL-SR-001', room_id: 'SEED-HOTEL-R-202', booking_id: 'SEED-HOTEL-B-005',
+          service_name: 'In-room breakfast', category: 'F&B', quantity: 2, status: 'PREPARING',
+          is_complimentary: 0, charge_amount: 900, priority: 'NORMAL', notes: '1 veg, 1 non-veg' },
+        { id: 'SEED-HOTEL-SR-002', room_id: 'SEED-HOTEL-R-202', booking_id: 'SEED-HOTEL-B-005',
+          service_name: 'Extra towels', category: 'HOUSEKEEPING', quantity: 2, status: 'DELIVERED',
+          is_complimentary: 1, charge_amount: 0, priority: 'NORMAL', notes: 'Bath + face towels' },
+        { id: 'SEED-HOTEL-SR-003', room_id: 'SEED-HOTEL-R-302', booking_id: 'SEED-HOTEL-B-006',
+          service_name: 'Spa appointment — 60 min', category: 'WELLNESS', quantity: 1, status: 'IN_PROGRESS',
+          is_complimentary: 0, charge_amount: 1800, priority: 'NORMAL', notes: 'Couple booking' },
+        { id: 'SEED-HOTEL-SR-004', room_id: 'SEED-HOTEL-R-103', booking_id: 'SEED-HOTEL-B-007',
+          service_name: 'Room cleaning', category: 'HOUSEKEEPING', quantity: 1, status: 'PENDING',
+          is_complimentary: 1, charge_amount: 0, priority: 'NORMAL', notes: 'Around 11am please' },
+        { id: 'SEED-HOTEL-SR-005', room_id: 'SEED-HOTEL-R-302', booking_id: 'SEED-HOTEL-B-006',
+          service_name: 'Late checkout request', category: 'CONCIERGE', quantity: 1, status: 'ACKNOWLEDGED',
+          is_complimentary: 1, charge_amount: 0, priority: 'HIGH', notes: 'Flight at 6 PM' },
+      ];
+      let srsInserted = 0;
+      for (const s of SRS) {
+        // Pull a matching service_id from the seeded services table for FK realism
+        const svc: any = await db.get(
+          "SELECT id FROM services WHERE category = ? AND is_active = 1 ORDER BY display_order LIMIT 1",
+          [s.category]
+        );
+        const out = await db.run(
+          `INSERT INTO service_requests
+             (id, room_id, booking_id, service_id, service_name, category, quantity, notes, priority, status,
+              is_complimentary, charge_amount, requested_at, acknowledged_at, completed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
+          [s.id, s.room_id, s.booking_id, svc?.id || null, s.service_name, s.category,
+            s.quantity, s.notes, s.priority, s.status, s.is_complimentary, s.charge_amount,
+            tsOffset(-1),
+            s.status !== 'PENDING' ? tsOffset(-0.5) : null,
+            s.status === 'DELIVERED' ? tsOffset(-0.25) : null,
+          ]
+        );
+        if (Number(out?.changes || 0) > 0) srsInserted++;
+      }
+
+      res.json({
+        success: true,
+        rooms_seeded:     roomsInserted,
+        bookings_seeded:  bookingsInserted,
+        folios_seeded:    foliosInserted,
+        entries_seeded:   entriesInserted,
+        srs_seeded:       srsInserted,
+        message: `Hotel demo data ready. ${roomsInserted} rooms, ${bookingsInserted} bookings, ${foliosInserted} folios, ${srsInserted} service requests.`,
+        next_steps: [
+          'Switch to Hotel mode (toggle above the nav) — RESTAURANT lane should hide',
+          'Open ROOMS tab → see the 8 rooms with mixed statuses',
+          'Open HOTEL_BOOKINGS → check the 10 bookings across all states',
+          'Open FOLIOS → 4 settled + 3 open folios',
+          'Open SERVICE_REQUESTS → 5 active service requests',
+          'Open COMPLIANCE → 3 foreign guests (US, UK, AU) ready for Form-C export',
+          'Open Command & Control → live tile counts should reflect the new data',
+          'Try checking out Meera Bhatia (B-005) — Silver tier discount auto-applies',
+          'Try checking out James Wilson (B-006) — new customer, gets enrolled in loyalty',
+        ],
+      });
+    } catch (err: any) {
+      console.error('Hotel seed-demo error:', err);
+      res.status(500).json({ error: 'Failed to seed hotel demo data: ' + (err?.message || String(err)) });
+    }
+  });
+
   // ─────────────────────────────────────────────────────────────────────
   // PROMO CODES (Phase L2 — discount codes layered on loyalty tiers)
   // ─────────────────────────────────────────────────────────────────────
@@ -17331,7 +17712,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'manual-invoice-error-surface',
+    commit_marker: 'hotel-e2e-seed-endpoint',
     code_features: [
       'subscription-billing',
       'read-only-mode',
