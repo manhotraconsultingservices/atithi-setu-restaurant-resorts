@@ -6936,6 +6936,47 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     discount: number; svcPct: number; gstPct: number; applyGst: boolean;
     payMethod: 'CASH'|'CARD'|'UPI'; saving: boolean; markingPaid: boolean;
   }>({ items:[], discount:0, svcPct:0, gstPct:0, applyGst:false, payMethod:'CASH', saving:false, markingPaid:false });
+  // Server-computed preview for the Edit Invoice modal — surfaces the
+  // loyalty discount banner (when the invoice's customer phone matches
+  // a loyalty member) and uses the SAME computeInvoiceTotals path as
+  // the New Invoice modal so multi-tax (tax_config rows), Section 9(5)
+  // ECO splits, and auto-loyalty all stay consistent across both
+  // surfaces. Without this, Edit Invoice was rendering totals from
+  // its own client-side math which missed loyalty entirely.
+  const [invEditPreview, setInvEditPreview] = useState<any | null>(null);
+  const [invEditPreviewLoading, setInvEditPreviewLoading] = useState(false);
+  useEffect(() => {
+    if (!invoiceEditTarget || !restaurantId) { setInvEditPreview(null); return; }
+    const inv = invoiceEditTarget;
+    const isSess = !!inv.isSession;
+    const subtotalLocal = isSess
+      ? Number(inv.raw_subtotal || 0)
+      : invEdit.items.reduce((s, it) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
+    if (subtotalLocal <= 0) { setInvEditPreview(null); return; }
+    const handle = setTimeout(async () => {
+      setInvEditPreviewLoading(true);
+      try {
+        const qs = new URLSearchParams({
+          subtotal: String(subtotalLocal),
+          discount: String(invEdit.discount || 0),
+          service_charge_percent: String(invEdit.svcPct || 0),
+          gst_percent: String(invEdit.gstPct || 0),
+          apply_gst: invEdit.applyGst ? '1' : '0',
+        });
+        const phone = inv.customerPhone || inv.customer_phone;
+        if (phone) qs.set('customer_phone', phone);
+        const res = await fetch(
+          `/api/restaurant/${restaurantId}/invoices/preview-totals?${qs.toString()}`,
+          { headers: { 'Authorization': `Bearer ${token}` } }
+        );
+        if (res.ok) setInvEditPreview(await res.json());
+        else setInvEditPreview(null);
+      } catch { setInvEditPreview(null); }
+      finally { setInvEditPreviewLoading(false); }
+    }, 300);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoiceEditTarget, restaurantId, invEdit.items, invEdit.discount, invEdit.svcPct, invEdit.gstPct, invEdit.applyGst]);
 
   // ── Invoice Management State ──────────────────────────────────────────────
   const [invoiceOrder, setInvoiceOrder]       = useState<any | null>(null);
@@ -17000,6 +17041,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       {isSess ? `Table Invoice · ${inv.round_count} round${inv.round_count !== 1 ? 's' : ''}` : 'Order Invoice'}
                       {' · '}{inv.tableNumber || '—'}
                       {inv.customerName ? ` · ${inv.customerName}` : ''}
+                      {(inv.customerPhone || inv.customer_phone) ? (
+                        <span className="font-mono text-[#cc5a16]">  ·  {inv.customerPhone || inv.customer_phone}</span>
+                      ) : null}
                     </p>
                   </div>
                   <button onClick={() => setInvoiceEditTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] transition-all"><X size={18} /></button>
@@ -17135,16 +17179,115 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                   </div>
 
-                  {/* Live total */}
-                  <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-1.5 text-sm">
-                    <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="font-mono">₹{editSub.toFixed(2)}</span></div>
-                    {invEdit.discount > 0 && <div className="flex justify-between text-red-600"><span>Discount</span><span className="font-mono">−₹{invEdit.discount.toFixed(2)}</span></div>}
-                    {invEdit.svcPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>Service ({invEdit.svcPct}%)</span><span className="font-mono">₹{editSvc.toFixed(2)}</span></div>}
-                    {invEdit.applyGst && invEdit.gstPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>GST ({invEdit.gstPct}%)</span><span className="font-mono">₹{editGst.toFixed(2)}</span></div>}
-                    <div className="flex justify-between font-bold text-[#1a1208] pt-1.5 border-t border-[#cc5a16]/10 text-base">
-                      <span>Grand Total</span><span className="font-mono text-[#cc5a16]">₹{editGrand.toFixed(2)}</span>
-                    </div>
-                  </div>
+                  {/* Live total — server-computed (multi-tax + auto-loyalty)
+                      with a client-side fallback so the UI is still
+                      usable while the debounced preview is loading. The
+                      loyalty banner shows when the invoice's customer
+                      phone matches a recognised loyalty member.        */}
+                  {(() => {
+                    const p = invEditPreview;
+                    const phone = inv.customerPhone || inv.customer_phone;
+                    if (!p) {
+                      // Fallback: client-side math (no loyalty / no multi-tax)
+                      return (
+                        <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-1.5 text-sm">
+                          {invEditPreviewLoading && (
+                            <p className="text-[10px] text-[#9c8e85] italic">Computing totals…</p>
+                          )}
+                          <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="font-mono">₹{editSub.toFixed(2)}</span></div>
+                          {invEdit.discount > 0 && <div className="flex justify-between text-red-600"><span>Discount</span><span className="font-mono">−₹{invEdit.discount.toFixed(2)}</span></div>}
+                          {invEdit.svcPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>Service ({invEdit.svcPct}%)</span><span className="font-mono">₹{editSvc.toFixed(2)}</span></div>}
+                          {invEdit.applyGst && invEdit.gstPct > 0 && <div className="flex justify-between text-[#6b5d52]"><span>GST ({invEdit.gstPct}%)</span><span className="font-mono">₹{editGst.toFixed(2)}</span></div>}
+                          <div className="flex justify-between font-bold text-[#1a1208] pt-1.5 border-t border-[#cc5a16]/10 text-base">
+                            <span>Grand Total</span><span className="font-mono text-[#cc5a16]">₹{editGrand.toFixed(2)}</span>
+                          </div>
+                        </div>
+                      );
+                    }
+                    const loy = p.loyalty;
+                    const loyaltyBinding = loy && Number(p.loyaltyDiscount || 0) >= Number(p.manualDiscount || 0) - 0.01;
+                    return (
+                      <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-1.5 text-sm">
+                        {/* Loyalty banner — shows when the existing
+                            customer phone matches a tier member */}
+                        {loy && loy.tier_name && (
+                          <div className={cn(
+                            "rounded-xl px-3 py-2 -mx-1 mb-2 flex items-start gap-2 border",
+                            Number(loy.discount_percent || 0) > 0
+                              ? "bg-amber-50 border-amber-200"
+                              : "bg-white border-[#cc5a16]/15"
+                          )}>
+                            <Sparkles size={14} className={cn(
+                              "shrink-0 mt-0.5",
+                              Number(loy.discount_percent || 0) > 0 ? "text-amber-700" : "text-[#cc5a16]"
+                            )} />
+                            <div className="text-[12px] text-amber-900 leading-snug">
+                              <strong>{loy.tier_name}</strong> member
+                              {Number(loy.discount_percent || 0) > 0
+                                ? <> · <strong>{Number(loy.discount_percent).toFixed(0)}% off</strong> auto-applied{Number(p.loyaltyDiscount || 0) > 0 ? ` (₹${Number(p.loyaltyDiscount).toFixed(2)})` : ''}</>
+                                : <> · welcome tier (no discount yet)</>
+                              }
+                              {phone && (
+                                <span className="block text-[10px] text-amber-700/80 mt-0.5 font-mono">
+                                  Phone: {phone}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* If phone exists but NOT a loyalty member, show a quiet note */}
+                        {!loy && phone && (
+                          <p className="text-[10px] text-[#9c8e85] italic mb-1">
+                            Phone {phone} — not enrolled in loyalty.
+                          </p>
+                        )}
+
+                        <div className="flex justify-between text-[#6b5d52]">
+                          <span>Subtotal</span>
+                          <span className="font-mono">₹{Number(p.subtotal || 0).toFixed(2)}</span>
+                        </div>
+                        {Number(p.totalDiscount || 0) > 0 && (
+                          <div className="flex justify-between text-red-600">
+                            <span>
+                              {loyaltyBinding
+                                ? `${loy.tier_name} discount (${Number(loy.discount_percent || 0)}%)`
+                                : 'Discount'}
+                            </span>
+                            <span className="font-mono">−₹{Number(p.totalDiscount).toFixed(2)}</span>
+                          </div>
+                        )}
+                        {Number(p.serviceCharge || 0) > 0 && (
+                          <div className="flex justify-between text-[#6b5d52]">
+                            <span>Service ({Number(p.serviceChargePct || 0)}%)</span>
+                            <span className="font-mono">₹{Number(p.serviceCharge).toFixed(2)}</span>
+                          </div>
+                        )}
+                        {Array.isArray(p.taxLines) && p.taxLines.length > 0 ? (
+                          p.taxLines.map((l: any, i: number) => (
+                            <div key={i} className="flex justify-between text-[#6b5d52]">
+                              <span>{l.label} ({Number(l.rate || 0).toFixed(2)}%)</span>
+                              <span className="font-mono">₹{Number(l.amount || 0).toFixed(2)}</span>
+                            </div>
+                          ))
+                        ) : Number(p.totalTax || 0) > 0 ? (
+                          <div className="flex justify-between text-[#6b5d52]">
+                            <span>Tax</span>
+                            <span className="font-mono">₹{Number(p.totalTax).toFixed(2)}</span>
+                          </div>
+                        ) : null}
+                        <div className="flex justify-between font-bold text-[#1a1208] pt-1.5 border-t border-[#cc5a16]/10 text-base">
+                          <span>Grand Total</span>
+                          <span className="font-mono text-[#cc5a16]">₹{Number(p.grandTotal || 0).toFixed(2)}</span>
+                        </div>
+                        {p.usedLegacyGst && (
+                          <p className="text-[10px] text-[#9c8e85] italic">
+                            No tax_config rows configured — using single GST % from this form.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Payment method (for Mark Paid) */}
                   <div>
@@ -17805,14 +17948,38 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         </div>
                       </div>
 
-                      {/* Loyalty banner */}
+                      {/* Loyalty banner — surfaces ANY recognised member
+                          (including 0%-discount welcome tiers like Bronze)
+                          so staff can see at a glance that the entered
+                          phone matched. Two visual variants for clarity. */}
                       {p?.loyalty?.tier_name && (
-                        <div className="bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-2 flex items-start gap-2">
-                          <Sparkles size={13} className="text-amber-700 shrink-0 mt-0.5" />
-                          <div className="text-[11px] text-amber-900 leading-snug">
-                            <strong>{p.loyalty.tier_name}</strong> · {Number(p.loyalty.discount_percent || 0)}% off auto-applied
+                        <div className={cn(
+                          "rounded-xl px-2.5 py-2 flex items-start gap-2 border",
+                          Number(p.loyalty.discount_percent || 0) > 0
+                            ? "bg-amber-50 border-amber-200"
+                            : "bg-[#faf7f2] border-[#cc5a16]/15"
+                        )}>
+                          <Sparkles size={13} className={cn(
+                            "shrink-0 mt-0.5",
+                            Number(p.loyalty.discount_percent || 0) > 0 ? "text-amber-700" : "text-[#cc5a16]"
+                          )} />
+                          <div className={cn(
+                            "text-[11px] leading-snug",
+                            Number(p.loyalty.discount_percent || 0) > 0 ? "text-amber-900" : "text-[#3d3128]"
+                          )}>
+                            <strong>{p.loyalty.tier_name}</strong>
+                            {Number(p.loyalty.discount_percent || 0) > 0
+                              ? <> · <strong>{Number(p.loyalty.discount_percent).toFixed(0)}% off</strong> auto-applied{Number(p.loyaltyDiscount || 0) > 0 ? ` (₹${Number(p.loyaltyDiscount).toFixed(2)})` : ''}</>
+                              : <> · welcome tier (no discount yet)</>
+                            }
                           </div>
                         </div>
+                      )}
+                      {/* Phone entered but not recognised — quiet hint */}
+                      {p && !p.loyalty && odCustomer.phone && odCustomer.phone.trim().length >= 10 && (
+                        <p className="text-[10px] text-[#9c8e85] italic px-1">
+                          Phone {odCustomer.phone} — not enrolled in loyalty.
+                        </p>
                       )}
 
                       {/* Live totals */}
