@@ -17912,68 +17912,76 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     {/* Adjustments + totals + payment method */}
                     <div className="border-t border-[#cc5a16]/10 px-4 py-3 space-y-3 shrink-0 bg-[#fdfaf4] overflow-y-auto">
                       {(() => {
-                        // Detect whether the tenant's tax_config is
-                        // driving the math. When it is, the legacy GST
-                        // and Service Charge inputs become decorative
-                        // (the server ignores them); showing the saved
-                        // blended rate (e.g. 15) confuses staff.
+                        // Detect whether the tenant's tax_config is driving
+                        // the math. When it is, hide the legacy GST and
+                        // Service Charge inputs entirely (the server ignores
+                        // them and showing them with value 0 makes staff
+                        // think service tax isn't being applied).
                         const isTaxCfgDriven = Array.isArray(invEditPreview?.taxLines) && invEditPreview.taxLines.length > 0;
-                        const taxConfigSummary = isTaxCfgDriven
-                          ? invEditPreview.taxLines.map((l: any) => `${l.label} ${Number(l.rate || 0).toFixed(0)}%`).join(' + ')
-                          : '';
                         return (
                           <>
-                            {isTaxCfgDriven && (
-                              <div className="rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15 px-2.5 py-1.5 text-[10px] text-[#3d3128] flex items-center gap-1.5">
-                                <Info size={11} className="text-[#cc5a16] shrink-0" />
-                                <span>
-                                  Tax Lines from Settings — <strong>{taxConfigSummary}</strong> applied automatically below.
-                                </span>
-                              </div>
-                            )}
-                            <div className="grid grid-cols-3 gap-2">
-                              <div>
-                                <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
-                                <input type="number" min="0" value={invEdit.discount}
-                                  onChange={e => setInvEdit(p => ({ ...p, discount: Number(e.target.value) || 0 }))}
-                                  className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                              </div>
-                              <div>
-                                <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
-                                  title={isTaxCfgDriven
-                                    ? "Disabled — your Tax Lines in Settings cover service taxes. This field is a legacy fallback used only when no Tax Lines are configured."
-                                    : "Optional restaurant service charge added BEFORE tax. NOT the same as 'Service Tax' configured in Brand & Settings → Tax Lines."}>
-                                  Service Charge %
-                                </label>
-                                <input type="number" min="0" value={invEdit.svcPct}
-                                  disabled={isTaxCfgDriven}
-                                  onChange={e => setInvEdit(p => ({ ...p, svcPct: Number(e.target.value) || 0 }))}
-                                  className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-[#faf7f2]" />
-                              </div>
-                              <div>
-                                <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
-                                  title={isTaxCfgDriven
-                                    ? "Disabled — your Tax Lines in Settings drive GST. This field is a legacy fallback used only when no Tax Lines are configured."
-                                    : "GST rate applied on the subtotal after service charge."}>
-                                  GST %
-                                </label>
-                                <div className="flex gap-1">
-                                  <input type="number" min="0" value={invEdit.gstPct}
-                                    disabled={isTaxCfgDriven}
-                                    onChange={e => setInvEdit(p => ({ ...p, gstPct: Number(e.target.value) || 0 }))}
-                                    className="min-w-0 flex-1 border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-[#faf7f2]" />
-                                  <button
-                                    onClick={() => setInvEdit(p => ({ ...p, applyGst: !p.applyGst }))}
-                                    disabled={isTaxCfgDriven}
-                                    className={cn(
-                                      "shrink-0 px-2 rounded-lg text-[10px] font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed",
-                                      invEdit.applyGst && !isTaxCfgDriven ? "bg-[#cc5a16] text-white" : "bg-[#0d0a07]/5 text-[#6b5d52]"
-                                    )}>
-                                    {invEdit.applyGst && !isTaxCfgDriven ? 'ON' : 'OFF'}
-                                  </button>
+                            {isTaxCfgDriven ? (
+                              <div className="grid grid-cols-2 gap-2 items-start">
+                                <div>
+                                  <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
+                                  <input type="number" min="0" value={invEdit.discount}
+                                    onChange={e => setInvEdit(p => ({ ...p, discount: Number(e.target.value) || 0 }))}
+                                    className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                                </div>
+                                <div className="rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15 px-2.5 py-1.5 text-[10px] text-[#3d3128]">
+                                  <div className="flex items-center gap-1.5 mb-1">
+                                    <Info size={11} className="text-[#cc5a16] shrink-0" />
+                                    <strong className="uppercase tracking-widest text-[9px]">Auto-applied taxes</strong>
+                                  </div>
+                                  <div className="space-y-0.5 leading-snug">
+                                    {invEditPreview.taxLines.map((l: any, i: number) => (
+                                      <div key={i} className="flex justify-between gap-2">
+                                        <span>{l.label}</span>
+                                        <strong className="font-mono">{Number(l.rate || 0).toFixed(2)}%</strong>
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <p className="text-[9px] text-[#9c8e85] italic mt-1">From Settings → Tax Lines.</p>
                                 </div>
                               </div>
-                            </div>
+                            ) : (
+                              <div className="grid grid-cols-3 gap-2">
+                                <div>
+                                  <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
+                                  <input type="number" min="0" value={invEdit.discount}
+                                    onChange={e => setInvEdit(p => ({ ...p, discount: Number(e.target.value) || 0 }))}
+                                    className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                                </div>
+                                <div>
+                                  <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
+                                    title="Optional restaurant service charge added BEFORE tax. NOT the same as 'Service Tax' configured in Brand & Settings → Tax Lines.">
+                                    Service Charge %
+                                  </label>
+                                  <input type="number" min="0" value={invEdit.svcPct}
+                                    onChange={e => setInvEdit(p => ({ ...p, svcPct: Number(e.target.value) || 0 }))}
+                                    className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                                </div>
+                                <div>
+                                  <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
+                                    title="GST rate applied on the subtotal after service charge.">
+                                    GST %
+                                  </label>
+                                  <div className="flex gap-1">
+                                    <input type="number" min="0" value={invEdit.gstPct}
+                                      onChange={e => setInvEdit(p => ({ ...p, gstPct: Number(e.target.value) || 0 }))}
+                                      className="min-w-0 flex-1 border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                                    <button
+                                      onClick={() => setInvEdit(p => ({ ...p, applyGst: !p.applyGst }))}
+                                      className={cn(
+                                        "shrink-0 px-2 rounded-lg text-[10px] font-bold transition-all",
+                                        invEdit.applyGst ? "bg-[#cc5a16] text-white" : "bg-[#0d0a07]/5 text-[#6b5d52]"
+                                      )}>
+                                      {invEdit.applyGst ? 'ON' : 'OFF'}
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                           </>
                         );
                       })()}
@@ -18729,71 +18737,86 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             summary banner above. */}
                         {(() => {
                           const isTaxCfgDriven = Array.isArray(p?.taxLines) && p.taxLines.length > 0;
-                          const taxConfigSummary = isTaxCfgDriven
-                            ? p.taxLines.map((l: any) => `${l.label} ${Number(l.rate || 0).toFixed(0)}%`).join(' + ')
-                            : '';
+                          // When tax_config drives the math the legacy
+                          // GST / Service Charge inputs are decorative.
+                          // Hiding them entirely (instead of just disabling)
+                          // prevents the very common misread of "0" as
+                          // "no service tax applied".
                           return (
                             <>
-                              {isTaxCfgDriven && (
-                                <div className="col-span-3 -mt-1 mb-1 rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15 px-2.5 py-1.5 text-[10px] text-[#3d3128] flex items-center gap-1.5">
-                                  <Info size={11} className="text-[#cc5a16] shrink-0" />
-                                  <span>
-                                    Tax Lines from Settings — <strong>{taxConfigSummary}</strong> applied automatically below.
-                                  </span>
-                                </div>
-                              )}
-                              <div className="col-span-3 grid grid-cols-3 gap-2">
-                                <div>
-                                  <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
-                                  <input
-                                    type="number" min="0" value={odDiscount}
-                                    onChange={e => setOdDiscount(Number(e.target.value) || 0)}
-                                    className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
-                                  />
-                                </div>
-                                <div>
-                                  <label
-                                    className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
-                                    title={isTaxCfgDriven
-                                      ? "Disabled — your Tax Lines in Settings cover service taxes. This field is a legacy fallback used only when no Tax Lines are configured."
-                                      : "Optional restaurant service charge added BEFORE tax. Separate from any 'Service Tax' line you've configured in Brand & Settings → Tax Lines."}
-                                  >
-                                    Service Charge %
-                                  </label>
-                                  <input
-                                    type="number" min="0" value={isTaxCfgDriven ? 0 : odSvcPct}
-                                    disabled={isTaxCfgDriven}
-                                    onChange={e => setOdSvcPct(Number(e.target.value) || 0)}
-                                    className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-[#faf7f2]"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
-                                    title={isTaxCfgDriven
-                                      ? "Disabled — your Tax Lines in Settings drive GST. This field is a legacy fallback used only when no Tax Lines are configured."
-                                      : "GST rate applied on the subtotal after service charge."}>
-                                    GST %
-                                  </label>
-                                  <div className="flex gap-1">
+                              {isTaxCfgDriven ? (
+                                <div className="col-span-3 grid grid-cols-2 gap-2 items-start">
+                                  <div>
+                                    <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
                                     <input
-                                      type="number" min="0" value={isTaxCfgDriven ? 0 : odGstPct}
-                                      disabled={isTaxCfgDriven}
-                                      onChange={e => setOdGstPct(Number(e.target.value) || 0)}
-                                      className="min-w-0 flex-1 border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-[#faf7f2]"
+                                      type="number" min="0" value={odDiscount}
+                                      onChange={e => setOdDiscount(Number(e.target.value) || 0)}
+                                      className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
                                     />
-                                    <button
-                                      onClick={() => setOdApplyGst(v => !v)}
-                                      disabled={isTaxCfgDriven}
-                                      className={cn(
-                                        "shrink-0 px-2 rounded-lg text-[10px] font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed",
-                                        odApplyGst && !isTaxCfgDriven ? "bg-[#cc5a16] text-white" : "bg-[#0d0a07]/5 text-[#6b5d52]"
-                                      )}
-                                    >
-                                      {odApplyGst && !isTaxCfgDriven ? 'ON' : 'OFF'}
-                                    </button>
+                                  </div>
+                                  <div className="rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15 px-2.5 py-1.5 text-[10px] text-[#3d3128]">
+                                    <div className="flex items-center gap-1.5 mb-1">
+                                      <Info size={11} className="text-[#cc5a16] shrink-0" />
+                                      <strong className="uppercase tracking-widest text-[9px]">Auto-applied taxes</strong>
+                                    </div>
+                                    <div className="space-y-0.5 leading-snug">
+                                      {p.taxLines.map((l: any, i: number) => (
+                                        <div key={i} className="flex justify-between gap-2">
+                                          <span>{l.label}</span>
+                                          <strong className="font-mono">{Number(l.rate || 0).toFixed(2)}%</strong>
+                                        </div>
+                                      ))}
+                                    </div>
+                                    <p className="text-[9px] text-[#9c8e85] italic mt-1">From Settings → Tax Lines. Edit there to change.</p>
                                   </div>
                                 </div>
-                              </div>
+                              ) : (
+                                <div className="col-span-3 grid grid-cols-3 gap-2">
+                                  <div>
+                                    <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
+                                    <input
+                                      type="number" min="0" value={odDiscount}
+                                      onChange={e => setOdDiscount(Number(e.target.value) || 0)}
+                                      className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label
+                                      className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
+                                      title="Optional restaurant service charge added BEFORE tax. Separate from any 'Service Tax' line you've configured in Brand & Settings → Tax Lines."
+                                    >
+                                      Service Charge %
+                                    </label>
+                                    <input
+                                      type="number" min="0" value={odSvcPct}
+                                      onChange={e => setOdSvcPct(Number(e.target.value) || 0)}
+                                      className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
+                                      title="GST rate applied on the subtotal after service charge.">
+                                      GST %
+                                    </label>
+                                    <div className="flex gap-1">
+                                      <input
+                                        type="number" min="0" value={odGstPct}
+                                        onChange={e => setOdGstPct(Number(e.target.value) || 0)}
+                                        className="min-w-0 flex-1 border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                      />
+                                      <button
+                                        onClick={() => setOdApplyGst(v => !v)}
+                                        className={cn(
+                                          "shrink-0 px-2 rounded-lg text-[10px] font-bold transition-all",
+                                          odApplyGst ? "bg-[#cc5a16] text-white" : "bg-[#0d0a07]/5 text-[#6b5d52]"
+                                        )}
+                                      >
+                                        {odApplyGst ? 'ON' : 'OFF'}
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
                             </>
                           );
                         })()}
