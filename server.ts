@@ -241,6 +241,19 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- Day-use booking type (idempotent — existing rows default to OVERNIGHT)
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS booking_type TEXT DEFAULT 'OVERNIGHT';
     UPDATE room_bookings SET booking_type = 'OVERNIGHT' WHERE booking_type IS NULL;
+    -- Phase H1 — cancellation refund snapshot. Captured at cancel time so
+    -- the audit trail (and the front desk's refund-pending list) reflects
+    -- the policy that was active *then*, not the current tenant config.
+    --   cancelled_at                ISO timestamp.
+    --   cancelled_by                staff user id (best-effort).
+    --   cancellation_reason         free-text from cashier ("no-show", "guest illness", etc.).
+    --   cancellation_refund_pct     0-100 — computed from hotel_refund_*  policy.
+    --   cancellation_refund_amount  refund_pct % of total_amount.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_refund_pct DOUBLE PRECISION;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_refund_amount DOUBLE PRECISION;
 
     CREATE TABLE IF NOT EXISTS services (
       id               TEXT PRIMARY KEY,
@@ -624,6 +637,80 @@ async function validateBookingRequest(
   }
 
   return { ok: true, status: 200, error: '' };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  computeCancellationRefund — Phase H1
+//
+//  Determines the refund percentage and amount for cancelling a booking,
+//  based on the tenant's hotel_refund_full_days / hotel_refund_partial_pct
+//  policy and the days remaining until check-in.
+//
+//  Rules:
+//    • If neither config field is set → no policy. Return refund_pct=null
+//      so the caller knows to fall back to manual cashier discretion.
+//    • If days_until_checkin >= refund_full_days  → 100% refund.
+//    • Else if refund_partial_pct is set          → partial refund.
+//    • Else → 0% (within grace, no partial defined).
+//
+//  Returns: { refund_pct, refund_amount, days_until_checkin, policy_text }
+//           — policy_text is a human-readable explanation for the UI.
+// ════════════════════════════════════════════════════════════════════════
+async function computeCancellationRefund(
+  restaurantId: string,
+  checkInDate: string,
+  totalAmount: number,
+): Promise<{ refund_pct: number | null; refund_amount: number; days_until_checkin: number; policy_text: string }> {
+  const r: any = await centralDb.get(
+    `SELECT hotel_refund_full_days, hotel_refund_partial_pct FROM restaurants WHERE id = ?`,
+    [restaurantId]
+  );
+  const fullDays: number | null = r?.hotel_refund_full_days == null ? null : Number(r.hotel_refund_full_days);
+  const partialPct: number | null = r?.hotel_refund_partial_pct == null ? null : Number(r.hotel_refund_partial_pct);
+
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const ci = new Date(checkInDate); ci.setHours(0, 0, 0, 0);
+  const daysUntil = Math.floor((ci.getTime() - today.getTime()) / 86400000);
+  const total = Number(totalAmount || 0);
+
+  // No policy set on this tenant.
+  if (fullDays == null && partialPct == null) {
+    return {
+      refund_pct: null,
+      refund_amount: 0,
+      days_until_checkin: daysUntil,
+      policy_text: 'No cancellation policy configured. Refund handled manually by staff.',
+    };
+  }
+
+  if (fullDays != null && daysUntil >= fullDays) {
+    return {
+      refund_pct: 100,
+      refund_amount: Math.round(total * 100) / 100,
+      days_until_checkin: daysUntil,
+      policy_text: `Cancellation ${daysUntil} day(s) before check-in — full refund (policy: ≥ ${fullDays} day(s) = 100%).`,
+    };
+  }
+
+  if (partialPct != null) {
+    const amount = Math.round((total * partialPct) / 100 * 100) / 100;
+    return {
+      refund_pct: partialPct,
+      refund_amount: amount,
+      days_until_checkin: daysUntil,
+      policy_text: fullDays != null
+        ? `Cancellation ${daysUntil} day(s) before check-in — partial refund (policy: < ${fullDays} day(s) = ${partialPct}%).`
+        : `Partial refund of ${partialPct}% applies per property policy.`,
+    };
+  }
+
+  // fullDays set, but no partial configured, and we're inside the window.
+  return {
+    refund_pct: 0,
+    refund_amount: 0,
+    days_until_checkin: daysUntil,
+    policy_text: `Cancellation inside the ${fullDays} day window — no refund per property policy.`,
+  };
 }
 
 async function settleFolioForBooking(
@@ -13450,12 +13537,40 @@ async function startServer() {
     }
   });
 
+  // Cancellation refund preview — UI fetches this before showing the
+  // cancel-confirm modal so the cashier can see the refund the guest
+  // is entitled to. Pure read; does not mutate the booking.
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/cancellation-preview", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get(
+        'SELECT id, check_in_date, total_amount, status FROM room_bookings WHERE id = ?',
+        [req.params.bookingId]
+      );
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      const refund = await computeCancellationRefund(req.params.id, b.check_in_date, Number(b.total_amount || 0));
+      res.json({
+        booking_id: b.id,
+        status: b.status,
+        total_amount: Number(b.total_amount || 0),
+        ...refund,
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to load cancellation preview' });
+    }
+  });
+
   app.post("/api/restaurant/:id/hotel/bookings/:bookingId/cancel", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const b: any = await tenantDb.get('SELECT id, status FROM room_bookings WHERE id = ?', [req.params.bookingId]);
+      const b: any = await tenantDb.get(
+        'SELECT id, status, check_in_date, total_amount FROM room_bookings WHERE id = ?',
+        [req.params.bookingId]
+      );
       if (!b) return res.status(404).json({ error: 'Booking not found.' });
       // State-machine guard. CHECKED_IN guests must go through proper
       // checkout (settle folio); CHECKED_OUT/CANCELLED are terminal.
@@ -13468,9 +13583,41 @@ async function startServer() {
       if (b.status === 'CANCELLED') {
         return res.json({ success: true, already_cancelled: true });
       }
-      await tenantDb.run("UPDATE room_bookings SET status = 'CANCELLED' WHERE id = ?", [req.params.bookingId]);
-      res.json({ success: true });
+      // Compute refund per the active tenant policy and snapshot it on
+      // the row so it survives subsequent policy edits. The cashier can
+      // optionally pass a `reason` field; this is stored verbatim.
+      const refund = await computeCancellationRefund(
+        req.params.id, b.check_in_date, Number(b.total_amount || 0)
+      );
+      const reason = req.body?.reason == null ? null : String(req.body.reason).slice(0, 500);
+      await tenantDb.run(
+        `UPDATE room_bookings
+            SET status                     = 'CANCELLED',
+                cancelled_at               = ?,
+                cancelled_by               = ?,
+                cancellation_reason        = ?,
+                cancellation_refund_pct    = ?,
+                cancellation_refund_amount = ?
+          WHERE id = ?`,
+        [
+          new Date().toISOString(),
+          req.user?.id || null,
+          reason,
+          refund.refund_pct,
+          refund.refund_amount,
+          req.params.bookingId,
+        ]
+      );
+      try { await triggerNotification(req.params.id, 'BOOKING_CANCELLED', { bookingId: b.id, refundPct: refund.refund_pct, refundAmount: refund.refund_amount }); } catch {}
+      res.json({
+        success: true,
+        refund_pct: refund.refund_pct,
+        refund_amount: refund.refund_amount,
+        days_until_checkin: refund.days_until_checkin,
+        policy_text: refund.policy_text,
+      });
     } catch (err) {
+      console.error("cancel booking error:", err);
       res.status(500).json({ error: "Failed to cancel booking" });
     }
   });
@@ -18036,7 +18183,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-min-max-stay',
+    commit_marker: 'hotel-refund-policy',
     code_features: [
       'subscription-billing',
       'read-only-mode',

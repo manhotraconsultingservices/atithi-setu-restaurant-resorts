@@ -6593,6 +6593,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingBooking, setEditingBooking] = useState<any>(null);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [checkoutBooking, setCheckoutBooking] = useState<any>(null);
+
+  // Phase H1 — cancellation confirm modal (refund preview + reason)
+  const [cancelBookingTarget, setCancelBookingTarget] = useState<any>(null);
+  const [cancelPreview, setCancelPreview] = useState<{
+    refund_pct: number | null; refund_amount: number;
+    days_until_checkin: number; policy_text: string; total_amount: number;
+  } | null>(null);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [checkoutPayment, setCheckoutPayment] = useState<'CASH'|'CARD'|'UPI'|'BANK'>('CASH');
   const [checkoutDiscount, setCheckoutDiscount] = useState(0);
   const [viewFolio, setViewFolio] = useState<any>(null);
@@ -8638,10 +8647,48 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchHotelRooms();
     return result;
   };
+  // Open the cancellation confirm modal — fetches the refund preview so
+  // the cashier can see what's owed before confirming. The actual cancel
+  // happens via submitCancelBooking() below.
+  const openCancelBookingModal = async (booking: any) => {
+    setCancelBookingTarget(booking);
+    setCancelReason('');
+    setCancelPreview(null);
+    try {
+      const preview = await hotelApi(`/bookings/${booking.id}/cancellation-preview`);
+      setCancelPreview(preview);
+    } catch (err: any) {
+      // Don't block cancellation if the preview fails — fall back to a
+      // policy-less cancel. Show the error in the modal.
+      setCancelPreview({
+        refund_pct: null, refund_amount: 0, days_until_checkin: 0,
+        policy_text: err?.message || 'Failed to load policy. Refund handled manually.',
+        total_amount: Number(booking.total_amount || 0),
+      });
+    }
+  };
+  const submitCancelBooking = async () => {
+    if (!cancelBookingTarget) return;
+    setCancelSubmitting(true);
+    try {
+      await hotelApi(`/bookings/${cancelBookingTarget.id}/cancel`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: cancelReason.trim() || null }),
+      });
+      setCancelBookingTarget(null);
+      setCancelPreview(null);
+      setCancelReason('');
+      await fetchHotelBookings();
+    } catch (err: any) {
+      alert(err?.message || 'Failed to cancel booking');
+    } finally {
+      setCancelSubmitting(false);
+    }
+  };
+  // Legacy entry — kept as a thin wrapper so any older callers don't break.
   const cancelBooking = async (bookingId: string) => {
-    if (!confirm('Cancel this booking?')) return;
-    await hotelApi(`/bookings/${bookingId}/cancel`, { method: 'POST', body: JSON.stringify({}) });
-    await fetchHotelBookings();
+    const b = hotelBookings.find((x: any) => x.id === bookingId) || { id: bookingId };
+    await openCancelBookingModal(b);
   };
   const loadFolio = async (folioId: string) => {
     try {
@@ -14649,9 +14696,44 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 </div>
 
-                <div className="pt-2 flex items-center justify-between gap-3 flex-wrap">
+                {/* ── Refund policy on cancellation ─────────────────── */}
+                <div className="pt-4 border-t border-[#cc5a16]/10">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Cancellation refund policy</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] text-[#6b5d52] mb-1">Full refund cutoff (days before check-in)</label>
+                      <input
+                        type="number" min={0}
+                        placeholder="No policy"
+                        value={hotelSettings.refund_full_days ?? ''}
+                        onChange={e => {
+                          const v = e.target.value.trim();
+                          setHotelSettings(s => ({ ...s, refund_full_days: v === '' ? null : Math.max(0, Number(v) || 0) }));
+                        }}
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                      />
+                      <p className="text-[10px] text-[#9c8e85] mt-1">e.g. 7 = 100% refund if cancelled 7+ days before.</p>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-[#6b5d52] mb-1">Partial refund inside window (%)</label>
+                      <input
+                        type="number" min={0} max={100}
+                        placeholder="No partial"
+                        value={hotelSettings.refund_partial_pct ?? ''}
+                        onChange={e => {
+                          const v = e.target.value.trim();
+                          setHotelSettings(s => ({ ...s, refund_partial_pct: v === '' ? null : Math.max(0, Math.min(100, Number(v) || 0)) }));
+                        }}
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                      />
+                      <p className="text-[10px] text-[#9c8e85] mt-1">e.g. 50 = 50% refund if inside the window.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-4 flex items-center justify-between gap-3 flex-wrap">
                   <p className="text-[11px] text-[#9c8e85]">
-                    Refund policy and late-checkout charge — coming in the next release.
+                    Late-checkout charge — coming in the next release.
                   </p>
                   <button
                     type="button"
@@ -16667,6 +16749,94 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">{editingBooking.id ? 'Save' : 'Create Booking'}</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ═════════ Cancel-booking confirm modal (Phase H1) ═════════
+          Shows the refund preview computed from the tenant's refund policy
+          plus a free-text reason field. The actual cancel POST happens on
+          confirm. Closing without confirm leaves the booking untouched. */}
+      {cancelBookingTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-bold font-serif text-[#1a1208]">Cancel booking — {cancelBookingTarget.guest_name || cancelBookingTarget.id}</h3>
+              <button onClick={() => { setCancelBookingTarget(null); setCancelPreview(null); setCancelReason(''); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]">
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Refund preview card */}
+            <div className="bg-[#faf7f2] rounded-2xl p-4 mb-4 text-sm">
+              {!cancelPreview ? (
+                <p className="text-[#6b5d52] text-xs">Loading refund policy…</p>
+              ) : (
+                <>
+                  {cancelPreview.refund_pct == null ? (
+                    <div className="flex items-start gap-2">
+                      <span className="text-amber-600 text-base leading-none mt-0.5">⚠</span>
+                      <div>
+                        <p className="font-semibold text-[#1a1208]">No automatic refund policy</p>
+                        <p className="text-[11px] text-[#6b5d52] mt-1">{cancelPreview.policy_text}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex justify-between mb-1">
+                        <span className="text-[#6b5d52]">Booking total</span>
+                        <span className="font-semibold">₹{cancelPreview.total_amount.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between mb-1">
+                        <span className="text-[#6b5d52]">Days until check-in</span>
+                        <span>{cancelPreview.days_until_checkin}</span>
+                      </div>
+                      <div className="flex justify-between mb-1">
+                        <span className="text-[#6b5d52]">Refund %</span>
+                        <span className="font-semibold">{cancelPreview.refund_pct}%</span>
+                      </div>
+                      <div className="flex justify-between border-t border-[#cc5a16]/10 pt-2 mt-2">
+                        <span className="font-bold text-[#1a1208]">Refund due</span>
+                        <span className="font-bold text-[#1a1208]">₹{cancelPreview.refund_amount.toFixed(2)}</span>
+                      </div>
+                      <p className="text-[10px] text-[#9c8e85] mt-2">{cancelPreview.policy_text}</p>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Reason (optional)</label>
+              <textarea
+                value={cancelReason}
+                onChange={e => setCancelReason(e.target.value.slice(0, 500))}
+                rows={2}
+                placeholder="e.g. Guest illness, no-show, schedule change"
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+              />
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => { setCancelBookingTarget(null); setCancelPreview(null); setCancelReason(''); }}
+                className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]"
+              >
+                Keep booking
+              </button>
+              <button
+                type="button"
+                onClick={submitCancelBooking}
+                disabled={cancelSubmitting}
+                className={cn(
+                  "flex-1 px-4 py-2.5 rounded-2xl bg-[#c13b3b] text-white text-sm font-bold hover:bg-[#a13030]",
+                  cancelSubmitting && "opacity-60 cursor-not-allowed"
+                )}
+              >
+                {cancelSubmitting ? 'Cancelling…' : 'Confirm cancel'}
+              </button>
+            </div>
           </div>
         </div>
       )}
