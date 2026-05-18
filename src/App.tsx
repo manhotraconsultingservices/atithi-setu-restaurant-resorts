@@ -9070,26 +9070,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           tabs: NavTab[];
           visible: boolean;
         };
+        // Operational summary tabs that belong to BOTH sides of the
+        // business — Command Center / Analytics / Invoices live at the
+        // top of whichever lane is currently active. We don't keep them
+        // in General because that would mean a BOTH-mode tenant sees
+        // them twice (once in General, once in their active lane). Each
+        // tab is internally mode-aware: e.g. Command & Control already
+        // shows restaurant tables when isRestaurantEnabled and hotel
+        // rooms when isHotelEnabled.
+        const operationalSummary: NavTab[] = [
+          { id: 'MONITOR',  label: 'Command & Control' },
+          { id: 'REPORTS',  label: 'Analytics & Reports' },
+          { id: 'INVOICES', label: 'Invoices' },
+        ];
+
         const navGroups: NavGroup[] = [
-          {
-            id: 'GENERAL', label: 'General',
-            icon: <LayoutDashboard size={12} />,
-            visible: true,
-            tabs: [
-              { id: 'MONITOR',       label: 'Command & Control' },
-              { id: 'REPORTS',       label: 'Analytics & Reports' },
-              { id: 'LOYALTY',       label: 'Loyalty Program' },
-              { id: 'STAFF',         label: 'Staff Management' },
-              { id: 'ROSTER',        label: 'Roster' },
-              { id: 'TIMESHEET',     label: 'Timesheet' },
-              { id: 'ATTENDANCE',    label: 'Attendance' },
-              { id: 'INVOICES',      label: 'Invoices' },
-              { id: 'FEEDBACK',      label: 'Feedback' },
-              { id: 'SUBSCRIPTION',  label: 'Subscription' },
-              { id: 'NOTIFICATIONS', label: 'Notifications' },
-              { id: 'SETTINGS',      label: 'Brand & Settings' },
-            ],
-          },
+          // RESTAURANT lane shown first so MONITOR stays at the top-
+          // left of the nav (preserves the muscle memory that Command
+          // & Control is the home tab). For hotel-only tenants the
+          // HOTEL lane takes this slot; for restaurant-only it's
+          // RESTAURANT; for BOTH it's whichever the mode toggle picks.
           {
             id: 'RESTAURANT', label: 'Restaurant',
             icon: <Utensils size={12} />,
@@ -9098,6 +9098,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             //   • the toggle is currently on Restaurant.
             visible: isRestaurantEnabled && (!bothEnabled || dashboardMode === 'RESTAURANT'),
             tabs: [
+              ...operationalSummary,
               { id: 'MENU',      label: 'Menu Management' },
               { id: 'INVENTORY', label: 'Inventory' },
               { id: 'DELIVERY',  label: 'Delivery Partners' },
@@ -9112,6 +9113,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // Same gating logic, mirrored for Hotel.
             visible: isHotelEnabled && (!bothEnabled || dashboardMode === 'HOTEL'),
             tabs: [
+              ...operationalSummary,
               { id: 'ROOMS',            label: 'Rooms' },
               { id: 'HOTEL_BOOKINGS',   label: 'Hotel Bookings' },
               { id: 'SERVICES',         label: 'Services' },
@@ -9119,6 +9121,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FOLIOS',           label: 'Folios' },
               { id: 'COMPLIANCE',       label: 'Compliance' },
               { id: 'CONCIERGE_FAQ',    label: 'Concierge FAQ' },
+            ],
+          },
+          // GENERAL lane is now everything cross-cutting that ISN'T a
+          // per-side operational summary: people, customers, finance
+          // admin, system. Sits below the active mode lane.
+          {
+            id: 'GENERAL', label: 'General',
+            icon: <LayoutDashboard size={12} />,
+            visible: true,
+            tabs: [
+              { id: 'LOYALTY',       label: 'Loyalty Program' },
+              { id: 'STAFF',         label: 'Staff Management' },
+              { id: 'ROSTER',        label: 'Roster' },
+              { id: 'TIMESHEET',     label: 'Timesheet' },
+              { id: 'ATTENDANCE',    label: 'Attendance' },
+              { id: 'FEEDBACK',      label: 'Feedback' },
+              { id: 'SUBSCRIPTION',  label: 'Subscription' },
+              { id: 'NOTIFICATIONS', label: 'Notifications' },
+              { id: 'SETTINGS',      label: 'Brand & Settings' },
             ],
           },
         ];

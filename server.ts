@@ -17225,7 +17225,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'dashboard-mode-toggle',
+    commit_marker: 'nav-summary-tabs-per-mode',
     code_features: [
       'subscription-billing',
       'read-only-mode',
