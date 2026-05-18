@@ -6806,6 +6806,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
 
+  // ── Hotel Rules (Phase H1 — per-tenant business rules) ──────────────────
+  // Fetched from /api/restaurant/:id/hotel/settings when the SETTINGS tab
+  // is opened on a Hotel-enabled tenant. Used in two places:
+  //   1. Settings UI — owner edits min/max stay, refund policy, late-checkout time
+  //   2. Booking modal — shows a hint ("Minimum 2 nights") near the date fields
+  const [hotelSettings, setHotelSettings] = useState<{
+    min_stay_nights: number;
+    max_stay_nights: number | null;
+    refund_full_days: number | null;
+    refund_partial_pct: number | null;
+    late_checkout_time: string | null;
+  }>({ min_stay_nights: 1, max_stay_nights: null, refund_full_days: null, refund_partial_pct: null, late_checkout_time: null });
+  const [hotelSettingsSaving, setHotelSettingsSaving] = useState(false);
+  const [hotelSettingsSaved, setHotelSettingsSaved] = useState(false);
+
   // ── Menu Management Enhancements ─────────────────────────────────────────────
   const [menuCatFilter, setMenuCatFilter] = useState<string>('ALL');
   const [menuSearchTerm, setMenuSearchTerm] = useState<string>('');
@@ -8459,6 +8474,38 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     return body;
   };
 
+  // Hotel business-rule settings (Phase H1). Best-effort load; failures
+  // are silent so a non-hotel tenant doesn't see spurious errors.
+  const fetchHotelSettings = async () => {
+    try {
+      const data = await hotelApi('/settings');
+      setHotelSettings({
+        min_stay_nights:    Number(data.min_stay_nights || 1),
+        max_stay_nights:    data.max_stay_nights == null ? null : Number(data.max_stay_nights),
+        refund_full_days:   data.refund_full_days == null ? null : Number(data.refund_full_days),
+        refund_partial_pct: data.refund_partial_pct == null ? null : Number(data.refund_partial_pct),
+        late_checkout_time: data.late_checkout_time || null,
+      });
+    } catch { /* hotel not enabled — ignore */ }
+  };
+
+  const saveHotelSettings = async () => {
+    setHotelSettingsSaving(true);
+    setHotelSettingsSaved(false);
+    try {
+      await hotelApi('/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(hotelSettings),
+      });
+      setHotelSettingsSaved(true);
+      setTimeout(() => setHotelSettingsSaved(false), 2000);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to save hotel settings');
+    } finally {
+      setHotelSettingsSaving(false);
+    }
+  };
+
   const toggleHotelModule = async (enabled: boolean) => {
     setHotelLoading(true); setHotelError('');
     try {
@@ -8651,11 +8698,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'ROOMS') fetchHotelRooms();
     if (activeTab === 'SERVICES') fetchHotelServices();
     if (activeTab === 'SERVICE_REQUESTS') fetchHotelRequests();
-    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); }
+    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); }
     if (activeTab === 'FOLIOS') fetchHotelFolios();
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
+    if (activeTab === 'SETTINGS') fetchHotelSettings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
 
@@ -14556,6 +14604,74 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             )}
           </div>
 
+          {/* ── Hotel Rules — per-tenant business rules (Phase H1) ──
+              Only rendered when the Hotel module is active. Every field
+              is optional; leaving min/max blank uses the platform default
+              (no constraint). Defaults preserve existing tenants' behaviour. */}
+          {isHotelEnabled && (
+            <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm relative overflow-hidden">
+              <div className="absolute top-0 left-0 right-0 h-[3px] bg-[#b8860b]"></div>
+              <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
+                <h3 className="text-2xl font-bold font-serif">Hotel Business Rules</h3>
+                <span className="text-[9px] font-mono uppercase tracking-widest font-bold px-2 py-1 rounded-full bg-[#b8860b]/10 text-[#b8860b] border border-[#b8860b]/25">
+                  Per-property
+                </span>
+              </div>
+              <p className="text-xs text-[#6b5d52] mb-5">
+                Configure how bookings, cancellations, and late checkouts are handled. Leave any field blank to use no constraint.
+              </p>
+
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Minimum stay (nights)</label>
+                    <input
+                      type="number" min={1}
+                      value={hotelSettings.min_stay_nights}
+                      onChange={e => setHotelSettings(s => ({ ...s, min_stay_nights: Math.max(1, Number(e.target.value) || 1) }))}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    />
+                    <p className="text-[10px] text-[#9c8e85] mt-1">Default 1. Skipped for day-use bookings.</p>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Maximum stay (nights)</label>
+                    <input
+                      type="number" min={1}
+                      placeholder="No limit"
+                      value={hotelSettings.max_stay_nights ?? ''}
+                      onChange={e => {
+                        const v = e.target.value.trim();
+                        setHotelSettings(s => ({ ...s, max_stay_nights: v === '' ? null : Math.max(1, Number(v) || 0) }));
+                      }}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    />
+                    <p className="text-[10px] text-[#9c8e85] mt-1">Blank = unlimited.</p>
+                  </div>
+                </div>
+
+                <div className="pt-2 flex items-center justify-between gap-3 flex-wrap">
+                  <p className="text-[11px] text-[#9c8e85]">
+                    Refund policy and late-checkout charge — coming in the next release.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={saveHotelSettings}
+                    disabled={hotelSettingsSaving}
+                    className={cn(
+                      "px-5 py-2.5 rounded-2xl font-bold text-sm transition-all",
+                      hotelSettingsSaved
+                        ? "bg-green-500 text-white"
+                        : "bg-[#cc5a16] text-white hover:bg-[#a84612]",
+                      hotelSettingsSaving && "opacity-60 cursor-not-allowed"
+                    )}
+                  >
+                    {hotelSettingsSaved ? 'Saved ✓' : (hotelSettingsSaving ? 'Saving…' : 'Save Rules')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* ── Brand Logo (used on invoice PDF) ───────────────────── */}
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
             <h3 className="text-2xl font-bold font-serif mb-1">Brand Logo</h3>
@@ -16468,14 +16584,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const v = e.target.value;
                       const next: any = { ...editingBooking, check_in_date: v };
                       const bt = editingBooking.booking_type || 'OVERNIGHT';
+                      const minNights = Math.max(1, Number(hotelSettings.min_stay_nights || 1));
                       // Auto-sync sibling date so the form stays valid:
                       //   • DAY_USE  → check_out = check_in
-                      //   • OVERNIGHT → bump check_out if it's now ≤ check_in
+                      //   • OVERNIGHT → bump check_out to at least min-stay nights ahead
                       if (bt === 'DAY_USE') {
                         next.check_out_date = v;
-                      } else if (next.check_out_date && next.check_out_date <= v) {
-                        const d = new Date(v); d.setDate(d.getDate() + 1);
-                        next.check_out_date = d.toISOString().slice(0, 10);
+                      } else {
+                        const minOut = (() => {
+                          const d = new Date(v); d.setDate(d.getDate() + minNights);
+                          return d.toISOString().slice(0, 10);
+                        })();
+                        if (!next.check_out_date || next.check_out_date < minOut) {
+                          next.check_out_date = minOut;
+                        }
                       }
                       setEditingBooking(next);
                     }}
@@ -16488,20 +16610,41 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     required
                     type="date"
                     disabled={(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE'}
-                    // HTML5 min — overnight: day AFTER check-in; day-use: same day
+                    // HTML5 min — overnight: day AFTER check-in + min-stay
+                    // nights (per tenant config). Day-use: same day.
                     min={(() => {
                       const ci = (editingBooking.check_in_date || '').slice(0, 10);
                       if (!ci) return undefined;
                       if ((editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE') return ci;
-                      const d = new Date(ci); d.setDate(d.getDate() + 1);
+                      const minNights = Math.max(1, Number(hotelSettings.min_stay_nights || 1));
+                      const d = new Date(ci); d.setDate(d.getDate() + minNights);
+                      return d.toISOString().slice(0, 10);
+                    })()}
+                    // HTML5 max — overnight + max-stay nights (per tenant config).
+                    max={(() => {
+                      const ci = (editingBooking.check_in_date || '').slice(0, 10);
+                      if (!ci) return undefined;
+                      if ((editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE') return ci;
+                      const maxNights = hotelSettings.max_stay_nights == null
+                        ? null : Math.max(1, Number(hotelSettings.max_stay_nights || 0));
+                      if (maxNights == null) return undefined;
+                      const d = new Date(ci); d.setDate(d.getDate() + maxNights);
                       return d.toISOString().slice(0, 10);
                     })()}
                     value={(editingBooking.check_out_date || '').slice(0,10)}
                     onChange={e => setEditingBooking({...editingBooking, check_out_date: e.target.value})}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                   />
-                  {(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE' && (
+                  {(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE' ? (
                     <p className="text-[10px] text-[#9c8e85] mt-1">Locked to check-in date for day-use bookings.</p>
+                  ) : (
+                    (hotelSettings.min_stay_nights > 1 || hotelSettings.max_stay_nights != null) && (
+                      <p className="text-[10px] text-[#9c8e85] mt-1">
+                        {hotelSettings.min_stay_nights > 1 && <>Min {hotelSettings.min_stay_nights} night{hotelSettings.min_stay_nights > 1 ? 's' : ''}</>}
+                        {hotelSettings.min_stay_nights > 1 && hotelSettings.max_stay_nights != null && ' · '}
+                        {hotelSettings.max_stay_nights != null && <>Max {hotelSettings.max_stay_nights} night{hotelSettings.max_stay_nights > 1 ? 's' : ''}</>}
+                      </p>
+                    )
                   )}
                 </div>
               </div>

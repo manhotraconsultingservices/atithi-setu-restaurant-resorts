@@ -529,6 +529,30 @@ async function validateBookingRequest(
         error: 'Check-out date must be after the check-in date for overnight stays. Use the Day-Use option for same-day bookings.',
       };
     }
+
+    // Min / max stay length (Phase H1). Per-tenant config — owner can leave
+    // either NULL to disable that constraint. DAY_USE skips this entirely.
+    const r: any = await centralDb.get(
+      "SELECT hotel_min_stay_nights, hotel_max_stay_nights FROM restaurants WHERE id = ?",
+      [restaurantId]
+    );
+    const minNights = Number(r?.hotel_min_stay_nights || 1);
+    const maxNights = r?.hotel_max_stay_nights == null ? null : Number(r.hotel_max_stay_nights);
+    const nights = Math.max(1, Math.ceil(
+      (new Date(check_out_date).getTime() - new Date(check_in_date).getTime()) / 86400000
+    ));
+    if (minNights > 1 && nights < minNights) {
+      return {
+        ok: false, status: 400,
+        error: `Minimum stay is ${minNights} night(s) for this property. The requested stay is only ${nights} night(s).`,
+      };
+    }
+    if (maxNights != null && maxNights > 0 && nights > maxNights) {
+      return {
+        ok: false, status: 400,
+        error: `Maximum stay is ${maxNights} night(s) for this property. The requested stay is ${nights} night(s). Split into multiple bookings or contact the front desk.`,
+      };
+    }
   }
 
   // Room existence + status
@@ -13451,6 +13475,78 @@ async function startServer() {
     }
   });
 
+  // ─── HOTEL SETTINGS — owner-configurable business rules ──────────────────
+  // Per-tenant overrides for Phase H1 rules. All fields are optional;
+  // leaving a column NULL means "use the platform default" (no constraint
+  // for min/max, no auto-refund, no auto-late-checkout fee). Designed to
+  // be backward-compatible so every pre-existing tenant sees no change
+  // until the owner explicitly configures a rule.
+  app.get("/api/restaurant/:id/hotel/settings", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const r: any = await centralDb.get(
+        `SELECT hotel_min_stay_nights, hotel_max_stay_nights,
+                hotel_refund_full_days, hotel_refund_partial_pct,
+                hotel_late_checkout_time
+           FROM restaurants WHERE id = ?`,
+        [req.params.id]
+      );
+      res.json({
+        min_stay_nights:        r?.hotel_min_stay_nights ?? 1,
+        max_stay_nights:        r?.hotel_max_stay_nights ?? null,
+        refund_full_days:       r?.hotel_refund_full_days ?? null,
+        refund_partial_pct:     r?.hotel_refund_partial_pct ?? null,
+        late_checkout_time:     r?.hotel_late_checkout_time ?? null,
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch hotel settings" });
+    }
+  });
+
+  app.patch("/api/restaurant/:id/hotel/settings", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    // Owner / Manager scope check — only the owning tenant or SUPER_ADMIN/CTO
+    if (req.user?.restaurantId !== req.params.id
+        && req.user?.role !== 'SUPER_ADMIN'
+        && req.user?.role !== 'CTO') {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    try {
+      const b = req.body || {};
+      // Coerce + validate. null is allowed (means "clear the override").
+      const minStay  = b.min_stay_nights == null ? null : Math.max(1, Math.floor(Number(b.min_stay_nights) || 1));
+      const maxStay  = b.max_stay_nights == null ? null : Math.max(1, Math.floor(Number(b.max_stay_nights) || 0));
+      if (minStay != null && maxStay != null && maxStay > 0 && maxStay < minStay) {
+        return res.status(400).json({ error: 'Maximum stay must be greater than or equal to minimum stay.' });
+      }
+      const refundFullDays = b.refund_full_days == null ? null : Math.max(0, Math.floor(Number(b.refund_full_days) || 0));
+      const refundPartial  = b.refund_partial_pct == null ? null : Math.max(0, Math.min(100, Number(b.refund_partial_pct) || 0));
+      const lateTime = b.late_checkout_time == null || b.late_checkout_time === ''
+        ? null
+        : String(b.late_checkout_time).trim();
+      if (lateTime != null && !/^\d{2}:\d{2}$/.test(lateTime)) {
+        return res.status(400).json({ error: 'Late checkout time must be in HH:MM format (24-hour clock).' });
+      }
+
+      await centralDb.run(
+        `UPDATE restaurants
+            SET hotel_min_stay_nights    = ?,
+                hotel_max_stay_nights    = ?,
+                hotel_refund_full_days   = ?,
+                hotel_refund_partial_pct = ?,
+                hotel_late_checkout_time = ?
+          WHERE id = ?`,
+        [minStay ?? 1, maxStay, refundFullDays, refundPartial, lateTime, req.params.id]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Update hotel settings error:", err);
+      res.status(500).json({ error: "Failed to update hotel settings" });
+    }
+  });
+
   // ─── FOLIOS — list + view + settle (Phase 3) ─────────────────────────────
   app.get("/api/restaurant/:id/hotel/folios", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
@@ -17940,7 +18036,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-early-checkin-confirm',
+    commit_marker: 'hotel-min-max-stay',
     code_features: [
       'subscription-billing',
       'read-only-mode',

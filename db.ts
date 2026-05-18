@@ -215,7 +215,28 @@ export async function initDb() {
     -- it always did. Multi-location aggregation kicks in when 2+ restaurants
     -- share the same brand_id AND the same user can access both.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS brand_id TEXT;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS location_label TEXT
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS location_label TEXT;
+    -- Phase H1 — Hotel business rules (per-tenant overrides).
+    -- All five columns are nullable / sane-default so existing tenants see
+    -- zero behavioural change until an owner opts in via Settings.
+    --
+    --   hotel_min_stay_nights   Minimum nights for an overnight booking.
+    --                           Default 1 (no constraint). Skipped for DAY_USE.
+    --   hotel_max_stay_nights   Maximum nights. NULL = unlimited.
+    --   hotel_refund_full_days  Refund 100% if cancelled this many days
+    --                           or more before check-in. NULL = no policy
+    --                           (current behaviour: cashier decides manually).
+    --   hotel_refund_partial_pct  Partial refund % when inside the window.
+    --                             Beyond grace, refund is 0%.
+    --   hotel_late_checkout_time  HH:MM grace cutoff (e.g. '12:00'). After
+    --                             this clock time on the check-out date,
+    --                             an extra-night charge is auto-added at
+    --                             check-out. NULL = no auto-fee.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_min_stay_nights INT DEFAULT 1;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_max_stay_nights INT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_refund_full_days INT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_refund_partial_pct DOUBLE PRECISION;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_late_checkout_time TEXT
   `);
   await centralDb.exec(
     `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`
