@@ -13371,6 +13371,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       ) : activeTab === 'INVOICES' ? (
+        // Hotel-mode owners get the hotel folios view (settled folios
+        // ARE the hotel's invoices, with their own PDF + audit trail).
+        // The restaurant invoice list stays unchanged for Restaurant
+        // mode and restaurant-only tenants.
+        isHotelView ? (
+          <HotelInvoicesView restaurantId={restaurantId} token={token!} />
+        ) : (
         <div className="space-y-6">
           {/* Header */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -13703,6 +13710,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             })()}
           </div>
         </div>
+        )  /* end of isHotelView ? <HotelInvoicesView /> : <restaurant invoices> */
 
       ) : activeTab === 'QR' ? (
         <div className="max-w-4xl space-y-8">
@@ -18024,6 +18032,10 @@ const HotelCommandCenter: React.FC<{
   const [folios, setFolios]     = useState<any[]>([]);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [loading, setLoading]   = useState(true);
+  // Slide-over drawer: when a room tile is clicked we open the
+  // HotelRoomDrawer to surface that room's booking + folio + history.
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
+  const selectedRoom = useMemo(() => rooms.find(r => r.id === selectedRoomId) || null, [rooms, selectedRoomId]);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -18173,9 +18185,14 @@ const HotelCommandCenter: React.FC<{
                 const c = roomColor(r.status);
                 const booking = bookings.find(b => b.room_id === r.id && b.status === 'CHECKED_IN');
                 return (
-                  <div key={r.id}
-                    className="rounded-xl p-3 border text-center flex flex-col justify-between"
-                    style={{ background: c.bg, borderColor: c.border, minHeight: 88 }}>
+                  <button
+                    key={r.id}
+                    type="button"
+                    onClick={() => setSelectedRoomId(r.id)}
+                    className="rounded-xl p-3 border text-center flex flex-col justify-between transition-all hover:brightness-110 hover:scale-[1.02] active:scale-95"
+                    style={{ background: c.bg, borderColor: c.border, minHeight: 88 }}
+                    title={`Open ${r.room_number || r.name} details`}
+                  >
                     <div>
                       <p className="text-xs font-bold text-[#f0ede8]">{r.room_number || r.name}</p>
                       <p className="text-[9px] uppercase tracking-widest mt-1" style={{ color: c.label }}>{r.status}</p>
@@ -18185,7 +18202,7 @@ const HotelCommandCenter: React.FC<{
                         {booking.guest_name}
                       </p>
                     )}
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -18283,6 +18300,520 @@ const HotelCommandCenter: React.FC<{
           </div>
         </div>
       )}
+
+      {/* Slide-over drawer — driven by selectedRoomId state */}
+      <AnimatePresence>
+        {selectedRoom && (
+          <HotelRoomDrawer
+            room={selectedRoom}
+            rooms={rooms}
+            bookings={bookings}
+            restaurantId={restaurantId}
+            token={token}
+            onClose={() => setSelectedRoomId(null)}
+            // Hand the booking back to the parent flow so the existing
+            // CheckOut modal can take over. The Command Center doesn't
+            // own that modal, so for now we just close the drawer and
+            // let staff tap the Bookings tab "Check Out" button as a
+            // follow-up. (Future: emit an event up via context.)
+            onCheckOutClick={(_booking) => {
+              setSelectedRoomId(null);
+              alert('Open the Hotel Bookings tab to complete check-out for this guest.');
+            }}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+/* ─── HotelRoomDrawer ─────────────────────────────────────────
+   Slide-over panel triggered by clicking a room tile in the Hotel
+   Command Center. Surfaces the room's current state, the active
+   booking (if any), the open folio with line items, and quick
+   actions (Check Out, View Folio). Slides in from the right with
+   a backdrop overlay; ESC or backdrop click closes it.
+
+   Data strategy: receives the rooms/bookings arrays already cached
+   in the parent (no re-fetch), and fetches the folio detail with
+   entries on-demand when an active booking exists. Keeps the
+   drawer responsive without re-pinging four endpoints on every
+   open.                                                          */
+const HotelRoomDrawer: React.FC<{
+  room: any | null;
+  rooms: any[];
+  bookings: any[];
+  restaurantId: string;
+  token: string;
+  onClose: () => void;
+  onCheckOutClick?: (booking: any) => void;
+}> = ({ room, rooms, bookings, restaurantId, token, onClose, onCheckOutClick }) => {
+  const [folio, setFolio] = useState<any>(null);
+  const [loadingFolio, setLoadingFolio] = useState(false);
+
+  // Active = currently checked-in booking on this room. Past = recent
+  // CHECKED_OUT history (top 3) for context. Upcoming = next BOOKED
+  // for the same room.
+  const activeBooking = useMemo(() =>
+    bookings.find(b => b.room_id === room?.id && b.status === 'CHECKED_IN'),
+    [bookings, room?.id]
+  );
+  const upcomingBooking = useMemo(() => {
+    if (!room) return null;
+    return bookings
+      .filter(b => b.room_id === room.id && b.status === 'BOOKED')
+      .sort((a, b) => String(a.check_in_date).localeCompare(String(b.check_in_date)))[0] || null;
+  }, [bookings, room]);
+  const recentHistory = useMemo(() => {
+    if (!room) return [];
+    return bookings
+      .filter(b => b.room_id === room.id && b.status === 'CHECKED_OUT')
+      .sort((a, b) => String(b.actual_checkout_at || b.check_out_date).localeCompare(String(a.actual_checkout_at || a.check_out_date)))
+      .slice(0, 3);
+  }, [bookings, room]);
+
+  // Fetch the open folio for the active booking. The Command Center's
+  // /hotel/folios?status=open list has the headers but not the
+  // line-item entries — that's what we want to render in the drawer.
+  useEffect(() => {
+    if (!activeBooking) { setFolio(null); return; }
+    let cancelled = false;
+    setLoadingFolio(true);
+    // Find the folio by booking, then fetch its detail. Two-step
+    // because the /folios endpoint indexes by folio.id, not booking_id.
+    fetch(`/api/restaurant/${restaurantId}/hotel/folios?status=open`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.ok ? r.json() : [])
+      .then(async (list: any[]) => {
+        if (cancelled) return;
+        const f = list.find(x => x.booking_id === activeBooking.id);
+        if (!f) { setFolio(null); return; }
+        // Now fetch detail with entries
+        const detailRes = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${f.id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (cancelled) return;
+        if (detailRes.ok) setFolio(await detailRes.json());
+      })
+      .catch(() => { if (!cancelled) setFolio(null); })
+      .finally(() => { if (!cancelled) setLoadingFolio(false); });
+    return () => { cancelled = true; };
+  }, [activeBooking, restaurantId, token]);
+
+  // Close on ESC for keyboard users
+  useEffect(() => {
+    if (!room) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [room, onClose]);
+
+  if (!room) return null;
+
+  // Visual palette per status (matches the tile colour)
+  const statusBadge = (status: string) => {
+    const tones: Record<string, { bg: string; text: string }> = {
+      OCCUPIED:    { bg: 'bg-amber-500/15',  text: 'text-amber-300' },
+      VACANT:      { bg: 'bg-emerald-500/15', text: 'text-emerald-300' },
+      CLEANING:    { bg: 'bg-sky-500/15',     text: 'text-sky-300' },
+      MAINTENANCE: { bg: 'bg-rose-500/15',    text: 'text-rose-300' },
+      BLOCKED:     { bg: 'bg-slate-500/15',   text: 'text-slate-300' },
+    };
+    return tones[status] || tones.BLOCKED;
+  };
+  const sb = statusBadge(room.status);
+
+  return (
+    <div className="fixed inset-0 z-[100]">
+      {/* Backdrop — clicking it closes the drawer */}
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+
+      {/* Slide-over panel */}
+      <motion.aside
+        initial={{ x: '100%' }}
+        animate={{ x: 0 }}
+        exit={{ x: '100%' }}
+        transition={{ type: 'spring', damping: 28, stiffness: 280 }}
+        className="absolute top-0 right-0 h-full w-full sm:max-w-md bg-[#0c1628] shadow-2xl overflow-y-auto"
+        style={{
+          background: 'radial-gradient(800px 400px at 20% 0%, #11213f 0%, transparent 60%), linear-gradient(180deg, #0c1628 0%, #0a1020 100%)',
+        }}
+      >
+        {/* Header */}
+        <div className="sticky top-0 z-10 px-5 py-4 border-b border-white/10 backdrop-blur-md bg-[#0a1020]/80 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div>
+              <p className="text-[10px] font-mono uppercase tracking-widest text-[#f0ede8]/55">Room</p>
+              <h2 className="text-xl font-bold font-serif text-[#f0ede8]">
+                {room.room_number || room.name}
+                {room.type && <span className="text-sm font-normal text-[#f0ede8]/55 ml-2">· {room.type}</span>}
+              </h2>
+            </div>
+            <span className={cn('text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', sb.bg, sb.text)}>
+              {room.status}
+            </span>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-lg text-[#f0ede8]/70" aria-label="Close drawer">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-5">
+          {/* Room meta */}
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div className="rounded-xl bg-white/5 border border-white/10 p-3">
+              <p className="text-[9px] font-mono uppercase tracking-widest text-[#f0ede8]/45">Base rate</p>
+              <p className="font-mono text-base font-bold text-[#f4b07a] mt-0.5">
+                ₹{Number(room.base_rate || 0).toLocaleString('en-IN')}
+              </p>
+            </div>
+            <div className="rounded-xl bg-white/5 border border-white/10 p-3">
+              <p className="text-[9px] font-mono uppercase tracking-widest text-[#f0ede8]/45">Capacity</p>
+              <p className="text-base font-bold text-[#f0ede8] mt-0.5">{room.capacity || '—'} guests</p>
+            </div>
+          </div>
+
+          {/* Active booking */}
+          {activeBooking ? (
+            <section className="rounded-2xl bg-white/5 border border-amber-400/30 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-amber-300">Current guest</h3>
+                <span className="text-[10px] font-mono text-amber-300/70">{activeBooking.guest_nationality || 'IN'}</span>
+              </div>
+              <div>
+                <p className="text-base font-bold text-[#f0ede8]">{activeBooking.guest_name}</p>
+                <p className="text-[11px] text-[#f0ede8]/60">
+                  {activeBooking.guest_phone ? `📞 ${activeBooking.guest_phone}` : ''}
+                  {activeBooking.guest_email ? `  ·  ${activeBooking.guest_email}` : ''}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <p className="text-[9px] font-mono uppercase tracking-widest text-[#f0ede8]/45">Check-in</p>
+                  <p className="text-[#f0ede8] mt-0.5">
+                    {activeBooking.check_in_date ? new Date(activeBooking.check_in_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[9px] font-mono uppercase tracking-widest text-[#f0ede8]/45">Check-out</p>
+                  <p className="text-[#f0ede8] mt-0.5">
+                    {activeBooking.check_out_date ? new Date(activeBooking.check_out_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[9px] font-mono uppercase tracking-widest text-[#f0ede8]/45">Guests</p>
+                  <p className="text-[#f0ede8] mt-0.5">{activeBooking.num_guests || 1}</p>
+                </div>
+                <div>
+                  <p className="text-[9px] font-mono uppercase tracking-widest text-[#f0ede8]/45">Room rate</p>
+                  <p className="text-[#f0ede8] mt-0.5 font-mono">₹{Number(activeBooking.room_rate || 0).toLocaleString('en-IN')}</p>
+                </div>
+              </div>
+              {activeBooking.special_requests && (
+                <div className="rounded-lg bg-amber-500/10 border border-amber-400/20 px-3 py-2 text-[11px] text-amber-200">
+                  <strong className="text-amber-100">Special:</strong> {activeBooking.special_requests}
+                </div>
+              )}
+              {onCheckOutClick && (
+                <button
+                  onClick={() => onCheckOutClick(activeBooking)}
+                  className="w-full mt-2 py-2.5 rounded-xl bg-amber-500 text-[#0a1020] text-xs font-bold uppercase tracking-widest hover:bg-amber-400 transition-all"
+                >
+                  Check Out · Settle Folio
+                </button>
+              )}
+            </section>
+          ) : upcomingBooking ? (
+            <section className="rounded-2xl bg-white/5 border border-sky-400/30 p-4">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-sky-300 mb-2">Next booking</h3>
+              <p className="text-base font-bold text-[#f0ede8]">{upcomingBooking.guest_name}</p>
+              <p className="text-[11px] text-[#f0ede8]/60 mt-0.5">
+                Check-in {new Date(upcomingBooking.check_in_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                {' · '}
+                {upcomingBooking.num_guests || 1} guest{(upcomingBooking.num_guests || 1) === 1 ? '' : 's'}
+              </p>
+            </section>
+          ) : (
+            <section className="rounded-2xl bg-white/5 border border-white/10 p-4 text-center">
+              <p className="text-xs text-[#f0ede8]/60">No active booking on this room.</p>
+              {room.status === 'VACANT' && (
+                <p className="text-[10px] text-[#f0ede8]/40 mt-1">Use the Hotel Bookings tab to create one.</p>
+              )}
+            </section>
+          )}
+
+          {/* Folio with entries */}
+          {activeBooking && (
+            <section>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60">Live folio</h3>
+                {folio && folio.id && (
+                  <a
+                    href={`/api/restaurant/${restaurantId}/hotel/folios/${folio.id}/invoice-pdf`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="text-[10px] font-bold uppercase tracking-widest text-[#f4b07a] hover:text-[#f4b07a]/80"
+                  >
+                    Open PDF ↗
+                  </a>
+                )}
+              </div>
+              <div className="rounded-2xl bg-white/5 border border-white/10 p-4">
+                {loadingFolio ? (
+                  <p className="text-xs text-[#f0ede8]/50">Loading folio…</p>
+                ) : !folio ? (
+                  <p className="text-xs text-[#f0ede8]/50">No open folio yet — entries will appear as room nights and services are posted.</p>
+                ) : (
+                  <>
+                    <div className="space-y-1.5 mb-3 max-h-60 overflow-y-auto pr-1">
+                      {(folio.entries || []).length === 0 ? (
+                        <p className="text-xs text-[#f0ede8]/50 italic">No line items posted yet.</p>
+                      ) : (folio.entries || []).map((e: any, i: number) => (
+                        <div key={i} className="flex items-start justify-between text-xs gap-2">
+                          <div className="min-w-0">
+                            <p className="text-[#f0ede8] truncate">{e.item_name}</p>
+                            <p className="text-[10px] text-[#f0ede8]/45 font-mono">
+                              {e.quantity} × ₹{Number(e.unit_price || 0).toLocaleString('en-IN')}
+                              {e.entry_type ? ` · ${e.entry_type}` : ''}
+                            </p>
+                          </div>
+                          <span className="font-mono text-[#f0ede8] shrink-0">
+                            ₹{Number(e.amount || 0).toLocaleString('en-IN')}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {/* Totals strip */}
+                    <div className="border-t border-white/10 pt-3 space-y-1 text-xs">
+                      <div className="flex justify-between text-[#f0ede8]/70">
+                        <span>Subtotal</span>
+                        <span className="font-mono">₹{Number(folio.subtotal || 0).toLocaleString('en-IN')}</span>
+                      </div>
+                      {Number(folio.gst_amount || 0) > 0 && (
+                        <div className="flex justify-between text-[#f0ede8]/70">
+                          <span>GST</span>
+                          <span className="font-mono">₹{Number(folio.gst_amount || 0).toLocaleString('en-IN')}</span>
+                        </div>
+                      )}
+                      {Number(folio.discount || 0) > 0 && (
+                        <div className="flex justify-between text-rose-300">
+                          <span>Discount</span>
+                          <span className="font-mono">− ₹{Number(folio.discount || 0).toLocaleString('en-IN')}</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between text-base font-bold pt-2 border-t border-white/10">
+                        <span className="text-[#f0ede8]">Grand total</span>
+                        <span className="font-mono text-[#f4b07a]">₹{Number(folio.grand_total || 0).toLocaleString('en-IN')}</span>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* Recent history (last 3 checkouts on this room) */}
+          {recentHistory.length > 0 && (
+            <section>
+              <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60 mb-2">Recent stays</h3>
+              <div className="space-y-1.5">
+                {recentHistory.map(h => (
+                  <div key={h.id} className="rounded-lg bg-white/5 border border-white/10 px-3 py-2 flex items-center justify-between text-xs">
+                    <div className="min-w-0">
+                      <p className="text-[#f0ede8] truncate">{h.guest_name}</p>
+                      <p className="text-[10px] text-[#f0ede8]/45 font-mono">
+                        {new Date(h.check_in_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                        {' → '}
+                        {new Date(h.check_out_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                      </p>
+                    </div>
+                    <span className="font-mono text-[#f4b07a] shrink-0">₹{Number(h.total_amount || 0).toLocaleString('en-IN')}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+      </motion.aside>
+    </div>
+  );
+};
+
+/* ─── HotelInvoicesView ───────────────────────────────────────────
+   Hotel-mode replacement for the restaurant Invoices tab. Renders
+   the list of settled (and optionally open / voided) folios as
+   line items in a familiar invoice grid. Each row has a "View PDF"
+   action that opens the existing /folios/:id/invoice-pdf endpoint
+   in a new tab. Search filter matches guest name OR folio id.   */
+const HotelInvoicesView: React.FC<{
+  restaurantId: string;
+  token: string;
+}> = ({ restaurantId, token }) => {
+  const [folios, setFolios] = useState<any[]>([]);
+  const [statusFilter, setStatusFilter] = useState<'all' | 'settled' | 'open' | 'voided'>('settled');
+  const [search, setSearch] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const fetchFolios = useCallback(async () => {
+    setLoading(true);
+    try {
+      const qs = statusFilter === 'all' ? '' : `?status=${statusFilter}`;
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setFolios(await res.json());
+    } finally {
+      setLoading(false);
+    }
+  }, [restaurantId, token, statusFilter]);
+
+  useEffect(() => { fetchFolios(); }, [fetchFolios]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return folios;
+    return folios.filter(f =>
+      String(f.guest_name || '').toLowerCase().includes(q) ||
+      String(f.id || '').toLowerCase().includes(q) ||
+      String(f.room_name || '').toLowerCase().includes(q)
+    );
+  }, [folios, search]);
+
+  const totalSettled = folios.filter(f => f.status === 'settled').reduce((s, f) => s + Number(f.grand_total || 0), 0);
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Hotel Invoices</h2>
+          <p className="text-xs text-[#9c8e85] mt-1">
+            Settled folios are the hotel equivalent of an invoice — same audit trail, same PDF.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={fetchFolios}
+            className="flex items-center gap-2 px-4 py-2 rounded-2xl border border-[#cc5a16]/20 text-[#6b5d52] hover:bg-[#faf7f2] text-xs font-bold uppercase tracking-widest transition-all"
+          >
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
+        </div>
+      </div>
+
+      {/* Stats strip */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="rounded-2xl bg-white border border-[#cc5a16]/10 p-4 shadow-sm">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Settled folios</p>
+          <p className="text-2xl font-bold text-[#1a1208] mt-1">{folios.filter(f => f.status === 'settled').length}</p>
+        </div>
+        <div className="rounded-2xl bg-white border border-[#cc5a16]/10 p-4 shadow-sm">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Open folios</p>
+          <p className="text-2xl font-bold text-[#1a1208] mt-1">{folios.filter(f => f.status === 'open').length}</p>
+        </div>
+        <div className="rounded-2xl bg-white border border-[#cc5a16]/10 p-4 shadow-sm">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Total settled value</p>
+          <p className="text-2xl font-bold text-[#cc5a16] mt-1 font-mono">
+            ₹{totalSettled.toLocaleString('en-IN')}
+          </p>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+        <div className="flex gap-1 bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shrink-0">
+          {(['all', 'settled', 'open', 'voided'] as const).map(s => (
+            <button
+              key={s}
+              onClick={() => setStatusFilter(s)}
+              className={cn(
+                'px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest transition-all',
+                statusFilter === s
+                  ? 'bg-[#cc5a16] text-white shadow'
+                  : 'text-[#6b5d52] hover:bg-[#faf7f2]'
+              )}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+        <div className="relative flex-1">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
+          <input
+            type="text"
+            placeholder="Search guest, folio ID, or room…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="w-full bg-white border border-[#cc5a16]/15 rounded-xl pl-9 pr-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+          />
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-[#faf7f2]">
+            <tr>
+              <th className="text-left py-3 px-4 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Folio</th>
+              <th className="text-left py-3 px-4 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Guest</th>
+              <th className="text-left py-3 px-4 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] hidden md:table-cell">Room</th>
+              <th className="text-left py-3 px-4 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] hidden md:table-cell">Stay</th>
+              <th className="text-right py-3 px-4 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Total</th>
+              <th className="text-left py-3 px-4 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Status</th>
+              <th className="text-right py-3 px-4 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="text-center py-12 text-sm text-[#9c8e85] italic">
+                  {loading ? 'Loading folios…' : 'No folios match your filters.'}
+                </td>
+              </tr>
+            ) : filtered.map(f => {
+              const statusColors: Record<string, string> = {
+                settled: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                open:    'bg-amber-50 text-amber-700 border-amber-200',
+                voided:  'bg-rose-50 text-rose-700 border-rose-200',
+              };
+              const sc = statusColors[f.status] || 'bg-slate-50 text-slate-700 border-slate-200';
+              return (
+                <tr key={f.id} className="border-t border-[#cc5a16]/5 hover:bg-[#faf7f2]/50 transition-colors">
+                  <td className="py-3 px-4 font-mono text-[11px] text-[#6b5d52] truncate max-w-[140px]">
+                    {f.id}
+                  </td>
+                  <td className="py-3 px-4 text-[#1a1208] font-semibold">{f.guest_name || '—'}</td>
+                  <td className="py-3 px-4 text-[#6b5d52] hidden md:table-cell">{f.room_name || '—'}</td>
+                  <td className="py-3 px-4 text-[11px] text-[#9c8e85] hidden md:table-cell">
+                    {f.check_in_date ? new Date(f.check_in_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '—'}
+                    {' → '}
+                    {f.check_out_date ? new Date(f.check_out_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '—'}
+                  </td>
+                  <td className="py-3 px-4 text-right font-mono font-bold text-[#cc5a16]">
+                    ₹{Number(f.grand_total || 0).toLocaleString('en-IN')}
+                  </td>
+                  <td className="py-3 px-4">
+                    <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full border', sc)}>
+                      {f.status}
+                    </span>
+                  </td>
+                  <td className="py-3 px-4 text-right">
+                    {f.status !== 'voided' && (
+                      <a
+                        href={`/api/restaurant/${restaurantId}/hotel/folios/${f.id}/invoice-pdf`}
+                        target="_blank" rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2] transition-colors"
+                      >
+                        <Eye size={12} /> PDF
+                      </a>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 };
