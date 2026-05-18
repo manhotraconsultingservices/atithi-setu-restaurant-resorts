@@ -6777,6 +6777,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [odApplyGst, setOdApplyGst]           = useState(false);
   const [odSaving, setOdSaving]               = useState(false);
   const [odSearchActive, setOdSearchActive]   = useState<number | null>(null);
+  // ── POS-style tile UI state for the on-demand invoice modal ────────────
+  // The modal's UX shifted from "type item names in rows" to "tap menu
+  // tiles like a POSist / Petpooja terminal." These three fields drive
+  // the new layout; the data shape of odInvoiceItems / odCustomer etc.
+  // is unchanged so the backend payload + preview-totals fetch + save
+  // handler all continue to work as-is.
+  const [odCategoryFilter, setOdCategoryFilter] = useState<string>('ALL');
+  const [odTileSearch, setOdTileSearch]         = useState<string>('');
+  const [showCustomItemForm, setShowCustomItemForm] = useState(false);
+  const [customItemDraft, setCustomItemDraft]   = useState<{name:string;qty:number;price:number}>({name:'',qty:1,price:0});
   // Server-computed preview for the manual-invoice modal. The form fields
   // are still inputs; the totals (incl. multi-tax breakdown + auto-loyalty
   // discount) are computed by the same code path that will run when the
@@ -6817,6 +6827,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showOnDemandModal, restaurantId, odInvoiceItems, odCustomer.phone, odDiscount, odSvcPct, odGstPct, odApplyGst]);
+
+  // Reset the cart + filters every time the modal opens. Without this,
+  // an aborted/closed invoice carries items into the next session,
+  // surprising the next cashier. The empty `[]` initial state pairs
+  // with the new tap-to-add UI where there's no "empty row" placeholder.
+  // odCustomer is intentionally NOT reset — a cashier may type the
+  // name first and then start tapping tiles.
+  useEffect(() => {
+    if (!showOnDemandModal) return;
+    setOdInvoiceItems([]);
+    setOdCategoryFilter('ALL');
+    setOdTileSearch('');
+    setShowCustomItemForm(false);
+    setCustomItemDraft({ name: '', qty: 1, price: 0 });
+    setOdDiscount(0);
+    setOdSvcPct(0);
+    setOdApplyGst(false);
+  }, [showOnDemandModal]);
+
   // Type-ahead state for the Edit-Invoice modal (separate from the New-Invoice modal)
   const [invEditSearchActive, setInvEditSearchActive] = useState<number | null>(null);
   // Settings save UX — "Saving…" button + "✓ Saved" banner for 3s
@@ -17116,260 +17145,538 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           );
         })()}
 
-        {/* ── On-Demand Invoice Modal ── */}
-        {showOnDemandModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl flex flex-col" style={{ maxHeight: '90vh' }}>
-              <div className="flex items-center justify-between px-6 py-4 border-b border-[#cc5a16]/10 shrink-0">
-                <h3 className="font-bold text-[#1a1208] flex items-center gap-2"><Receipt size={16} className="text-[#cc5a16]" /> New On-Demand Invoice</h3>
-                <button onClick={() => setShowOnDemandModal(false)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] transition-all"><X size={16} /></button>
-              </div>
-              <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
-                {/* Customer details */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Customer Name</label>
-                    <input type="text" placeholder="Optional" value={odCustomer.name}
-                      onChange={e => setOdCustomer(p => ({...p, name: e.target.value}))}
-                      className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+        {/* ── On-Demand Invoice Modal — POS-style tile UI ───────────────
+            Designed for touch terminals: cashier taps menu tiles in the
+            centre, items land in the cart on the right, customer +
+            adjustments live in the cart footer. The save handler and
+            server-side preview/computeInvoiceTotals are unchanged from
+            the previous (form-based) implementation — only the layout
+            switched. Mobile collapses to a single-column scroll.        */}
+        {showOnDemandModal && (() => {
+          // Categories derived live from the menu. "All" is always
+          // first; the rest are sorted by item count desc so the
+          // busiest categories show at the top.
+          const availableMenu = menu.filter(m => m.available !== false);
+          const catCounts = new Map<string, number>();
+          availableMenu.forEach(m => {
+            const c = String(m.category || 'Uncategorised').trim() || 'Uncategorised';
+            catCounts.set(c, (catCounts.get(c) || 0) + 1);
+          });
+          const categories: { id: string; label: string; count: number }[] = [
+            { id: 'ALL', label: 'All', count: availableMenu.length },
+            ...Array.from(catCounts.entries())
+              .sort((a, b) => b[1] - a[1])
+              .map(([label, count]) => ({ id: label, label, count })),
+          ];
+
+          // Tile filtering — category + free-text. Free-text search is
+          // a substring match against both name and category so typing
+          // "beverages" surfaces every drink (same behaviour as the old
+          // row-search dropdown).
+          const q = odTileSearch.trim().toLowerCase();
+          const filteredTiles = availableMenu.filter(m => {
+            const cat = String(m.category || 'Uncategorised');
+            if (odCategoryFilter !== 'ALL' && cat !== odCategoryFilter) return false;
+            if (!q) return true;
+            return m.name.toLowerCase().includes(q) || cat.toLowerCase().includes(q);
+          });
+
+          // Tap a tile → upsert into cart by (name, price). The price
+          // tuple matters because the same name with a different size
+          // is a different line. Existing match increments qty; new
+          // item appends.
+          const addItemFromTile = (m: MenuItem) => {
+            setOdInvoiceItems(prev => {
+              const idx = prev.findIndex(it => it.name === m.name && Number(it.price) === Number(m.price));
+              if (idx >= 0) {
+                return prev.map((it, i) => i === idx ? { ...it, qty: it.qty + 1 } : it);
+              }
+              return [...prev, { name: m.name, qty: 1, price: Number(m.price) }];
+            });
+          };
+          const bumpCartQty = (index: number, delta: number) => {
+            setOdInvoiceItems(prev => {
+              const cur = prev[index];
+              if (!cur) return prev;
+              const next = cur.qty + delta;
+              if (next <= 0) return prev.filter((_, i) => i !== index);
+              return prev.map((it, i) => i === index ? { ...it, qty: next } : it);
+            });
+          };
+          const addCustomItem = () => {
+            const n = customItemDraft.name.trim();
+            const p = Math.max(0, Number(customItemDraft.price) || 0);
+            const qty = Math.max(1, Number(customItemDraft.qty) || 1);
+            if (!n || p <= 0) return;
+            setOdInvoiceItems(prev => [...prev, { name: n, qty, price: p }]);
+            setCustomItemDraft({ name: '', qty: 1, price: 0 });
+            setShowCustomItemForm(false);
+          };
+
+          const cartCount = odInvoiceItems.reduce((n, it) => n + it.qty, 0);
+          const p = odPreview;
+
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-sm">
+              <div
+                className="bg-[#fdfaf4] rounded-3xl shadow-2xl w-full max-w-7xl flex flex-col overflow-hidden"
+                style={{ maxHeight: '95vh' }}
+              >
+                {/* ─── Header: title · customer strip · close ─────────── */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between px-4 sm:px-6 py-3 border-b border-[#cc5a16]/10 shrink-0 gap-3 bg-white">
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div className="w-8 h-8 rounded-lg bg-[#cc5a16] flex items-center justify-center">
+                      <Receipt size={15} className="text-white" />
+                    </div>
+                    <h3 className="font-bold font-serif text-lg text-[#1a1208]">New Invoice</h3>
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Phone</label>
-                    <input type="text" placeholder="Optional" value={odCustomer.phone}
-                      onChange={e => setOdCustomer(p => ({...p, phone: e.target.value}))}
-                      className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  <div className="grid grid-cols-3 gap-2 flex-1 sm:max-w-xl">
+                    <input
+                      type="text" placeholder="Customer name"
+                      value={odCustomer.name}
+                      onChange={e => setOdCustomer(p => ({ ...p, name: e.target.value }))}
+                      className="border border-[#cc5a16]/20 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                    <input
+                      type="tel" placeholder="Phone (loyalty)"
+                      value={odCustomer.phone}
+                      onChange={e => setOdCustomer(p => ({ ...p, phone: e.target.value }))}
+                      className="border border-[#cc5a16]/20 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                    <input
+                      type="text" placeholder="Table / ref"
+                      value={odCustomer.reference}
+                      onChange={e => setOdCustomer(p => ({ ...p, reference: e.target.value }))}
+                      className="border border-[#cc5a16]/20 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
                   </div>
-                  <div className="col-span-2">
-                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Table / Reference</label>
-                    <input type="text" placeholder="Table name or reference" value={odCustomer.reference}
-                      onChange={e => setOdCustomer(p => ({...p, reference: e.target.value}))}
-                      className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                  </div>
+                  <button
+                    onClick={() => setShowOnDemandModal(false)}
+                    className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] transition-all shrink-0 self-end sm:self-auto"
+                    aria-label="Close"
+                  >
+                    <X size={16} />
+                  </button>
                 </div>
 
-                {/* Items */}
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Items</label>
-                    <button
-                      onClick={() => setOdInvoiceItems(p => [...p, {name:'',qty:1,price:0}])}
-                      className="text-xs font-bold text-[#cc5a16] hover:underline flex items-center gap-1"
-                    ><Plus size={12} /> Add Item</button>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="grid grid-cols-12 gap-2 text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] px-1">
-                      <span className="col-span-6">Item Name</span><span className="col-span-2 text-center">Qty</span><span className="col-span-3 text-right">Price (₹)</span><span className="col-span-1"/>
+                {/* ─── Body: 3-col on desktop, stacked on mobile ──────── */}
+                <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+
+                  {/* ◆ LEFT — Categories rail (≥ lg only; chips on mobile) */}
+                  <aside className="hidden lg:flex lg:flex-col lg:w-44 border-r border-[#cc5a16]/10 bg-white overflow-y-auto shrink-0">
+                    <p className="px-4 pt-4 pb-2 font-mono text-[10px] uppercase tracking-widest text-[#9c8e85] font-bold">
+                      Categories
+                    </p>
+                    <div className="flex flex-col">
+                      {categories.map(c => {
+                        const active = odCategoryFilter === c.id;
+                        return (
+                          <button
+                            key={c.id}
+                            onClick={() => setOdCategoryFilter(c.id)}
+                            className={cn(
+                              "text-left px-4 py-2.5 text-sm flex items-center justify-between border-l-4 transition-all",
+                              active
+                                ? "border-[#cc5a16] bg-[#cc5a16]/5 text-[#1a1208] font-bold"
+                                : "border-transparent text-[#6b5d52] hover:bg-[#faf7f2]"
+                            )}
+                          >
+                            <span className="truncate">{c.label}</span>
+                            <span className={cn(
+                              "ml-2 text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded-full shrink-0",
+                              active ? "bg-[#cc5a16] text-white" : "bg-[#faf7f2] text-[#9c8e85]"
+                            )}>
+                              {c.count}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
-                    {odInvoiceItems.map((it, i) => (
-                      <div key={i} className="grid grid-cols-12 gap-2 items-center">
-                        <div className="col-span-6 relative">
-                          <input type="text" placeholder="Item name or search menu…" value={it.name}
-                            onChange={e => setOdInvoiceItems(p => p.map((x,j) => j===i ? {...x, name: e.target.value} : x))}
-                            onFocus={() => setOdSearchActive(i)}
-                            onBlur={() => setTimeout(() => setOdSearchActive(null), 150)}
-                            className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                          {odSearchActive === i && it.name.length > 0 && (() => {
-                            // Match by name OR category — type "beverages" to see all coffees, etc.
-                            const q = it.name.toLowerCase();
-                            const hits = menu.filter(m =>
-                              m.available !== false && (
-                                m.name.toLowerCase().includes(q) ||
-                                String(m.category || '').toLowerCase().includes(q)
-                              )
-                            ).slice(0, 50);
-                            return hits.length > 0 ? (
-                              <div className="absolute top-full left-0 mt-1 z-[300] w-full bg-white rounded-xl shadow-2xl border border-[#cc5a16]/10 max-h-52 overflow-y-auto">
-                                {hits.map(m => (
-                                  <button key={m.id} type="button"
-                                    onMouseDown={() => {
-                                      setOdInvoiceItems(p => p.map((x,j) => j===i ? {...x, name: m.name, price: m.price} : x));
-                                      setOdSearchActive(null);
-                                    }}
-                                    className="w-full flex justify-between items-center px-3 py-2 text-sm text-[#3d3128] hover:bg-[#faf7f2] transition-colors first:rounded-t-xl last:rounded-b-xl">
-                                    <span className="flex flex-col items-start min-w-0">
-                                      <span className="truncate">{m.name}</span>
-                                      {m.category && (
-                                        <span className="text-[10px] text-[#9c8e85] uppercase tracking-wider">{m.category}</span>
-                                      )}
-                                    </span>
-                                    <span className="text-xs font-semibold text-[#cc5a16] ml-2 shrink-0">₹{m.price}</span>
-                                  </button>
-                                ))}
-                              </div>
-                            ) : null;
-                          })()}
+                  </aside>
+
+                  {/* ◆ CENTER — search + tiles */}
+                  <section className="flex-1 flex flex-col overflow-hidden">
+                    {/* Mobile category chips (hidden ≥ lg) */}
+                    <div className="lg:hidden px-3 pt-3 flex gap-2 overflow-x-auto scrollbar-hide">
+                      {categories.map(c => {
+                        const active = odCategoryFilter === c.id;
+                        return (
+                          <button
+                            key={c.id}
+                            onClick={() => setOdCategoryFilter(c.id)}
+                            className={cn(
+                              "shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap",
+                              active
+                                ? "bg-[#cc5a16] text-white"
+                                : "bg-white border border-[#cc5a16]/15 text-[#6b5d52]"
+                            )}
+                          >
+                            {c.label} · {c.count}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Search bar */}
+                    <div className="px-3 sm:px-4 pt-3 pb-2 shrink-0">
+                      <div className="relative">
+                        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
+                        <input
+                          type="text" placeholder="Search items… (try 'coffee' or 'beverages')"
+                          value={odTileSearch}
+                          onChange={e => setOdTileSearch(e.target.value)}
+                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl pl-9 pr-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                          autoFocus
+                        />
+                      </div>
+                    </div>
+
+                    {/* Tile grid — scrollable */}
+                    <div className="flex-1 overflow-y-auto px-3 sm:px-4 pb-4">
+                      {filteredTiles.length === 0 && !showCustomItemForm && (
+                        <div className="text-center py-12 text-[#9c8e85] text-sm">
+                          {menu.length === 0
+                            ? <>No menu items yet. Use <strong className="text-[#cc5a16]">+ Custom item</strong> below to bill anything.</>
+                            : <>No items match "{odTileSearch}" in <strong>{odCategoryFilter === 'ALL' ? 'any category' : odCategoryFilter}</strong>.</>
+                          }
                         </div>
-                        <input type="number" min="1" value={it.qty}
-                          onChange={e => setOdInvoiceItems(p => p.map((x,j) => j===i ? {...x, qty: Number(e.target.value)||1} : x))}
-                          className="col-span-2 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                        <input type="number" min="0" step="0.01" value={it.price}
-                          onChange={e => setOdInvoiceItems(p => p.map((x,j) => j===i ? {...x, price: Number(e.target.value)||0} : x))}
-                          className="col-span-3 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-right outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                        <button onClick={() => setOdInvoiceItems(p => p.filter((_,j) => j!==i))} disabled={odInvoiceItems.length===1}
-                          className="col-span-1 flex justify-center text-[#c5b9b2] hover:text-red-500 disabled:opacity-20 transition-colors">
-                          <X size={14} />
+                      )}
+                      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-3">
+                        {filteredTiles.map(m => {
+                          // Light "in cart" indicator so cashier sees what's been tapped
+                          const inCart = odInvoiceItems.find(it => it.name === m.name && Number(it.price) === Number(m.price));
+                          return (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => addItemFromTile(m)}
+                              className={cn(
+                                "relative bg-white border-2 rounded-2xl p-3 sm:p-4 text-left transition-all hover:shadow-md active:scale-95",
+                                inCart
+                                  ? "border-[#cc5a16] shadow-sm"
+                                  : "border-[#cc5a16]/15 hover:border-[#cc5a16]/40"
+                              )}
+                              style={{ minHeight: 86 }}
+                            >
+                              {inCart && (
+                                <span className="absolute top-2 right-2 w-6 h-6 rounded-full bg-[#cc5a16] text-white text-[11px] font-bold flex items-center justify-center">
+                                  {inCart.qty}
+                                </span>
+                              )}
+                              <p className="font-bold text-[#1a1208] text-sm leading-tight line-clamp-2 pr-7">
+                                {m.name}
+                              </p>
+                              <p className="font-mono text-[#cc5a16] text-base font-bold mt-1.5">
+                                ₹{Number(m.price).toFixed(0)}
+                              </p>
+                              {m.category && (
+                                <p className="text-[9px] font-mono uppercase tracking-widest text-[#9c8e85] mt-0.5 truncate">
+                                  {m.category}
+                                </p>
+                              )}
+                            </button>
+                          );
+                        })}
+
+                        {/* Custom item tile — always last so cashier can
+                            invoice a one-off item that isn't in the menu */}
+                        <button
+                          type="button"
+                          onClick={() => setShowCustomItemForm(true)}
+                          className="border-2 border-dashed border-[#cc5a16]/40 rounded-2xl p-3 sm:p-4 text-center hover:border-[#cc5a16] hover:bg-[#faf7f2] transition-all active:scale-95 flex flex-col items-center justify-center gap-1"
+                          style={{ minHeight: 86 }}
+                        >
+                          <Plus size={20} className="text-[#cc5a16]" />
+                          <p className="text-sm font-bold text-[#1a1208]">Custom item</p>
+                          <p className="text-[10px] text-[#9c8e85] font-mono uppercase tracking-widest">
+                            Off-menu
+                          </p>
                         </button>
                       </div>
-                    ))}
-                  </div>
-                </div>
 
-                {/* Adjustments */}
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Discount (₹)</label>
-                    <input type="number" min="0" value={odDiscount} onChange={e => setOdDiscount(Number(e.target.value)||0)}
-                      className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Service (%)</label>
-                    <input type="number" min="0" value={odSvcPct} onChange={e => setOdSvcPct(Number(e.target.value)||0)}
-                      className="w-full border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">GST (%)</label>
-                    <div className="flex items-center gap-2">
-                      <input type="number" min="0" value={odGstPct} onChange={e => setOdGstPct(Number(e.target.value)||0)}
-                        className="min-w-0 flex-1 border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
-                      <button onClick={() => setOdApplyGst(v => !v)}
-                        className={cn("shrink-0 px-3 py-2 rounded-xl text-[11px] font-bold transition-all", odApplyGst ? "bg-[#cc5a16] text-white" : "bg-[#0d0a07]/5 text-[#6b5d52]")}>
-                        {odApplyGst ? 'ON' : 'OFF'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Live total — server-computed, multi-tax + auto-loyalty aware */}
-                {(() => {
-                  const p = odPreview;
-                  const sub = p ? Number(p.subtotal || 0) : odInvoiceItems.reduce((s,it) => s + it.price * it.qty, 0);
-                  if (!p) {
-                    return (
-                      <div className="bg-[#faf7f2] rounded-2xl p-4 text-sm text-[#9c8e85] text-center">
-                        {sub > 0 ? (odPreviewLoading ? 'Computing totals…' : 'Add items to see totals') : 'Add items to see totals'}
-                      </div>
-                    );
-                  }
-                  const loy = p.loyalty;
-                  return (
-                    <div className="bg-[#faf7f2] rounded-2xl p-4 space-y-1.5 text-sm">
-                      {loy && loy.tier_name && (
-                        <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 -mx-1 mb-2 flex items-center gap-2">
-                          <Sparkles size={14} className="text-amber-700 shrink-0" />
-                          <div className="text-[12px] text-amber-900">
-                            <strong>{loy.tier_name}</strong> member — <strong>{Number(loy.discount_percent || 0)}% off</strong> auto-applied
-                            {Number(p.loyalty_discount || 0) > Number(odDiscount || 0) &&
-                              ` (₹${Number(p.loyalty_discount).toFixed(2)} discount)`}
+                      {/* Inline custom-item popover (shown when "+ Custom" is tapped) */}
+                      {showCustomItemForm && (
+                        <div className="mt-4 bg-white border border-[#cc5a16]/30 rounded-2xl p-4 shadow-md">
+                          <div className="flex items-center justify-between mb-3">
+                            <p className="text-sm font-bold text-[#1a1208]">Add a custom item</p>
+                            <button
+                              onClick={() => setShowCustomItemForm(false)}
+                              className="p-1 hover:bg-[#faf7f2] rounded-lg text-[#9c8e85]"
+                              aria-label="Cancel"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-12 gap-2">
+                            <input
+                              type="text" placeholder="Item name"
+                              value={customItemDraft.name}
+                              onChange={e => setCustomItemDraft(d => ({ ...d, name: e.target.value }))}
+                              autoFocus
+                              className="col-span-6 border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                            />
+                            <input
+                              type="number" min="1" placeholder="Qty"
+                              value={customItemDraft.qty}
+                              onChange={e => setCustomItemDraft(d => ({ ...d, qty: Number(e.target.value) || 1 }))}
+                              className="col-span-2 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center outline-none focus:ring-2 ring-[#cc5a16]/20"
+                            />
+                            <input
+                              type="number" min="0" step="0.01" placeholder="Price"
+                              value={customItemDraft.price || ''}
+                              onChange={e => setCustomItemDraft(d => ({ ...d, price: Number(e.target.value) || 0 }))}
+                              onKeyDown={e => { if (e.key === 'Enter') addCustomItem(); }}
+                              className="col-span-3 border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-right outline-none focus:ring-2 ring-[#cc5a16]/20"
+                            />
+                            <button
+                              onClick={addCustomItem}
+                              disabled={!customItemDraft.name.trim() || (Number(customItemDraft.price) || 0) <= 0}
+                              className="col-span-1 bg-[#cc5a16] text-white rounded-xl flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[#a84612]"
+                              aria-label="Add"
+                            >
+                              <Plus size={14} />
+                            </button>
                           </div>
                         </div>
                       )}
-                      <div className="flex justify-between text-[#6b5d52]"><span>Subtotal</span><span className="font-mono">₹{Number(p.subtotal || 0).toFixed(2)}</span></div>
-                      {Number(p.totalDiscount || 0) > 0 && (
-                        <div className="flex justify-between text-red-600">
-                          <span>
-                            {loy && Number(p.loyaltyDiscount) >= Number(p.manualDiscount) - 0.01
-                              ? `${loy.tier_name} discount (${Number(loy.discount_percent || 0)}%)`
-                              : 'Discount'}
-                          </span>
-                          <span className="font-mono">−₹{Number(p.totalDiscount).toFixed(2)}</span>
+                    </div>
+                  </section>
+
+                  {/* ◆ RIGHT — cart, adjustments, live total */}
+                  <aside className="lg:w-80 border-t lg:border-t-0 lg:border-l border-[#cc5a16]/10 bg-white flex flex-col overflow-hidden shrink-0 max-h-[55vh] lg:max-h-none">
+                    <div className="px-4 py-3 border-b border-[#cc5a16]/10 shrink-0 flex items-center justify-between">
+                      <p className="font-bold text-[#1a1208] text-sm flex items-center gap-2">
+                        <ShoppingCart size={14} className="text-[#cc5a16]" /> Cart
+                      </p>
+                      <span className="text-[10px] font-mono uppercase tracking-widest text-[#9c8e85] tabular-nums">
+                        {cartCount} item{cartCount === 1 ? '' : 's'}
+                      </span>
+                    </div>
+
+                    {/* Cart items — scrollable region */}
+                    <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+                      {odInvoiceItems.length === 0 ? (
+                        <div className="text-center py-10 text-[#9c8e85] text-sm">
+                          <ShoppingCart size={28} className="mx-auto mb-2 opacity-30" />
+                          <p className="font-serif italic">Tap a tile to add</p>
                         </div>
-                      )}
-                      {Number(p.serviceCharge || 0) > 0 && (
-                        <div className="flex justify-between text-[#6b5d52]">
-                          <span>Service ({Number(p.serviceChargePct || 0)}%)</span>
-                          <span className="font-mono">₹{Number(p.serviceCharge).toFixed(2)}</span>
-                        </div>
-                      )}
-                      {Array.isArray(p.taxLines) && p.taxLines.length > 0 ? (
-                        p.taxLines.map((l: any, i: number) => (
-                          <div key={i} className="flex justify-between text-[#6b5d52]">
-                            <span>{l.label} ({Number(l.rate || 0).toFixed(2)}%)</span>
-                            <span className="font-mono">₹{Number(l.amount || 0).toFixed(2)}</span>
+                      ) : (
+                        odInvoiceItems.map((it, i) => (
+                          <div key={i} className="bg-[#faf7f2] rounded-xl p-2.5 flex items-center gap-2">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-bold text-[#1a1208] truncate">{it.name}</p>
+                              <p className="text-[11px] text-[#9c8e85] font-mono">
+                                ₹{it.price.toFixed(2)} × {it.qty}
+                                {' = '}
+                                <span className="text-[#3d3128]">₹{(it.price * it.qty).toFixed(2)}</span>
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                onClick={() => bumpCartQty(i, -1)}
+                                className="w-7 h-7 rounded-lg bg-white border border-[#cc5a16]/20 flex items-center justify-center text-[#cc5a16] hover:bg-[#cc5a16] hover:text-white transition-all"
+                                aria-label="Decrease"
+                              >
+                                <Minus size={12} />
+                              </button>
+                              <span className="text-sm font-bold text-[#1a1208] tabular-nums w-5 text-center">{it.qty}</span>
+                              <button
+                                onClick={() => bumpCartQty(i, +1)}
+                                className="w-7 h-7 rounded-lg bg-white border border-[#cc5a16]/20 flex items-center justify-center text-[#cc5a16] hover:bg-[#cc5a16] hover:text-white transition-all"
+                                aria-label="Increase"
+                              >
+                                <Plus size={12} />
+                              </button>
+                            </div>
                           </div>
                         ))
-                      ) : Number(p.totalTax || 0) > 0 ? (
-                        <div className="flex justify-between text-[#6b5d52]">
-                          <span>Tax</span>
-                          <span className="font-mono">₹{Number(p.totalTax).toFixed(2)}</span>
-                        </div>
-                      ) : null}
-                      <div className="flex justify-between font-bold text-[#1a1208] pt-1 border-t border-[#cc5a16]/10 text-base">
-                        <span>Grand Total</span>
-                        <span className="font-mono text-[#cc5a16]">₹{Number(p.grandTotal || 0).toFixed(2)}</span>
-                      </div>
-                      {p.usedLegacyGst && (
-                        <p className="text-[10px] text-[#9c8e85] italic">
-                          No tax_config rows configured — using single GST % from this form.
-                        </p>
                       )}
                     </div>
-                  );
-                })()}
-              </div>
-              <div className="px-6 py-4 border-t border-[#cc5a16]/10 flex gap-3 shrink-0">
-                <button
-                  onClick={async () => {
-                    const validItems = odInvoiceItems.filter(it => it.name.trim());
-                    if (validItems.length === 0) return;
-                    // Use the server's authoritative totals (multi-tax + loyalty)
-                    // so the preview matches the receipt that will print.
-                    const p = odPreview || {};
-                    const taxLabelSnapshot = Array.isArray(p.taxLines) && p.taxLines.length > 0
-                      ? p.taxLines.map((l: any) => `${l.label}:${Number(l.rate).toFixed(2)}:${Number(l.amount).toFixed(2)}`).join('|')
-                      : '';
-                    const fakeOrder = {
-                      id: `PRV-${Date.now()}`,
-                      customerName: odCustomer.name, customerPhone: odCustomer.phone,
-                      tableNumber: odCustomer.reference || 'Manual',
-                      items: validItems.map(it => ({ name: it.name, quantity: it.qty, price: it.price })),
-                      totalAmount: Number(p.grandTotal || 0),
-                      discount_amount: Number(p.totalDiscount || 0),
-                      service_charge_percent: Number(p.serviceChargePct || odSvcPct),
-                      gst_percent: odGstPct,
-                      apply_gst: odApplyGst ? 1 : 0,
-                      paymentMethod: '',
-                      createdAt: new Date().toISOString(),
-                      tax_label_snapshot: taxLabelSnapshot,
-                      loyalty_redemption_amount: Number(p.loyaltyDiscount || 0),
-                      loyalty_tier_name: p.loyalty?.tier_name,
-                      loyalty_discount_percent: p.loyalty?.discount_percent,
-                    };
-                    setPrintPreviewHtml(buildInvoiceHTML(fakeOrder, invoiceTemplate));
-                  }}
-                  className="flex-1 py-3 rounded-2xl border border-[#cc5a16]/20 text-[#6b5d52] font-bold text-sm hover:bg-[#faf7f2] transition-all flex items-center justify-center gap-2"
-                ><Eye size={15} /> Preview</button>
-                <button
-                  disabled={odSaving || odInvoiceItems.filter(it=>it.name.trim()).length === 0}
-                  onClick={async () => {
-                    const validItems = odInvoiceItems.filter(it => it.name.trim());
-                    if (validItems.length === 0) return;
-                    setOdSaving(true);
-                    try {
-                      const res = await fetch(`/api/restaurant/${restaurantId}/invoices/manual`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                        body: JSON.stringify({
-                          customer_name: odCustomer.name, customer_phone: odCustomer.phone,
-                          reference: odCustomer.reference,
-                          items: validItems.map(it => ({ name: it.name, quantity: it.qty, price: it.price })),
-                          discount_amount: odDiscount, service_charge_percent: odSvcPct,
-                          gst_percent: odGstPct, apply_gst: odApplyGst,
-                        }),
-                      });
-                      if (res.ok) {
-                        setShowOnDemandModal(false);
-                        fetchInvoices();
-                      }
-                    } finally { setOdSaving(false); }
-                  }}
-                  className="flex-1 py-3 rounded-2xl bg-[#cc5a16] text-white font-bold text-sm hover:bg-[#a84612] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-                >
-                  {odSaving ? <><RefreshCw size={15} className="animate-spin" /> Saving…</> : <><Receipt size={15} /> Generate Invoice</>}
-                </button>
+
+                    {/* Adjustments + totals + actions */}
+                    <div className="border-t border-[#cc5a16]/10 px-4 py-3 space-y-3 shrink-0 bg-[#fdfaf4]">
+                      {/* Discount / Service / GST controls — compact 3-col */}
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
+                          <input
+                            type="number" min="0" value={odDiscount}
+                            onChange={e => setOdDiscount(Number(e.target.value) || 0)}
+                            className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Service %</label>
+                          <input
+                            type="number" min="0" value={odSvcPct}
+                            onChange={e => setOdSvcPct(Number(e.target.value) || 0)}
+                            className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">GST %</label>
+                          <div className="flex gap-1">
+                            <input
+                              type="number" min="0" value={odGstPct}
+                              onChange={e => setOdGstPct(Number(e.target.value) || 0)}
+                              className="min-w-0 flex-1 border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                            />
+                            <button
+                              onClick={() => setOdApplyGst(v => !v)}
+                              className={cn(
+                                "shrink-0 px-2 rounded-lg text-[10px] font-bold transition-all",
+                                odApplyGst ? "bg-[#cc5a16] text-white" : "bg-[#0d0a07]/5 text-[#6b5d52]"
+                              )}
+                            >
+                              {odApplyGst ? 'ON' : 'OFF'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Loyalty banner */}
+                      {p?.loyalty?.tier_name && (
+                        <div className="bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-2 flex items-start gap-2">
+                          <Sparkles size={13} className="text-amber-700 shrink-0 mt-0.5" />
+                          <div className="text-[11px] text-amber-900 leading-snug">
+                            <strong>{p.loyalty.tier_name}</strong> · {Number(p.loyalty.discount_percent || 0)}% off auto-applied
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Live totals */}
+                      {(() => {
+                        const sub = p ? Number(p.subtotal || 0) : odInvoiceItems.reduce((s, it) => s + it.price * it.qty, 0);
+                        if (!p) {
+                          return (
+                            <div className="text-xs text-[#9c8e85] text-center py-2">
+                              {sub > 0 ? (odPreviewLoading ? 'Computing totals…' : 'Add items to see totals') : 'Add items to see totals'}
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="space-y-1 text-xs">
+                            <div className="flex justify-between text-[#6b5d52]">
+                              <span>Subtotal</span>
+                              <span className="font-mono">₹{Number(p.subtotal || 0).toFixed(2)}</span>
+                            </div>
+                            {Number(p.totalDiscount || 0) > 0 && (
+                              <div className="flex justify-between text-red-600">
+                                <span>
+                                  {p.loyalty && Number(p.loyaltyDiscount) >= Number(p.manualDiscount) - 0.01
+                                    ? `${p.loyalty.tier_name} discount`
+                                    : 'Discount'}
+                                </span>
+                                <span className="font-mono">−₹{Number(p.totalDiscount).toFixed(2)}</span>
+                              </div>
+                            )}
+                            {Number(p.serviceCharge || 0) > 0 && (
+                              <div className="flex justify-between text-[#6b5d52]">
+                                <span>Service ({Number(p.serviceChargePct || 0)}%)</span>
+                                <span className="font-mono">₹{Number(p.serviceCharge).toFixed(2)}</span>
+                              </div>
+                            )}
+                            {Array.isArray(p.taxLines) && p.taxLines.length > 0 ? (
+                              p.taxLines.map((l: any, i: number) => (
+                                <div key={i} className="flex justify-between text-[#6b5d52]">
+                                  <span>{l.label} ({Number(l.rate || 0).toFixed(2)}%)</span>
+                                  <span className="font-mono">₹{Number(l.amount || 0).toFixed(2)}</span>
+                                </div>
+                              ))
+                            ) : Number(p.totalTax || 0) > 0 ? (
+                              <div className="flex justify-between text-[#6b5d52]">
+                                <span>Tax</span>
+                                <span className="font-mono">₹{Number(p.totalTax).toFixed(2)}</span>
+                              </div>
+                            ) : null}
+                            <div className="flex justify-between font-bold text-[#1a1208] pt-1 border-t border-[#cc5a16]/10 text-sm">
+                              <span>Grand Total</span>
+                              <span className="font-mono text-[#cc5a16] text-base">₹{Number(p.grandTotal || 0).toFixed(2)}</span>
+                            </div>
+                            {p.usedLegacyGst && (
+                              <p className="text-[9px] text-[#9c8e85] italic pt-1">
+                                No tax_config rows configured — using single GST % from this form.
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </aside>
+                </div>
+
+                {/* ─── Footer actions ─────────────────────────────────── */}
+                <div className="px-4 sm:px-6 py-3 border-t border-[#cc5a16]/10 flex gap-2 sm:gap-3 shrink-0 bg-white">
+                  <button
+                    onClick={async () => {
+                      const validItems = odInvoiceItems.filter(it => it.name.trim());
+                      if (validItems.length === 0) return;
+                      // Use the server's authoritative totals (multi-tax + loyalty)
+                      // so the preview matches the receipt that will print.
+                      const p = odPreview || {};
+                      const taxLabelSnapshot = Array.isArray(p.taxLines) && p.taxLines.length > 0
+                        ? p.taxLines.map((l: any) => `${l.label}:${Number(l.rate).toFixed(2)}:${Number(l.amount).toFixed(2)}`).join('|')
+                        : '';
+                      const fakeOrder = {
+                        id: `PRV-${Date.now()}`,
+                        customerName: odCustomer.name, customerPhone: odCustomer.phone,
+                        tableNumber: odCustomer.reference || 'Manual',
+                        items: validItems.map(it => ({ name: it.name, quantity: it.qty, price: it.price })),
+                        totalAmount: Number(p.grandTotal || 0),
+                        discount_amount: Number(p.totalDiscount || 0),
+                        service_charge_percent: Number(p.serviceChargePct || odSvcPct),
+                        gst_percent: odGstPct,
+                        apply_gst: odApplyGst ? 1 : 0,
+                        paymentMethod: '',
+                        createdAt: new Date().toISOString(),
+                        tax_label_snapshot: taxLabelSnapshot,
+                        loyalty_redemption_amount: Number(p.loyaltyDiscount || 0),
+                        loyalty_tier_name: p.loyalty?.tier_name,
+                        loyalty_discount_percent: p.loyalty?.discount_percent,
+                      };
+                      setPrintPreviewHtml(buildInvoiceHTML(fakeOrder, invoiceTemplate));
+                    }}
+                    disabled={odInvoiceItems.length === 0}
+                    className="flex-1 py-3 rounded-2xl border border-[#cc5a16]/20 text-[#6b5d52] font-bold text-sm hover:bg-[#faf7f2] transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+                  >
+                    <Eye size={15} /> Preview
+                  </button>
+                  <button
+                    disabled={odSaving || odInvoiceItems.filter(it => it.name.trim()).length === 0}
+                    onClick={async () => {
+                      const validItems = odInvoiceItems.filter(it => it.name.trim());
+                      if (validItems.length === 0) return;
+                      setOdSaving(true);
+                      try {
+                        const res = await fetch(`/api/restaurant/${restaurantId}/invoices/manual`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                          body: JSON.stringify({
+                            customer_name: odCustomer.name, customer_phone: odCustomer.phone,
+                            reference: odCustomer.reference,
+                            items: validItems.map(it => ({ name: it.name, quantity: it.qty, price: it.price })),
+                            discount_amount: odDiscount, service_charge_percent: odSvcPct,
+                            gst_percent: odGstPct, apply_gst: odApplyGst,
+                          }),
+                        });
+                        if (res.ok) {
+                          setShowOnDemandModal(false);
+                          fetchInvoices();
+                        }
+                      } finally { setOdSaving(false); }
+                    }}
+                    className="flex-[2] py-3 rounded-2xl bg-[#cc5a16] text-white font-bold text-sm hover:bg-[#a84612] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {odSaving
+                      ? <><RefreshCw size={15} className="animate-spin" /> Saving…</>
+                      : <><Receipt size={15} /> Generate Invoice{p?.grandTotal ? ` · ₹${Number(p.grandTotal).toFixed(2)}` : ''}</>
+                    }
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
     </div>
   );

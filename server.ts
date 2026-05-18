@@ -17225,7 +17225,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'loyalty-customer-side-parity',
+    commit_marker: 'manual-invoice-tile-pos-ui',
     code_features: [
       'subscription-billing',
       'read-only-mode',
