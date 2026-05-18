@@ -6834,6 +6834,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [odGstPct, setOdGstPct]               = useState(0);
   const [odApplyGst, setOdApplyGst]           = useState(false);
   const [odSaving, setOdSaving]               = useState(false);
+  // Surface backend / network errors so a failed "Generate Invoice"
+  // click doesn't silently dismiss. Without this, a 500 / network drop
+  // / auth expiry would just flip the loading spinner off with no UX.
+  const [odSaveError, setOdSaveError]         = useState<string>('');
   const [odSearchActive, setOdSearchActive]   = useState<number | null>(null);
   // ── POS-style tile UI state for the on-demand invoice modal ────────────
   // The modal's UX shifted from "type item names in rows" to "tap menu
@@ -6902,6 +6906,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     setOdDiscount(0);
     setOdSvcPct(0);
     setOdApplyGst(false);
+    setOdSaveError('');
   }, [showOnDemandModal]);
 
   // Type-ahead state for the Edit-Invoice modal (separate from the New-Invoice modal)
@@ -17835,6 +17840,33 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </aside>
                 </div>
 
+                {/* Inline error strip — shown when the most recent
+                    Generate Invoice click failed. Sits above the action
+                    row so it's obvious why the modal stayed open.    */}
+                {odSaveError && (
+                  <div className="px-4 sm:px-6 pt-3 shrink-0">
+                    <div className="rounded-xl bg-red-50 border border-red-200 px-3 py-2.5 flex items-start gap-2">
+                      <AlertCircle size={14} className="text-red-600 shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold text-red-700 leading-snug">
+                          Couldn't generate invoice
+                        </p>
+                        <p className="text-[11px] text-red-600/90 mt-0.5 leading-snug break-words">
+                          {odSaveError}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setOdSaveError('')}
+                        className="text-red-500 hover:text-red-700 shrink-0"
+                        aria-label="Dismiss error"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* ─── Footer actions ─────────────────────────────────── */}
                 <div className="px-4 sm:px-6 py-3 border-t border-[#cc5a16]/10 flex gap-2 sm:gap-3 shrink-0 bg-white">
                   <button
@@ -17877,6 +17909,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const validItems = odInvoiceItems.filter(it => it.name.trim());
                       if (validItems.length === 0) return;
                       setOdSaving(true);
+                      setOdSaveError('');   // clear any previous error before retrying
                       try {
                         const res = await fetch(`/api/restaurant/${restaurantId}/invoices/manual`, {
                           method: 'POST',
@@ -17892,8 +17925,33 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         if (res.ok) {
                           setShowOnDemandModal(false);
                           fetchInvoices();
+                          return;
                         }
-                      } finally { setOdSaving(false); }
+                        // Non-2xx: try to parse a structured error body, fall
+                        // back to a generic message if the backend returned
+                        // HTML / nothing / a non-JSON body (e.g. 502 from
+                        // Cloudflare or a Vite dev-server crash).
+                        let msg = `Server returned ${res.status} ${res.statusText || ''}`.trim();
+                        try {
+                          const body = await res.json();
+                          if (body?.error) msg = String(body.error);
+                          else if (body?.message) msg = String(body.message);
+                        } catch { /* non-JSON body, keep the status-line msg */ }
+                        // 401 / 403 deserve a clearer hint
+                        if (res.status === 401) msg = 'Session expired — please log in again.';
+                        if (res.status === 403) msg = 'You do not have permission to create invoices.';
+                        console.error('[manual-invoice] save failed:', res.status, msg);
+                        setOdSaveError(msg);
+                      } catch (err: any) {
+                        // Network drop, CORS, fetch abort, JSON.stringify on
+                        // a circular reference — all land here. Show a
+                        // friendly message + log the real one for debugging.
+                        const detail = err?.message || String(err);
+                        console.error('[manual-invoice] network/runtime error:', err);
+                        setOdSaveError(`Could not reach the server — ${detail}. Check your connection and try again.`);
+                      } finally {
+                        setOdSaving(false);
+                      }
                     }}
                     className="flex-[2] py-3 rounded-2xl bg-[#cc5a16] text-white font-bold text-sm hover:bg-[#a84612] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                   >
