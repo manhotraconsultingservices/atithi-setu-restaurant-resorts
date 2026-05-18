@@ -8700,6 +8700,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const b = hotelBookings.find((x: any) => x.id === bookingId) || { id: bookingId };
     await openCancelBookingModal(b);
   };
+
+  // Phase H1 — manual re-sync to channel manager. Today this is a
+  // log-only operation; a follow-up commit will wire the actual OTA
+  // push. Useful when an OTA gets out of sync (rare but real — guests
+  // sometimes still arrive at hotels via Booking.com after the room
+  // is cancelled at the front desk).
+  const resyncBookingToChannel = async (booking: any) => {
+    try {
+      const result = await hotelApi(`/channel-sync/booking/${booking.id}`, { method: 'POST', body: JSON.stringify({}) });
+      const status = result?.latest?.status || 'queued';
+      const label = status === 'skipped_direct'
+        ? `${booking.guest_name || 'Booking'} is a direct booking — no OTA to re-sync.`
+        : `Re-sync queued for ${booking.guest_name || 'booking'} (channel: ${result?.latest?.channel || 'unknown'}).`;
+      alert(label);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to re-sync');
+    }
+  };
   const loadFolio = async (folioId: string) => {
     try {
       const folio = await hotelApi(`/folios/${folioId}`);
@@ -14415,7 +14433,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <td className="px-4 py-3 text-right">
                           {b.status === 'BOOKED' && <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600 mr-1">Check In</button>}
                           {b.status === 'CHECKED_IN' && <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608] mr-1">Check Out</button>}
-                          {(b.status === 'BOOKED') && <button onClick={() => cancelBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Cancel</button>}
+                          {(b.status === 'BOOKED') && <button onClick={() => cancelBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10 mr-1">Cancel</button>}
+                          {/* Phase H1 — channel re-sync. Only shown for OTA-sourced bookings */}
+                          {b.booking_source && !['DIRECT','WALKIN',''].includes(String(b.booking_source).toUpperCase()) && (
+                            <button onClick={() => resyncBookingToChannel(b)} title="Re-sync to channel manager" className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2]">Re-sync</button>
+                          )}
                         </td>
                       </tr>
                     );

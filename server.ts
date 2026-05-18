@@ -241,6 +241,24 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- Day-use booking type (idempotent — existing rows default to OVERNIGHT)
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS booking_type TEXT DEFAULT 'OVERNIGHT';
     UPDATE room_bookings SET booking_type = 'OVERNIGHT' WHERE booking_type IS NULL;
+    -- Phase H1 — channel manager re-sync log.
+    -- One row per outbound-sync attempt. For now we only LOG (status =
+    -- 'skipped_direct' for direct bookings and 'queued' for OTA-sourced
+    -- ones). Real OTA push lives in a follow-up commit and will pick up
+    -- the 'queued' rows.
+    CREATE TABLE IF NOT EXISTS channel_sync_log (
+      id           SERIAL PRIMARY KEY,
+      booking_id   TEXT NOT NULL,
+      channel      TEXT,
+      event_type   TEXT NOT NULL,
+      status       TEXT NOT NULL,
+      payload      TEXT,
+      error        TEXT,
+      created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_channel_sync_booking ON channel_sync_log (booking_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_channel_sync_status  ON channel_sync_log (status, created_at DESC);
+
     -- Phase H1 — cancellation refund snapshot. Captured at cancel time so
     -- the audit trail (and the front desk's refund-pending list) reflects
     -- the policy that was active *then*, not the current tenant config.
@@ -800,6 +818,48 @@ async function computeLateCheckoutFee(
     policy_text: `Within the ${cutoff} grace window — no late fee.`,
     late_checkout_time: cutoff,
   };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  logChannelSync — Phase H1
+//
+//  Writes one audit row to channel_sync_log for an outbound state
+//  change. For DIRECT / WALKIN bookings the status is 'skipped_direct'
+//  (no OTA to inform). For BOOKING / MMT / AGODA / etc. the status is
+//  'queued' — a follow-up commit will read the queue and push to the
+//  actual OTA APIs.
+//
+//  Best-effort: never throws upward — channel logging must NEVER block
+//  the booking lifecycle.
+// ════════════════════════════════════════════════════════════════════════
+async function logChannelSync(
+  restaurantId: string,
+  booking: { id: string; booking_source?: string | null; status?: string; check_in_date?: string; check_out_date?: string },
+  eventType: 'BOOKING_CREATED' | 'BOOKING_UPDATED' | 'BOOKING_CANCELLED' | 'GUEST_CHECKED_IN' | 'GUEST_CHECKED_OUT' | 'MANUAL_RESYNC',
+  extra?: Record<string, any>,
+): Promise<void> {
+  try {
+    const channel = String(booking.booking_source || 'DIRECT').toUpperCase();
+    const isDirect = channel === 'DIRECT' || channel === 'WALKIN' || channel === '';
+    const status = isDirect ? 'skipped_direct' : 'queued';
+    const payload = JSON.stringify({
+      booking_id: booking.id,
+      channel,
+      event: eventType,
+      status: booking.status,
+      check_in: booking.check_in_date,
+      check_out: booking.check_out_date,
+      ...(extra || {}),
+    });
+    const tenantDb = await getTenantDb(restaurantId);
+    await tenantDb.run(
+      `INSERT INTO channel_sync_log (booking_id, channel, event_type, status, payload)
+       VALUES (?, ?, ?, ?, ?)`,
+      [booking.id, channel, eventType, status, payload]
+    );
+  } catch (e) {
+    console.warn('[channel-sync] log failed:', e);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -13552,6 +13612,8 @@ async function startServer() {
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
+      // Phase H1 — log to channel sync queue (no-op for direct bookings).
+      await logChannelSync(req.params.id, row, 'BOOKING_CREATED');
       res.status(201).json(row);
     } catch (err: any) {
       console.error("Create booking error:", err);
@@ -13592,7 +13654,12 @@ async function startServer() {
 
       const setStr = Object.keys(patch).map(k => `${k} = ?`).join(', ');
       await tenantDb.run(`UPDATE room_bookings SET ${setStr} WHERE id = ?`, [...Object.values(patch), req.params.bookingId]);
-      res.json(await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]));
+      const updated: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      // Phase H1 — log channel re-sync for any business-field edit.
+      if (businessTouched) {
+        await logChannelSync(req.params.id, updated, 'BOOKING_UPDATED', { changed: Object.keys(patch) });
+      }
+      res.json(updated);
     } catch (err) {
       res.status(500).json({ error: "Failed to update booking" });
     }
@@ -13905,6 +13972,14 @@ async function startServer() {
         ]
       );
       try { await triggerNotification(req.params.id, 'BOOKING_CANCELLED', { bookingId: b.id, refundPct: refund.refund_pct, refundAmount: refund.refund_amount }); } catch {}
+      // Phase H1 — log cancel for channel re-sync. Even DIRECT bookings
+      // get an audit row (status='skipped_direct') so the front desk has
+      // a unified history.
+      await logChannelSync(req.params.id, { ...b, status: 'CANCELLED' }, 'BOOKING_CANCELLED', {
+        refund_pct: refund.refund_pct,
+        refund_amount: refund.refund_amount,
+        reason,
+      });
       res.json({
         success: true,
         refund_pct: refund.refund_pct,
@@ -13915,6 +13990,48 @@ async function startServer() {
     } catch (err) {
       console.error("cancel booking error:", err);
       res.status(500).json({ error: "Failed to cancel booking" });
+    }
+  });
+
+  // ─── CHANNEL MANAGER RE-SYNC LOG (Phase H1 scaffold) ─────────────────────
+  // Today: log-only. The actual OTA push (Booking.com, MakeMyTrip, etc.)
+  // is a follow-up commit that will read the 'queued' rows and forward.
+  app.get("/api/restaurant/:id/hotel/channel-sync/log", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const bookingId = (req.query.booking_id as string) || null;
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+      let sql = `SELECT id, booking_id, channel, event_type, status, error, created_at
+                   FROM channel_sync_log
+                  WHERE 1 = 1`;
+      const params: any[] = [];
+      if (bookingId) { sql += ' AND booking_id = ?'; params.push(bookingId); }
+      sql += ` ORDER BY created_at DESC LIMIT ${limit}`;
+      const rows = await tenantDb.query(sql, params);
+      res.json(rows);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch channel sync log' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/channel-sync/booking/:bookingId", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get('SELECT * FROM room_bookings WHERE id = ?', [req.params.bookingId]);
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      await logChannelSync(req.params.id, b, 'MANUAL_RESYNC', { triggered_by: req.user?.id || null });
+      const latest = await tenantDb.get(
+        `SELECT id, booking_id, channel, event_type, status, error, created_at
+           FROM channel_sync_log WHERE booking_id = ? ORDER BY created_at DESC LIMIT 1`,
+        [req.params.bookingId]
+      );
+      res.json({ success: true, latest });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to re-sync booking' });
     }
   });
 
@@ -18479,7 +18596,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-guest-perk',
+    commit_marker: 'hotel-channel-sync-scaffold',
     code_features: [
       'subscription-billing',
       'read-only-mode',
