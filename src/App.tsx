@@ -6610,6 +6610,63 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     (restaurant as any).property_type === 'RESTAURANT' ||
     (restaurant as any).property_type === 'BOTH'
   );
+  // ── Dashboard mode ─────────────────────────────────────────────────────
+  // For BOTH-mode tenants (Restaurant + Hotel on the same tenant), the
+  // owner can pick which "side" of the business to see in the nav. The
+  // toggle UI is hidden for restaurant-only / hotel-only tenants since
+  // there's nothing to switch — bothEnabled gates everything.
+  //
+  // Persisted per-tenant so a multi-location owner who switches outlets
+  // gets that outlet's last-used mode back. Default = RESTAURANT because
+  // most tenants start as restaurant-only and add hotel later.
+  const bothEnabled = isRestaurantEnabled && isHotelEnabled;
+  const [dashboardMode, setDashboardMode] = useState<'RESTAURANT' | 'HOTEL'>(() => {
+    try {
+      const k = `atithi_dashboard_mode_${restaurantId}`;
+      const v = typeof window !== 'undefined' ? localStorage.getItem(k) : null;
+      if (v === 'HOTEL' || v === 'RESTAURANT') return v;
+    } catch { /* ignore */ }
+    return 'RESTAURANT';
+  });
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(`atithi_dashboard_mode_${restaurantId}`, dashboardMode);
+      }
+    } catch { /* ignore quota / private-mode failures */ }
+  }, [dashboardMode, restaurantId]);
+  // If the tenant only has one side enabled, force the mode to match so
+  // any downstream rendering that checks dashboardMode doesn't surprise
+  // the user (e.g. a freshly-disabled-by-admin hotel module shouldn't
+  // leave the owner stuck on a now-empty Hotel view).
+  useEffect(() => {
+    if (!bothEnabled) {
+      const forced: 'RESTAURANT' | 'HOTEL' = isHotelEnabled ? 'HOTEL' : 'RESTAURANT';
+      setDashboardMode(prev => prev === forced ? prev : forced);
+    }
+  }, [bothEnabled, isHotelEnabled]);
+
+  // ── Mode-switch safety net ─────────────────────────────────────────────
+  // If the owner is on (say) ROOMS and flips to Restaurant mode, the ROOMS
+  // tab disappears. Auto-redirect to Command & Control so they don't end
+  // up on an empty view. The two sets are defined again inside the nav
+  // IIFE for the visibility check; keeping them in sync is enforced by
+  // the fact that both lists touch every tab id at most twice. If we ever
+  // add a tab, missing it here would mean the auto-redirect doesn't fire
+  // — a benign UI bug, not a crash.
+  useEffect(() => {
+    if (!bothEnabled) return;
+    const restaurantOnlyIds = new Set(['MENU', 'INVENTORY', 'DELIVERY', 'QR', 'BOOKINGS', 'ORDERS']);
+    const hotelOnlyIds      = new Set(['ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS', 'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ']);
+    const hidden =
+      (dashboardMode === 'RESTAURANT' && hotelOnlyIds.has(activeTab)) ||
+      (dashboardMode === 'HOTEL'      && restaurantOnlyIds.has(activeTab));
+    if (hidden) setActiveTab('MONITOR');
+    // activeTab intentionally not in deps — we only want to redirect at
+    // the moment the mode flips, not every time the user clicks a tab.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dashboardMode, bothEnabled]);
+
   // Alerts toggle (default TRUE unless explicitly disabled in Settings)
   const alertsEnabled = !restaurant || ((restaurant as any).alerts_enabled !== 0 && (restaurant as any).alerts_enabled !== false);
   const [staff, setStaff] = useState<any[]>([]);
@@ -9036,7 +9093,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {
             id: 'RESTAURANT', label: 'Restaurant',
             icon: <Utensils size={12} />,
-            visible: isRestaurantEnabled,
+            // Shown when: tenant has Restaurant enabled AND
+            //   • the tenant isn't BOTH-mode (so there's no mode toggle), OR
+            //   • the toggle is currently on Restaurant.
+            visible: isRestaurantEnabled && (!bothEnabled || dashboardMode === 'RESTAURANT'),
             tabs: [
               { id: 'MENU',      label: 'Menu Management' },
               { id: 'INVENTORY', label: 'Inventory' },
@@ -9049,7 +9109,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {
             id: 'HOTEL', label: 'Hotel',
             icon: <Bed size={12} />,
-            visible: isHotelEnabled,
+            // Same gating logic, mirrored for Hotel.
+            visible: isHotelEnabled && (!bothEnabled || dashboardMode === 'HOTEL'),
             tabs: [
               { id: 'ROOMS',            label: 'Rooms' },
               { id: 'HOTEL_BOOKINGS',   label: 'Hotel Bookings' },
@@ -9062,6 +9123,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           },
         ];
 
+        // Auto-redirect of an active-but-now-hidden tab lives in a
+        // top-level useEffect (search "Mode-switch safety net"); we
+        // don't need to compute it here.
+
         // Per-tab visibility — keep the grandfathering hacks that the
         // old flat list used, just in one place now.
         const isVisible = (id: string) => {
@@ -9071,6 +9136,41 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
         return (
           <>
+            {/* ── Mode toggle (BOTH-mode tenants only) ─────────────────
+                Single pill switch — taps either side. Stays out of the
+                way for single-mode tenants (no need to switch when
+                there's only one mode). Persists per-tenant in
+                localStorage via the useEffect on dashboardMode.       */}
+            {bothEnabled && (
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 text-xs text-[#6b5d52]">
+                  <span className="hidden sm:inline font-mono uppercase tracking-widest text-[10px] font-bold">Viewing as</span>
+                </div>
+                <div className="inline-flex bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shadow-sm">
+                  {([
+                    { id: 'RESTAURANT', label: 'Restaurant', icon: <Utensils size={13} /> },
+                    { id: 'HOTEL',      label: 'Hotel',      icon: <Bed size={13} /> },
+                  ] as const).map(opt => {
+                    const active = dashboardMode === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        onClick={() => setDashboardMode(opt.id)}
+                        className={cn(
+                          "flex items-center gap-2 px-4 py-1.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all",
+                          active
+                            ? "bg-[#cc5a16] text-white shadow"
+                            : "text-[#6b5d52] hover:bg-[#faf7f2]"
+                        )}
+                      >
+                        {opt.icon} {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* ── MOBILE: Dropdown navigation menu — grouped ───────── */}
             {mobileNavOpen && (
               <div className="md:hidden -mt-3 rounded-2xl bg-white border border-[#cc5a16]/10 shadow-lg overflow-hidden z-40 relative">
