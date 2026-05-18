@@ -21,6 +21,10 @@ export interface MenuItem {
   available: boolean;
   is_daily_special?: boolean;
   dietary_type: DietaryType;
+  // When true, the item's price is decided at billing time (e.g.
+  // market-rate seafood). Stored as 0 in the menu row; the cashier
+  // MUST enter a price in the cart before generating the invoice.
+  price_tbd?: boolean;
 }
 
 export interface OrderItem {

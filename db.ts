@@ -581,9 +581,19 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       drive_file_id TEXT,
       dietary_type TEXT,
       is_daily_special INT DEFAULT 0,
+      -- price_tbd = 1 means the price is decided at billing time
+      -- (e.g. market-rate seafood, custom platters). The item
+      -- still saves price=0 in the menu row; the cashier MUST
+      -- enter a price > 0 in the cart before the invoice can be
+      -- generated. Enforced by the /invoices/manual endpoint.
+      price_tbd INT DEFAULT 0,
       is_available INT DEFAULT 1,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    -- Idempotent migration for existing tenants whose menu table
+    -- predates the price_tbd column.
+    ALTER TABLE menu ADD COLUMN IF NOT EXISTS price_tbd INT DEFAULT 0;
+    UPDATE menu SET price_tbd = 0 WHERE price_tbd IS NULL;
 
     CREATE TABLE IF NOT EXISTS tables (
       id TEXT PRIMARY KEY,

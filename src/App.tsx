@@ -7034,27 +7034,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
   const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'CHEF' as UserRole, phone: '', email: '', hourly_rate: 0, payroll_id: '' });
-  const [newItem, setNewItem] = useState<{ 
-    name: string, 
-    description: string, 
-    price: string, 
-    price_half: string, 
-    price_full: string, 
-    category: string, 
+  const [newItem, setNewItem] = useState<{
+    name: string,
+    description: string,
+    price: string,
+    price_half: string,
+    price_full: string,
+    category: string,
     imageFile: File | null,
     driveUrl: string,
     dietary_type: DietaryType,
-    is_daily_special: boolean
-  }>({ 
-    name: '', 
-    description: '', 
-    price: '', 
-    price_half: '', 
-    price_full: '', 
-    category: 'Mains', 
+    is_daily_special: boolean,
+    // When true: this is a "Special" item whose price is set at
+    // billing (e.g. market-rate seafood). Saves price=0; the
+    // cashier MUST enter a price in the cart at invoice time.
+    price_tbd: boolean
+  }>({
+    name: '',
+    description: '',
+    price: '',
+    price_half: '',
+    price_full: '',
+    category: 'Mains',
     imageFile: null,
     dietary_type: 'VEG',
-    is_daily_special: false
+    is_daily_special: false,
+    price_tbd: false
   });
 
   // Fetch role-based tab permissions
@@ -8753,12 +8758,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const formData = new FormData();
     formData.append('name', newItem.name);
     formData.append('description', newItem.description);
-    formData.append('price', newItem.price_full || newItem.price);
-    formData.append('price_half', newItem.price_half);
-    formData.append('price_full', newItem.price_full || newItem.price);
+    // For TBD items, send price=0 — backend also coerces this defensively
+    formData.append('price', newItem.price_tbd ? '0' : (newItem.price_full || newItem.price));
+    formData.append('price_half', newItem.price_tbd ? '' : newItem.price_half);
+    formData.append('price_full', newItem.price_tbd ? '0' : (newItem.price_full || newItem.price));
     formData.append('category', newItem.category);
     formData.append('dietary_type', newItem.dietary_type);
     formData.append('is_daily_special', String(newItem.is_daily_special));
+    formData.append('price_tbd', String(newItem.price_tbd));
     if (newItem.driveUrl) {
       formData.append('drive_url', newItem.driveUrl);
     }
@@ -8775,17 +8782,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (res.ok) {
       console.log("Successfully added menu item");
       setIsAddingItem(false);
-      setNewItem({ 
-        name: '', 
-        description: '', 
-        price: '', 
-        price_half: '', 
-        price_full: '', 
-        category: 'Mains', 
+      setNewItem({
+        name: '',
+        description: '',
+        price: '',
+        price_half: '',
+        price_full: '',
+        category: 'Mains',
         imageFile: null,
         driveUrl: '',
         dietary_type: 'VEG',
-        is_daily_special: false
+        is_daily_special: false,
+        price_tbd: false
       });
       fetchMenu();
     } else {
@@ -16700,18 +16708,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <div>
                     <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Half Price ₹ (optional)</label>
                     <input type="number" step="0.01" min="0"
-                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                      value={newItem.price_half}
+                      disabled={newItem.price_tbd}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none disabled:opacity-40 disabled:cursor-not-allowed"
+                      value={newItem.price_tbd ? '' : newItem.price_half}
                       onChange={e => setNewItem({ ...newItem, price_half: e.target.value })}
-                      placeholder="e.g. 150"/>
+                      placeholder={newItem.price_tbd ? '— set at billing —' : 'e.g. 150'}/>
                   </div>
                   <div>
-                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Full Price ₹ *</label>
-                    <input required type="number" step="0.01" min="0"
-                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                      value={newItem.price_full}
+                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">
+                      Full Price ₹ {newItem.price_tbd ? <span className="text-[#cc5a16] normal-case">(set at billing)</span> : '*'}
+                    </label>
+                    <input
+                      required={!newItem.price_tbd}
+                      type="number" step="0.01" min="0"
+                      disabled={newItem.price_tbd}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none disabled:opacity-40 disabled:cursor-not-allowed"
+                      value={newItem.price_tbd ? '' : newItem.price_full}
                       onChange={e => setNewItem({ ...newItem, price_full: e.target.value })}
-                      placeholder="e.g. 280"/>
+                      placeholder={newItem.price_tbd ? '— set at billing —' : 'e.g. 280'}/>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 p-1">
@@ -16720,6 +16734,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     onChange={e => setNewItem({ ...newItem, is_daily_special: e.target.checked })}
                     className="w-4 h-4 rounded text-[#cc5a16]"/>
                   <label htmlFor="add_is_daily_special" className="text-xs font-bold text-[#1a1208]">⭐ Mark as Daily Special</label>
+                </div>
+                {/* Special item — price decided at billing time.
+                    When checked, price inputs disable and a hint appears.
+                    Saved with price=0 + price_tbd=1; the cashier MUST
+                    type a price in the cart before the invoice can be
+                    generated (server-side enforcement matches). */}
+                <div className="flex items-start gap-2 p-1 -mt-2">
+                  <input type="checkbox" id="add_price_tbd"
+                    checked={newItem.price_tbd}
+                    onChange={e => setNewItem({
+                      ...newItem,
+                      price_tbd: e.target.checked,
+                      // Auto-suggest "Special Items" category on toggle ON
+                      category: e.target.checked && newItem.category === 'Mains' ? 'Special Items' : newItem.category,
+                    })}
+                    className="w-4 h-4 rounded text-[#cc5a16] mt-0.5"/>
+                  <label htmlFor="add_price_tbd" className="text-xs font-bold text-[#1a1208] leading-snug">
+                    🔖 Special item — price set at billing
+                    <span className="block text-[10px] font-normal text-[#9c8e85] mt-0.5">
+                      For market-rate items (seafood, custom platters) where the cost is decided at billing time. Staff will enter the price on each invoice.
+                    </span>
+                  </label>
                 </div>
                 <div className="border-t border-[#cc5a16]/8 pt-4">
                   <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1 block">Item Image (optional — you can generate after adding)</label>
@@ -17227,16 +17263,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 <button key={m.id} type="button" onClick={() => editAddFromTile(m)}
                                   className={cn(
                                     "relative bg-white border-2 rounded-2xl p-3 sm:p-4 text-left transition-all hover:shadow-md active:scale-95",
-                                    inCart ? "border-[#cc5a16] shadow-sm" : "border-[#cc5a16]/15 hover:border-[#cc5a16]/40"
+                                    inCart ? "border-[#cc5a16] shadow-sm"
+                                      : m.price_tbd ? "border-amber-400/50 hover:border-amber-500 bg-amber-50/40"
+                                      : "border-[#cc5a16]/15 hover:border-[#cc5a16]/40"
                                   )}
-                                  style={{ minHeight: 86 }}>
+                                  style={{ minHeight: 86 }}
+                                  title={m.price_tbd ? 'Special item — enter the price in the cart after adding' : undefined}>
                                   {inCart && (
                                     <span className="absolute top-2 right-2 w-6 h-6 rounded-full bg-[#cc5a16] text-white text-[11px] font-bold flex items-center justify-center">
                                       {inCart.quantity}
                                     </span>
                                   )}
                                   <p className="font-bold text-[#1a1208] text-sm leading-tight line-clamp-2 pr-7">{m.name}</p>
-                                  <p className="font-mono text-[#cc5a16] text-base font-bold mt-1.5">₹{Number(m.price).toFixed(0)}</p>
+                                  {m.price_tbd ? (
+                                    <p className="font-mono text-amber-700 text-xs font-bold mt-1.5 uppercase tracking-widest">Set price ✎</p>
+                                  ) : (
+                                    <p className="font-mono text-[#cc5a16] text-base font-bold mt-1.5">₹{Number(m.price).toFixed(0)}</p>
+                                  )}
                                   {m.category && (
                                     <p className="text-[9px] font-mono uppercase tracking-widest text-[#9c8e85] mt-0.5 truncate">{m.category}</p>
                                   )}
@@ -17307,13 +17350,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <ShoppingCart size={28} className="mx-auto mb-2 opacity-30" />
                             <p className="font-serif italic">Tap a tile to add</p>
                           </div>
-                        ) : invEdit.items.map((it, i) => (
-                          <div key={i} className="bg-[#faf7f2] rounded-xl p-2.5 flex items-center gap-2">
+                        ) : invEdit.items.map((it, i) => {
+                          const needsPrice = !it.price || it.price <= 0;
+                          return (
+                          <div key={i} className={cn(
+                            "rounded-xl p-2.5 flex items-center gap-2",
+                            needsPrice ? "bg-amber-50 border border-amber-300" : "bg-[#faf7f2]"
+                          )}>
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-bold text-[#1a1208] truncate">{it.name}</p>
-                              <p className="text-[11px] text-[#9c8e85] font-mono">
-                                ₹{it.price.toFixed(2)} × {it.quantity} = <span className="text-[#3d3128]">₹{(it.price * it.quantity).toFixed(2)}</span>
-                              </p>
+                              {needsPrice ? (
+                                <div className="flex items-center gap-1.5 mt-1">
+                                  <span className="text-[10px] font-bold uppercase tracking-widest text-amber-700">Price ₹</span>
+                                  <input type="number" min="0" step="0.01" autoFocus
+                                    placeholder="Enter price"
+                                    value={it.price > 0 ? it.price : ''}
+                                    onChange={e => setInvEdit(prev => ({ ...prev, items: prev.items.map((x, j) => j === i ? { ...x, price: Number(e.target.value) || 0 } : x) }))}
+                                    className="flex-1 min-w-0 bg-white border border-amber-300 rounded-md px-2 py-1 text-xs outline-none focus:ring-2 ring-amber-300/40"
+                                  />
+                                  <span className="text-[10px] text-amber-700/80 font-mono">× {it.quantity}</span>
+                                </div>
+                              ) : (
+                                <p className="text-[11px] text-[#9c8e85] font-mono">
+                                  ₹{it.price.toFixed(2)} × {it.quantity} = <span className="text-[#3d3128]">₹{(it.price * it.quantity).toFixed(2)}</span>
+                                </p>
+                              )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
                               <button onClick={() => editBumpQty(i, -1)}
@@ -17325,7 +17386,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 aria-label="Increase"><Plus size={12} /></button>
                             </div>
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
 
@@ -17459,7 +17521,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <div className="px-6 py-4 border-t border-[#cc5a16]/10 flex gap-2 shrink-0">
                   <button
                     onClick={saveInvoiceEdit}
-                    disabled={invEdit.saving}
+                    disabled={
+                      invEdit.saving ||
+                      // For ORDER invoices: block save if any cart item is
+                      // still at price=0. SESSION invoices have read-only
+                      // items so this check doesn't apply.
+                      (!isSess && invEdit.items.some(it => String(it.name || '').trim() && (!it.price || it.price <= 0)))
+                    }
+                    title={
+                      !isSess && invEdit.items.some(it => String(it.name || '').trim() && (!it.price || it.price <= 0))
+                        ? `Set a price for: ${invEdit.items.filter(it => String(it.name || '').trim() && (!it.price || it.price <= 0)).map(it => it.name).join(', ')}`
+                        : undefined
+                    }
                     className="flex-1 py-3 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] font-bold text-sm hover:bg-[#faf7f2] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                   >
                     {invEdit.saving ? <><RefreshCw size={14} className="animate-spin"/>Saving…</> : <><Save size={14}/>Save Changes</>}
@@ -17919,9 +17992,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 "relative bg-white border-2 rounded-2xl p-3 sm:p-4 text-left transition-all hover:shadow-md active:scale-95",
                                 inCart
                                   ? "border-[#cc5a16] shadow-sm"
-                                  : "border-[#cc5a16]/15 hover:border-[#cc5a16]/40"
+                                  : m.price_tbd
+                                    ? "border-amber-400/50 hover:border-amber-500 bg-amber-50/40"
+                                    : "border-[#cc5a16]/15 hover:border-[#cc5a16]/40"
                               )}
                               style={{ minHeight: 86 }}
+                              title={m.price_tbd ? 'Special item — enter the price in the cart after adding' : undefined}
                             >
                               {inCart && (
                                 <span className="absolute top-2 right-2 w-6 h-6 rounded-full bg-[#cc5a16] text-white text-[11px] font-bold flex items-center justify-center">
@@ -17931,9 +18007,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <p className="font-bold text-[#1a1208] text-sm leading-tight line-clamp-2 pr-7">
                                 {m.name}
                               </p>
-                              <p className="font-mono text-[#cc5a16] text-base font-bold mt-1.5">
-                                ₹{Number(m.price).toFixed(0)}
-                              </p>
+                              {m.price_tbd ? (
+                                <p className="font-mono text-amber-700 text-xs font-bold mt-1.5 uppercase tracking-widest">Set price ✎</p>
+                              ) : (
+                                <p className="font-mono text-[#cc5a16] text-base font-bold mt-1.5">
+                                  ₹{Number(m.price).toFixed(0)}
+                                </p>
+                              )}
                               {m.category && (
                                 <p className="text-[9px] font-mono uppercase tracking-widest text-[#9c8e85] mt-0.5 truncate">
                                   {m.category}
@@ -18026,15 +18106,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <p className="font-serif italic">Tap a tile to add</p>
                         </div>
                       ) : (
-                        odInvoiceItems.map((it, i) => (
-                          <div key={i} className="bg-[#faf7f2] rounded-xl p-2.5 flex items-center gap-2">
+                        odInvoiceItems.map((it, i) => {
+                          // Special items (added with price=0 from a TBD
+                          // menu tile) need an inline price input. The
+                          // cart row is rendered in amber until the
+                          // cashier types a positive price, after which
+                          // it behaves like a normal row.
+                          const needsPrice = !it.price || it.price <= 0;
+                          return (
+                          <div key={i} className={cn(
+                            "rounded-xl p-2.5 flex items-center gap-2",
+                            needsPrice ? "bg-amber-50 border border-amber-300" : "bg-[#faf7f2]"
+                          )}>
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-bold text-[#1a1208] truncate">{it.name}</p>
-                              <p className="text-[11px] text-[#9c8e85] font-mono">
-                                ₹{it.price.toFixed(2)} × {it.qty}
-                                {' = '}
-                                <span className="text-[#3d3128]">₹{(it.price * it.qty).toFixed(2)}</span>
-                              </p>
+                              {needsPrice ? (
+                                <div className="flex items-center gap-1.5 mt-1">
+                                  <span className="text-[10px] font-bold uppercase tracking-widest text-amber-700">Price ₹</span>
+                                  <input
+                                    type="number" min="0" step="0.01" autoFocus
+                                    placeholder="Enter price"
+                                    value={it.price > 0 ? it.price : ''}
+                                    onChange={e => setOdInvoiceItems(prev => prev.map((x, j) => j === i ? { ...x, price: Number(e.target.value) || 0 } : x))}
+                                    className="flex-1 min-w-0 bg-white border border-amber-300 rounded-md px-2 py-1 text-xs outline-none focus:ring-2 ring-amber-300/40"
+                                  />
+                                  <span className="text-[10px] text-amber-700/80 font-mono">× {it.qty}</span>
+                                </div>
+                              ) : (
+                                <p className="text-[11px] text-[#9c8e85] font-mono">
+                                  ₹{it.price.toFixed(2)} × {it.qty}
+                                  {' = '}
+                                  <span className="text-[#3d3128]">₹{(it.price * it.qty).toFixed(2)}</span>
+                                </p>
+                              )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
                               <button
@@ -18054,7 +18158,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               </button>
                             </div>
                           </div>
-                        ))
+                          );
+                        })
                       )}
                     </div>
 
@@ -18263,7 +18368,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <Eye size={15} /> Preview
                   </button>
                   <button
-                    disabled={odSaving || odInvoiceItems.filter(it => it.name.trim()).length === 0}
+                    disabled={
+                      odSaving ||
+                      odInvoiceItems.filter(it => it.name.trim()).length === 0 ||
+                      // Block Generate when any item is still at price=0
+                      // (Special items where the cashier hasn't typed the
+                      // billing-time price yet). Server-side validation also
+                      // catches this but the UI gate is what staff sees.
+                      odInvoiceItems.some(it => it.name.trim() && (!it.price || it.price <= 0))
+                    }
+                    title={
+                      odInvoiceItems.some(it => it.name.trim() && (!it.price || it.price <= 0))
+                        ? `Set a price for: ${odInvoiceItems.filter(it => it.name.trim() && (!it.price || it.price <= 0)).map(it => it.name).join(', ')}`
+                        : undefined
+                    }
                     onClick={async () => {
                       const validItems = odInvoiceItems.filter(it => it.name.trim());
                       if (validItems.length === 0) return;

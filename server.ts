@@ -3991,9 +3991,18 @@ async function startServer() {
   // Menu: Add Item
   app.post("/api/restaurant/:id/menu", authenticate, menuImageUpload.single('image'), async (req: AuthRequest, res: Response) => {
     try {
-      const { name, description, price, price_half, price_full, category, dietary_type, is_daily_special, drive_url } = req.body;
+      const { name, description, price, price_half, price_full, category, dietary_type, is_daily_special, drive_url, price_tbd } = req.body;
       const db = await getTenantDb(req.params.id);
+      // Idempotent on every menu insert — keeps tenants who haven't
+      // hit a server-init refresh on the new schema in sync.
+      await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS price_tbd INT DEFAULT 0").catch(() => {});
       const id = randomUUID();
+      // Special items (price_tbd=true) ALWAYS save with price=0 so
+      // the "did the cashier enter a price?" check is unambiguous —
+      // a TBD item's stored row is "no price"; any non-zero price
+      // shows up only in the cart line at billing time.
+      const isTbd = price_tbd === true || price_tbd === 'true' || price_tbd === 1 || price_tbd === '1';
+      const effectivePrice = isTbd ? 0 : Number(price || 0);
       let imageUrl: string | null = req.file ? await persistMenuImage(req.params.id, req.file) : null;
       let driveFileId = null;
 
@@ -4016,9 +4025,9 @@ async function startServer() {
       }
 
       await db.run(`
-        INSERT INTO menu (id, name, description, price, price_half, price_full, category, dietary_type, is_daily_special, image_url, drive_file_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [id, name, description, price, price_half || null, price_full || null, category, dietary_type, is_daily_special === 'true' ? 1 : 0, imageUrl, driveFileId]);
+        INSERT INTO menu (id, name, description, price, price_half, price_full, category, dietary_type, is_daily_special, image_url, drive_file_id, price_tbd)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [id, name, description, effectivePrice, price_half || null, price_full || null, category, dietary_type, is_daily_special === 'true' ? 1 : 0, imageUrl, driveFileId, isTbd ? 1 : 0]);
 
       res.json({ success: true, id });
     } catch (err) {
@@ -14756,8 +14765,24 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS loyalty_tier_name TEXT").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS loyalty_discount_percent FLOAT").catch(() => {});
       const { customer_name, customer_phone, reference, items, discount_amount, service_charge_percent, gst_percent, apply_gst } = req.body;
+      // Validation: every line item must have a positive price + a
+      // non-empty name. "Special items" (price_tbd=1 in the menu)
+      // come in with price=0; the cashier must enter the price in
+      // the cart before submit. Rejecting here is the second line of
+      // defense — the UI already disables Generate until prices are
+      // filled.
+      const itemArr = Array.isArray(items) ? items : [];
+      const zeroPriceItems = itemArr.filter((it: any) =>
+        String(it?.name || '').trim() && Number(it?.price || 0) <= 0
+      );
+      if (zeroPriceItems.length > 0) {
+        const names = zeroPriceItems.map((it: any) => it.name).join(', ');
+        return res.status(400).json({
+          error: `Cannot generate invoice — set a price for the special item(s): ${names}.`,
+        });
+      }
       const id = `MAN-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
-      const subtotal = (items || []).reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
+      const subtotal = itemArr.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
 
       // ── Unified totals (multi-tax + auto loyalty) ──────────────────────
       // Computed server-side so the form's single `gst_percent` field never
@@ -17712,7 +17737,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'edit-invoice-tile-pos-ui',
+    commit_marker: 'menu-special-items-price-tbd',
     code_features: [
       'subscription-billing',
       'read-only-mode',
