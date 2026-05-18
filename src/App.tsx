@@ -23,6 +23,7 @@ import {
   Star,
   LogOut,
   Layout,
+  LayoutDashboard,
   User,
   Lock,
   Mail,
@@ -8990,89 +8991,166 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </button>
       </div>
 
-      {/* ── MOBILE: Dropdown navigation menu ── */}
-      {mobileNavOpen && (
-        <div className="md:hidden -mt-3 rounded-2xl bg-white border border-[#cc5a16]/10 shadow-lg overflow-hidden z-40 relative">
-          {([
-            ['MONITOR', 'Command & Control'], ['MENU', 'Menu Management'], ['INVENTORY', 'Inventory'], ['DELIVERY', 'Delivery Partners'], ['REPORTS', 'Analytics & Reports'],
-            ['QR', 'QR Management'], ['BOOKINGS', 'Bookings'],
-            ...(isHotelEnabled ? [
-              ['ROOMS','Rooms'],
-              ['HOTEL_BOOKINGS','Hotel Bookings'],
-              ['SERVICES','Services'],
-              ['SERVICE_REQUESTS','Service Requests'],
-              ['FOLIOS','Folios'],
-              ['COMPLIANCE','Compliance'],
-              ['CONCIERGE_FAQ','Concierge FAQ'],
-            ] as [string,string][] : []),
-            ['LOYALTY', 'Loyalty Program'],
-            ['STAFF', 'Staff Management'],
-            ['ROSTER', 'Roster'], ['TIMESHEET', 'Timesheet'],
-            ['ORDERS', 'Orders'], ['INVOICES', 'Invoices'],
-            ['ATTENDANCE', 'Attendance'], ['FEEDBACK', 'Feedback'],
-            ['SUBSCRIPTION', 'Subscription'], ['NOTIFICATIONS', 'Notifications'],
-            ['SETTINGS', 'Brand & Settings'],
-          ] as [string, string][]).filter(([id]) => isTabVisible(id, allowedTabs)).map(([id, label]) => (
-            <button
-              key={id}
-              onClick={() => { setActiveTab(id); setMobileNavOpen(false); }}
-              className={cn(
-                "w-full text-left px-5 py-3.5 text-sm font-bold uppercase tracking-widest border-b border-[#cc5a16]/10 last:border-0 flex items-center justify-between transition-colors",
-                activeTab === id
-                  ? "bg-[#cc5a16] text-white"
-                  : "text-[#6b5d52] hover:bg-[#cc5a16]/5"
-              )}
-            >
-              {label}
-              {activeTab === id && <Check size={14} />}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* ── Categorized nav groups ────────────────────────────────────
+          The owner dashboard previously rendered all ~25 tabs as a
+          single flat horizontal strip, which made it hard for owners
+          on a BOTH-mode account (Restaurant + Hotel) to tell which tab
+          belonged to which side of the business. We now group tabs
+          into three labelled lanes: GENERAL · RESTAURANT · HOTEL.
 
-      {/* ── DESKTOP: Horizontal scrollable tab bar (hidden on mobile) ── */}
-      <div className="hidden md:flex flex-wrap gap-x-4 gap-y-1 border-b border-[#cc5a16]/10">
-        {([
-          ['MONITOR', 'Command & Control'], ['MENU', 'Menu Management'], ['INVENTORY', 'Inventory'], ['DELIVERY', 'Delivery Partners'], ['REPORTS', 'Analytics & Reports'],
-          ['QR', 'QR Management'], ['BOOKINGS', 'Bookings'],
-          ...(isHotelEnabled ? [
-              ['ROOMS','Rooms'],
-              ['HOTEL_BOOKINGS','Hotel Bookings'],
-              ['SERVICES','Services'],
-              ['SERVICE_REQUESTS','Service Requests'],
-              ['FOLIOS','Folios'],
-              ['COMPLIANCE','Compliance'],
-              ['CONCIERGE_FAQ','Concierge FAQ'],
-            ] as [string,string][] : []),
-          ['LOYALTY', 'Loyalty Program'],
-          ['STAFF', 'Staff Management'],
-          ['ROSTER', 'Roster'], ['TIMESHEET', 'Timesheet'],
-          ['ORDERS', 'Orders'], ['INVOICES', 'Invoices'],
-          ['ATTENDANCE', 'Attendance'], ['FEEDBACK', 'Feedback'],
-          ['SUBSCRIPTION', 'Subscription'], ['NOTIFICATIONS', 'Notifications'],
-          ['SETTINGS', 'Brand & Settings'],
-        ] as [string, string][]).filter(([id]) => {
-          // Hotel tabs are always shown when hotel is enabled — bypass the stored allowedTabs
-          // permission list (which predates the hotel module and doesn't include these IDs).
-          if (['ROOMS','SERVICES','SERVICE_REQUESTS'].includes(id)) return true;
-          // INVENTORY / DELIVERY grandfathered for legacy permission sets; once an
-          // admin re-saves via Role Access their explicit choice wins. See isTabVisible().
+          Single source of truth — both the mobile dropdown and the
+          desktop nav consume the same nav_groups array, so adding a
+          new tab only requires touching this one definition. The
+          HOTEL lane is hidden entirely when isHotelEnabled is false;
+          the RESTAURANT lane is hidden when isRestaurantEnabled is
+          false (only-hotel tenants).                                   */}
+      {(() => {
+        type NavTab = { id: string; label: string };
+        type NavGroup = {
+          id: string;
+          label: string;
+          icon: React.ReactNode;
+          tabs: NavTab[];
+          visible: boolean;
+        };
+        const navGroups: NavGroup[] = [
+          {
+            id: 'GENERAL', label: 'General',
+            icon: <LayoutDashboard size={12} />,
+            visible: true,
+            tabs: [
+              { id: 'MONITOR',       label: 'Command & Control' },
+              { id: 'REPORTS',       label: 'Analytics & Reports' },
+              { id: 'LOYALTY',       label: 'Loyalty Program' },
+              { id: 'STAFF',         label: 'Staff Management' },
+              { id: 'ROSTER',        label: 'Roster' },
+              { id: 'TIMESHEET',     label: 'Timesheet' },
+              { id: 'ATTENDANCE',    label: 'Attendance' },
+              { id: 'INVOICES',      label: 'Invoices' },
+              { id: 'FEEDBACK',      label: 'Feedback' },
+              { id: 'SUBSCRIPTION',  label: 'Subscription' },
+              { id: 'NOTIFICATIONS', label: 'Notifications' },
+              { id: 'SETTINGS',      label: 'Brand & Settings' },
+            ],
+          },
+          {
+            id: 'RESTAURANT', label: 'Restaurant',
+            icon: <Utensils size={12} />,
+            visible: isRestaurantEnabled,
+            tabs: [
+              { id: 'MENU',      label: 'Menu Management' },
+              { id: 'INVENTORY', label: 'Inventory' },
+              { id: 'DELIVERY',  label: 'Delivery Partners' },
+              { id: 'QR',        label: 'QR Management' },
+              { id: 'BOOKINGS',  label: 'Bookings' },
+              { id: 'ORDERS',    label: 'Orders' },
+            ],
+          },
+          {
+            id: 'HOTEL', label: 'Hotel',
+            icon: <Bed size={12} />,
+            visible: isHotelEnabled,
+            tabs: [
+              { id: 'ROOMS',            label: 'Rooms' },
+              { id: 'HOTEL_BOOKINGS',   label: 'Hotel Bookings' },
+              { id: 'SERVICES',         label: 'Services' },
+              { id: 'SERVICE_REQUESTS', label: 'Service Requests' },
+              { id: 'FOLIOS',           label: 'Folios' },
+              { id: 'COMPLIANCE',       label: 'Compliance' },
+              { id: 'CONCIERGE_FAQ',    label: 'Concierge FAQ' },
+            ],
+          },
+        ];
+
+        // Per-tab visibility — keep the grandfathering hacks that the
+        // old flat list used, just in one place now.
+        const isVisible = (id: string) => {
+          if (['ROOMS', 'SERVICES', 'SERVICE_REQUESTS'].includes(id)) return true;
           return isTabVisible(id, allowedTabs);
-        }).map(([id, label]) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id)}
-            className={cn(
-              "pb-3 lg:pb-4 text-xs lg:text-sm font-bold uppercase tracking-widest transition-all whitespace-nowrap",
-              activeTab === id
-                ? "text-[#1a1208] border-b-2 border-[#cc5a16]"
-                : "text-[#9c8e85] hover:text-[#3d3128]"
+        };
+
+        return (
+          <>
+            {/* ── MOBILE: Dropdown navigation menu — grouped ───────── */}
+            {mobileNavOpen && (
+              <div className="md:hidden -mt-3 rounded-2xl bg-white border border-[#cc5a16]/10 shadow-lg overflow-hidden z-40 relative">
+                {navGroups.filter(g => g.visible).map((group, gi) => {
+                  const visibleTabs = group.tabs.filter(t => isVisible(t.id));
+                  if (visibleTabs.length === 0) return null;
+                  return (
+                    <div key={group.id}>
+                      {/* Group header — sticky-feel divider with icon */}
+                      <div
+                        className={cn(
+                          "px-5 py-2 flex items-center gap-2 bg-[#faf7f2] border-b border-[#cc5a16]/10",
+                          gi > 0 && "border-t-2 border-t-[#cc5a16]/15"
+                        )}
+                      >
+                        <span className="text-[#cc5a16]">{group.icon}</span>
+                        <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#cc5a16]">
+                          {group.label}
+                        </span>
+                      </div>
+                      {visibleTabs.map(t => (
+                        <button
+                          key={t.id}
+                          onClick={() => { setActiveTab(t.id); setMobileNavOpen(false); }}
+                          className={cn(
+                            "w-full text-left px-5 py-3.5 text-sm font-bold uppercase tracking-widest border-b border-[#cc5a16]/10 last:border-0 flex items-center justify-between transition-colors",
+                            activeTab === t.id
+                              ? "bg-[#cc5a16] text-white"
+                              : "text-[#6b5d52] hover:bg-[#cc5a16]/5"
+                          )}
+                        >
+                          {t.label}
+                          {activeTab === t.id && <Check size={14} />}
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
             )}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+
+            {/* ── DESKTOP: One row per group, header label on the left ──
+                Each group is its own flex-wrap line so the visual
+                separation survives long tab lists. A small icon +
+                colour-coded label sits on the left of each lane.    */}
+            <div className="hidden md:block space-y-1.5">
+              {navGroups.filter(g => g.visible).map(group => {
+                const visibleTabs = group.tabs.filter(t => isVisible(t.id));
+                if (visibleTabs.length === 0) return null;
+                return (
+                  <div key={group.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[#cc5a16]/10 pb-1">
+                    {/* Section label chip — narrow, fixed width so the
+                        tabs line up cleanly across the three lanes */}
+                    <div className="flex items-center gap-1.5 pr-3 mr-1 border-r border-[#cc5a16]/15 shrink-0 min-w-[88px] lg:min-w-[104px]">
+                      <span className="text-[#cc5a16]">{group.icon}</span>
+                      <span className="text-[10px] lg:text-[11px] font-bold uppercase tracking-[0.18em] text-[#cc5a16]">
+                        {group.label}
+                      </span>
+                    </div>
+                    {visibleTabs.map(t => (
+                      <button
+                        key={t.id}
+                        onClick={() => setActiveTab(t.id)}
+                        className={cn(
+                          "pb-2 lg:pb-2.5 text-xs lg:text-sm font-bold uppercase tracking-widest transition-all whitespace-nowrap",
+                          activeTab === t.id
+                            ? "text-[#1a1208] border-b-2 border-[#cc5a16]"
+                            : "text-[#9c8e85] hover:text-[#3d3128]"
+                        )}
+                      >
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        );
+      })()}
 
       {allowedTabs && !isTabVisible(activeTab, allowedTabs) ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
