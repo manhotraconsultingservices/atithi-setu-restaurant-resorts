@@ -7537,6 +7537,19 @@ async function startServer() {
     taxLabelSnapshot: string;
     usedLegacyGst: boolean;
   };
+  // Phase H3 — service-charge identification. Tax-config rows that look
+  // like a restaurant service charge (label/id contains "service", "st",
+  // or "sc") are NOT applied as statutory taxes — they migrate to the
+  // dedicated restaurants.service_charge_percent slot so the field stays
+  // editable per-invoice. This guard prevents double-counting when a
+  // tenant has both a tax_config "ST" row AND a service_charge_percent.
+  function isServiceChargeTaxRow(row: { id?: any; label?: any }): boolean {
+    const id    = String(row?.id    || '').toLowerCase();
+    const label = String(row?.label || '').toLowerCase();
+    if (id === 'st' || id === 'sc' || id === 'service' || id === 'service_charge') return true;
+    return /\bservice\b|service charge/.test(label);
+  }
+
   async function computeInvoiceTotals(opts: InvoiceTotalsInput): Promise<InvoiceTotalsOutput> {
     const subtotal = Math.max(0, Math.round((opts.subtotal || 0) * 100) / 100);
     const manualDiscount = Math.max(0, Math.round((opts.discountAmount || 0) * 100) / 100);
@@ -7581,8 +7594,14 @@ async function startServer() {
       [opts.tenantId]
     );
     const configs = await _loadTaxConfig(opts.tenantId, tenantRow?.tax_template_id || 'IN_GST');
+    // Phase H3 — filter out service-charge rows from tax_config so they
+    // never apply as taxes. Service charge is handled via the dedicated
+    // serviceChargePct field on this same call (above), pre-populated
+    // from restaurants.service_charge_percent on the frontend.
     const activeConfigs = (configs || []).filter(c =>
-      Number(c.enabled || 1) === 1 && Number(c.rate_percent || 0) > 0
+      Number(c.enabled || 1) === 1 &&
+      Number(c.rate_percent || 0) > 0 &&
+      !isServiceChargeTaxRow(c)
     );
 
     let taxLines: TaxLine[] = [];
@@ -7672,7 +7691,8 @@ async function startServer() {
     try {
       const tenantId = req.params.id;
       const row: any = await centralDb.get(
-        `SELECT country, currency_code, currency_symbol, locale, tax_template_id
+        `SELECT country, currency_code, currency_symbol, locale, tax_template_id,
+                service_charge_percent
            FROM restaurants WHERE id = ?`, [tenantId]
       );
       if (!row) return res.status(404).json({ error: "Restaurant not found" });
@@ -7681,16 +7701,45 @@ async function startServer() {
       const allRows: any[] = await db.query(
         "SELECT id, label, rate_percent, is_inclusive, applies_to, display_order, enabled, split_intrastate, cgst_share FROM tax_config ORDER BY display_order ASC, id ASC"
       );
+
+      // Phase H3 — one-time lazy migration. When a tenant has both:
+      //   • a service-charge-looking row in tax_config (e.g. label "ST")
+      //   • restaurants.service_charge_percent currently 0 (un-set)
+      // …copy the rate to restaurants.service_charge_percent and disable
+      // the tax_config row so it doesn't double-count. The user keeps
+      // their configured rate but it now flows through the dedicated
+      // editable Service Charge slot on every invoice.
+      let serviceChargePct = Number(row.service_charge_percent || 0);
+      if (serviceChargePct === 0) {
+        const svcRow = (allRows || []).find(r =>
+          Number(r.enabled || 1) === 1 &&
+          Number(r.rate_percent || 0) > 0 &&
+          isServiceChargeTaxRow(r)
+        );
+        if (svcRow) {
+          serviceChargePct = Number(svcRow.rate_percent || 0);
+          await centralDb.run(
+            "UPDATE restaurants SET service_charge_percent = ? WHERE id = ?",
+            [serviceChargePct, tenantId]
+          );
+          await db.run("UPDATE tax_config SET enabled = 0 WHERE id = ?", [svcRow.id]);
+          // Refresh the lists we'll return so the response reflects the
+          // post-migration state.
+          for (const r of allRows) if (r.id === svcRow.id) r.enabled = 0;
+        }
+      }
+
       res.json({
         country: row.country || 'IN',
         currency_code: row.currency_code || 'INR',
         currency_symbol: row.currency_symbol || '₹',
         locale: row.locale || 'en-IN',
         tax_template_id: row.tax_template_id || 'IN_GST',
-        active_configs: configs,                 // enabled rows only (used at runtime)
-        all_configs: allRows || [],              // full list for editor
+        active_configs: (configs || []).filter(c => !isServiceChargeTaxRow(c)),
+        all_configs: allRows || [],              // full list (incl. disabled ST) for editor
         presets: Object.keys(TAX_PRESETS),
         country_defaults: COUNTRY_DEFAULTS,
+        service_charge_percent: serviceChargePct,
       });
     } catch (err) {
       console.error("Tax config GET error:", err);
@@ -7709,8 +7758,12 @@ async function startServer() {
       const tenantId = req.params.id;
       const {
         country, currency_code, currency_symbol, locale, tax_template_id,
-        tax_lines,
+        tax_lines, service_charge_percent,
       } = req.body || {};
+      // Phase H3 — clamp + validate the dedicated service-charge slot.
+      const svcPct = service_charge_percent == null
+        ? null
+        : Math.max(0, Math.min(100, Number(service_charge_percent) || 0));
       // Update restaurants row
       await centralDb.run(
         `UPDATE restaurants
@@ -7718,10 +7771,11 @@ async function startServer() {
                 currency_code = COALESCE(?, currency_code),
                 currency_symbol = COALESCE(?, currency_symbol),
                 locale = COALESCE(?, locale),
-                tax_template_id = COALESCE(?, tax_template_id)
+                tax_template_id = COALESCE(?, tax_template_id),
+                service_charge_percent = COALESCE(?, service_charge_percent)
           WHERE id = ?`,
         [country || null, currency_code || null, currency_symbol || null,
-         locale || null, tax_template_id || null, tenantId]
+         locale || null, tax_template_id || null, svcPct, tenantId]
       );
       // Replace tax_config rows if caller passed an array
       if (Array.isArray(tax_lines)) {
@@ -15086,7 +15140,7 @@ async function startServer() {
     try {
       const db = await getTenantDb(req.params.id);
       const restaurant = await centralDb.get(
-        "SELECT name, gst_percentage, is_gst_enabled, gst_number, city FROM restaurants WHERE id = ?", [req.params.id]
+        "SELECT name, gst_percentage, is_gst_enabled, gst_number, city, service_charge_percent FROM restaurants WHERE id = ?", [req.params.id]
       );
       const session = await db.get(
         "SELECT * FROM table_sessions WHERE table_id = ? AND status IN ('open','bill_requested') ORDER BY opened_at DESC LIMIT 1",
@@ -15130,12 +15184,21 @@ async function startServer() {
           ? defaultApplyGst
           : (session.apply_gst != null ? Number(session.apply_gst) : defaultApplyGst);
 
+      // Phase H3 — default the session's service_charge_percent from the
+      // tenant setting when the session row's value is 0 AND the bill
+      // hasn't been requested yet. Once the customer requests the bill
+      // (or the cashier edits the session via the postpaid modal), the
+      // stored session value is intentional and we honour it as-is.
+      const defaultSvcPct = Number((restaurant as any)?.service_charge_percent || 0);
+      const sessionSvcPct = Number(session.service_charge_percent || 0);
+      const finalSvcPct   = isPreBillRequest && sessionSvcPct === 0 ? defaultSvcPct : sessionSvcPct;
+
       res.json({
         session: {
           ...session,
           table_display_name: tableRow?.name || session.table_name || session.table_id,
           discount_amount:        Number(session.discount_amount || 0),
-          service_charge_percent: Number(session.service_charge_percent || 0),
+          service_charge_percent: finalSvcPct,
           gst_percent:  finalGstPercent,
           apply_gst:    finalApplyGst,
           orders,
@@ -18688,7 +18751,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-tax-slabs-and-service-charge',
+    commit_marker: 'service-charge-editable-per-invoice',
     code_features: [
       'subscription-billing',
       'read-only-mode',

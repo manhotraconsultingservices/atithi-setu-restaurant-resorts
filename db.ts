@@ -253,7 +253,13 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab2_max  DOUBLE PRECISION DEFAULT 7500;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab2_rate DOUBLE PRECISION DEFAULT 12;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_gst_slab3_rate DOUBLE PRECISION DEFAULT 18;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_service_charge_percent DOUBLE PRECISION DEFAULT 0
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_service_charge_percent DOUBLE PRECISION DEFAULT 0;
+    -- Phase H3 — Restaurant default service charge.
+    -- A negotiable restaurant fee (separate from statutory GST). Sourced
+    -- as the pre-populated default for the editable "Service Charge %"
+    -- field on every invoice / postpaid session. Staff can override per
+    -- invoice when the customer pushes back. 0 = no default.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS service_charge_percent DOUBLE PRECISION DEFAULT 0
   `);
   await centralDb.exec(
     `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`

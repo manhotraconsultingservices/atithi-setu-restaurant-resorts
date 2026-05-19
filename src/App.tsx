@@ -6912,12 +6912,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // inputs. The preview is still used for the actual ₹ amounts when items
   // are present.
   const [activeTaxLines, setActiveTaxLines] = useState<Array<{ id: string; label: string; rate_percent: number }>>([]);
+  // Phase H3 — tenant-level default service charge %. Pre-populates the
+  // editable Service Charge field on every new invoice / postpaid
+  // session. Server filters service-labeled tax_config rows so this
+  // is the single source of truth.
+  const [tenantServiceChargePct, setTenantServiceChargePct] = useState<number>(0);
   const fetchActiveTaxLines = async () => {
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/tax-config`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) { setActiveTaxLines([]); return; }
+      if (!res.ok) { setActiveTaxLines([]); setTenantServiceChargePct(0); return; }
       const data = await res.json();
       const lines = Array.isArray(data?.active_configs)
         ? data.active_configs
@@ -6929,8 +6934,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             }))
         : [];
       setActiveTaxLines(lines);
+      setTenantServiceChargePct(Number(data?.service_charge_percent || 0));
     } catch {
       setActiveTaxLines([]);
+      setTenantServiceChargePct(0);
     }
   };
   // Derived: true when Tax Lines from Settings drive the math. Replaces
@@ -6986,7 +6993,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     setShowCustomItemForm(false);
     setCustomItemDraft({ name: '', qty: 1, price: 0 });
     setOdDiscount(0);
-    setOdSvcPct(0);
+    setOdSvcPct(0);  // pre-populated below once tax-config loads
     setOdApplyGst(false);
     setOdSaveError('');
     // Fetch the active tax lines so the layout below knows immediately
@@ -6995,6 +7002,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     fetchActiveTaxLines();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showOnDemandModal]);
+
+  // Phase H3 — pre-populate the editable Service Charge % from the tenant
+  // default once the tax-config fetch resolves. Runs whenever the modal
+  // opens AND when the tenant default loads. Doesn't fight a value the
+  // staff has already typed (only sets when odSvcPct is 0 — the initial
+  // state from the reset effect above).
+  useEffect(() => {
+    if (!showOnDemandModal) return;
+    if (tenantServiceChargePct <= 0) return;
+    if (odSvcPct > 0) return;
+    setOdSvcPct(tenantServiceChargePct);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showOnDemandModal, tenantServiceChargePct]);
 
   // Type-ahead state for the Edit-Invoice modal (separate from the New-Invoice modal)
   const [invEditSearchActive, setInvEditSearchActive] = useState<number | null>(null);
@@ -7022,21 +7042,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // its own client-side math which missed loyalty entirely.
   const [invEditPreview, setInvEditPreview] = useState<any | null>(null);
   const [invEditPreviewLoading, setInvEditPreviewLoading] = useState(false);
-  // Once the preview confirms tax_config is the driver, blank out the
-  // legacy gstPct/svcPct fields. They came pre-populated from the saved
-  // invoice's `orders.gst_percent` column which stores a BLENDED effective
-  // rate (GST + Service Tax / etc), making it look like the user set
-  // GST=15 when it's really 5 + 10. The blended number is misleading and
-  // the math doesn't use these fields anyway when taxLines is populated.
+  // Phase H3 — when tax_config drives the math, blank out the legacy
+  // gstPct/applyGst fields (those came pre-populated from the saved
+  // invoice's BLENDED `orders.gst_percent` column and would double-count).
+  // svcPct is NOT zeroed: service charge is its own editable field now,
+  // independent of tax_config statutory taxes. If the saved invoice had
+  // a service_charge_percent, we keep it; otherwise the open-invoice
+  // load path will populate it from the tenant default (below).
   useEffect(() => {
     const p = invEditPreview;
     if (!p || !Array.isArray(p.taxLines) || p.taxLines.length === 0) return;
-    if (invEdit.gstPct === 0 && invEdit.svcPct === 0 && !invEdit.applyGst) return;
-    setInvEdit(prev => ({ ...prev, gstPct: 0, svcPct: 0, applyGst: false }));
-    // Intentionally not depending on invEdit fields — we only want this
-    // to fire the FIRST time the preview confirms tax_config drives.
+    if (invEdit.gstPct === 0 && !invEdit.applyGst) return;
+    setInvEdit(prev => ({ ...prev, gstPct: 0, applyGst: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invEditPreview]);
+
+  // Phase H3 — pre-populate svcPct from the tenant default when an Edit
+  // Invoice modal opens AND the saved invoice has no service charge of
+  // its own. Doesn't fight a value the staff already typed.
+  useEffect(() => {
+    if (!invoiceEditTarget) return;
+    if (tenantServiceChargePct <= 0) return;
+    if (invEdit.svcPct > 0) return;
+    setInvEdit(prev => ({ ...prev, svcPct: tenantServiceChargePct }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoiceEditTarget, tenantServiceChargePct]);
   // POS-style tile UI state for the Edit Invoice modal — mirrors the
   // New Invoice modal so a cashier can tap tiles to add items to an
   // existing order invoice (SESSION invoices keep items read-only since
@@ -18075,14 +18105,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                          configured: show Discount + Auto-applied taxes card.
                          Otherwise: show legacy Discount + Service % + GST %. */}
                       {isTaxCfgDrivenTenant ? (
-                        <div className="grid grid-cols-2 gap-3 items-start">
+                        /* Tax Lines drive the GST/tax math. Service
+                           Charge remains editable per-invoice — staff
+                           can override when the customer pushes back. */
+                        <div className="grid grid-cols-3 gap-2 items-start">
                           <div>
                             <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
                             <input type="number" min="0" value={invEdit.discount}
                               onChange={e => setInvEdit(p => ({ ...p, discount: Number(e.target.value) || 0 }))}
                               className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
                           </div>
-                          <div className="rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15 px-3 py-2 text-[10px] text-[#3d3128]">
+                          <div>
+                            <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
+                              title="Default from Settings → Tax Lines → Service Charge. Editable per-invoice — set to 0 to waive.">
+                              Service Charge %
+                            </label>
+                            <input type="number" min="0" max="100" step="0.5" value={invEdit.svcPct}
+                              onChange={e => setInvEdit(p => ({ ...p, svcPct: Math.max(0, Math.min(100, Number(e.target.value) || 0)) }))}
+                              className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                          </div>
+                          <div className="rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15 px-2.5 py-1.5 text-[10px] text-[#3d3128]">
                             <div className="flex items-center gap-1.5 mb-1">
                               <Info size={11} className="text-[#cc5a16] shrink-0" />
                               <strong className="uppercase tracking-widest text-[9px]">Auto-applied taxes</strong>
@@ -18893,7 +18935,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                          modal open — that way the layout is correct even
                          with an empty cart (preview hasn't run yet). */}
                       {isTaxCfgDrivenTenant ? (
-                        <div className="grid grid-cols-2 gap-3 items-start">
+                        /* Tax Lines drive the GST/tax math, but Service
+                           Charge is always editable per-invoice (staff
+                           can negotiate it down when the customer pushes
+                           back). Pre-populated from tenantServiceChargePct
+                           on modal open. */
+                        <div className="grid grid-cols-3 gap-2 items-start">
                           <div>
                             <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">Discount ₹</label>
                             <input
@@ -18902,7 +18949,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
                             />
                           </div>
-                          <div className="rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15 px-3 py-2 text-[10px] text-[#3d3128]">
+                          <div>
+                            <label
+                              className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
+                              title="Default from Settings → Tax Lines → Service Charge. Editable per-invoice — set to 0 to waive."
+                            >
+                              Service Charge %
+                            </label>
+                            <input
+                              type="number" min="0" max="100" step="0.5" value={odSvcPct}
+                              onChange={e => setOdSvcPct(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                              className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                            />
+                          </div>
+                          <div className="rounded-xl bg-[#cc5a16]/5 border border-[#cc5a16]/15 px-2.5 py-1.5 text-[10px] text-[#3d3128]">
                             <div className="flex items-center gap-1.5 mb-1">
                               <Info size={11} className="text-[#cc5a16] shrink-0" />
                               <strong className="uppercase tracking-widest text-[9px]">Auto-applied taxes</strong>
@@ -18931,13 +18991,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <div>
                             <label
                               className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5"
-                              title="Optional restaurant service charge added BEFORE tax. Separate from any 'Service Tax' line you've configured in Brand & Settings → Tax Lines."
+                              title="Optional restaurant service charge added BEFORE tax. Pre-populated from Settings → Default Service Charge."
                             >
                               Service Charge %
                             </label>
                             <input
-                              type="number" min="0" value={odSvcPct}
-                              onChange={e => setOdSvcPct(Number(e.target.value) || 0)}
+                              type="number" min="0" max="100" step="0.5" value={odSvcPct}
+                              onChange={e => setOdSvcPct(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
                               className="w-full border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
                             />
                           </div>
@@ -28020,7 +28080,15 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
           setOrders(sess.orders || []);
           setRestaurant(rest);
           setDiscount(Number(sess.discount_amount || 0));
-          setSvcPct(Number(sess.service_charge_percent || 0));
+          // Phase H3 — sess.service_charge_percent already comes pre-defaulted
+          // from restaurants.service_charge_percent by the /active-session
+          // endpoint when the session is still 'open' AND has no svc % of
+          // its own. Once the bill is requested, the stored value wins.
+          // Belt-and-braces: also fall back to rest.service_charge_percent
+          // here in case the server defaulting didn't fire.
+          const sessSvc = Number(sess.service_charge_percent || 0);
+          const restSvc = Number((rest as any)?.service_charge_percent || 0);
+          setSvcPct(sessSvc > 0 ? sessSvc : restSvc);
           setGstPct(Number(rest?.is_gst_enabled ? (sess.gst_percent != null ? sess.gst_percent : (rest?.gst_percentage ?? 0)) : 0));
           setApplyGst(Boolean(rest?.is_gst_enabled) && (sess.apply_gst != null ? Number(sess.apply_gst) === 1 : true));
           if (sess.payment_method) setPayMethod(sess.payment_method as 'CASH' | 'CARD' | 'UPI');
@@ -30823,8 +30891,13 @@ function TaxCurrencyPanel({ restaurantId, token }: { restaurantId: string; token
     active_configs: any[]; all_configs: any[];
     presets: string[];
     country_defaults: Record<string, { currency_code: string; currency_symbol: string; locale: string; tax_template_id: string }>;
+    service_charge_percent?: number;
   } | null>(null);
   const [taxLines, setTaxLines] = useState<any[]>([]);
+  // Phase H3 — dedicated default Service Charge %. Separate from
+  // tax_config so the field stays editable per-invoice in both
+  // Manual Invoice and the postpaid session bill.
+  const [serviceChargePct, setServiceChargePct] = useState<number>(0);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(true);
@@ -30839,6 +30912,7 @@ function TaxCurrencyPanel({ restaurantId, token }: { restaurantId: string; token
       const data = await res.json();
       setCfg(data);
       setTaxLines(data.all_configs || []);
+      setServiceChargePct(Number(data.service_charge_percent || 0));
     } finally { setLoading(false); }
   }, [restaurantId, token]);
 
@@ -30884,6 +30958,7 @@ function TaxCurrencyPanel({ restaurantId, token }: { restaurantId: string; token
           currency_symbol: cfg.currency_symbol, locale: cfg.locale,
           tax_template_id: cfg.tax_template_id,
           tax_lines: taxLines,
+          service_charge_percent: serviceChargePct,
         }),
       });
       if (!res.ok) { setMessage('Save failed'); return; }
@@ -30980,6 +31055,33 @@ function TaxCurrencyPanel({ restaurantId, token }: { restaurantId: string; token
             className="w-full bg-white border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
             placeholder="en-IN"
           />
+        </div>
+      </div>
+
+      {/* Phase H3 — Default Service Charge. Sourced as the pre-populated
+          value of the editable "Service Charge %" field on every Manual
+          Invoice / Edit Invoice / postpaid-session bill. Staff can edit
+          it per-invoice (e.g. waive when the customer pushes back).
+          Kept ABOVE Tax Lines because it's a separate concept — a
+          negotiable restaurant fee, not a statutory tax. */}
+      <div className="bg-white rounded-2xl p-4">
+        <div className="flex items-start justify-between gap-3 mb-2 flex-wrap">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest text-[#6b5d52]">Default Service Charge</p>
+            <p className="text-[11px] text-[#9c8e85] mt-0.5">
+              Pre-populated on every new invoice. Editable per-invoice — staff can waive or adjust when a customer pushes back.
+            </p>
+          </div>
+          <div className="flex items-center gap-1 w-32">
+            <input
+              type="number" min={0} max={100} step="0.01"
+              value={serviceChargePct}
+              onChange={e => setServiceChargePct(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+              className="w-full bg-[#faf7f2] rounded-xl px-3 py-2 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20"
+              placeholder="0"
+            />
+            <span className="text-[#9c8e85] text-xs">%</span>
+          </div>
         </div>
       </div>
 
