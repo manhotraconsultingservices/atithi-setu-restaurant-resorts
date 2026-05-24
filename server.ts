@@ -290,6 +290,36 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     --   cancellation_reason         free-text from cashier ("no-show", "guest illness", etc.).
     --   cancellation_refund_pct     0-100 — computed from hotel_refund_*  policy.
     --   cancellation_refund_amount  refund_pct % of total_amount.
+    -- Sprint C2 — Group bookings. A "group" is N child bookings sharing
+    -- the same date range, guest contact, and group_id. Examples:
+    -- corporate event (10 rooms for 3 nights), tour operator (40
+    -- rooms), family booking (3 rooms under one billing contact).
+    --   group_id     opaque key linking the N bookings; NULL = standalone
+    --   group_name   denormalised label ("Acme Corp - May 24-27") so
+    --                listings don't need a join.
+    -- An optional room_booking_groups table holds the group-level
+    -- metadata (one row per group_id) — handy for "consolidated invoice"
+    -- and group cancellation flows; child bookings remain queryable in
+    -- isolation either way.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS group_id   TEXT;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS group_name TEXT;
+    CREATE INDEX IF NOT EXISTS idx_room_bookings_group ON room_bookings (group_id);
+
+    CREATE TABLE IF NOT EXISTS room_booking_groups (
+      id              TEXT PRIMARY KEY,
+      name            TEXT NOT NULL,
+      contact_name    TEXT,
+      contact_phone   TEXT,
+      contact_email   TEXT,
+      num_rooms       INT DEFAULT 0,
+      check_in_date   DATE,
+      check_out_date  DATE,
+      total_amount    DOUBLE PRECISION DEFAULT 0,
+      notes           TEXT,
+      created_by      TEXT,
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
@@ -14282,6 +14312,141 @@ async function startServer() {
     }
   });
 
+  // ─── GROUP BOOKINGS — Sprint C2 ────────────────────────────────────
+  // Create N bookings in a single transaction. All share:
+  //   - dates (check_in / check_out)
+  //   - guest contact (name / phone / email)
+  //   - booking_source / booking_type
+  //   - group_id linking them
+  // Each room slot is validated against the same overlap rules as
+  // single-booking POST so half-built groups can't leak through.
+  //
+  // body: {
+  //   name: 'Acme Corp — May 24-27',
+  //   contact_name, contact_phone, contact_email,
+  //   check_in_date, check_out_date, booking_type,
+  //   booking_source, special_requests,
+  //   rooms: [ { room_id, room_rate?, num_guests? }, ... ]
+  // }
+  app.post("/api/restaurant/:id/hotel/bookings/group", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const b = req.body || {};
+      const {
+        name, contact_name, contact_phone, contact_email,
+        check_in_date, check_out_date, booking_type,
+        booking_source, special_requests,
+      } = b;
+      const rooms: Array<{ room_id: string; room_rate?: number; num_guests?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
+      if (!name || String(name).trim().length === 0) {
+        return res.status(400).json({ error: "Group name is required." });
+      }
+      if (!contact_name || String(contact_name).trim().length === 0) {
+        return res.status(400).json({ error: "Contact name is required." });
+      }
+      if (rooms.length === 0) {
+        return res.status(400).json({ error: "At least one room is required for a group booking." });
+      }
+      // Defensive — reject obvious dup room_ids in the request.
+      const ids = rooms.map(r => r.room_id);
+      if (new Set(ids).size !== ids.length) {
+        return res.status(400).json({ error: "Same room selected twice in this group. Pick distinct rooms." });
+      }
+
+      const tenantDb = await getTenantDb(req.params.id);
+      // Validate EVERY room before inserting anything — atomic semantics.
+      for (const r of rooms) {
+        const v = await validateBookingRequest(req.params.id, {
+          room_id: r.room_id,
+          check_in_date, check_out_date,
+          booking_type,
+          num_guests: r.num_guests || 1,
+        });
+        if (!v.ok) return res.status(v.status).json({ error: `Room ${r.room_id}: ${v.error}` });
+      }
+
+      const bookingType = String(booking_type || 'OVERNIGHT').toUpperCase();
+      const groupId = `GRP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      let nights = 1;
+      if (bookingType !== 'DAY_USE') {
+        nights = Math.max(1, Math.ceil((new Date(check_out_date).getTime() - new Date(check_in_date).getTime()) / 86400000));
+      }
+
+      const created: any[] = [];
+      let groupTotal = 0;
+      for (const r of rooms) {
+        const rate = Number(r.room_rate) || 0;
+        const total = rate * nights;
+        groupTotal += total;
+        const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        await tenantDb.run(
+          `INSERT INTO room_bookings
+           (id, room_id, guest_name, guest_phone, guest_email,
+            num_guests, check_in_date, check_out_date, status, booking_source,
+            room_rate, total_amount, special_requests, booking_type,
+            group_id, group_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?)`,
+          [bid, r.room_id, contact_name, contact_phone || null, contact_email || null,
+           r.num_guests || 1, check_in_date, check_out_date, booking_source || 'DIRECT',
+           rate, total, special_requests || null, bookingType,
+           groupId, String(name).trim()]
+        );
+        created.push(await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]));
+      }
+
+      // Record the group row (best-effort — failure here doesn't roll
+      // the bookings back; the link via group_id still works).
+      try {
+        await tenantDb.run(
+          `INSERT INTO room_booking_groups
+             (id, name, contact_name, contact_phone, contact_email, num_rooms,
+              check_in_date, check_out_date, total_amount, notes, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [groupId, String(name).trim(), contact_name, contact_phone || null,
+           contact_email || null, rooms.length, check_in_date, check_out_date,
+           groupTotal, special_requests || null, req.user?.id || null]
+        );
+      } catch (e) {
+        console.warn('[group-booking] failed to record group meta:', e);
+      }
+
+      try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { groupId, groupName: name, numRooms: rooms.length, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
+      for (const row of created) await logChannelSync(req.params.id, row, 'BOOKING_CREATED');
+
+      res.status(201).json({
+        group_id: groupId,
+        num_rooms: rooms.length,
+        total_amount: groupTotal,
+        bookings: created,
+      });
+    } catch (err: any) {
+      console.error("group booking create error:", err);
+      res.status(500).json({ error: "Failed to create group booking" });
+    }
+  });
+
+  // List groups (room_booking_groups + booking count per group).
+  app.get("/api/restaurant/:id/hotel/booking-groups", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows = await tenantDb.query(
+        `SELECT g.*,
+                (SELECT COUNT(*) FROM room_bookings b WHERE b.group_id = g.id) AS booking_count,
+                (SELECT COUNT(*) FROM room_bookings b WHERE b.group_id = g.id AND b.status = 'CHECKED_IN') AS checked_in_count,
+                (SELECT COUNT(*) FROM room_bookings b WHERE b.group_id = g.id AND b.status = 'CHECKED_OUT') AS checked_out_count
+           FROM room_booking_groups g
+       ORDER BY g.created_at DESC
+          LIMIT 200`
+      );
+      res.json(rows);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch booking groups" });
+    }
+  });
+
   app.patch("/api/restaurant/:id/hotel/bookings/:bookingId", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -19307,7 +19472,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-category-availability',
+    commit_marker: 'hotel-group-bookings',
     code_features: [
       'subscription-billing',
       'read-only-mode',

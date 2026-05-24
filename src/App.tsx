@@ -6579,6 +6579,65 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingRoomType, setEditingRoomType] = useState<any | null>(null);
   // Sprint A1 — Availability calendar view toggle for the Bookings tab
   const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR'>('LIST');
+  // Sprint C2 — Group booking modal state. Holds a single "group draft"
+  // — name + contact + dates + a list of selected rooms — that the
+  // user can build up before clicking Create. Posts as one transaction
+  // to /hotel/bookings/group which creates N child bookings.
+  const [groupBookingDraft, setGroupBookingDraft] = useState<{
+    open: boolean;
+    name: string;
+    contact_name: string;
+    contact_phone: string;
+    contact_email: string;
+    check_in_date: string;
+    check_out_date: string;
+    booking_type: 'OVERNIGHT' | 'DAY_USE';
+    booking_source: string;
+    special_requests: string;
+    rooms: Array<{ room_id: string; room_rate: number; num_guests: number }>;
+    saving: boolean;
+  } | null>(null);
+  const openGroupBookingModal = () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    setGroupBookingDraft({
+      open: true, name: '', contact_name: '', contact_phone: '', contact_email: '',
+      check_in_date: today, check_out_date: tomorrow,
+      booking_type: 'OVERNIGHT', booking_source: 'DIRECT',
+      special_requests: '', rooms: [], saving: false,
+    });
+  };
+  const submitGroupBooking = async () => {
+    if (!groupBookingDraft) return;
+    if (groupBookingDraft.rooms.length === 0) {
+      alert('Add at least one room to the group.');
+      return;
+    }
+    setGroupBookingDraft({ ...groupBookingDraft, saving: true });
+    try {
+      const payload = {
+        name: groupBookingDraft.name.trim(),
+        contact_name: groupBookingDraft.contact_name.trim(),
+        contact_phone: groupBookingDraft.contact_phone.trim() || null,
+        contact_email: groupBookingDraft.contact_email.trim() || null,
+        check_in_date: groupBookingDraft.check_in_date,
+        check_out_date: groupBookingDraft.check_out_date,
+        booking_type: groupBookingDraft.booking_type,
+        booking_source: groupBookingDraft.booking_source,
+        special_requests: groupBookingDraft.special_requests.trim() || null,
+        rooms: groupBookingDraft.rooms,
+      };
+      const result = await hotelApi('/bookings/group', { method: 'POST', body: JSON.stringify(payload) });
+      const n = result?.bookings?.length || groupBookingDraft.rooms.length;
+      alert(`✓ Group booking created — ${n} room${n > 1 ? 's' : ''} for ${groupBookingDraft.name}.`);
+      setGroupBookingDraft(null);
+      await fetchHotelBookings();
+      markAvailabilityDirty();
+    } catch (err: any) {
+      alert(err?.message || 'Failed to create group booking');
+      setGroupBookingDraft(d => d ? { ...d, saving: false } : d);
+    }
+  };
   // Bumped from any mutation that affects availability (new booking,
   // cancel, check-in, check-out, hold create/lift). The calendar
   // listens via its refreshNonce prop and re-fetches when this changes,
@@ -14755,6 +14814,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </button>
                 ))}
               </div>
+              <button onClick={openGroupBookingModal} className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/30 text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5 transition-all flex items-center gap-2">
+                <Plus size={14} /> Group
+              </button>
               <button onClick={() => { setEditingBooking({ check_in_date: new Date().toISOString().slice(0,10), check_out_date: new Date(Date.now()+86400000).toISOString().slice(0,10) }); setShowBookingModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20">
                 <Plus size={16} /> New Booking
               </button>
@@ -14893,7 +14955,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     return (
                       <tr key={b.id} className="border-t border-[#cc5a16]/10 hover:bg-[#faf7f2]/50">
                         <td className="px-4 py-3">
-                          <div className="font-semibold text-[#1a1208]">{b.guest_name}</div>
+                          <div className="font-semibold text-[#1a1208] flex items-center gap-1.5 flex-wrap">
+                            {b.guest_name}
+                            {b.group_id && (
+                              <span
+                                className="inline-block text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-violet-100 text-violet-800"
+                                title={`Group: ${b.group_name || b.group_id}`}
+                              >
+                                Group{b.group_name ? ` · ${b.group_name}` : ''}
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[11px] text-[#9c8e85]">{b.guest_phone || '—'} {b.guest_nationality ? `· ${b.guest_nationality}` : ''}</div>
                         </td>
                         <td className="px-4 py-3 text-[#3d3128]">{b.room_name || b.room_id}</td>
@@ -17214,6 +17286,295 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       )}
+
+      {/* ═════════ Group Booking modal (Sprint C2) ═════════
+          Build a multi-room booking under one contact name. Each row
+          picks a specific room + nightly rate + guest count. Server
+          validates every room against overlap rules before inserting
+          anything so partial groups can't be created. */}
+      {groupBookingDraft?.open && (() => {
+        const draft = groupBookingDraft;
+        // Filter rooms with no overlap on the selected dates so the
+        // dropdown only ever offers genuinely bookable rooms. Mirrors
+        // the standard New Booking dropdown logic.
+        const ciStr = normaliseBookingDate(draft.check_in_date);
+        const coStr = normaliseBookingDate(draft.check_out_date);
+        const conflictRoomIds = new Set<string>();
+        if (ciStr && coStr) {
+          for (const b of hotelBookings) {
+            if (!b.room_id) continue;
+            if (b.status === 'CANCELLED' || b.status === 'CHECKED_OUT') continue;
+            const bci = normaliseBookingDate(b.check_in_date);
+            const bco = normaliseBookingDate(b.check_out_date);
+            if (!bci || !bco) continue;
+            const overlap = bci < coStr && bco > ciStr;
+            const dayUseSameDate = draft.booking_type === 'DAY_USE' && b.booking_type === 'DAY_USE' && bci === ciStr;
+            if (overlap || dayUseSameDate) conflictRoomIds.add(b.room_id);
+          }
+        }
+        const alreadyPicked = new Set(draft.rooms.map(r => r.room_id));
+        const availableForPick = hotelRooms.filter((r: any) =>
+          !conflictRoomIds.has(r.id) &&
+          !alreadyPicked.has(r.id) &&
+          r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED'
+        );
+        const nights = draft.booking_type === 'DAY_USE'
+          ? 1
+          : Math.max(1, Math.ceil((new Date(draft.check_out_date).getTime() - new Date(draft.check_in_date).getTime()) / 86400000));
+        const subtotal = draft.rooms.reduce((s, r) => s + r.room_rate * nights, 0);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+              <div className="flex items-center justify-between p-6 border-b border-[#cc5a16]/10 shrink-0">
+                <div>
+                  <h3 className="text-xl font-bold font-serif text-[#1a1208]">New Group Booking</h3>
+                  <p className="text-[11px] text-[#9c8e85] mt-0.5">One contact, multiple rooms, single transaction.</p>
+                </div>
+                <button onClick={() => setGroupBookingDraft(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                {/* Group identity */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Group Name *</label>
+                  <input
+                    required
+                    value={draft.name}
+                    onChange={e => setGroupBookingDraft({ ...draft, name: e.target.value })}
+                    placeholder="e.g. Acme Corp · May 24-27"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                  />
+                </div>
+
+                {/* Contact */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Contact Name *</label>
+                    <input
+                      required
+                      value={draft.contact_name}
+                      onChange={e => setGroupBookingDraft({ ...draft, contact_name: e.target.value })}
+                      placeholder="e.g. Priya Singh"
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Contact Phone</label>
+                    <input
+                      value={draft.contact_phone}
+                      onChange={e => setGroupBookingDraft({ ...draft, contact_phone: e.target.value })}
+                      placeholder="+91 9876543210"
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Contact Email</label>
+                  <input
+                    type="email"
+                    value={draft.contact_email}
+                    onChange={e => setGroupBookingDraft({ ...draft, contact_email: e.target.value })}
+                    placeholder="priya@acme.com"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                  />
+                </div>
+
+                {/* Booking type */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Booking Type</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(['OVERNIGHT', 'DAY_USE'] as const).map(t => (
+                      <button
+                        key={t} type="button"
+                        onClick={() => {
+                          const next: any = { ...draft, booking_type: t };
+                          if (t === 'DAY_USE' && draft.check_in_date) next.check_out_date = draft.check_in_date;
+                          setGroupBookingDraft(next);
+                        }}
+                        className={cn(
+                          'p-2.5 rounded-2xl border-2 text-sm font-bold',
+                          draft.booking_type === t ? 'border-[#cc5a16] bg-[#cc5a16]/5 text-[#1a1208]' : 'border-[#cc5a16]/10 bg-[#faf7f2] text-[#3d3128] hover:border-[#cc5a16]/30'
+                        )}
+                      >
+                        {t === 'OVERNIGHT' ? 'Overnight' : 'Day-use'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Dates */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in *</label>
+                    <input
+                      required type="date"
+                      min={new Date().toISOString().slice(0, 10)}
+                      value={draft.check_in_date}
+                      onChange={e => {
+                        const v = e.target.value;
+                        const next: any = { ...draft, check_in_date: v, rooms: [] };
+                        if (draft.booking_type === 'DAY_USE') next.check_out_date = v;
+                        else if (next.check_out_date <= v) {
+                          const d = new Date(v); d.setDate(d.getDate() + 1);
+                          next.check_out_date = d.toISOString().slice(0, 10);
+                        }
+                        setGroupBookingDraft(next);
+                      }}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out *</label>
+                    <input
+                      required type="date"
+                      disabled={draft.booking_type === 'DAY_USE'}
+                      min={draft.booking_type === 'DAY_USE' ? draft.check_in_date : (() => {
+                        const d = new Date(draft.check_in_date); d.setDate(d.getDate() + 1);
+                        return d.toISOString().slice(0, 10);
+                      })()}
+                      value={draft.check_out_date}
+                      onChange={e => setGroupBookingDraft({ ...draft, check_out_date: e.target.value, rooms: [] })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm disabled:opacity-60"
+                    />
+                  </div>
+                </div>
+
+                {/* Rooms picker */}
+                <div className="pt-2 border-t border-[#cc5a16]/10">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                      Rooms in this group · {draft.rooms.length}
+                    </p>
+                    <p className="text-[10px] text-[#9c8e85]">
+                      {nights} night{nights !== 1 ? 's' : ''} · {availableForPick.length} room{availableForPick.length !== 1 ? 's' : ''} available
+                    </p>
+                  </div>
+
+                  {/* Currently picked rooms */}
+                  {draft.rooms.length > 0 && (
+                    <div className="space-y-2 mb-3">
+                      {draft.rooms.map((sel, idx) => {
+                        const r = hotelRooms.find((x: any) => x.id === sel.room_id);
+                        return (
+                          <div key={idx} className="flex items-center gap-2 bg-[#faf7f2] rounded-xl px-3 py-2">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-semibold text-[#1a1208] truncate">{r?.name || sel.room_id}</p>
+                              <p className="text-[10px] text-[#9c8e85]">
+                                {r?.room_number ? `#${r.room_number} · ` : ''}{nights} × ₹{sel.room_rate} = ₹{(sel.room_rate * nights).toLocaleString('en-IN')}
+                              </p>
+                            </div>
+                            <input
+                              type="number" min={1}
+                              value={sel.num_guests}
+                              onChange={e => {
+                                const next = [...draft.rooms];
+                                next[idx] = { ...next[idx], num_guests: Math.max(1, Number(e.target.value) || 1) };
+                                setGroupBookingDraft({ ...draft, rooms: next });
+                              }}
+                              title="Guests"
+                              className="w-16 bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1 text-xs text-center"
+                            />
+                            <input
+                              type="number" min={0}
+                              value={sel.room_rate}
+                              onChange={e => {
+                                const next = [...draft.rooms];
+                                next[idx] = { ...next[idx], room_rate: Math.max(0, Number(e.target.value) || 0) };
+                                setGroupBookingDraft({ ...draft, rooms: next });
+                              }}
+                              title="Rate/night"
+                              className="w-20 bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1 text-xs text-right"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setGroupBookingDraft({ ...draft, rooms: draft.rooms.filter((_, i) => i !== idx) })}
+                              className="p-1 text-[#c13b3b] hover:bg-[#c13b3b]/10 rounded"
+                              title="Remove"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Add room dropdown */}
+                  {availableForPick.length > 0 ? (
+                    <select
+                      value=""
+                      onChange={e => {
+                        const id = e.target.value;
+                        if (!id) return;
+                        const r = hotelRooms.find((x: any) => x.id === id);
+                        if (!r) return;
+                        setGroupBookingDraft({
+                          ...draft,
+                          rooms: [...draft.rooms, { room_id: id, room_rate: Number(r.base_rate) || 0, num_guests: 1 }],
+                        });
+                      }}
+                      className="w-full bg-[#faf7f2] border-2 border-dashed border-[#cc5a16]/30 rounded-2xl px-4 py-3 text-sm text-[#cc5a16] font-bold focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    >
+                      <option value="">+ Add a room…</option>
+                      {availableForPick.map((r: any) => (
+                        <option key={r.id} value={r.id}>
+                          {r.name} · {r.type || 'STANDARD'} · ₹{Number(r.base_rate || 0).toLocaleString('en-IN')}/night
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="text-[11px] text-[#c13b3b] italic px-1">
+                      {ciStr && coStr ? 'No more rooms available for these dates.' : 'Pick dates first.'}
+                    </p>
+                  )}
+                </div>
+
+                {/* Special requests */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Special Requests</label>
+                  <textarea
+                    rows={2}
+                    value={draft.special_requests}
+                    onChange={e => setGroupBookingDraft({ ...draft, special_requests: e.target.value })}
+                    placeholder="Adjacent rooms preferred · vegetarian breakfast · etc."
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                  />
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="p-6 border-t border-[#cc5a16]/10 shrink-0 flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Group total ({nights}n × {draft.rooms.length} room{draft.rooms.length !== 1 ? 's' : ''})</p>
+                  <p className="text-xl font-bold font-mono text-[#cc5a16]">₹{subtotal.toLocaleString('en-IN')}</p>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setGroupBookingDraft(null)}
+                    className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={submitGroupBooking}
+                    disabled={draft.saving || draft.rooms.length === 0 || !draft.name.trim() || !draft.contact_name.trim()}
+                    className={cn(
+                      "px-6 py-2.5 rounded-2xl text-sm font-bold transition-all flex items-center gap-2",
+                      draft.rooms.length > 0 && draft.name.trim() && draft.contact_name.trim() && !draft.saving
+                        ? "bg-[#cc5a16] text-white hover:bg-[#a84612]"
+                        : "bg-[#cc5a16]/30 text-white cursor-not-allowed"
+                    )}
+                  >
+                    {draft.saving ? 'Creating…' : `Create ${draft.rooms.length} booking${draft.rooms.length !== 1 ? 's' : ''}`}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═════════ Find Available Rooms search (Sprint A2) ═════════
           Dialog with date + guest count inputs at the top, results grid
