@@ -210,6 +210,29 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE rooms ADD COLUMN IF NOT EXISTS smoking_preference TEXT DEFAULT 'NON_SMOKING';
     UPDATE rooms SET smoking_preference = 'NON_SMOKING' WHERE smoking_preference IS NULL;
 
+    -- Sprint B2 — Room types (metadata layer).
+    --   Standard / Deluxe / Suite / Villa — a category that one or more
+    --   physical rooms can belong to. Rate plans (Sprint C), inventory
+    --   pooling, OTA mapping, and the availability calendar's grouping
+    --   all key off these. Optional — rooms without a type_id continue
+    --   to work exactly as before.
+    CREATE TABLE IF NOT EXISTS room_types (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,
+      description   TEXT,
+      base_rate     DOUBLE PRECISION DEFAULT 0,
+      capacity      INT DEFAULT 2,
+      amenities     TEXT,
+      image_url     TEXT,
+      display_order INT DEFAULT 0,
+      is_active     INT DEFAULT 1,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_room_types_order ON room_types (display_order, name);
+    -- Link physical rooms to a room type (nullable for back-compat).
+    ALTER TABLE rooms ADD COLUMN IF NOT EXISTS type_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_rooms_type ON rooms (type_id);
+
     CREATE TABLE IF NOT EXISTS room_bookings (
       id                 TEXT PRIMARY KEY,
       room_id            TEXT,
@@ -13359,18 +13382,19 @@ async function startServer() {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const { id, name, room_number, floor, type, capacity, base_rate, amenities, notes, smoking_preference } = req.body || {};
+      const { id, name, room_number, floor, type, capacity, base_rate, amenities, notes, smoking_preference, type_id } = req.body || {};
       if (!name) return res.status(400).json({ error: "Name is required" });
       const roomId = id || `ROOM-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const qrData = `?r=${req.params.id}&room=${roomId}`;
       const sp = ['SMOKING', 'NON_SMOKING', 'ANY'].includes(smoking_preference) ? smoking_preference : 'NON_SMOKING';
       const tenantDb = await getTenantDb(req.params.id);
       await tenantDb.run(
-        `INSERT INTO rooms (id, name, room_number, floor, type, capacity, base_rate, status, amenities, qr_code_data, notes, smoking_preference)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'VACANT', ?, ?, ?, ?)`,
+        `INSERT INTO rooms (id, name, room_number, floor, type, capacity, base_rate, status, amenities, qr_code_data, notes, smoking_preference, type_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'VACANT', ?, ?, ?, ?, ?)`,
         [roomId, name, room_number || null, floor || null, type || 'STANDARD',
          capacity || 2, base_rate || 0,
-         amenities ? JSON.stringify(amenities) : null, qrData, notes || null, sp]
+         amenities ? JSON.stringify(amenities) : null, qrData, notes || null, sp,
+         type_id || null]
       );
       const row = await tenantDb.get("SELECT * FROM rooms WHERE id = ?", [roomId]);
       res.status(201).json(row);
@@ -13384,12 +13408,15 @@ async function startServer() {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const { name, room_number, floor, type, capacity, base_rate, amenities, notes, status, smoking_preference } = req.body || {};
+      const { name, room_number, floor, type, capacity, base_rate, amenities, notes, status, smoking_preference, type_id } = req.body || {};
       const tenantDb = await getTenantDb(req.params.id);
       const existing: any = await tenantDb.get("SELECT * FROM rooms WHERE id = ?", [req.params.roomId]);
       if (!existing) return res.status(404).json({ error: "Room not found" });
       const sp = smoking_preference === undefined ? null
         : (['SMOKING', 'NON_SMOKING', 'ANY'].includes(smoking_preference) ? smoking_preference : null);
+      // type_id explicit handling: null/'' clears, undefined preserves.
+      const typeIdValue = type_id === undefined ? null : (type_id || null);
+      const setTypeId = type_id !== undefined;
       await tenantDb.run(
         `UPDATE rooms SET
            name = COALESCE(?, name),
@@ -13401,12 +13428,18 @@ async function startServer() {
            amenities = COALESCE(?, amenities),
            notes = COALESCE(?, notes),
            status = COALESCE(?, status),
-           smoking_preference = COALESCE(?, smoking_preference)
+           smoking_preference = COALESCE(?, smoking_preference),
+           type_id = ${setTypeId ? '?' : 'type_id'}
          WHERE id = ?`,
-        [name ?? null, room_number ?? null, floor ?? null, type ?? null,
-         capacity ?? null, base_rate ?? null,
-         amenities ? JSON.stringify(amenities) : null,
-         notes ?? null, status ?? null, sp, req.params.roomId]
+        setTypeId
+          ? [name ?? null, room_number ?? null, floor ?? null, type ?? null,
+             capacity ?? null, base_rate ?? null,
+             amenities ? JSON.stringify(amenities) : null,
+             notes ?? null, status ?? null, sp, typeIdValue, req.params.roomId]
+          : [name ?? null, room_number ?? null, floor ?? null, type ?? null,
+             capacity ?? null, base_rate ?? null,
+             amenities ? JSON.stringify(amenities) : null,
+             notes ?? null, status ?? null, sp, req.params.roomId]
       );
       const updated = await tenantDb.get("SELECT * FROM rooms WHERE id = ?", [req.params.roomId]);
       res.json(updated);
@@ -13440,6 +13473,80 @@ async function startServer() {
       res.json(updated);
     } catch (err) {
       res.status(500).json({ error: "Failed to update room status" });
+    }
+  });
+
+  // ─── ROOM TYPES — Sprint B2 ─────────────────────────────────────────
+  // Reusable property-level categories (Standard / Deluxe / Suite / etc.)
+  // that physical rooms can belong to. Metadata only at this stage — the
+  // booking flow still binds to a specific room. Future work (rate plans,
+  // inventory pooling, OTA mapping) keys off these.
+  app.get("/api/restaurant/:id/hotel/room-types", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows = await tenantDb.query(
+        "SELECT * FROM room_types ORDER BY display_order, name"
+      );
+      res.json(rows);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch room types" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/room-types", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { name, description, base_rate, capacity, amenities, image_url, display_order } = req.body || {};
+      if (!name || String(name).trim().length === 0) {
+        return res.status(400).json({ error: "name is required." });
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      const id = `RTYPE-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO room_types (id, name, description, base_rate, capacity, amenities, image_url, display_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, String(name).trim(), description || null, Number(base_rate) || 0,
+         Number(capacity) || 2, amenities || null, image_url || null,
+         Number(display_order) || 0]
+      );
+      res.status(201).json(await tenantDb.get("SELECT * FROM room_types WHERE id = ?", [id]));
+    } catch (err) {
+      console.error("create room-type error:", err);
+      res.status(500).json({ error: "Failed to create room type" });
+    }
+  });
+
+  app.patch("/api/restaurant/:id/hotel/room-types/:typeId", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const allow = ['name','description','base_rate','capacity','amenities','image_url','display_order','is_active'];
+      const patch: any = {};
+      for (const k of allow) if (k in (req.body || {})) patch[k] = req.body[k];
+      if (Object.keys(patch).length === 0) return res.status(400).json({ error: "No editable fields." });
+      const tenantDb = await getTenantDb(req.params.id);
+      const setStr = Object.keys(patch).map(k => `${k} = ?`).join(', ');
+      await tenantDb.run(`UPDATE room_types SET ${setStr} WHERE id = ?`, [...Object.values(patch), req.params.typeId]);
+      res.json(await tenantDb.get("SELECT * FROM room_types WHERE id = ?", [req.params.typeId]));
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update room type" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hotel/room-types/:typeId", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      // Detach rooms first so they don't FK-orphan.
+      await tenantDb.run("UPDATE rooms SET type_id = NULL WHERE type_id = ?", [req.params.typeId]);
+      await tenantDb.run("DELETE FROM room_types WHERE id = ?", [req.params.typeId]);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to delete room type" });
     }
   });
 
@@ -18951,7 +19058,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-room-holds',
+    commit_marker: 'hotel-room-types',
     code_features: [
       'subscription-billing',
       'read-only-mode',

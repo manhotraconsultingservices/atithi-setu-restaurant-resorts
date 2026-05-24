@@ -6572,6 +6572,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   // ─── Hospitality module state (Phase 1) ─────────────────────────────────
   const [hotelRooms, setHotelRooms] = useState<any[]>([]);
+  // Sprint B2 — Room types (Standard / Deluxe / Suite / etc.)
+  // Reusable category that physical rooms can be tagged to. Drives the
+  // Availability Calendar grouping + the Find-Available-Rooms search.
+  const [hotelRoomTypes, setHotelRoomTypes] = useState<any[]>([]);
+  const [editingRoomType, setEditingRoomType] = useState<any | null>(null);
   const [hotelServices, setHotelServices] = useState<any[]>([]);
   const [hotelRequests, setHotelRequests] = useState<any[]>([]);
   const [hotelLoading, setHotelLoading] = useState(false);
@@ -8681,6 +8686,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!isHotelEnabled) return;
     try { setHotelRooms(await hotelApi('/rooms')); } catch (err: any) { setHotelError(err.message); }
   };
+  // Sprint B2 — room type CRUD helpers
+  const fetchHotelRoomTypes = async () => {
+    if (!isHotelEnabled) return;
+    try { setHotelRoomTypes(await hotelApi('/room-types')); } catch { setHotelRoomTypes([]); }
+  };
+  const saveRoomType = async (data: any) => {
+    const isNew = !data.id;
+    if (isNew) {
+      await hotelApi('/room-types', { method: 'POST', body: JSON.stringify(data) });
+    } else {
+      await hotelApi(`/room-types/${data.id}`, { method: 'PATCH', body: JSON.stringify(data) });
+    }
+    await fetchHotelRoomTypes();
+    await fetchHotelRooms();
+  };
+  const deleteRoomType = async (typeId: string) => {
+    if (!confirm('Delete this room type? Rooms currently in this type will lose their tag (data preserved).')) return;
+    await hotelApi(`/room-types/${typeId}`, { method: 'DELETE' });
+    await fetchHotelRoomTypes();
+    await fetchHotelRooms();
+  };
   const fetchHotelServices = async () => {
     if (!isHotelEnabled) return;
     try { setHotelServices(await hotelApi('/services')); } catch (err: any) { setHotelError(err.message); }
@@ -9004,7 +9030,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   useEffect(() => {
     if (!isHotelEnabled) return;
-    if (activeTab === 'ROOMS') fetchHotelRooms();
+    if (activeTab === 'ROOMS') { fetchHotelRooms(); fetchHotelRoomTypes(); }
     if (activeTab === 'SERVICES') fetchHotelServices();
     if (activeTab === 'SERVICE_REQUESTS') fetchHotelRequests();
     if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); }
@@ -14332,6 +14358,62 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
             {hotelError && <div className="px-4 py-3 rounded-xl bg-[#fdf0f0] border border-[#c13b3b]/20 text-[#c13b3b] text-sm">{hotelError}</div>}
 
+            {/* Sprint B2 — Room Types management.
+                Per-property categories (Standard / Deluxe / Suite / etc.)
+                that physical rooms can be tagged to. Manages the catalogue
+                here; tagging happens in the room edit modal. */}
+            <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5">
+              <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                <div>
+                  <h3 className="text-base font-bold font-serif text-[#1a1208]">Room Types</h3>
+                  <p className="text-[11px] text-[#6b5d52] mt-0.5">
+                    Optional categories used by the Availability Calendar grouping and the Find-Available-Rooms search.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setEditingRoomType({})}
+                  className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] transition-all flex items-center gap-1"
+                >
+                  <Plus size={12} /> Add Type
+                </button>
+              </div>
+              {hotelRoomTypes.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic">
+                  No room types yet. Add categories like "Standard", "Deluxe Suite", "Villa" to group rooms.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {hotelRoomTypes.map((t: any) => {
+                    const inType = hotelRooms.filter((r: any) => r.type_id === t.id).length;
+                    return (
+                      <div key={t.id} className="flex items-center justify-between gap-2 bg-[#faf7f2] rounded-xl px-3 py-2.5">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-bold text-[#1a1208] truncate">{t.name}</p>
+                          <p className="text-[10px] text-[#6b5d52] mt-0.5">
+                            {inType} room{inType !== 1 ? 's' : ''} · ₹{Number(t.base_rate || 0).toLocaleString('en-IN')}/night · {t.capacity} guest{t.capacity !== 1 ? 's' : ''}
+                          </p>
+                        </div>
+                        <div className="flex gap-1 shrink-0">
+                          <button
+                            onClick={() => setEditingRoomType(t)}
+                            className="text-[10px] font-bold text-[#3d3128] hover:underline"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => deleteRoomType(t.id)}
+                            className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             {hotelRooms.length === 0 ? (
               <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 p-12 text-center">
                 <Bed className="mx-auto text-[#cc5a16] mb-3" size={40} />
@@ -16800,6 +16882,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <input type="number" min={1} value={editingRoom.capacity || 2} onChange={e => setEditingRoom({...editingRoom, capacity: Number(e.target.value) || 2})} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
                 </div>
               </div>
+              {/* Sprint B2 — Room Type tag.
+                  Optional category that groups physical rooms together.
+                  Drives the Availability Calendar's row grouping +
+                  Find-Available-Rooms search. Tenants can leave this
+                  blank and the room still works exactly as before. */}
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                  Room Type Tag
+                  {hotelRoomTypes.length === 0 && <span className="ml-1 text-[#9c8e85] italic font-normal normal-case">— create types in the "Room Types" section below</span>}
+                </label>
+                <select
+                  value={editingRoom.type_id || ''}
+                  onChange={e => setEditingRoom({ ...editingRoom, type_id: e.target.value || null })}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  disabled={hotelRoomTypes.length === 0}
+                >
+                  <option value="">— None (untagged) —</option>
+                  {hotelRoomTypes.map((t: any) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Base Rate (₹/night)</label>
                 <input type="number" min={0} value={editingRoom.base_rate || 0} onChange={e => setEditingRoom({...editingRoom, base_rate: Number(e.target.value) || 0})} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
@@ -17003,6 +17107,97 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="flex gap-2 pt-3">
                 <button type="button" onClick={() => { setShowServiceModal(false); setEditingService(null); }} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
                 <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">{editingService.id ? 'Save' : 'Create'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ═════════ Room Type edit modal (Sprint B2) ═════════
+          Create or edit a property-level room category. */}
+      {editingRoomType && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-bold font-serif text-[#1a1208]">{editingRoomType.id ? 'Edit Room Type' : 'New Room Type'}</h3>
+              <button onClick={() => setEditingRoomType(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!editingRoomType.name || !String(editingRoomType.name).trim()) return;
+                try {
+                  await saveRoomType({
+                    ...editingRoomType,
+                    base_rate: Number(editingRoomType.base_rate) || 0,
+                    capacity: Number(editingRoomType.capacity) || 2,
+                  });
+                  setEditingRoomType(null);
+                } catch (err: any) { alert(err?.message || 'Failed to save'); }
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Name *</label>
+                <input
+                  required
+                  value={editingRoomType.name || ''}
+                  onChange={e => setEditingRoomType({ ...editingRoomType, name: e.target.value })}
+                  placeholder="e.g. Deluxe Suite"
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Description</label>
+                <textarea
+                  rows={2}
+                  value={editingRoomType.description || ''}
+                  onChange={e => setEditingRoomType({ ...editingRoomType, description: e.target.value })}
+                  placeholder="Spacious suite with king bed, sea view, butler service"
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Base Rate (₹/night)</label>
+                  <input
+                    type="number" min={0}
+                    value={editingRoomType.base_rate || 0}
+                    onChange={e => setEditingRoomType({ ...editingRoomType, base_rate: Number(e.target.value) || 0 })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Capacity</label>
+                  <input
+                    type="number" min={1}
+                    value={editingRoomType.capacity || 2}
+                    onChange={e => setEditingRoomType({ ...editingRoomType, capacity: Number(e.target.value) || 2 })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Image URL</label>
+                <input
+                  value={editingRoomType.image_url || ''}
+                  onChange={e => setEditingRoomType({ ...editingRoomType, image_url: e.target.value })}
+                  placeholder="https://..."
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Amenities (comma-separated)</label>
+                <input
+                  value={editingRoomType.amenities || ''}
+                  onChange={e => setEditingRoomType({ ...editingRoomType, amenities: e.target.value })}
+                  placeholder="King bed, AC, WiFi, Sea view, Mini bar"
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button type="button" onClick={() => setEditingRoomType(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">{editingRoomType.id ? 'Save' : 'Create'}</button>
               </div>
             </form>
           </div>
