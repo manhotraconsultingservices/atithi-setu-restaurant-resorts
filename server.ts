@@ -324,6 +324,30 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
 
+    -- Sprint P2-H — Yield management rules.
+    -- Owner-defined occupancy-triggered multipliers. Example:
+    --   "When occupancy >= 80%, multiply rate by 1.25 (+25%)"
+    --   "When occupancy <= 30% AND days_out <= 7, multiply by 0.80"
+    -- Highest priority matching rule wins; otherwise the base rate
+    -- (or rate plan from rate_overrides) is used unchanged.
+    -- mode:
+    --   'SUGGEST' → owner sees recommended rate but it's not auto-applied
+    --   'AUTO'    → suggested rate is applied during booking creation
+    CREATE TABLE IF NOT EXISTS yield_rules (
+      id              TEXT PRIMARY KEY,
+      label           TEXT NOT NULL,
+      occupancy_min   DOUBLE PRECISION,        -- % (0-100); NULL = no lower bound
+      occupancy_max   DOUBLE PRECISION,        -- % (0-100); NULL = no upper bound
+      days_out_min    INT,                     -- min days to check-in; NULL = no lower bound
+      days_out_max    INT,                     -- max days to check-in; NULL = no upper bound
+      multiplier      DOUBLE PRECISION NOT NULL,  -- 1.25 = +25%, 0.80 = -20%
+      mode            TEXT NOT NULL DEFAULT 'SUGGEST',  -- 'SUGGEST' | 'AUTO'
+      priority        INT DEFAULT 0,
+      is_enabled      INT DEFAULT 1,
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_yield_rules_active ON yield_rules (is_enabled, priority);
+
     -- Sprint C-RP — Rate plan overrides.
     -- Date-range price overrides scoped to either a specific room or
     -- a whole room type. Used for:
@@ -13752,6 +13776,143 @@ async function startServer() {
     }
   });
 
+  // ─── YIELD MANAGEMENT — Sprint P2-H ─────────────────────────────────
+  // Occupancy-triggered rate multipliers. The yield engine evaluates
+  // every enabled rule against (current occupancy %, days-out to
+  // check-in); the highest-priority matching rule applies its
+  // multiplier on top of the rate-plan resolved rate.
+  app.get("/api/restaurant/:id/hotel/yield-rules", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows = await tenantDb.query(
+        "SELECT * FROM yield_rules ORDER BY priority DESC, label"
+      );
+      res.json(rows);
+    } catch {
+      res.status(500).json({ error: "Failed to fetch yield rules" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/yield-rules", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const b = req.body || {};
+      if (!b.label || !String(b.label).trim()) return res.status(400).json({ error: "label is required." });
+      const multiplier = Number(b.multiplier);
+      if (!isFinite(multiplier) || multiplier <= 0 || multiplier > 10) {
+        return res.status(400).json({ error: "multiplier must be a positive number (e.g. 1.25 for +25%, 0.8 for -20%)." });
+      }
+      const mode = String(b.mode || 'SUGGEST').toUpperCase();
+      if (mode !== 'SUGGEST' && mode !== 'AUTO') {
+        return res.status(400).json({ error: "mode must be 'SUGGEST' or 'AUTO'." });
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      const id = `YIELD-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO yield_rules
+           (id, label, occupancy_min, occupancy_max, days_out_min, days_out_max,
+            multiplier, mode, priority, is_enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, String(b.label).trim(),
+         b.occupancy_min == null ? null : Number(b.occupancy_min),
+         b.occupancy_max == null ? null : Number(b.occupancy_max),
+         b.days_out_min  == null ? null : Number(b.days_out_min),
+         b.days_out_max  == null ? null : Number(b.days_out_max),
+         multiplier, mode, Number(b.priority) || 0]
+      );
+      res.status(201).json(await tenantDb.get("SELECT * FROM yield_rules WHERE id = ?", [id]));
+    } catch (err) {
+      console.error("create yield-rule error:", err);
+      res.status(500).json({ error: "Failed to create yield rule" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hotel/yield-rules/:ruleId", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.run("DELETE FROM yield_rules WHERE id = ?", [req.params.ruleId]);
+      res.json({ success: true });
+    } catch {
+      res.status(500).json({ error: "Failed to delete yield rule" });
+    }
+  });
+
+  // Owner suggests-or-applies a yield-adjusted rate for a specific
+  // (room, date) combination. Returns:
+  //   {
+  //     base_rate, applied_multiplier, suggested_rate, mode,
+  //     reason, occupancy, days_out, matching_rule
+  //   }
+  app.get("/api/restaurant/:id/hotel/yield-suggest", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const roomId = String(req.query.room_id || '');
+      const date   = String(req.query.date || '');
+      if (!roomId || !date) return res.status(400).json({ error: "room_id and date are required." });
+
+      const tenantDb = await getTenantDb(req.params.id);
+      // Base rate from rate-plan lookup (so yield stacks on top of overrides)
+      const baseLookup = await getRateForRoomDate(req.params.id, roomId, date);
+      // Compute occupancy % for that date.
+      const allRooms: any[] = await tenantDb.query("SELECT id FROM rooms");
+      const totalRooms = allRooms.length;
+      let occupied = 0;
+      if (totalRooms > 0) {
+        const conflict: any = await tenantDb.get(
+          `SELECT COUNT(DISTINCT room_id) AS n FROM room_bookings
+            WHERE status NOT IN ('CANCELLED','CHECKED_OUT')
+              AND check_in_date <= ? AND check_out_date > ?`,
+          [date, date]
+        );
+        const holds: any = await tenantDb.get(
+          `SELECT COUNT(DISTINCT room_id) AS n FROM room_holds
+            WHERE start_date <= ? AND end_date > ?`,
+          [date, date]
+        );
+        occupied = Math.min(totalRooms, Number(conflict?.n || 0) + Number(holds?.n || 0));
+      }
+      const occupancyPct = totalRooms > 0 ? Math.round((occupied / totalRooms) * 100) : 0;
+      const today = new Date();
+      const target = new Date(date + 'T00:00:00Z');
+      const daysOut = Math.floor((target.getTime() - today.getTime()) / 86400000);
+
+      // Find best matching rule.
+      const rules: any[] = await tenantDb.query(
+        "SELECT * FROM yield_rules WHERE is_enabled = 1 ORDER BY priority DESC, created_at DESC"
+      );
+      const winner = rules.find(r => {
+        if (r.occupancy_min != null && occupancyPct < Number(r.occupancy_min)) return false;
+        if (r.occupancy_max != null && occupancyPct > Number(r.occupancy_max)) return false;
+        if (r.days_out_min  != null && daysOut < Number(r.days_out_min)) return false;
+        if (r.days_out_max  != null && daysOut > Number(r.days_out_max)) return false;
+        return true;
+      });
+      const multiplier = winner ? Number(winner.multiplier) : 1;
+      const suggested = Math.round(baseLookup.rate * multiplier * 100) / 100;
+      res.json({
+        base_rate: baseLookup.rate,
+        base_source: baseLookup.source,
+        base_label: baseLookup.label,
+        applied_multiplier: multiplier,
+        suggested_rate: suggested,
+        delta_pct: Math.round((multiplier - 1) * 100),
+        mode: winner?.mode || 'SUGGEST',
+        occupancy_pct: occupancyPct,
+        days_out: daysOut,
+        matching_rule: winner ? { id: winner.id, label: winner.label } : null,
+      });
+    } catch (err) {
+      console.error("yield-suggest error:", err);
+      res.status(500).json({ error: "Failed to compute yield suggestion" });
+    }
+  });
+
   // ─── AVAILABILITY CALENDAR — Sprint A1 ──────────────────────────────
   // Returns a compact representation of the booking + hold landscape for
   // a date range. The frontend renders this as a rooms-down × dates-across
@@ -20280,7 +20441,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-pre-arrival-emails',
+    commit_marker: 'hotel-yield-management',
     code_features: [
       'subscription-billing',
       'read-only-mode',
