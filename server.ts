@@ -13590,6 +13590,104 @@ async function startServer() {
     }
   });
 
+  // ─── FIND AVAILABLE ROOMS — Sprint A2 ───────────────────────────────
+  // Search endpoint for the "find me a room" modal. Given a date range +
+  // optional guest count, returns every room with:
+  //   - available: bool — fits the entire requested range
+  //   - conflict_until: date — when the first conflict ends (if any),
+  //     i.e. the earliest date the room becomes free again
+  //   - reason: human label of the blocker ('Guest stay' | 'Maintenance' | ...)
+  //   - capacity / base_rate / amenities / image — copied from the room +
+  //     its type (type values used as fallback when the room itself lacks).
+  app.get("/api/restaurant/:id/hotel/find-available-rooms", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const start = (req.query.start as string) || '';
+      const end   = (req.query.end as string)   || '';
+      const guests = Math.max(1, Number(req.query.guests) || 1);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+        return res.status(400).json({ error: "start and end must be YYYY-MM-DD" });
+      }
+      if (end < start) return res.status(400).json({ error: "end must be on or after start" });
+
+      const tenantDb = await getTenantDb(req.params.id);
+      const rooms: any[] = await tenantDb.query(
+        `SELECT r.*, t.name AS type_name, t.image_url AS type_image_url,
+                t.amenities AS type_amenities, t.description AS type_description,
+                t.base_rate AS type_base_rate
+           FROM rooms r
+      LEFT JOIN room_types t ON t.id = r.type_id
+       ORDER BY r.floor, r.room_number, r.name`
+      );
+      // Pull conflicting bookings + holds for ALL rooms in one shot.
+      // For each room, the earliest end_date of an overlapping conflict
+      // = the earliest date the room becomes free again.
+      const bookingConflicts: any[] = await tenantDb.query(
+        `SELECT room_id, guest_name, check_out_date AS conflict_end
+           FROM room_bookings
+          WHERE status NOT IN ('CANCELLED', 'CHECKED_OUT')
+            AND check_in_date < ?
+            AND check_out_date > ?`,
+        [end, start]
+      );
+      const holdConflicts: any[] = await tenantDb.query(
+        `SELECT room_id, kind, end_date AS conflict_end
+           FROM room_holds
+          WHERE start_date < ?
+            AND end_date > ?`,
+        [end, start]
+      );
+      // Index conflicts by room → earliest conflict_end.
+      const iso = (v: any): string => {
+        if (!v) return '';
+        if (v instanceof Date) return v.toISOString().slice(0, 10);
+        const s = String(v);
+        return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : new Date(s).toISOString().slice(0, 10);
+      };
+      const conflictByRoom: Record<string, { end: string; reason: string }> = {};
+      for (const c of bookingConflicts) {
+        const end0 = iso(c.conflict_end);
+        if (!conflictByRoom[c.room_id] || end0 > conflictByRoom[c.room_id].end) {
+          conflictByRoom[c.room_id] = { end: end0, reason: `Guest stay (${c.guest_name})` };
+        }
+      }
+      for (const c of holdConflicts) {
+        const end0 = iso(c.conflict_end);
+        if (!conflictByRoom[c.room_id] || end0 > conflictByRoom[c.room_id].end) {
+          conflictByRoom[c.room_id] = { end: end0, reason: String(c.kind || 'Hold').replace(/_/g, ' ') };
+        }
+      }
+      const results = rooms.map((r: any) => {
+        const capacity = Number(r.capacity || 2);
+        const baseRate = Number(r.base_rate || r.type_base_rate || 0);
+        const fits = capacity >= guests;
+        const blocked = r.status === 'MAINTENANCE' || r.status === 'BLOCKED';
+        const conflict = conflictByRoom[r.id];
+        const available = fits && !blocked && !conflict;
+        return {
+          id: r.id, name: r.name, room_number: r.room_number, floor: r.floor,
+          type_id: r.type_id, type_name: r.type_name,
+          capacity, base_rate: baseRate,
+          status: r.status,
+          smoking_preference: r.smoking_preference,
+          amenities: r.amenities || r.type_amenities,
+          description: r.type_description,
+          image_url: r.type_image_url,
+          available,
+          fits_capacity: fits,
+          blocked_by_status: blocked ? r.status : null,
+          conflict_until: conflict?.end || null,
+          conflict_reason: conflict?.reason || null,
+        };
+      });
+      res.json({ start, end, guests, rooms: results });
+    } catch (err: any) {
+      console.error("find-available-rooms error:", err);
+      res.status(500).json({ error: "Failed to search rooms" });
+    }
+  });
+
   // ─── ROOM TYPES — Sprint B2 ─────────────────────────────────────────
   // Reusable property-level categories (Standard / Deluxe / Suite / etc.)
   // that physical rooms can belong to. Metadata only at this stage — the
@@ -19172,7 +19270,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-availability-calendar',
+    commit_marker: 'hotel-find-available-rooms',
     code_features: [
       'subscription-billing',
       'read-only-mode',

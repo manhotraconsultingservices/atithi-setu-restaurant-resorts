@@ -6605,6 +6605,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [complianceList, setComplianceList] = useState<any[]>([]);
   const [hotelAnalytics, setHotelAnalytics] = useState<any>(null);
   const [showBookingModal, setShowBookingModal] = useState(false);
+  // Sprint A2 — Find Available Rooms search modal
+  const [findRoomsOpen, setFindRoomsOpen] = useState(false);
+  const [findRoomsResults, setFindRoomsResults] = useState<any[] | null>(null);
+  const [findRoomsLoading, setFindRoomsLoading] = useState(false);
+  const [findRoomsParams, setFindRoomsParams] = useState<{ start: string; end: string; guests: number }>({
+    start: new Date().toISOString().slice(0, 10),
+    end: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
+    guests: 1,
+  });
   const [editingBooking, setEditingBooking] = useState<any>(null);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [checkoutBooking, setCheckoutBooking] = useState<any>(null);
@@ -8688,6 +8697,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!isHotelEnabled) return;
     try { setHotelRooms(await hotelApi('/rooms')); } catch (err: any) { setHotelError(err.message); }
   };
+  // Sprint A2 — Find Available Rooms search.
+  // Calls /hotel/find-available-rooms with the modal's date + guest count
+  // inputs. Renders each room with a photo / amenities / rate. Available
+  // rooms have a green "Available" badge + click-to-pick action; booked
+  // rooms show an "Available from DD-MM" badge with the blocker reason
+  // (e.g. "Guest stay (Tarun)" or "Maintenance").
+  const runFindAvailableRooms = async () => {
+    setFindRoomsLoading(true);
+    setFindRoomsResults(null);
+    try {
+      const qs = new URLSearchParams({
+        start:  findRoomsParams.start,
+        end:    findRoomsParams.end,
+        guests: String(findRoomsParams.guests || 1),
+      });
+      const data = await hotelApi(`/find-available-rooms?${qs.toString()}`);
+      setFindRoomsResults(Array.isArray(data?.rooms) ? data.rooms : []);
+    } catch (err: any) {
+      alert(err?.message || 'Search failed');
+    } finally {
+      setFindRoomsLoading(false);
+    }
+  };
+
   // Sprint B2 — room type CRUD helpers
   const fetchHotelRoomTypes = async () => {
     if (!isHotelEnabled) return;
@@ -17159,6 +17192,180 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       )}
 
+      {/* ═════════ Find Available Rooms search (Sprint A2) ═════════
+          Dialog with date + guest count inputs at the top, results grid
+          below. Each room card shows photo (when available), name, type,
+          rate, capacity. Available rooms get a green "Available" badge
+          and a click-to-pick action; unavailable rooms show "Available
+          from DD-MM" with the blocker reason. */}
+      {findRoomsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between p-6 border-b border-[#cc5a16]/10 shrink-0">
+              <div>
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Find available rooms</h3>
+                <p className="text-[11px] text-[#9c8e85] mt-0.5">Pick dates + guests, see what's free and what's not.</p>
+              </div>
+              <button onClick={() => setFindRoomsOpen(false)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+            </div>
+
+            <div className="p-6 border-b border-[#cc5a16]/10 shrink-0">
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in</label>
+                  <input
+                    type="date"
+                    min={new Date().toISOString().slice(0, 10)}
+                    value={findRoomsParams.start}
+                    onChange={e => {
+                      const v = e.target.value;
+                      setFindRoomsParams(p => ({
+                        ...p,
+                        start: v,
+                        end: p.end <= v ? new Date(new Date(v).getTime() + 86400000).toISOString().slice(0,10) : p.end,
+                      }));
+                    }}
+                    className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out</label>
+                  <input
+                    type="date"
+                    min={findRoomsParams.start || new Date().toISOString().slice(0,10)}
+                    value={findRoomsParams.end}
+                    onChange={e => setFindRoomsParams(p => ({ ...p, end: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
+                  <input
+                    type="number" min={1}
+                    value={findRoomsParams.guests}
+                    onChange={e => setFindRoomsParams(p => ({ ...p, guests: Math.max(1, Number(e.target.value) || 1) }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    onClick={runFindAvailableRooms}
+                    disabled={findRoomsLoading || !findRoomsParams.start || !findRoomsParams.end || findRoomsParams.end < findRoomsParams.start}
+                    className={cn(
+                      "w-full px-4 py-2 rounded-xl text-sm font-bold transition-all",
+                      findRoomsParams.start && findRoomsParams.end && findRoomsParams.end >= findRoomsParams.start && !findRoomsLoading
+                        ? "bg-[#cc5a16] text-white hover:bg-[#a84612]"
+                        : "bg-[#cc5a16]/30 text-white cursor-not-allowed"
+                    )}
+                  >
+                    {findRoomsLoading ? 'Searching…' : 'Search'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6">
+              {findRoomsResults === null ? (
+                <p className="text-sm text-[#9c8e85] italic text-center py-8">
+                  Set dates above and click <strong>Search</strong> to see availability.
+                </p>
+              ) : findRoomsResults.length === 0 ? (
+                <p className="text-sm text-[#9c8e85] italic text-center py-8">No rooms configured. Add rooms in the Rooms tab.</p>
+              ) : (
+                (() => {
+                  const sorted = [...findRoomsResults].sort((a, b) => {
+                    if (a.available !== b.available) return a.available ? -1 : 1;
+                    if (!a.available && !b.available) {
+                      return String(a.conflict_until || '').localeCompare(String(b.conflict_until || ''));
+                    }
+                    return a.base_rate - b.base_rate;
+                  });
+                  const availCount = sorted.filter(r => r.available).length;
+                  return (
+                    <>
+                      <p className="text-[11px] text-[#6b5d52] mb-3">
+                        <strong className="text-emerald-700">{availCount} available</strong> · {sorted.length - availCount} unavailable
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {sorted.map((r: any) => {
+                          const dateFmt = (d: string) => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '';
+                          return (
+                            <div
+                              key={r.id}
+                              className={cn(
+                                "rounded-2xl border overflow-hidden flex flex-col transition-all",
+                                r.available
+                                  ? "border-emerald-300 bg-emerald-50/40 hover:border-emerald-500 hover:shadow-md cursor-pointer"
+                                  : "border-[#cc5a16]/15 bg-[#faf7f2] opacity-75"
+                              )}
+                              onClick={() => {
+                                if (!r.available) return;
+                                setEditingBooking({
+                                  ...editingBooking,
+                                  room_id: r.id,
+                                  room_rate: r.base_rate || editingBooking.room_rate || 0,
+                                  check_in_date: findRoomsParams.start,
+                                  check_out_date: findRoomsParams.end,
+                                  num_guests: findRoomsParams.guests,
+                                });
+                                setFindRoomsOpen(false);
+                                if (!showBookingModal) setShowBookingModal(true);
+                              }}
+                            >
+                              {r.image_url && (
+                                <div className="h-28 bg-cover bg-center" style={{ backgroundImage: `url(${r.image_url})` }} />
+                              )}
+                              <div className="p-3 flex-1 flex flex-col gap-1.5">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0 flex-1">
+                                    <p className="font-bold text-[#1a1208] text-sm truncate">{r.name}</p>
+                                    <p className="text-[10px] text-[#9c8e85]">
+                                      {r.type_name || r.type || 'Untagged'} · Sleeps {r.capacity}
+                                      {r.room_number ? ` · #${r.room_number}` : ''}
+                                    </p>
+                                  </div>
+                                  <div className="text-right shrink-0">
+                                    <p className="text-sm font-bold font-mono text-[#cc5a16]">₹{Number(r.base_rate).toLocaleString('en-IN')}</p>
+                                    <p className="text-[9px] text-[#9c8e85]">/night</p>
+                                  </div>
+                                </div>
+                                {r.amenities && (
+                                  <p className="text-[10px] text-[#6b5d52] truncate" title={r.amenities}>{r.amenities}</p>
+                                )}
+                                <div className="mt-auto pt-1">
+                                  {r.available ? (
+                                    <span className="inline-block text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full bg-emerald-200 text-emerald-800">
+                                      ✓ Available — click to pick
+                                    </span>
+                                  ) : !r.fits_capacity ? (
+                                    <span className="inline-block text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full bg-amber-100 text-amber-800">
+                                      Capacity {r.capacity} · {findRoomsParams.guests} guests requested
+                                    </span>
+                                  ) : r.blocked_by_status ? (
+                                    <span className="inline-block text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full bg-rose-100 text-rose-800">
+                                      {String(r.blocked_by_status).toLowerCase().replace(/_/g, ' ')}
+                                    </span>
+                                  ) : (
+                                    <span className="inline-block text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full bg-amber-100 text-amber-800">
+                                      Available from {dateFmt(r.conflict_until)} · {r.conflict_reason}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  );
+                })()
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ═════════ Room Type edit modal (Sprint B2) ═════════
           Create or edit a property-level room category. */}
       {editingRoomType && (
@@ -17481,7 +17688,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </p>
               </div>
               <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Room *</label>
+                <div className="flex items-baseline justify-between mb-1">
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Room *</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      // Pre-fill the search from whatever dates the booking
+                      // form already has (or sensible defaults).
+                      const ci = (editingBooking.check_in_date || new Date().toISOString().slice(0,10)).slice(0,10);
+                      const co = (editingBooking.check_out_date || new Date(Date.now()+86400000).toISOString().slice(0,10)).slice(0,10);
+                      setFindRoomsParams({ start: ci, end: co, guests: Number(editingBooking.num_guests) || 1 });
+                      setFindRoomsResults(null);
+                      setFindRoomsOpen(true);
+                    }}
+                    className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] hover:underline"
+                  >
+                    🔍 Find available rooms
+                  </button>
+                </div>
                 {(() => {
                   // Filter out rooms that already have an overlapping
                   // booking for the selected date range. Mirrors the
