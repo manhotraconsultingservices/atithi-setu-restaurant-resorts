@@ -14701,6 +14701,62 @@ async function startServer() {
     }
   });
 
+  // Sprint P2-A — Cancel a whole booking group in one shot.
+  // Applies the tenant's refund policy to each child booking
+  // independently (the refund window is the same for all of them
+  // since they share check_in_date, but per-row math + audit row).
+  // Skips children that are already CHECKED_IN / CHECKED_OUT /
+  // CANCELLED so the caller doesn't accidentally undo a settled stay.
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const children: any[] = await tenantDb.query(
+        "SELECT * FROM room_bookings WHERE group_id = ?",
+        [req.params.groupId]
+      );
+      if (children.length === 0) return res.status(404).json({ error: 'Group not found or has no bookings.' });
+
+      const reason = req.body?.reason == null ? null : String(req.body.reason).slice(0, 500);
+      const results: any[] = [];
+      let totalRefund = 0;
+      for (const b of children) {
+        if (b.status === 'CHECKED_IN') { results.push({ id: b.id, skipped: true, reason: 'already checked in' }); continue; }
+        if (b.status === 'CHECKED_OUT') { results.push({ id: b.id, skipped: true, reason: 'already checked out' }); continue; }
+        if (b.status === 'CANCELLED')  { results.push({ id: b.id, skipped: true, reason: 'already cancelled' }); continue; }
+        const refund = await computeCancellationRefund(req.params.id, b.check_in_date, Number(b.total_amount || 0));
+        await tenantDb.run(
+          `UPDATE room_bookings
+             SET status                     = 'CANCELLED',
+                 cancelled_at               = ?,
+                 cancelled_by               = ?,
+                 cancellation_reason        = ?,
+                 cancellation_refund_pct    = ?,
+                 cancellation_refund_amount = ?
+           WHERE id = ?`,
+          [new Date().toISOString(), req.user?.id || null, reason,
+           refund.refund_pct, refund.refund_amount, b.id]
+        );
+        totalRefund += Number(refund.refund_amount || 0);
+        results.push({
+          id: b.id, room_id: b.room_id, guest_name: b.guest_name,
+          refund_pct: refund.refund_pct, refund_amount: refund.refund_amount,
+        });
+        try { await logChannelSync(req.params.id, { ...b, status: 'CANCELLED' }, 'BOOKING_CANCELLED', { groupCancel: true }); } catch {}
+      }
+      try {
+        await triggerNotification(req.params.id, 'BOOKING_CANCELLED', {
+          groupId: req.params.groupId, numCancelled: results.filter(r => !r.skipped).length, totalRefund,
+        });
+      } catch {}
+      res.json({ success: true, group_id: req.params.groupId, total_refund: totalRefund, results });
+    } catch (err) {
+      console.error("group cancel error:", err);
+      res.status(500).json({ error: "Failed to cancel group" });
+    }
+  });
+
   // List groups (room_booking_groups + booking count per group).
   app.get("/api/restaurant/:id/hotel/booking-groups", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
@@ -19747,7 +19803,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-walk-in-fast-path',
+    commit_marker: 'hotel-group-cancel',
     code_features: [
       'subscription-billing',
       'read-only-mode',
