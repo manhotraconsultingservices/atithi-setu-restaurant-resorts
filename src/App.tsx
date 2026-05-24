@@ -6583,6 +6583,88 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Sprint A1 — Availability calendar view toggle for the Bookings tab
   // (DASHBOARD added in C3 — quick-glance receptionist/GM view)
   const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR' | 'DASHBOARD'>('LIST');
+  // Sprint C-WI — Walk-in fast-path modal. Single-screen flow for
+  // "guest arrives now": pick a vacant room (auto-suggested), enter
+  // name + phone, click "Walk-in & Check-In" → creates booking +
+  // immediately fires check-in. Skips the multi-step booking modal.
+  const [walkInDraft, setWalkInDraft] = useState<{
+    open: boolean;
+    guest_name: string;
+    guest_phone: string;
+    nights: number;
+    room_id: string;
+    room_rate: number;
+    saving: boolean;
+  } | null>(null);
+  const openWalkInModal = () => {
+    // Auto-pick the first VACANT, non-blocked room that has no
+    // overlapping booking today.
+    const today = new Date().toISOString().slice(0, 10);
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const todayBooked = new Set(
+      hotelBookings
+        .filter((b: any) => {
+          if (b.status === 'CANCELLED' || b.status === 'CHECKED_OUT') return false;
+          const ci = normaliseBookingDate(b.check_in_date);
+          const co = normaliseBookingDate(b.check_out_date);
+          return ci && co && ci <= today && co > today;
+        })
+        .map((b: any) => b.room_id)
+    );
+    const pick = hotelRooms.find(r =>
+      r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED' && !todayBooked.has(r.id)
+    );
+    setWalkInDraft({
+      open: true,
+      guest_name: '',
+      guest_phone: '',
+      nights: 1,
+      room_id: pick?.id || '',
+      room_rate: Number(pick?.base_rate || 0),
+      saving: false,
+    });
+  };
+  const submitWalkIn = async () => {
+    if (!walkInDraft) return;
+    if (!walkInDraft.guest_name.trim()) {
+      alert('Guest name is required for walk-in.');
+      return;
+    }
+    if (!walkInDraft.room_id) {
+      alert('Pick a room before submitting.');
+      return;
+    }
+    setWalkInDraft({ ...walkInDraft, saving: true });
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const co = new Date(Date.now() + walkInDraft.nights * 86400000).toISOString().slice(0, 10);
+      // 1. Create booking — server applies rate plans when room_rate is 0
+      const created: any = await hotelApi('/bookings', {
+        method: 'POST',
+        body: JSON.stringify({
+          room_id: walkInDraft.room_id,
+          guest_name: walkInDraft.guest_name.trim(),
+          guest_phone: walkInDraft.guest_phone.trim() || null,
+          check_in_date: today,
+          check_out_date: co,
+          booking_type: 'OVERNIGHT',
+          booking_source: 'WALKIN',
+          num_guests: 1,
+          room_rate: walkInDraft.room_rate || 0,
+        }),
+      });
+      // 2. Immediately check the guest in (force=true since today >= check_in)
+      await checkInBooking(created.id, false);
+      // 3. Close modal + refresh views
+      setWalkInDraft(null);
+      await fetchHotelBookings();
+      markAvailabilityDirty();
+      alert(`✓ Walk-in complete — ${walkInDraft.guest_name} checked into ${hotelRooms.find(r => r.id === walkInDraft.room_id)?.name}.`);
+    } catch (err: any) {
+      alert(err?.message || 'Walk-in failed');
+      setWalkInDraft(d => d ? { ...d, saving: false } : d);
+    }
+  };
   // Calendar quick-action popover — opened by clicking a booked cell.
   // Holds the booking id; the popover looks up the row from hotelBookings
   // so it stays in sync with the calendar's data without re-fetching.
@@ -14917,6 +14999,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </button>
                 ))}
               </div>
+              <button onClick={openWalkInModal} className="px-4 py-2.5 rounded-2xl border border-emerald-300 text-emerald-700 text-sm font-bold hover:bg-emerald-50 transition-all flex items-center gap-2">
+                🚶 Walk-in
+              </button>
               <button onClick={openGroupBookingModal} className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/30 text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5 transition-all flex items-center gap-2">
                 <Plus size={14} /> Group
               </button>
@@ -14964,6 +15049,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               token={token}
               refreshNonce={calendarRefreshNonce}
               onDateJump={() => setBookingsView('CALENDAR')}
+              onWalkInClick={openWalkInModal}
               onNewBooking={(roomId, date) => {
                 const room = hotelRooms.find(r => r.id === roomId);
                 setEditingBooking({
@@ -17415,6 +17501,152 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       )}
+
+      {/* ═════════ Walk-in fast-path modal (Sprint C-WI) ═════════
+          Single-screen flow for "guest arrived right now". Auto-picks
+          the first vacant room, lets the staff edit guest name +
+          phone + nights, then creates the booking AND immediately
+          fires check-in in one click. Replaces the multi-step regular
+          booking flow when the guest is already physically present. */}
+      {walkInDraft?.open && (() => {
+        const draft = walkInDraft;
+        const setDraft = (patch: any) => setWalkInDraft({ ...draft, ...patch });
+        const today = new Date().toISOString().slice(0, 10);
+        // Vacant rooms for today — show in dropdown for manual override.
+        const todayBooked = new Set(
+          hotelBookings
+            .filter((b: any) => {
+              if (b.status === 'CANCELLED' || b.status === 'CHECKED_OUT') return false;
+              const ci = normaliseBookingDate(b.check_in_date);
+              const co = normaliseBookingDate(b.check_out_date);
+              return ci && co && ci <= today && co > today;
+            })
+            .map((b: any) => b.room_id)
+        );
+        const availableRooms = hotelRooms.filter(r =>
+          r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED' && !todayBooked.has(r.id)
+        );
+        const total = draft.room_rate * draft.nights;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">🚶 Walk-in Check-In</h3>
+                <button onClick={() => setWalkInDraft(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+              <p className="text-[11px] text-[#9c8e85] mb-4">
+                Single screen — creates the booking and checks the guest in immediately.
+              </p>
+
+              <form
+                onSubmit={(e) => { e.preventDefault(); submitWalkIn(); }}
+                className="space-y-3"
+              >
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guest name *</label>
+                  <input
+                    required
+                    autoFocus
+                    value={draft.guest_name}
+                    onChange={e => setDraft({ guest_name: e.target.value })}
+                    placeholder="e.g. Ramesh Kumar"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone</label>
+                  <input
+                    value={draft.guest_phone}
+                    onChange={e => setDraft({ guest_phone: e.target.value })}
+                    placeholder="+91 9876543210"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Room *</label>
+                    {availableRooms.length === 0 ? (
+                      <p className="text-[11px] text-[#c13b3b] italic px-1 py-2">No vacant rooms right now.</p>
+                    ) : (
+                      <select
+                        required
+                        value={draft.room_id}
+                        onChange={e => {
+                          const r = hotelRooms.find(x => x.id === e.target.value);
+                          setDraft({ room_id: e.target.value, room_rate: Number(r?.base_rate || draft.room_rate) });
+                        }}
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                      >
+                        {availableRooms.map((r: any) => (
+                          <option key={r.id} value={r.id}>
+                            {r.name}{r.room_number ? ` · #${r.room_number}` : ''} · ₹{Number(r.base_rate || 0).toLocaleString('en-IN')}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Nights</label>
+                    <input
+                      type="number" min={1} max={30}
+                      value={draft.nights}
+                      onChange={e => setDraft({ nights: Math.max(1, Math.min(30, Number(e.target.value) || 1)) })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Rate per night (₹)</label>
+                  <input
+                    type="number" min={0}
+                    value={draft.room_rate}
+                    onChange={e => setDraft({ room_rate: Math.max(0, Number(e.target.value) || 0) })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                  />
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Leave 0 to auto-apply Rate Plan (season / weekend overrides).</p>
+                </div>
+
+                {/* Stay summary */}
+                <div className="bg-[#faf7f2] rounded-2xl p-3 text-[11px] text-[#6b5d52]">
+                  <div className="flex justify-between"><span>Check-in</span><span className="text-[#1a1208] font-semibold">Today · {new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</span></div>
+                  <div className="flex justify-between"><span>Check-out</span><span className="text-[#1a1208] font-semibold">{new Date(Date.now() + draft.nights * 86400000).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</span></div>
+                  {draft.room_rate > 0 && (
+                    <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
+                      <span>Estimated total</span>
+                      <span className="font-bold font-mono text-[#cc5a16] text-sm">₹{total.toLocaleString('en-IN')}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-2 pt-3">
+                  <button
+                    type="button"
+                    onClick={() => setWalkInDraft(null)}
+                    className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={draft.saving || !draft.guest_name.trim() || !draft.room_id}
+                    className={cn(
+                      "flex-1 px-4 py-2.5 rounded-2xl text-sm font-bold transition-all flex items-center justify-center gap-1",
+                      draft.guest_name.trim() && draft.room_id && !draft.saving
+                        ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                        : "bg-emerald-300 text-white cursor-not-allowed"
+                    )}
+                  >
+                    {draft.saving ? 'Checking in…' : 'Book & Check-In Now'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═════════ Calendar Booking Quick-Actions popover ═════════
           Opened by clicking a booked / checked-in cell on the
@@ -21884,7 +22116,8 @@ const AvailabilityDashboard: React.FC<{
   refreshNonce?: number;
   onDateJump?: () => void;
   onNewBooking?: (roomId: string, date: string) => void;
-}> = ({ restaurantId, token, refreshNonce, onDateJump, onNewBooking }) => {
+  onWalkInClick?: () => void;   // Sprint C-WI — dedicated fast-path
+}> = ({ restaurantId, token, refreshNonce, onDateJump, onNewBooking, onWalkInClick }) => {
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -22180,8 +22413,11 @@ const AvailabilityDashboard: React.FC<{
           <button
             type="button"
             onClick={() => {
+              // Prefer the dedicated walk-in fast-path; fall back to the
+              // regular New Booking modal pre-filled with the first vacant
+              // room (legacy behaviour before C-WI).
+              if (onWalkInClick) { onWalkInClick(); return; }
               if (!onNewBooking || !data?.rooms) return;
-              // Pick the first vacant room for today.
               const today = data.dates[0];
               const r = data.rooms.find((r: any) => {
                 const cell = data.grid[r.id]?.[today];
@@ -22192,7 +22428,7 @@ const AvailabilityDashboard: React.FC<{
             }}
             className="px-5 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 flex items-center gap-2"
           >
-            <Plus size={14} /> Walk-in booking
+            🚶 Walk-in & Check-In
           </button>
         </div>
       )}
