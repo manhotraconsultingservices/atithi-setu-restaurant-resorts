@@ -14496,21 +14496,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {hotelError && <div className="px-4 py-3 rounded-xl bg-[#fdf0f0] border border-[#c13b3b]/20 text-[#c13b3b] text-sm">{hotelError}</div>}
 
           {/* Today's Arrivals & Departures.
-              Bug 5 fix — the previous filter used `.slice(0,10)` on the
-              raw API value. When the API returns a Date object instead
-              of an ISO string (some JSON serialisers do this), .slice
-              is undefined → every comparison fails → "0 departures".
-              normaliseBookingDate() handles both shapes. We also accept
-              both 'BOOKED' and 'CONFIRMED' for arrivals (status set may
-              vary across booking sources). */}
+              Bug 5 fix — normaliseBookingDate handles both ISO strings
+              and JS Date objects (the API may return either depending
+              on the route's serialiser).
+
+              Day-use fix — day-use bookings (check_in === check_out)
+              represent the entire stay in a single day. A BOOKED day-use
+              guest is still scheduled to leave today, so we include them
+              in Departures with a "Check In" action that takes them
+              through the normal check-in flow. CHECKED_IN day-use guests
+              continue to show with a "Check Out" action. */}
           {(() => {
             const today = new Date().toISOString().slice(0,10);
             const arrivals = hotelBookings.filter((b: any) =>
               b.status === 'BOOKED' && normaliseBookingDate(b.check_in_date) === today
             );
-            const departures = hotelBookings.filter((b: any) =>
-              b.status === 'CHECKED_IN' && normaliseBookingDate(b.check_out_date) === today
-            );
+            const departures = hotelBookings.filter((b: any) => {
+              if (normaliseBookingDate(b.check_out_date) !== today) return false;
+              if (b.status === 'CHECKED_IN') return true;
+              // Day-use bookings that haven't been checked in yet —
+              // their entire stay is today so they DO belong in the
+              // departures list (staff needs to act on them today).
+              if (b.status === 'BOOKED' && b.booking_type === 'DAY_USE') return true;
+              return false;
+            });
             return (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5" style={{ borderTop: '3px solid #0f766e' }}>
@@ -14527,15 +14536,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
                 <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5" style={{ borderTop: '3px solid #b8860b' }}>
                   <h3 className="text-sm font-bold uppercase tracking-widest text-[#b8860b] mb-3">Today's Departures · {departures.length}</h3>
-                  {departures.length === 0 ? <p className="text-sm text-[#9c8e85]">No departures today</p> : departures.map((b: any) => (
-                    <div key={b.id} className="flex items-center justify-between py-2 border-b border-[#cc5a16]/10 last:border-0">
-                      <div>
-                        <p className="font-semibold text-[#1a1208] text-sm">{b.guest_name}</p>
-                        <p className="text-xs text-[#9c8e85]">{b.room_name || b.room_id}</p>
+                  {departures.length === 0 ? <p className="text-sm text-[#9c8e85]">No departures today</p> : departures.map((b: any) => {
+                    // Day-use bookings that are still BOOKED need to be
+                    // checked in first; the checkout flow handles them
+                    // after that. CHECKED_IN bookings (overnight or
+                    // day-use) go straight to the checkout modal.
+                    const isDayUseBooked = b.status === 'BOOKED' && b.booking_type === 'DAY_USE';
+                    return (
+                      <div key={b.id} className="flex items-center justify-between py-2 border-b border-[#cc5a16]/10 last:border-0">
+                        <div>
+                          <p className="font-semibold text-[#1a1208] text-sm">{b.guest_name}</p>
+                          <p className="text-xs text-[#9c8e85]">
+                            {b.room_name || b.room_id}
+                            {isDayUseBooked && <span className="ml-2 px-1.5 py-0.5 rounded bg-[#0f766e]/10 text-[#0f766e] text-[10px] font-bold uppercase tracking-wider">Day-Use · Not Yet In</span>}
+                          </p>
+                        </div>
+                        {isDayUseBooked ? (
+                          <button
+                            onClick={() => confirmAndCheckIn(b)}
+                            className="px-3 py-1.5 rounded-lg bg-[#0f766e] text-white text-xs font-bold hover:bg-[#0a5853]"
+                          >
+                            Check In
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }}
+                            className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-xs font-bold hover:bg-[#8f6608]"
+                          >
+                            Check Out
+                          </button>
+                        )}
                       </div>
-                      <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-xs font-bold hover:bg-[#8f6608]">Check Out</button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             );
@@ -19464,7 +19497,15 @@ const HotelCommandCenter: React.FC<{
     return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
   };
   const checkInsToday  = bookings.filter(b => toIsoDay(b.check_in_date)  === today && b.status !== 'CANCELLED');
-  const checkOutsToday = bookings.filter(b => toIsoDay(b.check_out_date) === today && b.status !== 'CANCELLED');
+  // Day-use fix — include BOOKED day-use bookings (they leave today
+  // regardless of whether they've been checked in yet).
+  const checkOutsToday = bookings.filter(b => {
+    if (toIsoDay(b.check_out_date) !== today) return false;
+    if (b.status === 'CANCELLED' || b.status === 'CHECKED_OUT') return false;
+    if (b.status === 'CHECKED_IN') return true;
+    if (b.status === 'BOOKED' && b.booking_type === 'DAY_USE') return true;
+    return false;
+  });
   const openFolioTotal = folios.reduce((s, f) => s + Number(f.grand_total || 0), 0);
   const foreignPendingFormC = bookings.filter(b =>
     b.status === 'CHECKED_IN' && b.guest_nationality && b.guest_nationality !== 'IN'
