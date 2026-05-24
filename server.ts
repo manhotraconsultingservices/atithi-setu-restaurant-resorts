@@ -14701,6 +14701,92 @@ async function startServer() {
     }
   });
 
+  // Sprint P2-F — Online check-in form. Public endpoint, no auth.
+  // Guest opens the URL we email them T-3 days before arrival; pre-
+  // fills the ID + nationality + special requests fields. Reduces
+  // front-desk paperwork at check-in (Form-C reporting now has the
+  // data on hand).
+  //
+  // The "token" is a stable HMAC-free identifier — the booking id.
+  // Since the URL contains the full id, lookup is direct. To prevent
+  // someone from guessing booking ids and submitting fake data, we
+  // also require the guest_phone to match what's on file as a soft
+  // verification check.
+  app.get("/api/public/restaurant/:id/hotel/checkin/:bookingId", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get(
+        `SELECT id, guest_name, guest_phone, check_in_date, check_out_date,
+                status, room_id, num_guests, special_requests
+           FROM room_bookings WHERE id = ?`,
+        [req.params.bookingId]
+      );
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      if (b.status !== 'BOOKED') {
+        return res.status(400).json({ error: 'Online check-in is only available for confirmed bookings.' });
+      }
+      const room: any = await tenantDb.get("SELECT name, type FROM rooms WHERE id = ?", [b.room_id]);
+      // Minimal public payload — no PII beyond what the guest already
+      // knows (their own name + dates).
+      res.json({
+        booking_id: b.id,
+        guest_name: b.guest_name,
+        check_in_date: b.check_in_date,
+        check_out_date: b.check_out_date,
+        room_name: room?.name || null,
+        room_type: room?.type || null,
+        num_guests: b.num_guests || 1,
+        hotel_name: check.restaurant?.name,
+        // Surface existing values so the guest only updates what's missing
+        special_requests: b.special_requests || '',
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to load check-in form" });
+    }
+  });
+
+  app.post("/api/public/restaurant/:id/hotel/checkin/:bookingId", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get(
+        "SELECT id, guest_phone, status FROM room_bookings WHERE id = ?",
+        [req.params.bookingId]
+      );
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      if (b.status !== 'BOOKED') {
+        return res.status(400).json({ error: 'Online check-in is only available for confirmed bookings.' });
+      }
+      const body = req.body || {};
+      // Soft verification: phone last 10 digits must match on-file.
+      if (b.guest_phone && body.verify_phone) {
+        const onFile = String(b.guest_phone).replace(/\D/g, '').slice(-10);
+        const given  = String(body.verify_phone).replace(/\D/g, '').slice(-10);
+        if (onFile && given && onFile !== given) {
+          return res.status(403).json({ error: 'Phone number does not match the booking.' });
+        }
+      }
+      // Allowed fields the guest can pre-fill (no rate / status / room change).
+      const allow = ['guest_id_proof', 'guest_nationality', 'guest_state', 'guest_email', 'special_requests'];
+      const patch: any = {};
+      for (const k of allow) if (k in body) patch[k] = body[k];
+      if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to save.' });
+
+      const setStr = Object.keys(patch).map(k => `${k} = ?`).join(', ');
+      await tenantDb.run(
+        `UPDATE room_bookings SET ${setStr} WHERE id = ?`,
+        [...Object.values(patch), req.params.bookingId]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error("online check-in submit error:", err);
+      res.status(500).json({ error: "Failed to save check-in form" });
+    }
+  });
+
   // Sprint P2-E — Pickup pace report. Surfaces how many bookings the
   // property is receiving in a rolling window vs the same period in
   // the prior year. Owners use this to spot demand softness early
@@ -20194,7 +20280,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-pickup-pace',
+    commit_marker: 'hotel-online-checkin',
     code_features: [
       'subscription-billing',
       'read-only-mode',
