@@ -7031,6 +7031,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     service_charge_percent: 0,
   });
   const [hotelSettingsSaving, setHotelSettingsSaving] = useState(false);
+  // Sprint P2-H — Yield rules CRUD state.
+  const [yieldRules, setYieldRules] = useState<any[]>([]);
+  const [editingYieldRule, setEditingYieldRule] = useState<any | null>(null);
+  // Sprint D2 — Channel credentials state. Stored masked on the wire,
+  // the form lets the owner enter or replace values.
+  const [channelCredentials, setChannelCredentials] = useState<any[]>([]);
+  const [editingChannelCred, setEditingChannelCred] = useState<any | null>(null);
   const [hotelSettingsSaved, setHotelSettingsSaved] = useState(false);
 
   // ── Menu Management Enhancements ─────────────────────────────────────────────
@@ -8917,6 +8924,36 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await hotelApi(`/rate-overrides/${overrideId}`, { method: 'DELETE' });
     await fetchRateOverrides();
   };
+
+  // Sprint P2-H — Yield rules helpers.
+  const fetchYieldRules = async () => {
+    if (!isHotelEnabled) return;
+    try { setYieldRules(await hotelApi('/yield-rules')); } catch { setYieldRules([]); }
+  };
+  const saveYieldRule = async (data: any) => {
+    await hotelApi('/yield-rules', { method: 'POST', body: JSON.stringify(data) });
+    await fetchYieldRules();
+  };
+  const deleteYieldRule = async (id: string) => {
+    if (!confirm('Delete this yield rule? Future bookings will skip this rate multiplier.')) return;
+    await hotelApi(`/yield-rules/${id}`, { method: 'DELETE' });
+    await fetchYieldRules();
+  };
+
+  // Sprint D2 — Channel credentials helpers.
+  const fetchChannelCredentials = async () => {
+    if (!isHotelEnabled) return;
+    try { setChannelCredentials(await hotelApi('/channel-credentials')); } catch { setChannelCredentials([]); }
+  };
+  const saveChannelCredential = async (data: any) => {
+    await hotelApi('/channel-credentials', { method: 'POST', body: JSON.stringify(data) });
+    await fetchChannelCredentials();
+  };
+  const deleteChannelCredential = async (channel: string) => {
+    if (!confirm(`Remove ${channel} credentials? Inventory sync to this channel will stop.`)) return;
+    await hotelApi(`/channel-credentials/${channel}`, { method: 'DELETE' });
+    await fetchChannelCredentials();
+  };
   const fetchHotelServices = async () => {
     if (!isHotelEnabled) return;
     try { setHotelServices(await hotelApi('/services')); } catch (err: any) { setHotelError(err.message); }
@@ -9259,7 +9296,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
-    if (activeTab === 'SETTINGS') fetchHotelSettings();
+    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
 
@@ -15659,6 +15696,135 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
 
+          {/* ── Sprint P2-H — Yield rules editor ─────────────────────
+              Occupancy-triggered rate multipliers. Owner defines rules
+              like "Occupancy ≥ 80% within 7 days → +25%". Backend
+              GET /hotel/yield-suggest applies on rate plans at booking
+              time when mode is AUTO. */}
+          {isHotelEnabled && (
+            <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+              <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
+                <div>
+                  <h3 className="text-2xl font-bold font-serif">Yield Management</h3>
+                  <p className="text-xs text-[#6b5d52] mt-1">
+                    Auto-adjust rates based on occupancy + days-to-check-in. Layered on top of Rate Plans.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setEditingYieldRule({ mode: 'SUGGEST', multiplier: 1.25 })}
+                  className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] flex items-center gap-1"
+                >
+                  <Plus size={12} /> Add Rule
+                </button>
+              </div>
+
+              {yieldRules.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic mt-3">
+                  No yield rules yet. Examples: "Occupancy ≥ 80% → +25%" · "Occupancy ≤ 30% within 7 days → −20%".
+                </p>
+              ) : (
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[#faf7f2]">
+                      <tr>
+                        <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Rule</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Occupancy</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Days-Out</th>
+                        <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Multiplier</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Mode</th>
+                        <th className="px-3 py-2"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {yieldRules.map((r: any) => (
+                        <tr key={r.id} className="border-t border-[#cc5a16]/5">
+                          <td className="px-3 py-2 font-semibold text-[#1a1208]">{r.label}</td>
+                          <td className="px-3 py-2 text-[11px] text-[#3d3128]">
+                            {r.occupancy_min != null ? `≥ ${r.occupancy_min}%` : 'any'}
+                            {r.occupancy_max != null && ` · ≤ ${r.occupancy_max}%`}
+                          </td>
+                          <td className="px-3 py-2 text-[11px] text-[#3d3128]">
+                            {r.days_out_min != null ? `≥ ${r.days_out_min}d` : 'any'}
+                            {r.days_out_max != null && ` · ≤ ${r.days_out_max}d`}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono font-bold text-[#cc5a16]">
+                            ×{Number(r.multiplier).toFixed(2)} ({((r.multiplier - 1) * 100 > 0 ? '+' : '') + Math.round((r.multiplier - 1) * 100)}%)
+                          </td>
+                          <td className="px-3 py-2 text-[10px]">
+                            <span className={cn(
+                              'px-1.5 py-0.5 rounded font-bold uppercase tracking-widest',
+                              r.mode === 'AUTO' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                            )}>{r.mode}</span>
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <button onClick={() => deleteYieldRule(r.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Delete</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Sprint D2 — Channel manager credentials ──────────────
+              Stub credentials for Booking.com / MMT / Agoda / etc.
+              Real push is a follow-up; this surface unblocks owner
+              entry. api_key/api_secret are masked on display. */}
+          {isHotelEnabled && (
+            <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+              <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
+                <div>
+                  <h3 className="text-2xl font-bold font-serif">Channel Manager</h3>
+                  <p className="text-xs text-[#6b5d52] mt-1">
+                    OTA API credentials for Booking.com / MakeMyTrip / Agoda / etc.
+                    <span className="block mt-1 text-amber-700 font-semibold">⚠ Real OTA push is in progress — credentials are stored masked but inventory sync requires the worker shipping next sprint.</span>
+                  </p>
+                </div>
+                <button
+                  onClick={() => setEditingChannelCred({ channel: 'BOOKING', is_enabled: false })}
+                  className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] flex items-center gap-1"
+                >
+                  <Plus size={12} /> Add Channel
+                </button>
+              </div>
+
+              {channelCredentials.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic mt-3">
+                  No channel credentials configured. Add an OTA channel to enable inventory sync once the push worker ships.
+                </p>
+              ) : (
+                <div className="mt-4 space-y-2">
+                  {channelCredentials.map((c: any) => (
+                    <div key={c.id} className="flex items-center justify-between gap-3 bg-[#faf7f2] rounded-2xl px-4 py-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-[#1a1208]">{c.channel}</p>
+                        <p className="text-[10px] text-[#6b5d52] mt-0.5 font-mono">
+                          API Key: {c.api_key || '—'} · Secret: {c.api_secret ? '••••••••' : '—'} · Property: {c.property_id || '—'}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className={cn(
+                          'text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
+                          c.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
+                        )}>{c.is_enabled ? 'Enabled' : 'Disabled'}</span>
+                        <button
+                          onClick={() => setEditingChannelCred({ channel: c.channel, api_key: '', api_secret: '', property_id: c.property_id || '', is_enabled: c.is_enabled })}
+                          className="text-[10px] font-bold text-[#3d3128] hover:underline"
+                        >Edit</button>
+                        <button
+                          onClick={() => deleteChannelCredential(c.channel)}
+                          className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                        >Delete</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* ── Brand Logo (used on invoice PDF) ───────────────────── */}
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
             <h3 className="text-2xl font-bold font-serif mb-1">Brand Logo</h3>
@@ -18338,6 +18504,160 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       )}
+
+      {/* ═════════ Yield Rule edit modal (Sprint P2-H) ═════════ */}
+      {editingYieldRule && (() => {
+        const d = editingYieldRule;
+        const set = (patch: any) => setEditingYieldRule({ ...d, ...patch });
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">New Yield Rule</h3>
+                <button onClick={() => setEditingYieldRule(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (!d.label || !d.multiplier) { alert('Label and multiplier are required.'); return; }
+                try {
+                  await saveYieldRule({
+                    label: d.label, multiplier: Number(d.multiplier),
+                    occupancy_min: d.occupancy_min === '' || d.occupancy_min == null ? null : Number(d.occupancy_min),
+                    occupancy_max: d.occupancy_max === '' || d.occupancy_max == null ? null : Number(d.occupancy_max),
+                    days_out_min:  d.days_out_min  === '' || d.days_out_min  == null ? null : Number(d.days_out_min),
+                    days_out_max:  d.days_out_max  === '' || d.days_out_max  == null ? null : Number(d.days_out_max),
+                    mode: d.mode || 'SUGGEST',
+                    priority: Number(d.priority) || 0,
+                  });
+                  setEditingYieldRule(null);
+                } catch (err: any) { alert(err?.message || 'Failed to save'); }
+              }} className="space-y-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Label *</label>
+                  <input required value={d.label || ''} onChange={e => set({ label: e.target.value })}
+                    placeholder="e.g. High Demand · Last Minute · Off-Season"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm" />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Occupancy min %</label>
+                    <input type="number" min={0} max={100} value={d.occupancy_min ?? ''} onChange={e => set({ occupancy_min: e.target.value })}
+                      placeholder="any" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Occupancy max %</label>
+                    <input type="number" min={0} max={100} value={d.occupancy_max ?? ''} onChange={e => set({ occupancy_max: e.target.value })}
+                      placeholder="any" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Days-out min</label>
+                    <input type="number" min={0} value={d.days_out_min ?? ''} onChange={e => set({ days_out_min: e.target.value })}
+                      placeholder="any" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Days-out max</label>
+                    <input type="number" min={0} value={d.days_out_max ?? ''} onChange={e => set({ days_out_max: e.target.value })}
+                      placeholder="any" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Multiplier *</label>
+                    <input required type="number" min={0.1} max={10} step="0.05" value={d.multiplier || ''} onChange={e => set({ multiplier: e.target.value })}
+                      placeholder="1.25 = +25%" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                    <p className="text-[9px] text-[#9c8e85] mt-1">1.25 → +25% · 0.80 → −20% · 1.00 → no change</p>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Mode *</label>
+                    <select value={d.mode || 'SUGGEST'} onChange={e => set({ mode: e.target.value })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                      <option value="SUGGEST">Suggest (show hint)</option>
+                      <option value="AUTO">Auto-apply at booking</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Priority</label>
+                  <input type="number" value={d.priority || 0} onChange={e => set({ priority: e.target.value })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <button type="button" onClick={() => setEditingYieldRule(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                  <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Save Rule</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═════════ Channel Credentials modal (Sprint D2) ═════════ */}
+      {editingChannelCred && (() => {
+        const d = editingChannelCred;
+        const set = (patch: any) => setEditingChannelCred({ ...d, ...patch });
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Channel Credentials</h3>
+                <button onClick={() => setEditingChannelCred(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (!d.channel) { alert('Channel name is required.'); return; }
+                try {
+                  await saveChannelCredential({
+                    channel: String(d.channel).toUpperCase().trim(),
+                    api_key: d.api_key || null,
+                    api_secret: d.api_secret || null,
+                    property_id: d.property_id || null,
+                    is_enabled: d.is_enabled ? 1 : 0,
+                  });
+                  setEditingChannelCred(null);
+                } catch (err: any) { alert(err?.message || 'Failed to save'); }
+              }} className="space-y-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Channel *</label>
+                  <select required value={d.channel || 'BOOKING'} onChange={e => set({ channel: e.target.value })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                    <option value="BOOKING">Booking.com</option>
+                    <option value="MMT">MakeMyTrip / Goibibo</option>
+                    <option value="AGODA">Agoda</option>
+                    <option value="EXPEDIA">Expedia</option>
+                    <option value="AIRBNB">Airbnb</option>
+                    <option value="OTHER">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">API Key</label>
+                  <input type="password" autoComplete="new-password" value={d.api_key || ''} onChange={e => set({ api_key: e.target.value })}
+                    placeholder="Leave blank to keep existing" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">API Secret</label>
+                  <input type="password" autoComplete="new-password" value={d.api_secret || ''} onChange={e => set({ api_secret: e.target.value })}
+                    placeholder="Leave blank to keep existing" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Property ID on OTA</label>
+                  <input value={d.property_id || ''} onChange={e => set({ property_id: e.target.value })}
+                    placeholder="e.g. 12345678" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                <label className="flex items-center gap-2 text-sm text-[#3d3128]">
+                  <input type="checkbox" checked={!!d.is_enabled} onChange={e => set({ is_enabled: e.target.checked })} className="w-4 h-4" />
+                  Enable inventory sync to this channel
+                </label>
+                <div className="flex gap-2 pt-2">
+                  <button type="button" onClick={() => setEditingChannelCred(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                  <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Save</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═════════ Rate Plan edit modal (Sprint C-RP) ═════════
           Adds a date-range price override. Optional applies_to_days
