@@ -324,6 +324,32 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
 
+    -- Sprint C-RP — Rate plan overrides.
+    -- Date-range price overrides scoped to either a specific room or
+    -- a whole room type. Used for:
+    --   - Season rates ("Diwali Nov 1-7 → ₹6,000")
+    --   - Weekend rates (applies_to_days = 'FRI,SAT')
+    --   - Promotional periods
+    -- Resolution order at booking time:
+    --   1. ROOM-scoped override matching the date (highest priority wins)
+    --   2. TYPE-scoped override matching the date
+    --   3. room.base_rate (default)
+    -- applies_to_days: comma-separated weekday codes (MON,TUE,WED,THU,
+    -- FRI,SAT,SUN). NULL = every day in the range.
+    CREATE TABLE IF NOT EXISTS rate_overrides (
+      id              TEXT PRIMARY KEY,
+      scope           TEXT NOT NULL,
+      scope_id        TEXT NOT NULL,
+      start_date      DATE NOT NULL,
+      end_date        DATE NOT NULL,
+      rate            DOUBLE PRECISION NOT NULL,
+      label           TEXT,
+      applies_to_days TEXT,
+      priority        INT DEFAULT 0,
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_rate_overrides_lookup ON rate_overrides (scope, scope_id, start_date, end_date);
+
     -- Phase H3 / Sprint B1 — Room holds.
     -- Non-booking unavailability records: maintenance windows, owner stays,
     -- OTA inventory holds, deep cleaning, etc. Behave the same way as a
@@ -587,37 +613,55 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
        VALUES (?, ?, ?, 'open', 0, 0, 0)`,
       [folioId, booking.id, booking.room_id]
     );
-    const nights = Math.max(1, Math.ceil((new Date(booking.check_out_date).getTime() - new Date(booking.check_in_date).getTime()) / 86400000));
-    const rate = Number(booking.room_rate) || 0;
-    const gstPct = gstRateForTariff(rate, cfg);
+    // Sprint C-RP — per-night rate lookup. Each night may have a
+    // different effective rate (season override / weekend rate / type-
+    // scope override / base). The booking's stored room_rate is used
+    // ONLY as the manual-override fallback; if the staff set it
+    // explicitly to a value different from the base/override, we
+    // honour that value across all nights (existing behaviour).
+    const ci = normaliseDateIso(booking.check_in_date);
+    const co = normaliseDateIso(booking.check_out_date);
+    const explicitRate = Number(booking.room_rate) || 0;
+    const ratePlan = await computeRoomTotal(restaurantId, booking.room_id, ci, co);
+    // Detect whether the staff manually overrode the rate. Compare the
+    // explicit rate against the rate the rate plan would compute for the
+    // FIRST night. If they match → use per-night rates from the plan.
+    // If they differ → respect the explicit rate (used for every night).
+    const firstNightPlanRate = ratePlan.nights[0]?.rate || 0;
+    const useExplicit = explicitRate > 0 && Math.abs(explicitRate - firstNightPlanRate) > 0.01;
+    const nights = ratePlan.nights.length;
     const svcPct = cfg.serviceChargePct;
-    const svcPerNight = Math.round((rate * svcPct / 100) * 100) / 100;
 
     for (let i = 0; i < nights; i++) {
-      const date = new Date(booking.check_in_date);
-      date.setDate(date.getDate() + i);
-      const dateStr = date.toISOString().slice(0,10);
+      const planNight = ratePlan.nights[i];
+      const dateStr = planNight.date;
+      const rate = useExplicit ? explicitRate : planNight.rate;
+      const gstPct = gstRateForTariff(rate, cfg);
       const tag = Math.random().toString(36).slice(2, 5).toUpperCase();
       // Room night line — GST computed on the room rate only.
       const roomGst = Math.round((rate * gstPct / 100) * 100) / 100;
       const roomEntryId = `FE-${Date.now()}-${i}-${tag}`;
+      // Append the rate plan label when it's an override, so the invoice
+      // PDF says "Room charge · 2026-11-02 · Diwali Week" — useful audit.
+      const labelSuffix = !useExplicit && planNight.label ? ` · ${planNight.label}` : '';
       await tenantDb.run(
         `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
          VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
-        [roomEntryId, folioId, `Room charge · ${dateStr}`, rate, rate, gstPct, roomGst]
+        [roomEntryId, folioId, `Room charge · ${dateStr}${labelSuffix}`, rate, rate, gstPct, roomGst]
       );
-      // Optional service charge line — only when configured. Same GST slab
-      // as the room (Indian hotels treat service charge as part of the
-      // taxable supply at the room's tariff slab). 0% service charge skips
-      // the row entirely so legacy folios stay unchanged.
-      if (svcPct > 0 && svcPerNight > 0) {
-        const svcGst = Math.round((svcPerNight * gstPct / 100) * 100) / 100;
-        const svcEntryId = `FE-${Date.now()}-${i}-S-${tag}`;
-        await tenantDb.run(
-          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
-           VALUES (?, ?, 'SERVICE_CHARGE', ?, 1, ?, ?, ?, ?)`,
-          [svcEntryId, folioId, `Service charge (${svcPct}%) · ${dateStr}`, svcPerNight, svcPerNight, gstPct, svcGst]
-        );
+      // Service charge line — % of THIS night's rate (so weekend rate
+      // → weekend service charge, etc.). 0% service charge skips the row.
+      if (svcPct > 0) {
+        const svcAmount = Math.round((rate * svcPct / 100) * 100) / 100;
+        if (svcAmount > 0) {
+          const svcGst = Math.round((svcAmount * gstPct / 100) * 100) / 100;
+          const svcEntryId = `FE-${Date.now()}-${i}-S-${tag}`;
+          await tenantDb.run(
+            `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+             VALUES (?, ?, 'SERVICE_CHARGE', ?, 1, ?, ?, ?, ?)`,
+            [svcEntryId, folioId, `Service charge (${svcPct}%) · ${dateStr}`, svcAmount, svcAmount, gstPct, svcGst]
+          );
+        }
       }
     }
     await recomputeFolioTotals(tenantDb, folioId);
@@ -940,6 +984,110 @@ async function computeCancellationRefund(
     days_until_checkin: daysUntil,
     policy_text: `Cancellation inside the ${fullDays} day window — no refund per property policy.`,
   };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  Rate Plan resolution — Sprint C-RP
+//
+//  Returns the effective per-night rate for a (room, date) pair by
+//  consulting the rate_overrides table. Resolution order:
+//    1. ROOM-scoped override with matching date + applies_to_days
+//       (highest priority wins; ties broken by latest created_at)
+//    2. TYPE-scoped override (if the room is tagged to a type)
+//    3. room.base_rate (default)
+//
+//  WEEKDAY_KEYS maps JS Date.getDay() → 'SUN'/'MON'/.../'SAT'. Used to
+//  filter overrides whose applies_to_days excludes the given date.
+// ════════════════════════════════════════════════════════════════════════
+const WEEKDAY_KEYS = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+
+interface RateLookup { rate: number; label: string | null; source: 'OVERRIDE_ROOM' | 'OVERRIDE_TYPE' | 'BASE_RATE'; override_id: string | null; }
+
+async function getRateForRoomDate(restaurantId: string, roomId: string, date: string): Promise<RateLookup> {
+  const tenantDb = await getTenantDb(restaurantId);
+  const room: any = await tenantDb.get(
+    "SELECT id, type_id, base_rate FROM rooms WHERE id = ?", [roomId]
+  );
+  const baseRate = Number(room?.base_rate || 0);
+  if (!room) return { rate: 0, label: null, source: 'BASE_RATE', override_id: null };
+
+  const weekday = WEEKDAY_KEYS[new Date(date + 'T12:00:00Z').getUTCDay()];
+  const isoDate = normaliseDateIso(date);
+
+  // Helper: among the candidate overrides matching scope+date+weekday,
+  // pick the highest priority then the latest created_at.
+  const pick = (rows: any[]): RateLookup | null => {
+    const candidates = rows.filter(r => {
+      const start = normaliseDateIso(r.start_date);
+      const end   = normaliseDateIso(r.end_date);
+      if (!start || !end) return false;
+      if (isoDate < start || isoDate > end) return false;
+      if (r.applies_to_days) {
+        const days = String(r.applies_to_days).split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+        if (days.length > 0 && !days.includes(weekday)) return false;
+      }
+      return true;
+    });
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      if (Number(b.priority || 0) !== Number(a.priority || 0)) return Number(b.priority || 0) - Number(a.priority || 0);
+      return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+    });
+    const winner = candidates[0];
+    return {
+      rate: Number(winner.rate),
+      label: winner.label || null,
+      source: winner.scope === 'ROOM' ? 'OVERRIDE_ROOM' : 'OVERRIDE_TYPE',
+      override_id: winner.id,
+    };
+  };
+
+  const roomRows: any[] = await tenantDb.query(
+    "SELECT * FROM rate_overrides WHERE scope = 'ROOM' AND scope_id = ? AND start_date <= ? AND end_date >= ?",
+    [roomId, isoDate, isoDate]
+  );
+  const roomPick = pick(roomRows);
+  if (roomPick) return roomPick;
+
+  if (room.type_id) {
+    const typeRows: any[] = await tenantDb.query(
+      "SELECT * FROM rate_overrides WHERE scope = 'TYPE' AND scope_id = ? AND start_date <= ? AND end_date >= ?",
+      [room.type_id, isoDate, isoDate]
+    );
+    const typePick = pick(typeRows);
+    if (typePick) return typePick;
+  }
+
+  return { rate: baseRate, label: null, source: 'BASE_RATE', override_id: null };
+}
+
+// Compute per-night rates across a stay. Day-use (check_in === check_out)
+// returns a single night at the check-in date's rate.
+async function computeRoomTotal(restaurantId: string, roomId: string, checkIn: string, checkOut: string): Promise<{
+  nights: Array<{ date: string; rate: number; label: string | null; source: string }>;
+  total: number;
+}> {
+  const ci = normaliseDateIso(checkIn);
+  const co = normaliseDateIso(checkOut);
+  const result: Array<{ date: string; rate: number; label: string | null; source: string }> = [];
+  if (!ci || !co) return { nights: [], total: 0 };
+  if (ci === co) {
+    // Day-use — single night at check-in date's rate.
+    const r = await getRateForRoomDate(restaurantId, roomId, ci);
+    result.push({ date: ci, rate: r.rate, label: r.label, source: r.source });
+    return { nights: result, total: Math.round(r.rate * 100) / 100 };
+  }
+  // Overnight — [ci, co) half-open.
+  let cursor = new Date(ci + 'T12:00:00Z');
+  const end = new Date(co + 'T12:00:00Z');
+  while (cursor < end) {
+    const d = cursor.toISOString().slice(0, 10);
+    const r = await getRateForRoomDate(restaurantId, roomId, d);
+    result.push({ date: d, rate: r.rate, label: r.label, source: r.source });
+    cursor = new Date(cursor.getTime() + 86400000);
+  }
+  const total = Math.round(result.reduce((s, n) => s + n.rate, 0) * 100) / 100;
+  return { nights: result, total };
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -13506,6 +13654,104 @@ async function startServer() {
     }
   });
 
+  // ─── RATE PLANS — Sprint C-RP ───────────────────────────────────────
+  // CRUD for date-range price overrides + per-room rate preview.
+  app.get("/api/restaurant/:id/hotel/rate-overrides", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const scope = (req.query.scope as string) || null;       // 'ROOM' | 'TYPE' | null = all
+      const scopeId = (req.query.scope_id as string) || null;
+      let sql = "SELECT * FROM rate_overrides WHERE 1 = 1";
+      const params: any[] = [];
+      if (scope)   { sql += " AND scope = ?";    params.push(scope.toUpperCase()); }
+      if (scopeId) { sql += " AND scope_id = ?"; params.push(scopeId); }
+      sql += " ORDER BY start_date DESC, priority DESC";
+      res.json(await tenantDb.query(sql, params));
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch rate overrides" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/rate-overrides", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const b = req.body || {};
+      const scope = String(b.scope || '').toUpperCase();
+      if (scope !== 'ROOM' && scope !== 'TYPE') {
+        return res.status(400).json({ error: "scope must be 'ROOM' or 'TYPE'." });
+      }
+      if (!b.scope_id) return res.status(400).json({ error: "scope_id is required." });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(b.start_date) || !/^\d{4}-\d{2}-\d{2}$/.test(b.end_date)) {
+        return res.status(400).json({ error: "start_date and end_date must be YYYY-MM-DD." });
+      }
+      if (b.end_date < b.start_date) {
+        return res.status(400).json({ error: "end_date must be on or after start_date." });
+      }
+      const rate = Number(b.rate);
+      if (!isFinite(rate) || rate < 0) {
+        return res.status(400).json({ error: "rate must be a non-negative number." });
+      }
+      // Normalise applies_to_days to uppercase comma-separated weekday codes.
+      const ALLOWED_DAYS = new Set(['MON','TUE','WED','THU','FRI','SAT','SUN']);
+      let appliesTo: string | null = null;
+      if (b.applies_to_days && String(b.applies_to_days).trim()) {
+        const days = String(b.applies_to_days).split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+        const bad = days.filter(d => !ALLOWED_DAYS.has(d));
+        if (bad.length > 0) {
+          return res.status(400).json({ error: `Invalid weekday code(s): ${bad.join(', ')}. Use MON,TUE,WED,THU,FRI,SAT,SUN.` });
+        }
+        appliesTo = days.join(',');
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      const id = `RATE-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO rate_overrides (id, scope, scope_id, start_date, end_date, rate, label, applies_to_days, priority)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, scope, b.scope_id, b.start_date, b.end_date, rate,
+         b.label || null, appliesTo, Number(b.priority) || 0]
+      );
+      res.status(201).json(await tenantDb.get("SELECT * FROM rate_overrides WHERE id = ?", [id]));
+    } catch (err) {
+      console.error("create rate-override error:", err);
+      res.status(500).json({ error: "Failed to create rate override" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hotel/rate-overrides/:overrideId", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.run("DELETE FROM rate_overrides WHERE id = ?", [req.params.overrideId]);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to delete rate override" });
+    }
+  });
+
+  // GET /hotel/rate-preview?room_id=X&start=Y&end=Z
+  // Per-night breakdown for a date range — used by the booking modal
+  // to show "Total: ₹X with rate-plan breakdown" before submit.
+  app.get("/api/restaurant/:id/hotel/rate-preview", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const roomId = req.query.room_id as string;
+      const start  = req.query.start as string;
+      const end    = req.query.end as string;
+      if (!roomId || !start || !end) {
+        return res.status(400).json({ error: "room_id, start, end are required." });
+      }
+      const plan = await computeRoomTotal(req.params.id, roomId, start, end);
+      res.json({ room_id: roomId, start, end, ...plan });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to compute rate preview" });
+    }
+  });
+
   // ─── AVAILABILITY CALENDAR — Sprint A1 ──────────────────────────────
   // Returns a compact representation of the booking + hold landscape for
   // a date range. The frontend renders this as a rooms-down × dates-across
@@ -14280,17 +14526,28 @@ async function startServer() {
       const bookingType = String(booking_type || 'OVERNIGHT').toUpperCase();
       const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const tenantDb = await getTenantDb(req.params.id);
-      // Total computation:
-      //   OVERNIGHT — nights × rate
-      //   DAY_USE   — flat 1 × rate (the cashier can override room_rate
-      //               to a discounted day-rate if the hotel charges
-      //               less for partial-day use)
-      const rate = Number(room_rate) || 0;
+      // Sprint C-RP — rate-plan-aware total. If the caller provided an
+      // explicit room_rate we honour it (manual override). Otherwise we
+      // resolve per-night rates from rate_overrides and sum them.
+      let rate = Number(room_rate) || 0;
+      let total: number;
       let nights = 1;
-      if (bookingType !== 'DAY_USE') {
+      if (bookingType === 'DAY_USE') {
+        if (rate <= 0) {
+          const r = await getRateForRoomDate(req.params.id, room_id, check_in_date);
+          rate = r.rate;
+        }
+        total = rate;
+      } else {
         nights = Math.max(1, Math.ceil((new Date(check_out_date).getTime() - new Date(check_in_date).getTime()) / 86400000));
+        if (rate <= 0) {
+          const plan = await computeRoomTotal(req.params.id, room_id, check_in_date, check_out_date);
+          rate = plan.nights[0]?.rate || 0;
+          total = plan.total;
+        } else {
+          total = rate * nights;
+        }
       }
-      const total = rate * nights;
       await tenantDb.run(
         `INSERT INTO room_bookings
          (id, room_id, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
@@ -14376,8 +14633,26 @@ async function startServer() {
       const created: any[] = [];
       let groupTotal = 0;
       for (const r of rooms) {
-        const rate = Number(r.room_rate) || 0;
-        const total = rate * nights;
+        // Sprint C-RP — per-room rate-plan resolution. If caller passed
+        // an explicit room_rate we honour it; else compute per-night
+        // total from rate_overrides + base_rate.
+        let rate = Number(r.room_rate) || 0;
+        let total: number;
+        if (bookingType === 'DAY_USE') {
+          if (rate <= 0) {
+            const single = await getRateForRoomDate(req.params.id, r.room_id, check_in_date);
+            rate = single.rate;
+          }
+          total = rate;
+        } else {
+          if (rate <= 0) {
+            const plan = await computeRoomTotal(req.params.id, r.room_id, check_in_date, check_out_date);
+            rate = plan.nights[0]?.rate || 0;
+            total = plan.total;
+          } else {
+            total = rate * nights;
+          }
+        }
         groupTotal += total;
         const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         await tenantDb.run(
@@ -19472,7 +19747,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-calendar-booking-popover',
+    commit_marker: 'hotel-rate-plans',
     code_features: [
       'subscription-billing',
       'read-only-mode',

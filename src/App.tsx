@@ -6577,6 +6577,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Availability Calendar grouping + the Find-Available-Rooms search.
   const [hotelRoomTypes, setHotelRoomTypes] = useState<any[]>([]);
   const [editingRoomType, setEditingRoomType] = useState<any | null>(null);
+  // Sprint C-RP — Rate plan overrides (weekend / season rates).
+  const [rateOverrides, setRateOverrides] = useState<any[]>([]);
+  const [editingRateOverride, setEditingRateOverride] = useState<any | null>(null);
   // Sprint A1 — Availability calendar view toggle for the Bookings tab
   // (DASHBOARD added in C3 — quick-glance receptionist/GM view)
   const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR' | 'DASHBOARD'>('LIST');
@@ -8817,6 +8820,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchHotelRoomTypes();
     await fetchHotelRooms();
   };
+
+  // Sprint C-RP — Rate plan CRUD
+  const fetchRateOverrides = async () => {
+    if (!isHotelEnabled) return;
+    try { setRateOverrides(await hotelApi('/rate-overrides')); } catch { setRateOverrides([]); }
+  };
+  const saveRateOverride = async (data: any) => {
+    await hotelApi('/rate-overrides', { method: 'POST', body: JSON.stringify(data) });
+    await fetchRateOverrides();
+  };
+  const deleteRateOverride = async (overrideId: string) => {
+    if (!confirm('Delete this rate plan? Future bookings will fall back to the base rate.')) return;
+    await hotelApi(`/rate-overrides/${overrideId}`, { method: 'DELETE' });
+    await fetchRateOverrides();
+  };
   const fetchHotelServices = async () => {
     if (!isHotelEnabled) return;
     try { setHotelServices(await hotelApi('/services')); } catch (err: any) { setHotelError(err.message); }
@@ -9151,7 +9169,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   useEffect(() => {
     if (!isHotelEnabled) return;
-    if (activeTab === 'ROOMS') { fetchHotelRooms(); fetchHotelRoomTypes(); }
+    if (activeTab === 'ROOMS') { fetchHotelRooms(); fetchHotelRoomTypes(); fetchRateOverrides(); }
     if (activeTab === 'SERVICES') fetchHotelServices();
     if (activeTab === 'SERVICE_REQUESTS') fetchHotelRequests();
     if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); }
@@ -14535,6 +14553,84 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               )}
             </div>
 
+            {/* Sprint C-RP — Rate Plans (weekend / season rates).
+                Per-room or per-type date-range price overrides. Booking
+                creation + folio generation both consult these. */}
+            <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5">
+              <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                <div>
+                  <h3 className="text-base font-bold font-serif text-[#1a1208]">Rate Plans</h3>
+                  <p className="text-[11px] text-[#6b5d52] mt-0.5">
+                    Date-range overrides for weekend rates, season rates, and promotional periods. Auto-applied at booking time.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setEditingRateOverride({ scope: 'ROOM' })}
+                  className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] flex items-center gap-1"
+                >
+                  <Plus size={12} /> Add Rate Plan
+                </button>
+              </div>
+              {rateOverrides.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic">
+                  No rate plans yet. Examples: "Weekend rate ₹3,500 (Fri+Sat)" · "Diwali Week ₹6,000 (Nov 1-7)".
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[#faf7f2]">
+                      <tr>
+                        <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Plan</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Scope</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Dates</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Days</th>
+                        <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Rate</th>
+                        <th className="text-right px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Priority</th>
+                        <th className="px-3 py-2"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rateOverrides.map((o: any) => {
+                        const scopeName = o.scope === 'ROOM'
+                          ? (hotelRooms.find((r: any) => r.id === o.scope_id)?.name || o.scope_id)
+                          : (hotelRoomTypes.find((t: any) => t.id === o.scope_id)?.name || o.scope_id);
+                        return (
+                          <tr key={o.id} className="border-t border-[#cc5a16]/5">
+                            <td className="px-3 py-2 font-semibold text-[#1a1208]">{o.label || <span className="italic text-[#9c8e85]">(unlabeled)</span>}</td>
+                            <td className="px-3 py-2 text-[11px] text-[#3d3128]">
+                              <span className={cn(
+                                'inline-block px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-widest',
+                                o.scope === 'ROOM' ? 'bg-sky-100 text-sky-800' : 'bg-violet-100 text-violet-800'
+                              )}>
+                                {o.scope === 'ROOM' ? 'Room' : 'Type'}
+                              </span>
+                              <span className="ml-1.5">{scopeName}</span>
+                            </td>
+                            <td className="px-3 py-2 text-[11px] text-[#3d3128]">
+                              {String(o.start_date).slice(0,10)} → {String(o.end_date).slice(0,10)}
+                            </td>
+                            <td className="px-3 py-2 text-[10px] text-[#6b5d52]">
+                              {o.applies_to_days || <span className="italic">All days</span>}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono font-bold text-[#cc5a16]">₹{Number(o.rate).toLocaleString('en-IN')}</td>
+                            <td className="px-3 py-2 text-right text-[11px] text-[#9c8e85]">{o.priority || 0}</td>
+                            <td className="px-3 py-2 text-right">
+                              <button
+                                onClick={() => deleteRateOverride(o.id)}
+                                className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                              >
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
             {hotelRooms.length === 0 ? (
               <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 p-12 text-center">
                 <Bed className="mx-auto text-[#cc5a16] mb-3" size={40} />
@@ -18010,6 +18106,180 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       )}
+
+      {/* ═════════ Rate Plan edit modal (Sprint C-RP) ═════════
+          Adds a date-range price override. Optional applies_to_days
+          (comma-separated MON,TUE,... codes) for weekend-only rates. */}
+      {editingRateOverride && (() => {
+        const draft = editingRateOverride;
+        const setDraft = (patch: any) => setEditingRateOverride({ ...draft, ...patch });
+        const dayKeys = ['MON','TUE','WED','THU','FRI','SAT','SUN'] as const;
+        const selectedDays = new Set(
+          String(draft.applies_to_days || '').split(',').map((s: string) => s.trim().toUpperCase()).filter(Boolean)
+        );
+        const toggleDay = (d: string) => {
+          const next = new Set(selectedDays);
+          next.has(d) ? next.delete(d) : next.add(d);
+          setDraft({ applies_to_days: Array.from(next).join(',') });
+        };
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">New Rate Plan</h3>
+                <button onClick={() => setEditingRateOverride(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!draft.scope_id || !draft.start_date || !draft.end_date || !draft.rate) {
+                    alert('Scope, dates and rate are required.');
+                    return;
+                  }
+                  try {
+                    await saveRateOverride({
+                      scope: draft.scope || 'ROOM',
+                      scope_id: draft.scope_id,
+                      start_date: draft.start_date,
+                      end_date: draft.end_date,
+                      rate: Number(draft.rate),
+                      label: draft.label || null,
+                      applies_to_days: draft.applies_to_days || null,
+                      priority: Number(draft.priority) || 0,
+                    });
+                    setEditingRateOverride(null);
+                  } catch (err: any) {
+                    alert(err?.message || 'Failed to save rate plan');
+                  }
+                }}
+                className="space-y-3"
+              >
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Label</label>
+                  <input
+                    value={draft.label || ''}
+                    onChange={e => setDraft({ label: e.target.value })}
+                    placeholder="e.g. Weekend Rate · Diwali Week · New Year"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Scope *</label>
+                    <select
+                      required
+                      value={draft.scope || 'ROOM'}
+                      onChange={e => setDraft({ scope: e.target.value, scope_id: '' })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                    >
+                      <option value="ROOM">Specific Room</option>
+                      <option value="TYPE">Room Type</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">{draft.scope === 'TYPE' ? 'Type' : 'Room'} *</label>
+                    <select
+                      required
+                      value={draft.scope_id || ''}
+                      onChange={e => setDraft({ scope_id: e.target.value })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                    >
+                      <option value="">— Select —</option>
+                      {(draft.scope === 'TYPE' ? hotelRoomTypes : hotelRooms).map((x: any) => (
+                        <option key={x.id} value={x.id}>{x.name}{x.base_rate ? ` · ₹${Number(x.base_rate).toLocaleString('en-IN')}` : ''}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Start date *</label>
+                    <input
+                      required type="date"
+                      value={draft.start_date || ''}
+                      onChange={e => setDraft({ start_date: e.target.value, end_date: draft.end_date && draft.end_date < e.target.value ? e.target.value : draft.end_date })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">End date *</label>
+                    <input
+                      required type="date"
+                      min={draft.start_date || undefined}
+                      value={draft.end_date || ''}
+                      onChange={e => setDraft({ end_date: e.target.value })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Rate per night *</label>
+                    <div className="flex items-center gap-1">
+                      <span className="text-[#9c8e85] text-sm">₹</span>
+                      <input
+                        required type="number" min="0"
+                        value={draft.rate || ''}
+                        onChange={e => setDraft({ rate: Number(e.target.value) || 0 })}
+                        className="flex-1 bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Priority</label>
+                    <input
+                      type="number"
+                      value={draft.priority || 0}
+                      onChange={e => setDraft({ priority: Number(e.target.value) || 0 })}
+                      placeholder="0"
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                    />
+                  </div>
+                </div>
+
+                {/* Weekday selector */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    Applies to specific days?
+                    <span className="ml-1 text-[#9c8e85] italic font-normal normal-case">— leave all unselected for "every day in range"</span>
+                  </label>
+                  <div className="flex gap-1 flex-wrap">
+                    {dayKeys.map(d => (
+                      <button
+                        type="button"
+                        key={d}
+                        onClick={() => toggleDay(d)}
+                        className={cn(
+                          'px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all',
+                          selectedDays.has(d)
+                            ? 'bg-[#cc5a16] text-white'
+                            : 'bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10'
+                        )}
+                      >
+                        {d}
+                      </button>
+                    ))}
+                  </div>
+                  {selectedDays.size > 0 && (
+                    <p className="text-[10px] text-[#cc5a16] mt-1.5 italic">
+                      Rate applies only on {Array.from(selectedDays).join(', ')} between {draft.start_date || 'start'} and {draft.end_date || 'end'}.
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex gap-2 pt-3">
+                  <button type="button" onClick={() => setEditingRateOverride(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                  <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Save Rate Plan</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═════════ Room Type edit modal (Sprint B2) ═════════
           Create or edit a property-level room category. */}
