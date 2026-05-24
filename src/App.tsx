@@ -7062,6 +7062,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // the form lets the owner enter or replace values.
   const [channelCredentials, setChannelCredentials] = useState<any[]>([]);
   const [editingChannelCred, setEditingChannelCred] = useState<any | null>(null);
+  // CH-2 — iCal feed state (Booking.com / Airbnb / Vrbo / Agoda
+  // export-URL inbound sync; the practical OTA integration most
+  // independent hotels actually use today).
+  const [icalFeeds, setIcalFeeds] = useState<any[]>([]);
+  const [editingIcalFeed, setEditingIcalFeed] = useState<any | null>(null);
+  const [syncingIcalFeedId, setSyncingIcalFeedId] = useState<string | null>(null);
+  // CH-3 — Recent inbound webhook events for the channel-manager
+  // dashboard pane. Powered by GET /hotel/webhook-log.
+  const [webhookLog, setWebhookLog] = useState<any[]>([]);
   const [hotelSettingsSaved, setHotelSettingsSaved] = useState(false);
 
   // ── Menu Management Enhancements ─────────────────────────────────────────────
@@ -8978,6 +8987,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await hotelApi(`/channel-credentials/${channel}`, { method: 'DELETE' });
     await fetchChannelCredentials();
   };
+
+  // CH-2 — iCal feed helpers.
+  const fetchIcalFeeds = async () => {
+    if (!isHotelEnabled) return;
+    try { setIcalFeeds(await hotelApi('/ical-feeds')); } catch { setIcalFeeds([]); }
+  };
+  const saveIcalFeed = async (data: any) => {
+    await hotelApi('/ical-feeds', { method: 'POST', body: JSON.stringify(data) });
+    await fetchIcalFeeds();
+  };
+  const deleteIcalFeed = async (id: string) => {
+    if (!confirm('Remove this iCal feed? Already-imported bookings stay; no further sync from this URL.')) return;
+    await hotelApi(`/ical-feeds/${id}`, { method: 'DELETE' });
+    await fetchIcalFeeds();
+  };
+  const syncIcalFeedNow = async (id: string) => {
+    setSyncingIcalFeedId(id);
+    try {
+      const r = await hotelApi(`/ical-feeds/${id}/sync`, { method: 'POST' });
+      alert(`Sync complete · imported ${r?.imported ?? 0} · skipped ${r?.skipped ?? 0} · failed ${r?.failed ?? 0}`);
+      await fetchIcalFeeds();
+    } catch (e: any) {
+      alert(e?.message || 'Sync failed');
+    } finally {
+      setSyncingIcalFeedId(null);
+    }
+  };
+
+  // CH-3 — Webhook log helper.
+  const fetchWebhookLog = async () => {
+    if (!isHotelEnabled) return;
+    try { setWebhookLog(await hotelApi('/webhook-log?limit=50')); } catch { setWebhookLog([]); }
+  };
   const fetchHotelServices = async () => {
     if (!isHotelEnabled) return;
     try { setHotelServices(await hotelApi('/services')); } catch (err: any) { setHotelError(err.message); }
@@ -9320,7 +9362,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
-    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); }
+    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
 
@@ -15801,51 +15843,175 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
                 <div>
                   <h3 className="text-2xl font-bold font-serif">Channel Manager</h3>
-                  <p className="text-xs text-[#6b5d52] mt-1">
-                    OTA API credentials for Booking.com / MakeMyTrip / Agoda / etc.
-                    <span className="block mt-1 text-amber-700 font-semibold">⚠ Real OTA push is in progress — credentials are stored masked but inventory sync requires the worker shipping next sprint.</span>
+                  <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
+                    Inbound and outbound sync with OTAs (Booking.com / MakeMyTrip / Goibibo / Agoda / Expedia / Airbnb).
+                    <span className="block mt-1">
+                      <strong>iCal feeds</strong> below pull bookings from each OTA every 30 min — the practical real-world integration that works without partner approval.
+                      <strong className="ml-1">API credentials</strong> are stored at-rest encrypted; outbound push is stubbed pending OTA partnership approval.
+                    </span>
                   </p>
                 </div>
-                <button
-                  onClick={() => setEditingChannelCred({ channel: 'BOOKING', is_enabled: false })}
-                  className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] flex items-center gap-1"
-                >
-                  <Plus size={12} /> Add Channel
-                </button>
               </div>
 
-              {channelCredentials.length === 0 ? (
-                <p className="text-xs text-[#9c8e85] italic mt-3">
-                  No channel credentials configured. Add an OTA channel to enable inventory sync once the push worker ships.
-                </p>
-              ) : (
-                <div className="mt-4 space-y-2">
-                  {channelCredentials.map((c: any) => (
-                    <div key={c.id} className="flex items-center justify-between gap-3 bg-[#faf7f2] rounded-2xl px-4 py-3">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-bold text-[#1a1208]">{c.channel}</p>
-                        <p className="text-[10px] text-[#6b5d52] mt-0.5 font-mono">
-                          API Key: {c.api_key || '—'} · Secret: {c.api_secret ? '••••••••' : '—'} · Property: {c.property_id || '—'}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className={cn(
-                          'text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
-                          c.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
-                        )}>{c.is_enabled ? 'Enabled' : 'Disabled'}</span>
-                        <button
-                          onClick={() => setEditingChannelCred({ channel: c.channel, api_key: '', api_secret: '', property_id: c.property_id || '', is_enabled: c.is_enabled })}
-                          className="text-[10px] font-bold text-[#3d3128] hover:underline"
-                        >Edit</button>
-                        <button
-                          onClick={() => deleteChannelCredential(c.channel)}
-                          className="text-[10px] font-bold text-[#c13b3b] hover:underline"
-                        >Delete</button>
-                      </div>
-                    </div>
-                  ))}
+              {/* ── 1. INBOUND — iCal feeds ───────────────────────────── */}
+              <div className="mt-6">
+                <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                  <div>
+                    <h4 className="text-sm font-bold text-[#1a1208]">Inbound — iCal feeds</h4>
+                    <p className="text-[10px] text-[#9c8e85] mt-0.5">Auto-pulls every 30 min · Manual sync available below</p>
+                  </div>
+                  <button
+                    onClick={() => setEditingIcalFeed({ scope: 'ROOM', scope_id: '', channel: 'BOOKING', url: '', label: '', is_enabled: true })}
+                    className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] flex items-center gap-1"
+                  >
+                    <Plus size={12} /> Add iCal Feed
+                  </button>
                 </div>
-              )}
+                {icalFeeds.length === 0 ? (
+                  <p className="text-xs text-[#9c8e85] italic mt-2">
+                    No iCal feeds configured. Paste an export URL from your OTA's calendar settings to start syncing.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {icalFeeds.map((f: any) => (
+                      <div key={f.id} className="flex items-start justify-between gap-3 bg-[#f4f0eb] rounded-2xl px-4 py-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-bold text-[#1a1208]">
+                            {f.channel} <span className="text-[10px] font-normal text-[#6b5d52]">· {f.scope}{f.scope_id ? ` ${f.scope_id}` : ''}</span>
+                          </p>
+                          <p className="text-[10px] text-[#6b5d52] mt-0.5 font-mono truncate" title={f.url}>{f.url}</p>
+                          <p className="text-[10px] text-[#9c8e85] mt-0.5">
+                            Last synced: {f.last_synced ? new Date(f.last_synced).toLocaleString() : 'never'}
+                            {f.last_error && <span className="text-[#c13b3b] ml-2">⚠ {f.last_error}</span>}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className={cn(
+                            'text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
+                            f.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
+                          )}>{f.is_enabled ? 'Active' : 'Paused'}</span>
+                          <button
+                            onClick={() => syncIcalFeedNow(f.id)}
+                            disabled={syncingIcalFeedId === f.id}
+                            className="text-[10px] font-bold text-[#1a4a6f] hover:underline disabled:opacity-50"
+                          >{syncingIcalFeedId === f.id ? 'Syncing…' : 'Sync now'}</button>
+                          <button
+                            onClick={() => deleteIcalFeed(f.id)}
+                            className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                          >Delete</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* ── 2. INBOUND — Recent webhook events ────────────────── */}
+              <div className="mt-6">
+                <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                  <div>
+                    <h4 className="text-sm font-bold text-[#1a1208]">Inbound — Webhook activity</h4>
+                    <p className="text-[10px] text-[#9c8e85] mt-0.5">Last 50 OTA push events received at /channel-webhook/:channel</p>
+                  </div>
+                  <button
+                    onClick={fetchWebhookLog}
+                    className="px-3 py-1.5 rounded-xl border border-[#cc5a16]/30 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5 flex items-center gap-1"
+                  >Refresh</button>
+                </div>
+                {webhookLog.length === 0 ? (
+                  <p className="text-xs text-[#9c8e85] italic mt-2">No webhook events yet.</p>
+                ) : (
+                  <div className="max-h-64 overflow-y-auto border border-[#cc5a16]/10 rounded-2xl">
+                    <table className="w-full text-[10px]">
+                      <thead className="bg-[#faf7f2] sticky top-0">
+                        <tr className="text-left text-[#6b5d52]">
+                          <th className="px-3 py-2">Time</th>
+                          <th className="px-3 py-2">Channel</th>
+                          <th className="px-3 py-2">Operation</th>
+                          <th className="px-3 py-2">External ID</th>
+                          <th className="px-3 py-2">Status</th>
+                          <th className="px-3 py-2">Booking</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {webhookLog.map((w: any) => (
+                          <tr key={w.id} className="border-t border-[#cc5a16]/5">
+                            <td className="px-3 py-1.5 font-mono text-[#6b5d52]">{new Date(w.received_at).toLocaleString()}</td>
+                            <td className="px-3 py-1.5 font-bold">{w.channel}</td>
+                            <td className="px-3 py-1.5">{w.operation || '—'}</td>
+                            <td className="px-3 py-1.5 font-mono truncate max-w-[120px]" title={w.external_id || ''}>{w.external_id || '—'}</td>
+                            <td className="px-3 py-1.5">
+                              <span className={cn(
+                                'px-2 py-0.5 rounded-full font-bold',
+                                w.status === 'accepted'  ? 'bg-emerald-100 text-emerald-800' :
+                                w.status === 'duplicate' ? 'bg-blue-100 text-blue-800' :
+                                w.status === 'rejected'  ? 'bg-amber-100 text-amber-800' :
+                                                           'bg-rose-100 text-rose-800'
+                              )}>{w.status}</span>
+                              {w.error && <span className="text-[#c13b3b] ml-1" title={w.error}>⚠</span>}
+                            </td>
+                            <td className="px-3 py-1.5 font-mono">{w.booking_id || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* ── 3. OUTBOUND — API credentials ─────────────────────── */}
+              <div className="mt-6">
+                <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                  <div>
+                    <h4 className="text-sm font-bold text-[#1a1208]">Outbound — OTA credentials</h4>
+                    <p className="text-[10px] text-[#9c8e85] mt-0.5">
+                      Real OTA push is stubbed pending partner approval (2-4 months per channel).
+                      Credentials stored AES-256-GCM at rest.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setEditingChannelCred({ channel: 'BOOKING', is_enabled: false })}
+                    className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] flex items-center gap-1"
+                  >
+                    <Plus size={12} /> Add Channel
+                  </button>
+                </div>
+                {channelCredentials.length === 0 ? (
+                  <p className="text-xs text-[#9c8e85] italic mt-2">
+                    No OTA credentials configured. Add a channel once you have partnership credentials.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {channelCredentials.map((c: any) => (
+                      <div key={c.id} className="flex items-center justify-between gap-3 bg-[#faf7f2] rounded-2xl px-4 py-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-bold text-[#1a1208]">{c.channel}</p>
+                          <p className="text-[10px] text-[#6b5d52] mt-0.5 font-mono">
+                            API Key: {c.api_key || '—'} · Secret: {c.api_secret ? '••••••••' : '—'} · Property: {c.property_id || '—'}
+                          </p>
+                          {c.last_synced && (
+                            <p className="text-[10px] text-[#9c8e85] mt-0.5">Last outbound push: {new Date(c.last_synced).toLocaleString()}</p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className={cn(
+                            'text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
+                            c.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
+                          )}>{c.is_enabled ? 'Enabled' : 'Disabled'}</span>
+                          <button
+                            onClick={() => setEditingChannelCred({ channel: c.channel, api_key: '', api_secret: '', property_id: c.property_id || '', is_enabled: c.is_enabled })}
+                            className="text-[10px] font-bold text-[#3d3128] hover:underline"
+                          >Edit</button>
+                          <button
+                            onClick={() => deleteChannelCredential(c.channel)}
+                            className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                          >Delete</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -18676,6 +18842,88 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <div className="flex gap-2 pt-2">
                   <button type="button" onClick={() => setEditingChannelCred(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
                   <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Save</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═════════ iCal Feed modal (Sprint CH-2) ═════════
+          Owner pastes the OTA's iCal export URL. Most OTAs surface this
+          in the channel manager / extranet under "Calendar export" or
+          "Sync calendar with other tools". */}
+      {editingIcalFeed && (() => {
+        const d = editingIcalFeed;
+        const set = (patch: any) => setEditingIcalFeed({ ...d, ...patch });
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Add iCal Feed</h3>
+                <button onClick={() => setEditingIcalFeed(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (!d.url || !d.scope_id) { alert('Room and URL are required.'); return; }
+                try {
+                  await saveIcalFeed({
+                    scope: 'ROOM',
+                    scope_id: d.scope_id,
+                    channel: String(d.channel || 'BOOKING').toUpperCase(),
+                    url: String(d.url).trim(),
+                    label: d.label || null,
+                    is_enabled: d.is_enabled ? 1 : 0,
+                  });
+                  setEditingIcalFeed(null);
+                } catch (err: any) { alert(err?.message || 'Failed to save'); }
+              }} className="space-y-3">
+                <p className="text-[11px] text-[#6b5d52] bg-[#faf7f2] rounded-xl px-3 py-2">
+                  Find the iCal export URL in your OTA's calendar settings.
+                  Booking.com / Airbnb / Vrbo / Agoda all expose one per listing.
+                </p>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Channel *</label>
+                  <select required value={d.channel || 'BOOKING'} onChange={e => set({ channel: e.target.value })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                    <option value="BOOKING">Booking.com</option>
+                    <option value="AIRBNB">Airbnb</option>
+                    <option value="VRBO">Vrbo</option>
+                    <option value="AGODA">Agoda</option>
+                    <option value="MMT">MakeMyTrip</option>
+                    <option value="GOIBIBO">Goibibo</option>
+                    <option value="EXPEDIA">Expedia</option>
+                    <option value="OTHER">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Room *</label>
+                  <select required value={d.scope_id || ''} onChange={e => set({ scope_id: e.target.value })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                    <option value="">— Select room —</option>
+                    {hotelRooms.map((r: any) => (
+                      <option key={r.id} value={r.id}>{r.name} {r.type ? `· ${r.type}` : ''}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">iCal URL *</label>
+                  <input required type="url" value={d.url || ''} onChange={e => set({ url: e.target.value })}
+                    placeholder="https://..." className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-xs font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Label (optional)</label>
+                  <input value={d.label || ''} onChange={e => set({ label: e.target.value })}
+                    placeholder="e.g. Booking.com - Deluxe Room export"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                <label className="flex items-center gap-2 text-sm text-[#3d3128]">
+                  <input type="checkbox" checked={!!d.is_enabled} onChange={e => set({ is_enabled: e.target.checked })} className="w-4 h-4" />
+                  Enable auto-sync (every 30 min)
+                </label>
+                <div className="flex gap-2 pt-2">
+                  <button type="button" onClick={() => setEditingIcalFeed(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                  <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#1a4a6f] text-white text-sm font-bold hover:bg-[#103352]">Save</button>
                 </div>
               </form>
             </div>
