@@ -20198,13 +20198,34 @@ const HotelRoomDrawer: React.FC<{
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60">Live folio</h3>
                 {folio && folio.id && (
-                  <a
-                    href={`/api/restaurant/${restaurantId}/hotel/folios/${folio.id}/invoice-pdf`}
-                    target="_blank" rel="noopener noreferrer"
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      // Same auth-aware download dance as HotelInvoicesView.
+                      // The /invoice-pdf endpoint requires an Authorization
+                      // header that a plain <a href> can't send.
+                      try {
+                        const res = await fetch(
+                          `/api/restaurant/${restaurantId}/hotel/folios/${folio.id}/invoice-pdf`,
+                          { headers: { Authorization: `Bearer ${token}` } }
+                        );
+                        if (!res.ok) {
+                          const body = await res.json().catch(() => ({}));
+                          alert(body.error || `Failed to download invoice (HTTP ${res.status})`);
+                          return;
+                        }
+                        const blob = await res.blob();
+                        const url = URL.createObjectURL(blob);
+                        window.open(url, '_blank', 'noopener,noreferrer');
+                        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+                      } catch (err: any) {
+                        alert(err?.message || 'Failed to open invoice');
+                      }
+                    }}
                     className="text-[10px] font-bold uppercase tracking-widest text-[#f4b07a] hover:text-[#f4b07a]/80"
                   >
                     Open PDF ↗
-                  </a>
+                  </button>
                 )}
               </div>
               <div className="rounded-2xl bg-white/5 border border-white/10 p-4">
@@ -20330,6 +20351,32 @@ const HotelInvoicesView: React.FC<{
 
   const totalSettled = folios.filter(f => f.status === 'settled').reduce((s, f) => s + Number(f.grand_total || 0), 0);
 
+  // PDF download — the endpoint requires Authorization: Bearer <token>
+  // which a plain <a href> can't send (the browser only attaches the
+  // header for fetch/XHR, not for navigations). Fetch the PDF with
+  // auth, turn the blob into a temporary object URL, and open it in
+  // a new tab. This replaces the previous broken anchor links that
+  // returned 401 from the server.
+  const openInvoicePdf = async (folioId: string) => {
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${folioId}/invoice-pdf`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert(body.error || `Failed to download invoice (HTTP ${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      // Revoke after a delay so the new tab has time to load.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to download invoice');
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -20448,13 +20495,13 @@ const HotelInvoicesView: React.FC<{
                   </td>
                   <td className="py-3 px-4 text-right">
                     {f.status !== 'voided' && (
-                      <a
-                        href={`/api/restaurant/${restaurantId}/hotel/folios/${f.id}/invoice-pdf`}
-                        target="_blank" rel="noopener noreferrer"
+                      <button
+                        type="button"
+                        onClick={() => openInvoicePdf(f.id)}
                         className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2] transition-colors"
                       >
                         <Eye size={12} /> PDF
-                      </a>
+                      </button>
                     )}
                   </td>
                 </tr>

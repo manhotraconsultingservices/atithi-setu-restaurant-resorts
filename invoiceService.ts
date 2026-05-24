@@ -611,18 +611,20 @@ function computeNights(checkIn: string, checkOut: string): number {
 }
 function entryTypeLabel(t: string): string {
   switch (t) {
-    case 'ROOM_CHARGE': return 'Accommodation';
-    case 'SERVICE':     return 'Service charge';
-    case 'F&B':         return 'Food & Beverage';
-    default:            return t.replace(/_/g, ' ');
+    case 'ROOM_CHARGE':    return 'Accommodation';
+    case 'SERVICE':        return 'Service charge';
+    case 'SERVICE_CHARGE': return 'Service charge';   // Phase H2 — per-night charge on rooms
+    case 'F&B':            return 'Food & Beverage';
+    default:               return t.replace(/_/g, ' ');
   }
 }
 function hsnForEntry(t: string): string {
   switch (t) {
-    case 'ROOM_CHARGE': return '996311';
-    case 'F&B':         return '996331';
-    case 'SERVICE':     return '999799';
-    default:            return '996311';
+    case 'ROOM_CHARGE':    return '996311';
+    case 'F&B':            return '996331';
+    case 'SERVICE':        return '999799';
+    case 'SERVICE_CHARGE': return '996311';  // Bundled with the room — same accommodation HSN
+    default:               return '996311';
   }
 }
 // Normalise Indian state names for comparison ("Haryana", "HARYANA ", "haryana")
