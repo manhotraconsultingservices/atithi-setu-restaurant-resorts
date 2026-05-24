@@ -198,6 +198,7 @@ import {
   Pie,
   Cell,
   ComposedChart,
+  LineChart,
   Line,
   Legend,
 } from 'recharts';
@@ -23395,8 +23396,109 @@ const HotelAnalyticsDashboard: React.FC<{
           {/* AI sentiment on guest feedback (re-use the existing panel
               so we don't fork the AI-call logic). */}
           <HotelSentimentPanel restaurantId={restaurantId} token={token} />
+
+          {/* Sprint P2-E — Pickup pace report */}
+          <PickupPaceChart restaurantId={restaurantId} token={token} />
         </>
       )}
+    </div>
+  );
+};
+
+/* ─── PickupPaceChart — Sprint P2-E ──────────────────────────────
+   Current vs prior-year window pace. KPI deltas + recharts line
+   chart for daily booking creation rate + source-mix breakdown.   */
+const PickupPaceChart: React.FC<{ restaurantId: string; token: string }> = ({ restaurantId, token }) => {
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState<number>(7);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/reports/pickup-pace?days=${days}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.ok) setData(await res.json());
+    } finally { setLoading(false); }
+  }, [restaurantId, token, days]);
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  if (loading && !data) {
+    return <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-10 text-center text-sm text-[#9c8e85] italic">Loading pickup pace…</div>;
+  }
+  if (!data) return null;
+  // Build chart series for recharts.
+  const merged: Array<{ date: string; current: number; prior: number }> = [];
+  const allDates = new Set<string>([...Object.keys(data.daily_current || {}), ...Object.keys(data.daily_prior || {})]);
+  Array.from(allDates).sort().forEach(d => {
+    merged.push({ date: d.slice(5), current: data.daily_current[d] || 0, prior: data.daily_prior[d] || 0 });
+  });
+  const sourceEntries = Object.entries(data.source_mix || {}).map(([k, v]: [string, any]) => ({ name: k, value: Number(v) }));
+  const COLORS = ['#cc5a16', '#0f766e', '#b8860b', '#7c3aed', '#0284c7', '#dc2626', '#475569'];
+  const bookingsDelta = data.delta?.bookings_pct;
+  const revenueDelta  = data.delta?.revenue_pct;
+  const fmtPct = (n: number | null) => n == null ? '—' : `${n > 0 ? '+' : ''}${n}%`;
+  const deltaColor = (n: number | null) => n == null ? 'text-[#6b5d52]' : n >= 0 ? 'text-emerald-700' : 'text-rose-700';
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-base font-bold font-serif text-[#1a1208]">Pickup Pace · Last {days} days vs same period last year</h3>
+          <p className="text-[11px] text-[#9c8e85] mt-0.5">Spot demand softness early. Drop the window to see today's velocity.</p>
+        </div>
+        <div className="flex gap-1 bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shrink-0">
+          {[7, 14, 30, 60].map(n => (
+            <button key={n} onClick={() => setDays(n)}
+              className={cn('px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest', days === n ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52] hover:bg-[#faf7f2]')}>
+              {n}d
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="rounded-2xl border border-[#cc5a16]/10 bg-white p-4">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Bookings</p>
+          <p className="text-3xl font-bold font-mono text-[#1a1208] mt-1">{data.current_window?.bookings ?? 0}</p>
+          <p className={cn('text-[11px] font-bold mt-1', deltaColor(bookingsDelta))}>vs {data.prior_window?.bookings ?? 0} prior · {fmtPct(bookingsDelta)}</p>
+        </div>
+        <div className="rounded-2xl border border-[#cc5a16]/10 bg-white p-4">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Revenue</p>
+          <p className="text-3xl font-bold font-mono text-[#cc5a16] mt-1">₹{Number(data.current_window?.revenue || 0).toLocaleString('en-IN')}</p>
+          <p className={cn('text-[11px] font-bold mt-1', deltaColor(revenueDelta))}>vs ₹{Number(data.prior_window?.revenue || 0).toLocaleString('en-IN')} · {fmtPct(revenueDelta)}</p>
+        </div>
+        <div className="rounded-2xl border border-[#cc5a16]/10 bg-white p-4 col-span-2">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Source mix · current window</p>
+          {sourceEntries.length === 0 ? (
+            <p className="text-xs text-[#9c8e85] italic">No bookings in this window.</p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {sourceEntries.map((s, i) => (
+                <span key={s.name} className="text-[10px] font-bold rounded-full px-2 py-1" style={{ background: COLORS[i % COLORS.length] + '20', color: COLORS[i % COLORS.length] }}>
+                  {s.name} · {s.value}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="rounded-3xl border border-[#cc5a16]/10 bg-white p-4">
+        <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-3">Bookings per day</p>
+        <ResponsiveContainer width="100%" height={220}>
+          <LineChart data={merged}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f5e7d8" />
+            <XAxis dataKey="date" stroke="#9c8e85" style={{ fontSize: 10 }} />
+            <YAxis stroke="#9c8e85" style={{ fontSize: 10 }} allowDecimals={false} />
+            <Tooltip />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Line type="monotone" dataKey="current" name="This year" stroke="#cc5a16" strokeWidth={2} dot={{ r: 3 }} />
+            <Line type="monotone" dataKey="prior" name="Same period last year" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 2 }} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 };

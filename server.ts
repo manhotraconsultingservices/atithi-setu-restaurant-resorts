@@ -20702,7 +20702,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-yield-channel-ui',
+    commit_marker: 'hotel-pickup-pace-chart',
     code_features: [
       'subscription-billing',
       'read-only-mode',
