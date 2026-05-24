@@ -37117,8 +37117,293 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
   );
 }
 
-/* PublicBookingPage definition lives further down (Sprint D1 UI). */
+/* ─── PublicBookingPage — Sprint D1 ──────────────────────────────────
+   Public route /book/:tenantId. Three steps in a single column:
+     1. Landing — hotel info + room type cards + "Check Availability" CTA
+     2. Search  — date pickers + guests + available rooms with prices
+     3. Confirm — guest details form + booking creation
+   Plus a success state with confirmation reference.                 */
 function PublicBookingPage({ tenantId }: { tenantId: string }) {
-  // Stub — full implementation in the next commit.
-  return <div className="min-h-screen flex items-center justify-center text-[#9c8e85]">Loading booking page for {tenantId}…</div>;
+  const [step, setStep] = useState<'LANDING' | 'SEARCH' | 'GUEST' | 'DONE'>('LANDING');
+  const [hotelInfo, setHotelInfo] = useState<any>(null);
+  const [error, setError] = useState('');
+  const [searchParams, setSearchParams] = useState({
+    start: new Date().toISOString().slice(0, 10),
+    end: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
+    guests: 1,
+  });
+  const [searchResults, setSearchResults] = useState<any[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [pickedRoom, setPickedRoom] = useState<any | null>(null);
+  const [guest, setGuest] = useState({ name: '', phone: '', email: '', special_requests: '' });
+  const [submitting, setSubmitting] = useState(false);
+  const [confirmation, setConfirmation] = useState<any>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`/api/public/restaurant/${tenantId}/hotel`);
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          throw new Error(e.error || `HTTP ${res.status}`);
+        }
+        setHotelInfo(await res.json());
+      } catch (err: any) {
+        setError(err?.message || 'Property not found');
+      }
+    })();
+  }, [tenantId]);
+
+  const runSearch = async () => {
+    setSearching(true);
+    setSearchResults(null);
+    try {
+      const qs = new URLSearchParams({
+        start: searchParams.start, end: searchParams.end, guests: String(searchParams.guests),
+      });
+      const res = await fetch(`/api/public/restaurant/${tenantId}/hotel/availability?${qs.toString()}`);
+      const data = await res.json();
+      setSearchResults(Array.isArray(data?.rooms) ? data.rooms : []);
+    } catch (err: any) { alert(err?.message || 'Search failed'); }
+    finally { setSearching(false); }
+  };
+
+  const submitBooking = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pickedRoom) return;
+    setSubmitting(true);
+    try {
+      const res = await fetch(`/api/public/restaurant/${tenantId}/hotel/booking`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          room_id: pickedRoom.id,
+          guest_name: guest.name.trim(),
+          guest_phone: guest.phone.trim(),
+          guest_email: guest.email.trim(),
+          check_in_date: searchParams.start,
+          check_out_date: searchParams.end,
+          num_guests: searchParams.guests,
+          special_requests: guest.special_requests.trim() || null,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setConfirmation(data);
+      setStep('DONE');
+    } catch (err: any) { alert(err?.message || 'Booking failed'); }
+    finally { setSubmitting(false); }
+  };
+
+  if (error && !hotelInfo) {
+    return (
+      <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center p-6">
+        <div className="bg-white rounded-3xl shadow-2xl max-w-md p-8 text-center border-t-[3px] border-[#c13b3b]">
+          <h1 className="text-xl font-serif font-bold text-[#1a1208] mb-1">Couldn't load this property</h1>
+          <p className="text-sm text-[#6b5d52]">{error}</p>
+        </div>
+      </div>
+    );
+  }
+  if (!hotelInfo) {
+    return (
+      <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center">
+        <div className="w-12 h-12 border-4 border-[#cc5a16] border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#faf7f2]">
+      <div className="max-w-2xl mx-auto p-4 sm:p-8">
+        {/* Header */}
+        <div className="bg-white rounded-3xl shadow-md overflow-hidden mb-5 border-t-[3px] border-[#cc5a16]">
+          <div className="px-6 py-5 flex items-center gap-4">
+            {hotelInfo.logo_url && (
+              <img src={hotelInfo.logo_url} alt="" className="w-14 h-14 rounded-2xl object-contain bg-[#faf7f2]" />
+            )}
+            <div className="flex-1 min-w-0">
+              <h1 className="text-xl sm:text-2xl font-serif font-bold text-[#1a1208]">{hotelInfo.name}</h1>
+              <p className="text-xs text-[#6b5d52]">{[hotelInfo.city, hotelInfo.state].filter(Boolean).join(' · ')}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* STEP 1: LANDING */}
+        {step === 'LANDING' && (
+          <div className="space-y-5">
+            {hotelInfo.room_types?.length > 0 && (
+              <div className="space-y-3">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Our rooms</p>
+                {hotelInfo.room_types.map((t: any) => (
+                  <div key={t.id} className="bg-white rounded-3xl shadow-sm overflow-hidden">
+                    {t.image_url && <div className="h-40 bg-cover bg-center" style={{ backgroundImage: `url(${t.image_url})` }} />}
+                    <div className="p-5">
+                      <div className="flex items-start justify-between gap-3">
+                        <h3 className="text-lg font-serif font-bold text-[#1a1208]">{t.name}</h3>
+                        <p className="text-base font-bold font-mono text-[#cc5a16] shrink-0">{hotelInfo.currency_symbol}{Number(t.base_rate).toLocaleString('en-IN')}<span className="text-[10px] font-normal text-[#9c8e85]">/night</span></p>
+                      </div>
+                      {t.description && <p className="text-[12px] text-[#6b5d52] mt-1">{t.description}</p>}
+                      <p className="text-[10px] text-[#9c8e85] mt-1">Sleeps {t.capacity} · {t.amenities || 'Standard amenities'}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setStep('SEARCH')} className="w-full px-5 py-4 rounded-2xl bg-[#cc5a16] text-white font-bold hover:bg-[#a84612] shadow-md">
+              🔍 Check Availability
+            </button>
+          </div>
+        )}
+
+        {/* STEP 2: SEARCH */}
+        {step === 'SEARCH' && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-3xl shadow-sm p-5 space-y-3">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Your stay</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in</label>
+                  <input
+                    required type="date"
+                    min={new Date().toISOString().slice(0, 10)}
+                    value={searchParams.start}
+                    onChange={e => setSearchParams(p => ({ ...p, start: e.target.value, end: p.end <= e.target.value ? new Date(new Date(e.target.value).getTime() + 86400000).toISOString().slice(0, 10) : p.end }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out</label>
+                  <input
+                    required type="date"
+                    min={searchParams.start || new Date().toISOString().slice(0, 10)}
+                    value={searchParams.end}
+                    onChange={e => setSearchParams(p => ({ ...p, end: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
+                <input
+                  type="number" min={1} max={10}
+                  value={searchParams.guests}
+                  onChange={e => setSearchParams(p => ({ ...p, guests: Math.max(1, Number(e.target.value) || 1) }))}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                />
+              </div>
+              <button onClick={runSearch} disabled={searching} className="w-full px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-60">
+                {searching ? 'Searching…' : 'Show available rooms'}
+              </button>
+            </div>
+
+            {searchResults !== null && (
+              <div className="space-y-2">
+                {searchResults.length === 0 ? (
+                  <div className="bg-white rounded-3xl shadow-sm p-8 text-center text-sm text-[#6b5d52]">
+                    No rooms available for these dates. Try a different range or contact the property.
+                  </div>
+                ) : (
+                  searchResults.map(r => (
+                    <button
+                      key={r.id}
+                      onClick={() => { setPickedRoom(r); setStep('GUEST'); }}
+                      className="block w-full text-left bg-white rounded-3xl shadow-sm hover:shadow-md transition-all p-5 border border-transparent hover:border-[#cc5a16]/30"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <h3 className="font-bold text-[#1a1208]">{r.name}</h3>
+                          <p className="text-[10px] text-[#9c8e85]">{r.type || 'Standard'} · Sleeps {r.capacity}</p>
+                          {r.amenities && <p className="text-[10px] text-[#6b5d52] mt-1 line-clamp-2">{r.amenities}</p>}
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-lg font-bold font-mono text-[#cc5a16]">{hotelInfo.currency_symbol}{Number(r.total_rate).toLocaleString('en-IN')}</p>
+                          <p className="text-[10px] text-[#9c8e85]">{r.nights}n total · {hotelInfo.currency_symbol}{Number(r.base_rate).toLocaleString('en-IN')}/night</p>
+                        </div>
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+
+            <button onClick={() => setStep('LANDING')} className="text-xs text-[#9c8e85] hover:underline">← Back</button>
+          </div>
+        )}
+
+        {/* STEP 3: GUEST DETAILS */}
+        {step === 'GUEST' && pickedRoom && (
+          <form onSubmit={submitBooking} className="bg-white rounded-3xl shadow-sm p-5 space-y-3">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Your details</p>
+            <div className="bg-[#faf7f2] rounded-2xl p-3 text-sm">
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{pickedRoom.name}</strong></div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Dates</span>{searchParams.start} → {searchParams.end}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Guests</span>{searchParams.guests}</div>
+              <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
+                <span className="text-[#6b5d52] font-bold">Total</span>
+                <strong className="font-mono text-[#cc5a16]">{hotelInfo.currency_symbol}{Number(pickedRoom.total_rate).toLocaleString('en-IN')}</strong>
+              </div>
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Full name *</label>
+              <input required value={guest.name} onChange={e => setGuest({ ...guest, name: e.target.value })}
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone *</label>
+              <input required type="tel" value={guest.phone} onChange={e => setGuest({ ...guest, phone: e.target.value })}
+                placeholder="+91 9876543210"
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Email *</label>
+              <input required type="email" value={guest.email} onChange={e => setGuest({ ...guest, email: e.target.value })}
+                placeholder="you@example.com"
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
+              <p className="text-[10px] text-[#9c8e85] mt-1">We'll send your confirmation here.</p>
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Special requests (optional)</label>
+              <textarea rows={2} value={guest.special_requests} onChange={e => setGuest({ ...guest, special_requests: e.target.value })}
+                placeholder="e.g. early check-in · airport pickup · dietary"
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
+            </div>
+            <div className="flex gap-2 pt-2">
+              <button type="button" onClick={() => setStep('SEARCH')} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Back</button>
+              <button type="submit" disabled={submitting}
+                className={cn(
+                  "flex-1 px-4 py-2.5 rounded-2xl text-sm font-bold",
+                  submitting ? "bg-[#cc5a16]/40 text-white cursor-not-allowed" : "bg-[#cc5a16] text-white hover:bg-[#a84612]"
+                )}>
+                {submitting ? 'Confirming…' : 'Confirm booking'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* STEP 4: CONFIRMATION */}
+        {step === 'DONE' && confirmation && (
+          <div className="bg-white rounded-3xl shadow-2xl p-7 text-center border-t-[3px] border-emerald-500">
+            <div className="w-14 h-14 rounded-full bg-emerald-50 flex items-center justify-center mx-auto mb-3">
+              <Check size={30} className="text-emerald-600" />
+            </div>
+            <h1 className="text-xl font-serif font-bold text-[#1a1208] mb-1">Booking confirmed!</h1>
+            <p className="text-sm text-[#6b5d52] mb-3">{confirmation.confirmation_message}</p>
+            <div className="bg-[#faf7f2] rounded-2xl p-3 text-sm text-left space-y-1">
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Reference</span><span className="font-mono text-[11px]">{confirmation.booking_id}</span></div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-in</span>{confirmation.check_in_date}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-out</span>{confirmation.check_out_date}</div>
+              <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
+                <span className="text-[#6b5d52] font-bold">Total</span>
+                <strong className="font-mono text-[#cc5a16]">{hotelInfo.currency_symbol}{Number(confirmation.total_amount).toLocaleString('en-IN')}</strong>
+              </div>
+            </div>
+            <p className="text-[11px] text-[#9c8e85] mt-4">A confirmation will arrive at your email. You'll also receive an online check-in link 3 days before arrival.</p>
+          </div>
+        )}
+
+        <p className="text-center text-[10px] text-[#9c8e85] mt-6">Powered by Atithi-Setu · Direct booking, no commission</p>
+      </div>
+    </div>
+  );
 }
