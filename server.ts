@@ -14701,6 +14701,86 @@ async function startServer() {
     }
   });
 
+  // Sprint P2-E — Pickup pace report. Surfaces how many bookings the
+  // property is receiving in a rolling window vs the same period in
+  // the prior year. Owners use this to spot demand softness early
+  // (e.g. "last 7 days only 8 bookings vs 23 same week last year →
+  // open a flash sale").
+  //
+  // Returns { current_window, prior_window, daily }:
+  //   - current_window = bookings created in [now-N, now]
+  //   - prior_window   = bookings created in [now-N-365, now-365]
+  //   - daily = per-day pace for both windows (charts in UI)
+  app.get("/api/restaurant/:id/hotel/reports/pickup-pace", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const days = Math.max(1, Math.min(180, Number(req.query.days) || 7));
+      const tenantDb = await getTenantDb(req.params.id);
+      const now = new Date();
+      const winStart = new Date(now.getTime() - days * 86400000);
+      const priorEnd = new Date(now.getTime() - 365 * 86400000);
+      const priorStart = new Date(priorEnd.getTime() - days * 86400000);
+
+      const fmt = (d: Date) => d.toISOString().slice(0, 10);
+      const winStartIso = fmt(winStart);
+      const priorStartIso = fmt(priorStart);
+      const priorEndIso = fmt(priorEnd);
+
+      const current: any[] = await tenantDb.query(
+        `SELECT id, created_at, total_amount, status, booking_source
+           FROM room_bookings
+          WHERE created_at >= ?`,
+        [winStartIso]
+      );
+      const prior: any[] = await tenantDb.query(
+        `SELECT id, created_at, total_amount, status, booking_source
+           FROM room_bookings
+          WHERE created_at >= ? AND created_at < ?`,
+        [priorStartIso, priorEndIso]
+      );
+      const sum = (rows: any[]) => rows.reduce((s, r) => s + Number(r.total_amount || 0), 0);
+      const countByDay = (rows: any[], windowStart: Date): Record<string, number> => {
+        const out: Record<string, number> = {};
+        for (const r of rows) {
+          const d = fmt(new Date(r.created_at));
+          out[d] = (out[d] || 0) + 1;
+        }
+        // Pad zero-day buckets so the chart shows a continuous line.
+        for (let i = 0; i <= days; i++) {
+          const d = fmt(new Date(windowStart.getTime() + i * 86400000));
+          if (!(d in out)) out[d] = 0;
+        }
+        return out;
+      };
+      const currentDaily = countByDay(current, winStart);
+      const priorDaily   = countByDay(prior, priorStart);
+
+      // Source mix in current window — pie chart fuel.
+      const sourceMix: Record<string, number> = {};
+      for (const r of current) {
+        const src = (r.booking_source || 'DIRECT').toUpperCase();
+        sourceMix[src] = (sourceMix[src] || 0) + 1;
+      }
+
+      res.json({
+        days,
+        current_window: { start: winStartIso, end: fmt(now), bookings: current.length, revenue: sum(current) },
+        prior_window:   { start: priorStartIso, end: priorEndIso, bookings: prior.length, revenue: sum(prior) },
+        delta: {
+          bookings_pct: prior.length === 0 ? null : Math.round(((current.length - prior.length) / prior.length) * 100),
+          revenue_pct:  sum(prior) === 0 ? null : Math.round(((sum(current) - sum(prior)) / sum(prior)) * 100),
+        },
+        source_mix: sourceMix,
+        daily_current: currentDaily,
+        daily_prior:   priorDaily,
+      });
+    } catch (err) {
+      console.error("pickup pace error:", err);
+      res.status(500).json({ error: "Failed to compute pickup pace" });
+    }
+  });
+
   // Sprint P2-D — Hotel promo codes. Re-uses the existing promo_codes
   // table (created for the restaurant module) and applies a discount
   // to an open folio. Validation rules:
@@ -20114,7 +20194,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-promo-codes',
+    commit_marker: 'hotel-pickup-pace',
     code_features: [
       'subscription-billing',
       'read-only-mode',
