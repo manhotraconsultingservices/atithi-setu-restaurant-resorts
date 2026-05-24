@@ -7148,16 +7148,49 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [ordersDateTo, setOrdersDateTo]       = useState('');
   const [invoicesPage, setInvoicesPage]       = useState(1);
   const [staffSearch, setStaffSearch]         = useState('');
-  const [staffRoleFilter, setStaffRoleFilter] = useState<'ALL'|'CHEF'|'WAITER'|'MANAGER'>('ALL');
+  const [staffRoleFilter, setStaffRoleFilter] = useState<string>('ALL');
+
+  // ── Staff role metadata ─────────────────────────────────────────────
+  // Single source of truth for Staff Management dropdowns / filters / chips.
+  //   scope = which property type a role applies to:
+  //     RESTAURANT — Chef, Waiter (restaurant-only)
+  //     HOTEL      — Front Desk, Housekeeping, Maintenance, Concierge
+  //     BOTH       — Manager (works across both modules)
+  // The visible-roles helper below filters by the tenant's enabled modules
+  // so a restaurant-only tenant never sees hotel roles.
+  const STAFF_ROLE_META: Array<{
+    id: UserRole; label: string; emoji: string;
+    scope: 'BOTH' | 'RESTAURANT' | 'HOTEL';
+    chipBg: string; chipText: string; cardBg: string;
+  }> = [
+    { id: 'CHEF',         label: 'Chef',         emoji: '👨‍🍳', scope: 'RESTAURANT', chipBg: 'bg-orange-200', chipText: 'text-orange-800', cardBg: 'bg-orange-50' },
+    { id: 'WAITER',       label: 'Waiter',       emoji: '🧑‍🍽️', scope: 'RESTAURANT', chipBg: 'bg-blue-200',   chipText: 'text-blue-800',   cardBg: 'bg-blue-50' },
+    { id: 'MANAGER',      label: 'Manager',      emoji: '🧑‍💼', scope: 'BOTH',       chipBg: 'bg-purple-200', chipText: 'text-purple-800', cardBg: 'bg-purple-50' },
+    { id: 'FRONT_DESK',   label: 'Front Desk',   emoji: '🛎️',  scope: 'HOTEL',      chipBg: 'bg-amber-200',  chipText: 'text-amber-800',  cardBg: 'bg-amber-50' },
+    { id: 'HOUSEKEEPING', label: 'Housekeeping', emoji: '🛏️',  scope: 'HOTEL',      chipBg: 'bg-teal-200',   chipText: 'text-teal-800',   cardBg: 'bg-teal-50' },
+    { id: 'MAINTENANCE',  label: 'Maintenance',  emoji: '🔧',   scope: 'HOTEL',      chipBg: 'bg-slate-200',  chipText: 'text-slate-800',  cardBg: 'bg-slate-50' },
+    { id: 'CONCIERGE',    label: 'Concierge',    emoji: '🎩',   scope: 'HOTEL',      chipBg: 'bg-rose-200',   chipText: 'text-rose-800',   cardBg: 'bg-rose-50' },
+  ];
+  // Roles visible in this tenant — based on whether Hotel + Restaurant
+  // modules are active. BOTH roles always show. Other scopes show
+  // only when their module is active for this tenant.
+  const visibleStaffRoles = STAFF_ROLE_META.filter(r =>
+    r.scope === 'BOTH' ||
+    (r.scope === 'RESTAURANT' && isRestaurantEnabled) ||
+    (r.scope === 'HOTEL'      && isHotelEnabled)
+  );
+  const staffRoleMetaFor = (role: string) =>
+    STAFF_ROLE_META.find(r => r.id === role) ||
+    { id: role as UserRole, label: role, emoji: '👤', scope: 'BOTH' as const, chipBg: 'bg-zinc-200', chipText: 'text-zinc-700', cardBg: 'bg-zinc-50' };
   const [staffPage, setStaffPage]             = useState(1);
   const [editingStaff, setEditingStaff]       = useState<any | null>(null);
   // Phase B3 — cross-location staff transfer
   const [transferringStaff, setTransferringStaff] = useState<any | null>(null);
   const [isBulkAddingStaff, setIsBulkAddingStaff] = useState(false);
   const [bulkRows, setBulkRows] = useState<Array<{name: string; role: UserRole; loginId: string; password: string; phone: string; email: string}>>([
-    { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
-    { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
-    { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
+    { name: '', role: 'MANAGER', loginId: '', password: '', phone: '', email: '' },
+    { name: '', role: 'MANAGER', loginId: '', password: '', phone: '', email: '' },
+    { name: '', role: 'MANAGER', loginId: '', password: '', phone: '', email: '' },
   ]);
   const [feedbackSearch, setFeedbackSearch]   = useState('');
   const [feedbackMinRating, setFeedbackMinRating] = useState(0);
@@ -7166,7 +7199,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
-  const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'CHEF' as UserRole, phone: '', email: '', hourly_rate: 0, payroll_id: '' });
+  // Default role MANAGER — works for any tenant (RESTAURANT / HOTEL / BOTH).
+  // Restaurant-only tenants will pick Chef/Waiter; hotel-only tenants will
+  // pick Front Desk / Housekeeping / etc.
+  const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'MANAGER' as UserRole, phone: '', email: '', hourly_rate: 0, payroll_id: '' });
   const [newItem, setNewItem] = useState<{
     name: string,
     description: string,
@@ -7534,7 +7570,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       if (res.ok) {
         setIsAddingStaff(false);
-        setNewStaff({ loginId: '', name: '', password: '', role: 'CHEF', phone: '', email: '', hourly_rate: 0, payroll_id: '' });
+        setNewStaff({ loginId: '', name: '', password: '', role: 'MANAGER', phone: '', email: '', hourly_rate: 0, payroll_id: '' });
         setTimeout(() => fetchStaff(), 100);
       } else {
         const contentType = res.headers.get("content-type");
@@ -7621,9 +7657,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       alert(`✓ Added ${data.created_count} staff member${data.created_count !== 1 ? 's' : ''}.${errMsg}`);
       setIsBulkAddingStaff(false);
       setBulkRows([
-        { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
-        { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
-        { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' },
+        { name: '', role: 'MANAGER', loginId: '', password: '', phone: '', email: '' },
+        { name: '', role: 'MANAGER', loginId: '', password: '', phone: '', email: '' },
+        { name: '', role: 'MANAGER', loginId: '', password: '', phone: '', email: '' },
       ]);
       fetchStaff();
     } catch (err) {
@@ -13025,12 +13061,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 value={staffSearch} onChange={e => { setStaffSearch(e.target.value); setStaffPage(1); }}
                 className="w-full bg-white border border-[#cc5a16]/10 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 shadow-sm" />
             </div>
-            <div className="flex gap-2">
-              {(['ALL','CHEF','WAITER','MANAGER'] as const).map(r => (
-                <button key={r} onClick={() => { setStaffRoleFilter(r); setStaffPage(1); }}
+            {/* Role filter — driven by visibleStaffRoles so hotel roles
+                appear only when the Hotel module is enabled on this tenant. */}
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => { setStaffRoleFilter('ALL'); setStaffPage(1); }}
+                className={cn("px-4 py-2 rounded-xl text-xs font-bold transition-all",
+                  staffRoleFilter === 'ALL' ? "bg-[#cc5a16] text-white" : "bg-white border border-[#cc5a16]/10 text-[#1a1208] hover:bg-[#cc5a16]/5")}
+              >
+                All
+              </button>
+              {visibleStaffRoles.map(r => (
+                <button key={r.id} onClick={() => { setStaffRoleFilter(r.id); setStaffPage(1); }}
                   className={cn("px-4 py-2 rounded-xl text-xs font-bold transition-all",
-                    staffRoleFilter === r ? "bg-[#cc5a16] text-white" : "bg-white border border-[#cc5a16]/10 text-[#1a1208] hover:bg-[#cc5a16]/5")}>
-                  {r === 'ALL' ? 'All' : r.charAt(0) + r.slice(1).toLowerCase()}
+                    staffRoleFilter === r.id ? "bg-[#cc5a16] text-white" : "bg-white border border-[#cc5a16]/10 text-[#1a1208] hover:bg-[#cc5a16]/5")}>
+                  {r.emoji} {r.label}
                 </button>
               ))}
             </div>
@@ -13053,21 +13098,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <div className="col-span-full py-16 text-center text-[#9c8e85]">No staff members found</div>
                   ) : pageItems.map((s) => (
               <div key={s.id} className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm overflow-hidden">
-                {/* Card header — role-coloured strip */}
-                <div className={cn(
-                  "px-6 pt-5 pb-4 flex justify-between items-start",
-                  s.role === 'CHEF' ? "bg-orange-50" : s.role === 'MANAGER' ? "bg-purple-50" : "bg-blue-50"
-                )}>
+                {/* Card header — role-coloured strip. Colours are
+                    driven by STAFF_ROLE_META so every role (including
+                    hotel roles) gets a consistent palette. */}
+                {(() => { const meta = staffRoleMetaFor(s.role); return (
+                <div className={cn("px-6 pt-5 pb-4 flex justify-between items-start", meta.cardBg)}>
                   <div>
                     <h3 className="text-lg font-bold text-[#1a1a1a]">{s.name}</h3>
                     <div className="flex items-center gap-2 mt-1 flex-wrap">
                       <span className={cn(
                         "inline-block text-[11px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full",
-                        s.role === 'CHEF' ? "bg-orange-200 text-orange-800"
-                        : s.role === 'MANAGER' ? "bg-purple-200 text-purple-800"
-                        : "bg-blue-200 text-blue-800"
+                        meta.chipBg, meta.chipText
                       )}>
-                        {s.role === 'CHEF' ? '👨‍🍳 Chef' : s.role === 'MANAGER' ? '🧑‍💼 Manager' : '🧑‍🍽️ Waiter'}
+                        {meta.emoji} {meta.label}
                       </span>
                       <span className={cn(
                         "inline-flex items-center gap-1 text-[11px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full",
@@ -13084,6 +13127,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <Trash2 size={18} />
                   </button>
                 </div>
+                ); })()}
 
                 {/* Login credentials box */}
                 <div className="mx-5 mt-4 bg-[#1a1a1a] rounded-2xl p-4 space-y-3">
@@ -13220,13 +13264,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <select value={editingStaff.role}
                       onChange={e => setEditingStaff({ ...editingStaff, role: e.target.value })}
                       className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none">
-                      <option value="CHEF">👨‍🍳 Chef</option>
-                      <option value="WAITER">🧑‍🍽️ Waiter</option>
-                      <option value="MANAGER">🧑‍💼 Manager</option>
-                      <option value="FRONT_DESK">🛎️ Front Desk</option>
-                      <option value="HOUSEKEEPING">🛏️ Housekeeping</option>
-                      <option value="MAINTENANCE">🔧 Maintenance</option>
-                      <option value="CONCIERGE">🎩 Concierge</option>
+                      {/* Tenant-aware role list. If this staff already has
+                          a role outside the visible set (e.g. legacy data
+                          after the tenant changed property type), surface
+                          it so the dropdown displays correctly. */}
+                      {visibleStaffRoles.map(r => (
+                        <option key={r.id} value={r.id}>{r.emoji} {r.label}</option>
+                      ))}
+                      {editingStaff.role &&
+                       !visibleStaffRoles.some(r => r.id === editingStaff.role) && (
+                        <option value={editingStaff.role}>{staffRoleMetaFor(editingStaff.role).emoji} {staffRoleMetaFor(editingStaff.role).label}</option>
+                      )}
                     </select>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -13298,13 +13346,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <select value={row.role}
                               onChange={e => setBulkRows(rs => rs.map((r, j) => j === i ? { ...r, role: e.target.value as UserRole } : r))}
                               className="w-full bg-zinc-50 border border-zinc-200 rounded-lg px-2 py-1.5 text-xs">
-                              <option value="CHEF">Chef</option>
-                              <option value="WAITER">Waiter</option>
-                              <option value="MANAGER">Manager</option>
-                              <option value="FRONT_DESK">Front Desk</option>
-                              <option value="HOUSEKEEPING">Housekeeping</option>
-                              <option value="MAINTENANCE">Maintenance</option>
-                              <option value="CONCIERGE">Concierge</option>
+                              {visibleStaffRoles.map(r => (
+                                <option key={r.id} value={r.id}>{r.label}</option>
+                              ))}
                             </select>
                           </td>
                           <td className="px-2 py-2">
@@ -13338,7 +13382,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
                 <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-zinc-100">
                   <button type="button"
-                    onClick={() => setBulkRows(rs => [...rs, { name: '', role: 'CHEF', loginId: '', password: '', phone: '', email: '' }])}
+                    onClick={() => setBulkRows(rs => [...rs, { name: '', role: 'MANAGER', loginId: '', password: '', phone: '', email: '' }])}
                     className="px-4 py-2 rounded-xl border-2 border-[#cc5a16]/20 text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5">
                     + Add Row
                   </button>
@@ -13419,14 +13463,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                   <div className="space-y-1">
                     <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Role</label>
-                    <select 
+                    <select
                       className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
                       value={newStaff.role}
                       onChange={e => setNewStaff({...newStaff, role: e.target.value as UserRole})}
                     >
-                      <option value="CHEF">Chef</option>
-                      <option value="WAITER">Waiter / Attender</option>
-                      <option value="MANAGER">Manager</option>
+                      {/* visibleStaffRoles is gated by isHotelEnabled +
+                          isRestaurantEnabled so the dropdown only shows
+                          roles that make sense for this tenant. */}
+                      {visibleStaffRoles.map(r => (
+                        <option key={r.id} value={r.id}>{r.emoji} {r.label}</option>
+                      ))}
                     </select>
                   </div>
                   {/* Phase S2 — hourly rate + payroll ID for payroll math */}
