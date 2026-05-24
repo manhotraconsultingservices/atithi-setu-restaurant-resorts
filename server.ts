@@ -617,6 +617,10 @@ async function validateBookingRequest(
     booking_type?: string;
     num_guests?: number | string;
     excludeBookingId?: string;   // PATCH: ignore the row being updated
+    // Skip the past-date guard. Used by PATCH when the date field is
+    // NOT being changed — staff still need to edit other fields on
+    // historical bookings (notes, room_rate, etc.).
+    skipPastDateCheck?: boolean;
   }
 ): Promise<{ ok: boolean; status: number; error: string }> {
   // Flat shape (not a discriminated union) so call sites can read
@@ -635,6 +639,22 @@ async function validateBookingRequest(
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(check_in_date) || !/^\d{4}-\d{2}-\d{2}$/.test(check_out_date)) {
     return { ok: false, status: 400, error: 'Dates must be in YYYY-MM-DD format.' };
+  }
+
+  // Bug 3 fix — block bookings in the past. Server-side enforcement
+  // protects against direct API calls; the booking form also sets a
+  // HTML5 `min` attribute on the check-in date input as the primary
+  // UX guard. PATCH passes skipPastDateCheck=true when the date field
+  // is NOT being changed so staff can still edit room_rate / notes /
+  // num_guests on historical bookings.
+  if (!opts.skipPastDateCheck) {
+    const todayIso = new Date().toISOString().slice(0, 10);
+    if (check_in_date < todayIso) {
+      return {
+        ok: false, status: 400,
+        error: `Check-in date ${check_in_date} is in the past. Bookings must start today or later.`,
+      };
+    }
   }
 
   // Date comparison via YYYY-MM-DD string compare is safe + timezone-free.
@@ -13798,6 +13818,11 @@ async function startServer() {
           booking_type:   post.booking_type || 'OVERNIGHT',
           num_guests:     post.num_guests || 1,
           excludeBookingId: b.id,
+          // Only enforce the past-date guard when the caller is actually
+          // modifying the check_in_date — editing other fields (notes,
+          // num_guests, room_rate) on a historical booking shouldn't be
+          // blocked just because the original date is in the past.
+          skipPastDateCheck: !('check_in_date' in patch),
         });
         if (!v.ok) return res.status(v.status).json({ error: v.error });
       }
@@ -18791,7 +18816,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-checkin-date-normalisation-fix',
+    commit_marker: 'hotel-bugs-2-3-5-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',

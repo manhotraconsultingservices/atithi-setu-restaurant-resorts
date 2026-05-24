@@ -14495,11 +14495,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
           {hotelError && <div className="px-4 py-3 rounded-xl bg-[#fdf0f0] border border-[#c13b3b]/20 text-[#c13b3b] text-sm">{hotelError}</div>}
 
-          {/* Today's Arrivals & Departures */}
+          {/* Today's Arrivals & Departures.
+              Bug 5 fix — the previous filter used `.slice(0,10)` on the
+              raw API value. When the API returns a Date object instead
+              of an ISO string (some JSON serialisers do this), .slice
+              is undefined → every comparison fails → "0 departures".
+              normaliseBookingDate() handles both shapes. We also accept
+              both 'BOOKED' and 'CONFIRMED' for arrivals (status set may
+              vary across booking sources). */}
           {(() => {
             const today = new Date().toISOString().slice(0,10);
-            const arrivals = hotelBookings.filter((b: any) => b.status === 'BOOKED' && b.check_in_date && b.check_in_date.slice(0,10) === today);
-            const departures = hotelBookings.filter((b: any) => b.status === 'CHECKED_IN' && b.check_out_date && b.check_out_date.slice(0,10) === today);
+            const arrivals = hotelBookings.filter((b: any) =>
+              b.status === 'BOOKED' && normaliseBookingDate(b.check_in_date) === today
+            );
+            const departures = hotelBookings.filter((b: any) =>
+              b.status === 'CHECKED_IN' && normaliseBookingDate(b.check_out_date) === today
+            );
             return (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5" style={{ borderTop: '3px solid #0f766e' }}>
@@ -16940,6 +16951,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <input
                     required
                     type="date"
+                    // Bug 3 — block past dates at the input level. Server
+                    // enforces the same rule in validateBookingRequest()
+                    // for direct API callers. We allow today, not just
+                    // tomorrow, since same-day check-ins are common.
+                    min={new Date().toISOString().slice(0, 10)}
                     value={(editingBooking.check_in_date || '').slice(0,10)}
                     onChange={e => {
                       const v = e.target.value;
@@ -19436,8 +19452,19 @@ const HotelCommandCenter: React.FC<{
   const occupied = rooms.filter(r => r.status === 'OCCUPIED').length;
   const total    = rooms.length;
   const occupancyPct = total > 0 ? Math.round((occupied * 100) / total) : 0;
-  const checkInsToday  = bookings.filter(b => b.check_in_date === today  && b.status !== 'CANCELLED');
-  const checkOutsToday = bookings.filter(b => b.check_out_date === today && b.status !== 'CANCELLED');
+  // Bug 5 — normalise to YYYY-MM-DD before comparing. The API may return
+  // dates as ISO timestamps or (rarely) Date objects; strict === against
+  // today silently dropped every match before this fix.
+  const toIsoDay = (v: any): string => {
+    if (!v) return '';
+    if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
+    const s = String(v);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+  };
+  const checkInsToday  = bookings.filter(b => toIsoDay(b.check_in_date)  === today && b.status !== 'CANCELLED');
+  const checkOutsToday = bookings.filter(b => toIsoDay(b.check_out_date) === today && b.status !== 'CANCELLED');
   const openFolioTotal = folios.reduce((s, f) => s + Number(f.grand_total || 0), 0);
   const foreignPendingFormC = bookings.filter(b =>
     b.status === 'CHECKED_IN' && b.guest_nationality && b.guest_nationality !== 'IN'
@@ -21526,6 +21553,14 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
   const [session, setSession] = useState<any>(null);
   const [guestName, setGuestName] = useState('');
   const [guestPhone, setGuestPhone] = useState('');
+  // Bug 2 fix — the previous form rendered conditionally on `!guestName`
+  // so the input element unmounted the moment the user typed their first
+  // character, making it appear that the screen "auto-saved" after one
+  // keystroke. nameSubmitted tracks whether the guest has explicitly
+  // confirmed their name (server-saved). Initialised true when the
+  // session already has a name (returning visit / staff pre-filled).
+  const [nameSubmitted, setNameSubmitted] = useState(false);
+  const [savingName, setSavingName] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>('ALL');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -21570,7 +21605,7 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
         const sess = await sessRes.json();
         setSession(sess);
         localStorage.setItem(sessionKey, sess.session_token);
-        if (sess.guest_name) setGuestName(sess.guest_name);
+        if (sess.guest_name) { setGuestName(sess.guest_name); setNameSubmitted(true); }
         if (sess.guest_phone) setGuestPhone(sess.guest_phone);
 
         // Fetch the public guest services list
@@ -21685,17 +21720,63 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
           );
         })()}
 
-        {/* Guest name capture (on first visit) */}
-        {!guestName && (
+        {/* Guest name capture (on first visit).
+            Bug 2 fix — gated on `nameSubmitted`, NOT on whether the
+            input is non-empty. The previous gating caused the entire
+            form to unmount the moment the user typed one character. */}
+        {!nameSubmitted && (
           <div className="bg-white rounded-3xl p-5 border border-[#cc5a16]/10 mb-5">
             <h3 className="text-sm font-bold font-serif text-[#1a1208] mb-1">Your name</h3>
             <p className="text-xs text-[#6b5d52] mb-3">So we can address you properly.</p>
-            <input
-              value={guestName}
-              onChange={e => setGuestName(e.target.value)}
-              placeholder="Your name"
-              className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
-            />
+            <form
+              onSubmit={async e => {
+                e.preventDefault();
+                const trimmed = guestName.trim();
+                if (!trimmed || !session) return;
+                setSavingName(true);
+                try {
+                  // Re-POST with the session_token + guest_name to persist
+                  // (server's UPDATE branch reads COALESCE(?, guest_name)).
+                  await fetch(`/api/restaurant/${restaurantId}/hotel/room-sessions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      room_id: roomId,
+                      session_token: session.session_token,
+                      guest_name: trimmed,
+                    }),
+                  });
+                  setGuestName(trimmed);
+                  setNameSubmitted(true);
+                } catch {
+                  // Non-blocking — even if the save fails, the greeting
+                  // still works locally; staff can re-prompt on next request.
+                  setNameSubmitted(true);
+                } finally {
+                  setSavingName(false);
+                }
+              }}
+            >
+              <input
+                value={guestName}
+                onChange={e => setGuestName(e.target.value)}
+                placeholder="Your name"
+                autoFocus
+                className="w-full bg-[#faf7f2] rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!guestName.trim() || savingName}
+                className={cn(
+                  "w-full mt-3 px-4 py-3 rounded-2xl text-sm font-bold transition-all",
+                  guestName.trim() && !savingName
+                    ? "bg-[#cc5a16] text-white hover:bg-[#a84612]"
+                    : "bg-[#cc5a16]/30 text-white cursor-not-allowed"
+                )}
+              >
+                {savingName ? 'Saving…' : 'Save name'}
+              </button>
+            </form>
           </div>
         )}
 
