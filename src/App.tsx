@@ -6577,6 +6577,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Availability Calendar grouping + the Find-Available-Rooms search.
   const [hotelRoomTypes, setHotelRoomTypes] = useState<any[]>([]);
   const [editingRoomType, setEditingRoomType] = useState<any | null>(null);
+  // Sprint A1 — Availability calendar view toggle for the Bookings tab
+  const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR'>('LIST');
   const [hotelServices, setHotelServices] = useState<any[]>([]);
   const [hotelRequests, setHotelRequests] = useState<any[]>([]);
   const [hotelLoading, setHotelLoading] = useState(false);
@@ -14682,11 +14684,54 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Hotel Bookings</h2>
               <p className="text-sm text-[#6b5d52] mt-1">Manage reservations, check-ins, and check-outs.</p>
             </div>
-            <button onClick={() => { setEditingBooking({ check_in_date: new Date().toISOString().slice(0,10), check_out_date: new Date(Date.now()+86400000).toISOString().slice(0,10) }); setShowBookingModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20">
-              <Plus size={16} /> New Booking
-            </button>
+            <div className="flex items-center gap-2">
+              {/* Sprint A1 — view toggle */}
+              <div className="flex gap-1 bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shrink-0">
+                {(['LIST','CALENDAR'] as const).map(v => (
+                  <button
+                    key={v}
+                    onClick={() => setBookingsView(v)}
+                    className={cn(
+                      'px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest transition-all flex items-center gap-1',
+                      bookingsView === v ? 'bg-[#cc5a16] text-white shadow' : 'text-[#6b5d52] hover:bg-[#faf7f2]'
+                    )}
+                  >
+                    {v === 'CALENDAR' ? <><CalendarClock size={12}/> Calendar</> : <>List</>}
+                  </button>
+                ))}
+              </div>
+              <button onClick={() => { setEditingBooking({ check_in_date: new Date().toISOString().slice(0,10), check_out_date: new Date(Date.now()+86400000).toISOString().slice(0,10) }); setShowBookingModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20">
+                <Plus size={16} /> New Booking
+              </button>
+            </div>
           </div>
           {hotelError && <div className="px-4 py-3 rounded-xl bg-[#fdf0f0] border border-[#c13b3b]/20 text-[#c13b3b] text-sm">{hotelError}</div>}
+
+          {/* Sprint A1 — Availability Calendar view */}
+          {bookingsView === 'CALENDAR' && (
+            <AvailabilityCalendar
+              restaurantId={restaurantId}
+              token={token}
+              onCellClick={(roomId, date) => {
+                // Pre-fill the new-booking modal with the room + clicked date.
+                const room = hotelRooms.find(r => r.id === roomId);
+                setEditingBooking({
+                  room_id: roomId,
+                  room_rate: room?.base_rate || 0,
+                  check_in_date: date,
+                  check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
+                  booking_type: 'OVERNIGHT',
+                });
+                setShowBookingModal(true);
+              }}
+              onHoldClick={(roomId) => {
+                const room = hotelRooms.find(r => r.id === roomId);
+                if (room) setBlockingRoom(room);
+              }}
+            />
+          )}
+
+          {bookingsView === 'LIST' && (<>
 
           {/* Today's Arrivals & Departures.
               Bug 5 fix — normaliseBookingDate handles both ISO strings
@@ -14818,6 +14863,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </table>
             )}
           </div>
+          </>)}{/* /bookingsView === 'LIST' */}
         </div>
       ) : activeTab === 'FOLIOS' && isHotelEnabled ? (
         /* ════════════════ FOLIOS ════════════════ */
@@ -20671,6 +20717,213 @@ const HotelRoomDrawer: React.FC<{
           )}
         </div>
       </motion.aside>
+    </div>
+  );
+};
+
+/* ─── AvailabilityCalendar — Sprint A1 ──────────────────────────────
+   Rooms-down × dates-across grid showing the booking + hold landscape
+   for a chosen window (7 / 14 / 30 / 60 days). Click an empty cell to
+   start a new booking pre-filled with that room and that date. Click
+   a HOLD cell to open the block-dates modal for that room.            */
+const AvailabilityCalendar: React.FC<{
+  restaurantId: string;
+  token: string;
+  onCellClick: (roomId: string, date: string) => void;
+  onHoldClick?: (roomId: string) => void;
+}> = ({ restaurantId, token, onCellClick, onHoldClick }) => {
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState<number>(14);
+  const [start, setStart] = useState<string>(() => new Date().toISOString().slice(0, 10));
+
+  const fetchAvailability = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/availability?start=${start}&days=${days}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.ok) setData(await res.json());
+    } finally { setLoading(false); }
+  }, [restaurantId, token, start, days]);
+
+  useEffect(() => { fetchAvailability(); }, [fetchAvailability]);
+
+  // Status palette — keep accessible and high-contrast.
+  const cellPalette: Record<string, { bg: string; fg: string; border: string; label: string }> = {
+    VACANT:      { bg: '#f7faf7', fg: '#1f513f', border: '#cfe7d6', label: '' },
+    BOOKED:      { bg: '#fef3c7', fg: '#6b4f1a', border: '#facc15', label: 'Booked' },
+    CHECKED_IN:  { bg: '#fde2c8', fg: '#7c2d12', border: '#fb923c', label: 'In-house' },
+    CHECKED_OUT: { bg: '#e2e8f0', fg: '#475569', border: '#94a3b8', label: 'Past' },
+    HOLD:        { bg: '#e7e5e4', fg: '#57534e', border: '#a8a29e', label: 'Hold' },
+  };
+
+  const shiftStart = (deltaDays: number) => {
+    const d = new Date(start + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + deltaDays);
+    setStart(d.toISOString().slice(0, 10));
+  };
+
+  // Group rooms by type for visual clarity.
+  const grouped = useMemo(() => {
+    if (!data) return [];
+    const rt = data.room_types || [];
+    const byType: Record<string, any[]> = {};
+    const untagged: any[] = [];
+    for (const r of data.rooms) {
+      if (r.type_id) {
+        (byType[r.type_id] = byType[r.type_id] || []).push(r);
+      } else {
+        untagged.push(r);
+      }
+    }
+    const groups = rt
+      .filter((t: any) => byType[t.id]?.length > 0)
+      .map((t: any) => ({ id: t.id, name: t.name, rooms: byType[t.id] }));
+    if (untagged.length > 0) groups.push({ id: '__untagged__', name: 'Untagged Rooms', rooms: untagged });
+    return groups;
+  }, [data]);
+
+  return (
+    <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+      {/* Toolbar */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
+        <div className="flex items-center gap-1">
+          <button onClick={() => shiftStart(-7)} className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs font-bold text-[#3d3128] hover:bg-white">‹ Prev week</button>
+          <button onClick={() => setStart(new Date().toISOString().slice(0,10))} className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs font-bold text-[#3d3128] hover:bg-white">Today</button>
+          <button onClick={() => shiftStart(7)} className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs font-bold text-[#3d3128] hover:bg-white">Next week ›</button>
+        </div>
+        <input
+          type="date"
+          value={start}
+          onChange={e => setStart(e.target.value)}
+          className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs bg-white"
+        />
+        <div className="flex gap-1 bg-white rounded-lg p-1 border border-[#cc5a16]/15 shrink-0">
+          {[7, 14, 30, 60].map(n => (
+            <button
+              key={n}
+              onClick={() => setDays(n)}
+              className={cn(
+                'px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-widest',
+                days === n ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52] hover:bg-[#faf7f2]'
+              )}
+            >
+              {n}d
+            </button>
+          ))}
+        </div>
+        {/* Legend */}
+        <div className="ml-auto flex items-center gap-2 text-[10px] text-[#6b5d52] flex-wrap">
+          {Object.entries(cellPalette).filter(([k]) => k !== 'VACANT').map(([k, p]) => (
+            <span key={k} className="inline-flex items-center gap-1">
+              <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: p.bg, border: `1px solid ${p.border}` }} />
+              {k.replace('_', ' ').toLowerCase()}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Grid */}
+      {loading || !data ? (
+        <div className="p-12 text-center text-sm text-[#9c8e85] italic">Loading availability…</div>
+      ) : data.rooms.length === 0 ? (
+        <div className="p-12 text-center text-sm text-[#9c8e85] italic">No rooms configured. Add rooms in the Rooms tab first.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-[11px]">
+            <thead>
+              <tr>
+                <th className="sticky left-0 z-10 bg-white border-b border-r border-[#cc5a16]/10 px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] min-w-[180px]">
+                  Room
+                </th>
+                {data.dates.map((d: string) => {
+                  const dt = new Date(d + 'T00:00:00');
+                  const isWeekend = dt.getDay() === 0 || dt.getDay() === 6;
+                  const isToday = d === new Date().toISOString().slice(0,10);
+                  return (
+                    <th
+                      key={d}
+                      className={cn(
+                        'border-b border-[#cc5a16]/10 px-1 py-2 text-center text-[9px] font-bold uppercase tracking-widest min-w-[44px]',
+                        isWeekend ? 'bg-[#cc5a16]/5 text-[#cc5a16]' : 'bg-white text-[#9c8e85]',
+                        isToday && 'ring-2 ring-inset ring-[#cc5a16]/40'
+                      )}
+                    >
+                      <div>{dt.toLocaleDateString('en-IN', { weekday: 'short' })}</div>
+                      <div className="text-[10px] text-[#3d3128]">{dt.getDate()}</div>
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {grouped.map((g: any) => (
+                <React.Fragment key={g.id}>
+                  <tr>
+                    <td colSpan={data.dates.length + 1} className="bg-[#faf7f2] px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                      {g.name} · {g.rooms.length} room{g.rooms.length > 1 ? 's' : ''}
+                    </td>
+                  </tr>
+                  {g.rooms.map((r: any) => (
+                    <tr key={r.id} className="border-b border-[#cc5a16]/5">
+                      <td className="sticky left-0 z-10 bg-white border-r border-[#cc5a16]/10 px-3 py-1.5">
+                        <div className="font-semibold text-[#1a1208] text-[12px]">{r.name}</div>
+                        <div className="text-[9px] text-[#9c8e85]">
+                          {r.room_number ? `#${r.room_number} · ` : ''}₹{Number(r.base_rate || 0).toLocaleString('en-IN')}
+                        </div>
+                      </td>
+                      {data.dates.map((d: string) => {
+                        const cell = data.grid[r.id]?.[d];
+                        const status = cell?.status || 'VACANT';
+                        const p = cellPalette[status];
+                        const clickable = status === 'VACANT';
+                        return (
+                          <td
+                            key={d}
+                            onClick={() => {
+                              if (clickable) onCellClick(r.id, d);
+                              else if (status === 'HOLD' && onHoldClick) onHoldClick(r.id);
+                            }}
+                            title={
+                              status === 'VACANT' ? `Click to create a booking for ${r.name} on ${d}` :
+                              status === 'HOLD'   ? `${cell.kind}${cell.reason ? ` — ${cell.reason}` : ''}` :
+                              cell.guest_name ? `${cell.guest_name} (${status})` : status
+                            }
+                            className={cn(
+                              'p-1 text-center align-middle border-l border-[#cc5a16]/5',
+                              clickable && 'cursor-pointer hover:ring-2 hover:ring-[#cc5a16]/30',
+                              status === 'HOLD' && 'cursor-pointer'
+                            )}
+                            style={{
+                              background: p.bg,
+                              minWidth: 44,
+                              height: 36,
+                            }}
+                          >
+                            {cell?.guest_name && (
+                              <div
+                                className="text-[10px] font-bold truncate px-1 leading-tight"
+                                style={{ color: p.fg, maxWidth: 60 }}
+                              >
+                                {cell.guest_name.split(' ')[0]}
+                              </div>
+                            )}
+                            {status === 'HOLD' && (
+                              <div className="text-[9px] font-bold" style={{ color: p.fg }}>×</div>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 };

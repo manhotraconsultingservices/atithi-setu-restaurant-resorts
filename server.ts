@@ -13476,6 +13476,120 @@ async function startServer() {
     }
   });
 
+  // ─── AVAILABILITY CALENDAR — Sprint A1 ──────────────────────────────
+  // Returns a compact representation of the booking + hold landscape for
+  // a date range. The frontend renders this as a rooms-down × dates-across
+  // grid. Days are inclusive at both ends. For each day we surface:
+  //   { date, status, label, booking_id?, hold_id?, guest_name? }
+  // where status ∈ VACANT | BOOKED | CHECKED_IN | CHECKED_OUT | HOLD.
+  //
+  // Default window: today → today+13 (14 days). Capped at 90 days to
+  // avoid huge payloads.
+  app.get("/api/restaurant/:id/hotel/availability", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const start = (req.query.start as string) || new Date().toISOString().slice(0, 10);
+      const days  = Math.max(1, Math.min(90, Number(req.query.days) || 14));
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
+        return res.status(400).json({ error: "start must be YYYY-MM-DD" });
+      }
+      // Compute end (exclusive) so we can query overlap with [start, end).
+      const startDate = new Date(start + 'T00:00:00Z');
+      const endDate   = new Date(startDate.getTime() + days * 86400000);
+      const end       = endDate.toISOString().slice(0, 10);
+
+      const rooms: any[] = await tenantDb.query(
+        "SELECT id, name, room_number, floor, type, type_id, base_rate, status FROM rooms ORDER BY floor, room_number, name"
+      );
+      const bookings: any[] = await tenantDb.query(
+        `SELECT id, room_id, guest_name, status, booking_type, check_in_date, check_out_date
+           FROM room_bookings
+          WHERE status NOT IN ('CANCELLED', 'CHECKED_OUT')
+            AND check_in_date < ?
+            AND check_out_date > ?`,
+        [end, start]
+      );
+      // Include CHECKED_OUT in the same window (greyed on the calendar)
+      const recentCheckouts: any[] = await tenantDb.query(
+        `SELECT id, room_id, guest_name, status, booking_type, check_in_date, check_out_date
+           FROM room_bookings
+          WHERE status = 'CHECKED_OUT'
+            AND check_in_date < ?
+            AND check_out_date > ?`,
+        [end, start]
+      );
+      const holds: any[] = await tenantDb.query(
+        `SELECT id, room_id, start_date, end_date, kind, reason
+           FROM room_holds
+          WHERE start_date < ? AND end_date > ?`,
+        [end, start]
+      );
+      const roomTypes: any[] = await tenantDb.query(
+        "SELECT id, name FROM room_types ORDER BY display_order, name"
+      );
+
+      // Build the date list once.
+      const dates: string[] = [];
+      for (let i = 0; i < days; i++) {
+        const d = new Date(startDate.getTime() + i * 86400000);
+        dates.push(d.toISOString().slice(0, 10));
+      }
+      // Normalise an event's date strings (pg returns Date objects).
+      const iso = (v: any): string => {
+        if (!v) return '';
+        if (v instanceof Date) return v.toISOString().slice(0, 10);
+        const s = String(v);
+        return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : new Date(s).toISOString().slice(0, 10);
+      };
+      // Build per-room day map: roomId → { date → cell }
+      const grid: Record<string, Record<string, any>> = {};
+      for (const r of rooms) grid[r.id] = {};
+      // Bookings (BOOKED / CHECKED_IN) — half-open [check_in, check_out).
+      // For DAY_USE: bci === bco → mark just that day.
+      const stamp = (rid: string, date: string, cell: any) => {
+        if (!grid[rid]) return;
+        // Don't overwrite a higher-precedence cell (CHECKED_IN beats BOOKED).
+        const existing = grid[rid][date];
+        const rank: Record<string, number> = { HOLD: 1, BOOKED: 2, CHECKED_IN: 3, CHECKED_OUT: 0 };
+        if (existing && (rank[existing.status] || 0) >= (rank[cell.status] || 0)) return;
+        grid[rid][date] = cell;
+      };
+      for (const b of bookings) {
+        const bci = iso(b.check_in_date);
+        const bco = iso(b.check_out_date);
+        if (b.booking_type === 'DAY_USE' && bci === bco) {
+          if (bci >= start && bci < end) stamp(b.room_id, bci, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: 'DAY_USE' });
+          continue;
+        }
+        for (const d of dates) {
+          if (d >= bci && d < bco) stamp(b.room_id, d, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: b.booking_type });
+        }
+      }
+      // Checked-out bookings — show as historical (lowest priority)
+      for (const b of recentCheckouts) {
+        const bci = iso(b.check_in_date);
+        const bco = iso(b.check_out_date);
+        for (const d of dates) {
+          if (d >= bci && d < bco) stamp(b.room_id, d, { status: 'CHECKED_OUT', booking_id: b.id, guest_name: b.guest_name });
+        }
+      }
+      // Holds (lowest priority unless no booking on that cell)
+      for (const h of holds) {
+        const hci = iso(h.start_date);
+        const hco = iso(h.end_date);
+        for (const d of dates) {
+          if (d >= hci && d < hco) stamp(h.room_id, d, { status: 'HOLD', hold_id: h.id, kind: h.kind, reason: h.reason });
+        }
+      }
+      res.json({ start, end, days, dates, rooms, room_types: roomTypes, grid });
+    } catch (err: any) {
+      console.error("availability error:", err);
+      res.status(500).json({ error: "Failed to load availability" });
+    }
+  });
+
   // ─── ROOM TYPES — Sprint B2 ─────────────────────────────────────────
   // Reusable property-level categories (Standard / Deluxe / Suite / etc.)
   // that physical rooms can belong to. Metadata only at this stage — the
@@ -19058,7 +19172,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-room-types',
+    commit_marker: 'hotel-availability-calendar',
     code_features: [
       'subscription-billing',
       'read-only-mode',
