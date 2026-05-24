@@ -14701,6 +14701,93 @@ async function startServer() {
     }
   });
 
+  // Sprint P2-D — Hotel promo codes. Re-uses the existing promo_codes
+  // table (created for the restaurant module) and applies a discount
+  // to an open folio. Validation rules:
+  //   - promo must be enabled + within its starts_at/expires_at window
+  //   - folio subtotal must meet min_order_amount
+  //   - used_count < max_uses (if set)
+  //   - per-customer cap honoured if customer_phone is on file
+  //   - restricted_tier_id ignored for hotel for now (could be wired up
+  //     to a tier-aware lookup later)
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/apply-promo", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const code = String(req.body?.code || '').trim().toUpperCase();
+      if (!code) return res.status(400).json({ error: 'Promo code is required.' });
+      const tenantDb = await getTenantDb(req.params.id);
+
+      const folio: any = await tenantDb.get(
+        `SELECT f.*, b.guest_phone, b.guest_name
+           FROM folios f
+      LEFT JOIN room_bookings b ON b.id = f.booking_id
+          WHERE f.id = ?`, [req.params.folioId]
+      );
+      if (!folio) return res.status(404).json({ error: 'Folio not found.' });
+      if (folio.status !== 'open') return res.status(400).json({ error: 'Folio is not open — cannot apply a promo.' });
+
+      const promo: any = await tenantDb.get(
+        "SELECT * FROM promo_codes WHERE UPPER(code) = ? AND is_enabled = 1",
+        [code]
+      );
+      if (!promo) return res.status(404).json({ error: 'Invalid promo code.' });
+      const now = new Date();
+      if (promo.starts_at && new Date(promo.starts_at) > now) {
+        return res.status(400).json({ error: `Promo code is not valid until ${new Date(promo.starts_at).toLocaleDateString('en-IN')}.` });
+      }
+      if (promo.expires_at && new Date(promo.expires_at) < now) {
+        return res.status(400).json({ error: 'Promo code has expired.' });
+      }
+      if (promo.min_order_amount && Number(folio.subtotal || 0) < Number(promo.min_order_amount)) {
+        return res.status(400).json({ error: `Minimum order amount ₹${promo.min_order_amount} required for this promo.` });
+      }
+      if (promo.max_uses && Number(promo.used_count || 0) >= Number(promo.max_uses)) {
+        return res.status(400).json({ error: 'Promo code has reached its usage limit.' });
+      }
+      if (folio.guest_phone && promo.max_uses_per_customer) {
+        const usedByCustomer: any = await tenantDb.get(
+          "SELECT COUNT(*) AS n FROM promo_redemptions WHERE promo_code_id = ? AND customer_phone = ?",
+          [promo.id, folio.guest_phone]
+        );
+        if (Number(usedByCustomer?.n || 0) >= Number(promo.max_uses_per_customer)) {
+          return res.status(400).json({ error: 'You\'ve already used this promo code the maximum allowed times.' });
+        }
+      }
+
+      // Compute discount. Percent first (capped at subtotal), then flat.
+      const subtotal = Number(folio.subtotal || 0);
+      let discount = 0;
+      if (Number(promo.discount_percent) > 0) {
+        discount = Math.round(subtotal * Number(promo.discount_percent) / 100 * 100) / 100;
+      }
+      if (Number(promo.discount_amount) > 0) {
+        discount += Number(promo.discount_amount);
+      }
+      discount = Math.min(discount, subtotal);
+
+      // Apply: bump folio.discount + insert redemption + recompute totals.
+      await tenantDb.run("UPDATE folios SET discount = ? WHERE id = ?", [discount, folio.id]);
+      await tenantDb.run("UPDATE promo_codes SET used_count = COALESCE(used_count, 0) + 1 WHERE id = ?", [promo.id]);
+      await tenantDb.run(
+        `INSERT INTO promo_redemptions (promo_code_id, code, customer_phone, order_id, discount_amount)
+         VALUES (?, ?, ?, ?, ?)`,
+        [promo.id, code, folio.guest_phone || null, folio.id, discount]
+      );
+      await recomputeFolioTotals(tenantDb, folio.id);
+      const updated = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+      res.json({
+        success: true,
+        promo: { code, label: promo.label, percent: promo.discount_percent, amount: promo.discount_amount },
+        discount,
+        folio: updated,
+      });
+    } catch (err) {
+      console.error("apply-promo error:", err);
+      res.status(500).json({ error: "Failed to apply promo code" });
+    }
+  });
+
   // Sprint P2-C — iCal export. Property-wide or per-room .ics feeds
   // so direct bookings sync to OTAs (Booking.com / Airbnb / Expedia
   // accept iCal feeds) and to personal calendars (Google / Apple).
@@ -20027,7 +20114,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-ical-export',
+    commit_marker: 'hotel-promo-codes',
     code_features: [
       'subscription-billing',
       'read-only-mode',
