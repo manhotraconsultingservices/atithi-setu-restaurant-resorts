@@ -13681,7 +13681,44 @@ async function startServer() {
           conflict_reason: conflict?.reason || null,
         };
       });
-      res.json({ start, end, guests, rooms: results });
+
+      // Sprint C1 — category-level rollup so the modal can show
+      // "Deluxe: 3 of 5 available · ₹2,500" cards above the per-room list.
+      // Synthesised entirely from the per-room results so we don't query
+      // the DB a second time. Untagged rooms get bucketed under a synthetic
+      // '__untagged__' entry only when they exist.
+      const catMap: Record<string, {
+        type_id: string | null; type_name: string;
+        total: number; available: number;
+        base_rate: number; image_url: string | null;
+      }> = {};
+      for (const r of results) {
+        const key = r.type_id || '__untagged__';
+        if (!catMap[key]) {
+          catMap[key] = {
+            type_id: r.type_id || null,
+            type_name: r.type_name || 'Untagged Rooms',
+            total: 0, available: 0,
+            base_rate: r.base_rate,
+            image_url: r.image_url || null,
+          };
+        }
+        catMap[key].total++;
+        if (r.available) catMap[key].available++;
+        // Use the lowest non-zero rate as the displayed "starting from".
+        if (r.base_rate > 0 && (catMap[key].base_rate === 0 || r.base_rate < catMap[key].base_rate)) {
+          catMap[key].base_rate = r.base_rate;
+        }
+      }
+      // Sort: types with availability first, then by name.
+      const categories = Object.values(catMap).sort((a, b) => {
+        if ((b.available > 0 ? 1 : 0) !== (a.available > 0 ? 1 : 0)) {
+          return (b.available > 0 ? 1 : 0) - (a.available > 0 ? 1 : 0);
+        }
+        return a.type_name.localeCompare(b.type_name);
+      });
+
+      res.json({ start, end, guests, rooms: results, categories });
     } catch (err: any) {
       console.error("find-available-rooms error:", err);
       res.status(500).json({ error: "Failed to search rooms" });
@@ -19270,7 +19307,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-calendar-auto-refresh',
+    commit_marker: 'hotel-category-availability',
     code_features: [
       'subscription-billing',
       'read-only-mode',

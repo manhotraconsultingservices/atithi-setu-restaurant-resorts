@@ -6614,6 +6614,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Sprint A2 — Find Available Rooms search modal
   const [findRoomsOpen, setFindRoomsOpen] = useState(false);
   const [findRoomsResults, setFindRoomsResults] = useState<any[] | null>(null);
+  // Sprint C1 — category rollup + filter
+  const [findRoomsCategories, setFindRoomsCategories] = useState<any[]>([]);
+  const [findRoomsCategoryFilter, setFindRoomsCategoryFilter] = useState<string | null>(null);
   const [findRoomsLoading, setFindRoomsLoading] = useState(false);
   const [findRoomsParams, setFindRoomsParams] = useState<{ start: string; end: string; guests: number }>({
     start: new Date().toISOString().slice(0, 10),
@@ -8712,6 +8715,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const runFindAvailableRooms = async () => {
     setFindRoomsLoading(true);
     setFindRoomsResults(null);
+    setFindRoomsCategoryFilter(null);
     try {
       const qs = new URLSearchParams({
         start:  findRoomsParams.start,
@@ -8720,6 +8724,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       const data = await hotelApi(`/find-available-rooms?${qs.toString()}`);
       setFindRoomsResults(Array.isArray(data?.rooms) ? data.rooms : []);
+      setFindRoomsCategories(Array.isArray(data?.categories) ? data.categories : []);
     } catch (err: any) {
       alert(err?.message || 'Search failed');
     } finally {
@@ -17292,7 +17297,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <p className="text-sm text-[#9c8e85] italic text-center py-8">No rooms configured. Add rooms in the Rooms tab.</p>
               ) : (
                 (() => {
-                  const sorted = [...findRoomsResults].sort((a, b) => {
+                  // Filter by selected category before sorting.
+                  const filtered = findRoomsCategoryFilter
+                    ? findRoomsResults.filter(r => (r.type_id || '__untagged__') === findRoomsCategoryFilter)
+                    : findRoomsResults;
+                  const sorted = [...filtered].sort((a, b) => {
                     if (a.available !== b.available) return a.available ? -1 : 1;
                     if (!a.available && !b.available) {
                       return String(a.conflict_until || '').localeCompare(String(b.conflict_until || ''));
@@ -17302,8 +17311,72 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   const availCount = sorted.filter(r => r.available).length;
                   return (
                     <>
+                      {/* Sprint C1 — category rollup cards.
+                          One card per type with "{N} of {M} available · ₹{rate}".
+                          Click to filter the list below to just that category.
+                          Hidden when the property has zero categories defined
+                          and only "Untagged Rooms" would show. */}
+                      {findRoomsCategories.length > 1 && (
+                        <div className="mb-4">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Browse by category</p>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setFindRoomsCategoryFilter(null)}
+                              className={cn(
+                                "rounded-xl border px-3 py-2 text-left transition-all",
+                                findRoomsCategoryFilter === null
+                                  ? "border-[#cc5a16] bg-[#cc5a16]/5"
+                                  : "border-[#cc5a16]/15 bg-white hover:border-[#cc5a16]/40"
+                              )}
+                            >
+                              <p className="text-[11px] font-bold text-[#1a1208]">All categories</p>
+                              <p className="text-[10px] text-[#6b5d52]">
+                                {findRoomsCategories.reduce((s: number, c: any) => s + c.available, 0)} of {findRoomsCategories.reduce((s: number, c: any) => s + c.total, 0)} available
+                              </p>
+                            </button>
+                            {findRoomsCategories.map((c: any) => {
+                              const key = c.type_id || '__untagged__';
+                              const noneFree = c.available === 0;
+                              return (
+                                <button
+                                  key={key}
+                                  type="button"
+                                  onClick={() => setFindRoomsCategoryFilter(key)}
+                                  className={cn(
+                                    "rounded-xl border px-3 py-2 text-left transition-all",
+                                    findRoomsCategoryFilter === key
+                                      ? "border-[#cc5a16] bg-[#cc5a16]/5"
+                                      : noneFree
+                                        ? "border-rose-200 bg-rose-50/30 hover:border-rose-300"
+                                        : "border-emerald-200 bg-emerald-50/30 hover:border-emerald-400"
+                                  )}
+                                >
+                                  <p className="text-[11px] font-bold text-[#1a1208] truncate">{c.type_name}</p>
+                                  <p className={cn("text-[10px] font-mono mt-0.5", noneFree ? "text-rose-700" : "text-emerald-700")}>
+                                    <strong>{c.available} of {c.total}</strong> available
+                                  </p>
+                                  {c.base_rate > 0 && (
+                                    <p className="text-[9px] text-[#9c8e85] mt-0.5">from ₹{Number(c.base_rate).toLocaleString('en-IN')}/night</p>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
                       <p className="text-[11px] text-[#6b5d52] mb-3">
                         <strong className="text-emerald-700">{availCount} available</strong> · {sorted.length - availCount} unavailable
+                        {findRoomsCategoryFilter && (
+                          <button
+                            type="button"
+                            onClick={() => setFindRoomsCategoryFilter(null)}
+                            className="ml-2 text-[10px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest"
+                          >
+                            Clear filter
+                          </button>
+                        )}
                       </p>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {sorted.map((r: any) => {
