@@ -301,6 +301,29 @@ interface TenantInfo {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  // ─── Sprint D1 / P2-F — public guest routes ────────────────────────
+  // Two unauth'd guest surfaces match by URL path BEFORE any of the
+  // auth / dashboard flow even mounts. Avoids the login redirect /
+  // tenant-subdomain branch entirely.
+  //   /checkin/:tenantId/:bookingId  — Online check-in form (P2-F)
+  //   /book/:tenantId                — Public booking page (D1)
+  const publicGuestPath = (() => {
+    const segs = (window.location.pathname || '').replace(/^\/+|\/+$/g, '').split('/');
+    if (segs[0] === 'checkin' && segs[1] && segs[2]) {
+      return { kind: 'checkin' as const, tenantId: segs[1], bookingId: segs[2] };
+    }
+    if (segs[0] === 'book' && segs[1]) {
+      return { kind: 'book' as const, tenantId: segs[1] };
+    }
+    return null;
+  })();
+  if (publicGuestPath?.kind === 'checkin') {
+    return <OnlineCheckInPage tenantId={publicGuestPath.tenantId} bookingId={publicGuestPath.bookingId} />;
+  }
+  if (publicGuestPath?.kind === 'book') {
+    return <PublicBookingPage tenantId={publicGuestPath.tenantId} />;
+  }
+
   const [role, setRole] = useState<UserRole | null>(localStorage.getItem('role') as UserRole);
   const [userName, setUserName] = useState<string | null>(localStorage.getItem('userName'));
   const [view, setView] = useState<'LANDING' | 'DASHBOARD' | 'AUTH'>(localStorage.getItem('token') ? 'DASHBOARD' : 'LANDING');
@@ -36898,4 +36921,204 @@ function TelegramSetupGuide({ token }: { token: string }) {
       </div>
     </div>
   );
+}
+
+/* ─── OnlineCheckInPage — Sprint P2-F ─────────────────────────────────
+   Public route /checkin/:tenantId/:bookingId. Guest pre-fills ID,
+   nationality, email, special requests T-3 days before arrival.
+   Soft phone-last-4 verification before submit. No auth.            */
+function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingId: string }) {
+  const [info, setInfo] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [form, setForm] = useState({
+    verify_phone: '',
+    guest_id_proof: '',
+    guest_nationality: 'Indian',
+    guest_state: '',
+    guest_email: '',
+    special_requests: '',
+  });
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`/api/public/restaurant/${tenantId}/hotel/checkin/${bookingId}`);
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          throw new Error(e.error || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        setInfo(data);
+        setForm(f => ({ ...f, special_requests: data.special_requests || '' }));
+      } catch (err: any) {
+        setError(err?.message || 'Failed to load booking');
+      } finally { setLoading(false); }
+    })();
+  }, [tenantId, bookingId]);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      const res = await fetch(`/api/public/restaurant/${tenantId}/hotel/checkin/${bookingId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setSubmitted(true);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to submit');
+    } finally { setSubmitting(false); }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-[#cc5a16] border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-sm text-[#6b5d52]">Loading your check-in form…</p>
+        </div>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center p-6">
+        <div className="bg-white rounded-3xl shadow-2xl max-w-md p-8 text-center border-t-[3px] border-[#c13b3b]">
+          <div className="w-14 h-14 rounded-full bg-[#fdf0f0] flex items-center justify-center mx-auto mb-4">
+            <X size={30} className="text-[#c13b3b]" />
+          </div>
+          <h1 className="text-xl font-serif font-bold text-[#1a1208] mb-1">Unable to open check-in</h1>
+          <p className="text-sm text-[#6b5d52]">{error}</p>
+          <p className="text-[11px] text-[#9c8e85] mt-4">Please contact the property if this persists.</p>
+        </div>
+      </div>
+    );
+  }
+  if (submitted) {
+    return (
+      <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center p-6">
+        <div className="bg-white rounded-3xl shadow-2xl max-w-md p-8 text-center border-t-[3px] border-emerald-500">
+          <div className="w-14 h-14 rounded-full bg-emerald-50 flex items-center justify-center mx-auto mb-4">
+            <Check size={30} className="text-emerald-600" />
+          </div>
+          <h1 className="text-xl font-serif font-bold text-[#1a1208] mb-1">All set, {info?.guest_name}!</h1>
+          <p className="text-sm text-[#6b5d52]">
+            Your details are saved. The front desk will have everything ready when you arrive on{' '}
+            <strong>{info?.check_in_date ? new Date(info.check_in_date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short' }) : ''}</strong>.
+          </p>
+          <p className="text-[11px] text-[#9c8e85] mt-4">Safe travels!</p>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="min-h-screen bg-[#faf7f2] p-4 sm:p-8">
+      <div className="max-w-md mx-auto">
+        <div className="bg-white rounded-3xl shadow-2xl overflow-hidden border-t-[3px] border-[#cc5a16]">
+          <div className="px-6 pt-6 pb-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">Online Check-In</p>
+            <h1 className="text-xl sm:text-2xl font-serif font-bold text-[#1a1208] mt-1">
+              Welcome, {info?.guest_name}
+            </h1>
+            <p className="text-xs text-[#6b5d52] mt-1">{info?.hotel_name}</p>
+            <div className="mt-3 bg-[#faf7f2] rounded-2xl p-3 text-[12px] text-[#3d3128] space-y-0.5">
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{info?.room_name || '—'}</strong></div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-in</span>{info?.check_in_date ? new Date(info.check_in_date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' }) : '—'}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-out</span>{info?.check_out_date ? new Date(info.check_out_date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' }) : '—'}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Guests</span>{info?.num_guests || 1}</div>
+            </div>
+          </div>
+
+          <form onSubmit={submit} className="px-6 pb-6 space-y-3">
+            <p className="text-[11px] text-[#6b5d52] mb-1">
+              Pre-fill these details to skip the paperwork at arrival. We verify with the last 4 digits of the phone you used to book.
+            </p>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone verify (last 4 digits) *</label>
+              <input
+                required maxLength={10}
+                value={form.verify_phone}
+                onChange={e => setForm({ ...form, verify_phone: e.target.value.replace(/\D/g, '') })}
+                placeholder="e.g. 7011"
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">ID Proof (Aadhaar / Passport)</label>
+              <input
+                value={form.guest_id_proof}
+                onChange={e => setForm({ ...form, guest_id_proof: e.target.value })}
+                placeholder="e.g. Passport · A12345678"
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Nationality</label>
+                <input
+                  value={form.guest_nationality}
+                  onChange={e => setForm({ ...form, guest_nationality: e.target.value })}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">State</label>
+                <input
+                  value={form.guest_state}
+                  onChange={e => setForm({ ...form, guest_state: e.target.value })}
+                  placeholder="e.g. Maharashtra"
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Email</label>
+              <input
+                type="email"
+                value={form.guest_email}
+                onChange={e => setForm({ ...form, guest_email: e.target.value })}
+                placeholder="guest@example.com"
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Special Requests</label>
+              <textarea
+                rows={2}
+                value={form.special_requests}
+                onChange={e => setForm({ ...form, special_requests: e.target.value })}
+                placeholder="e.g. early check-in · airport pickup · dietary preferences"
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={submitting || !form.verify_phone}
+              className={cn(
+                "w-full px-4 py-3 rounded-2xl text-sm font-bold transition-all",
+                form.verify_phone && !submitting
+                  ? "bg-[#cc5a16] text-white hover:bg-[#a84612]"
+                  : "bg-[#cc5a16]/30 text-white cursor-not-allowed"
+              )}
+            >
+              {submitting ? 'Saving…' : 'Save & Check-in early'}
+            </button>
+          </form>
+        </div>
+        <p className="text-center text-[10px] text-[#9c8e85] mt-3">Powered by Atithi-Setu</p>
+      </div>
+    </div>
+  );
+}
+
+/* PublicBookingPage definition lives further down (Sprint D1 UI). */
+function PublicBookingPage({ tenantId }: { tenantId: string }) {
+  // Stub — full implementation in the next commit.
+  return <div className="min-h-screen flex items-center justify-center text-[#9c8e85]">Loading booking page for {tenantId}…</div>;
 }
