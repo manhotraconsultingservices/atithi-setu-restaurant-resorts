@@ -8703,10 +8703,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   const saveService = async (data: any) => {
     const isNew = !data.id;
+    // Strip transient UI-only flags (_customCategory / _customRole)
+    // that the Add Service modal uses to switch between dropdown
+    // and free-text entry — the server doesn't need them.
+    const { _customCategory, _customRole, ...payload } = data;
     if (isNew) {
-      await hotelApi('/services', { method: 'POST', body: JSON.stringify(data) });
+      await hotelApi('/services', { method: 'POST', body: JSON.stringify(payload) });
     } else {
-      await hotelApi(`/services/${data.id}`, { method: 'PATCH', body: JSON.stringify(data) });
+      await hotelApi(`/services/${data.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
     }
     await fetchHotelServices();
   };
@@ -16800,21 +16804,128 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Description</label>
                 <textarea value={editingService.description || ''} onChange={e => setEditingService({...editingService, description: e.target.value})} rows={2} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
               </div>
+              {(() => {
+                // Categories + roles allow a "+ Custom…" option that
+                // switches to a text input. Existing categories/roles
+                // from the tenant's saved services are merged into the
+                // dropdown so a previously-entered custom value can be
+                // re-picked rather than re-typed.
+                const PRESET_CATEGORIES = ['HOUSEKEEPING','MAINTENANCE','ROOM_SERVICE','CONCIERGE','LAUNDRY','SPA','UPGRADE'];
+                const PRESET_ROLES      = ['HOUSEKEEPING','MAINTENANCE','CONCIERGE','FRONT_DESK','MANAGER'];
+                const tenantCategories = Array.from(new Set(
+                  hotelServices.map((s: any) => String(s.category || '').trim()).filter(Boolean)
+                ));
+                const tenantRoles = Array.from(new Set(
+                  hotelServices.map((s: any) => String(s.assigned_role || '').trim()).filter(Boolean)
+                ));
+                const categoryOpts = Array.from(new Set([...PRESET_CATEGORIES, ...tenantCategories]));
+                const roleOpts     = Array.from(new Set([...PRESET_ROLES,      ...tenantRoles]));
+                // Selecting __custom__ flips the field to an input. We
+                // store the "in custom mode" state on the editingService
+                // itself (using transient _customCategory / _customRole
+                // flags) so we don't need new top-level state.
+                const inCustomCategory = !!(editingService as any)._customCategory;
+                const inCustomRole     = !!(editingService as any)._customRole;
+                const currentCategory  = editingService.category || 'HOUSEKEEPING';
+                const currentRole      = editingService.assigned_role || 'HOUSEKEEPING';
+                // If the current saved value isn't in our option list, we
+                // implicitly treat it as a custom value (e.g. editing a
+                // service the owner created last week).
+                const categoryShownAsCustom = inCustomCategory ||
+                  (currentCategory && !categoryOpts.includes(currentCategory));
+                const roleShownAsCustom = inCustomRole ||
+                  (currentRole && !roleOpts.includes(currentRole));
+                return (
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Category *</label>
-                  <select required value={editingService.category || 'HOUSEKEEPING'} onChange={e => setEditingService({...editingService, category: e.target.value})} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none">
-                    <option>HOUSEKEEPING</option><option>MAINTENANCE</option><option>ROOM_SERVICE</option>
-                    <option>CONCIERGE</option><option>LAUNDRY</option><option>SPA</option><option>UPGRADE</option>
-                  </select>
+                  {categoryShownAsCustom ? (
+                    <div className="flex gap-1">
+                      <input
+                        required
+                        autoFocus={inCustomCategory}
+                        value={editingService.category || ''}
+                        onChange={e => setEditingService({
+                          ...editingService,
+                          // Normalise to upper snake_case so it matches the
+                          // preset shape and stays consistent across services.
+                          category: e.target.value.toUpperCase().replace(/\s+/g, '_'),
+                          _customCategory: true,
+                        } as any)}
+                        placeholder="e.g. WELLNESS"
+                        className="flex-1 min-w-0 bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                      />
+                      <button
+                        type="button"
+                        title="Pick from existing"
+                        onClick={() => setEditingService({ ...editingService, _customCategory: false } as any)}
+                        className="shrink-0 px-3 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-xs font-bold hover:bg-[#faf7f2]"
+                      >
+                        ▾
+                      </button>
+                    </div>
+                  ) : (
+                    <select
+                      required
+                      value={currentCategory}
+                      onChange={e => {
+                        if (e.target.value === '__custom__') {
+                          setEditingService({ ...editingService, category: '', _customCategory: true } as any);
+                        } else {
+                          setEditingService({ ...editingService, category: e.target.value, _customCategory: false } as any);
+                        }
+                      }}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    >
+                      {categoryOpts.map(c => <option key={c} value={c}>{c}</option>)}
+                      <option value="__custom__">+ Add custom category…</option>
+                    </select>
+                  )}
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Assigned Role</label>
-                  <select value={editingService.assigned_role || 'HOUSEKEEPING'} onChange={e => setEditingService({...editingService, assigned_role: e.target.value})} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none">
-                    <option>HOUSEKEEPING</option><option>MAINTENANCE</option><option>CONCIERGE</option><option>FRONT_DESK</option>
-                  </select>
+                  {roleShownAsCustom ? (
+                    <div className="flex gap-1">
+                      <input
+                        autoFocus={inCustomRole}
+                        value={editingService.assigned_role || ''}
+                        onChange={e => setEditingService({
+                          ...editingService,
+                          assigned_role: e.target.value.toUpperCase().replace(/\s+/g, '_'),
+                          _customRole: true,
+                        } as any)}
+                        placeholder="e.g. SPA_THERAPIST"
+                        className="flex-1 min-w-0 bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                      />
+                      <button
+                        type="button"
+                        title="Pick from existing"
+                        onClick={() => setEditingService({ ...editingService, _customRole: false } as any)}
+                        className="shrink-0 px-3 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-xs font-bold hover:bg-[#faf7f2]"
+                      >
+                        ▾
+                      </button>
+                    </div>
+                  ) : (
+                    <select
+                      value={currentRole}
+                      onChange={e => {
+                        if (e.target.value === '__custom__') {
+                          setEditingService({ ...editingService, assigned_role: '', _customRole: true } as any);
+                        } else {
+                          setEditingService({ ...editingService, assigned_role: e.target.value, _customRole: false } as any);
+                        }
+                      }}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    >
+                      {roleOpts.map(r => <option key={r} value={r}>{r}</option>)}
+                      <option value="__custom__">+ Add custom role…</option>
+                    </select>
+                  )}
                 </div>
               </div>
+                );
+              })()}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">SLA (minutes)</label>
