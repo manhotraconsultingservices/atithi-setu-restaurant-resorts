@@ -14701,6 +14701,107 @@ async function startServer() {
     }
   });
 
+  // Sprint P2-C — iCal export. Property-wide or per-room .ics feeds
+  // so direct bookings sync to OTAs (Booking.com / Airbnb / Expedia
+  // accept iCal feeds) and to personal calendars (Google / Apple).
+  // No auth — the URL itself is the bearer; rotate by changing the
+  // tenant slug if needed. Returns a valid RFC 5545 VCALENDAR with
+  // one VEVENT per non-cancelled booking.
+  const escapeIcal = (s: string): string =>
+    String(s || '')
+      .replace(/\\/g, '\\\\')
+      .replace(/;/g, '\\;')
+      .replace(/,/g, '\\,')
+      .replace(/\r?\n/g, '\\n');
+
+  const buildIcalFeed = (
+    bookings: any[],
+    propertyName: string,
+    feedName: string,
+  ): string => {
+    const lines: string[] = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//Atithi-Setu//Hotel iCal Feed//EN',
+      'CALSCALE:GREGORIAN',
+      'METHOD:PUBLISH',
+      `X-WR-CALNAME:${escapeIcal(feedName)}`,
+      `X-WR-CALDESC:${escapeIcal(`Direct bookings for ${propertyName}`)}`,
+    ];
+    const nowStamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+    for (const b of bookings) {
+      const ci = normaliseDateIso(b.check_in_date).replace(/-/g, '');
+      const co = normaliseDateIso(b.check_out_date).replace(/-/g, '');
+      if (!ci || !co) continue;
+      // For DAY_USE (ci === co) add a single-day event.
+      const dtend = ci === co
+        ? new Date(new Date(b.check_in_date).getTime() + 86400000).toISOString().slice(0, 10).replace(/-/g, '')
+        : co;
+      lines.push(
+        'BEGIN:VEVENT',
+        `UID:atithi-${b.id}@atithi-setu.com`,
+        `DTSTAMP:${nowStamp}`,
+        `DTSTART;VALUE=DATE:${ci}`,
+        `DTEND;VALUE=DATE:${dtend}`,
+        `SUMMARY:${escapeIcal(`${b.guest_name || 'Guest'}${b.room_name ? ` · ${b.room_name}` : ''}`)}`,
+        `DESCRIPTION:${escapeIcal(`Booking ${b.id}${b.guest_phone ? ` · ${b.guest_phone}` : ''}${b.booking_source ? ` · via ${b.booking_source}` : ''} · ${b.status}`)}`,
+        `STATUS:${b.status === 'CHECKED_OUT' ? 'CONFIRMED' : 'CONFIRMED'}`,
+        b.room_name ? `LOCATION:${escapeIcal(`${propertyName} · ${b.room_name}`)}` : `LOCATION:${escapeIcal(propertyName)}`,
+        'END:VEVENT'
+      );
+    }
+    lines.push('END:VCALENDAR');
+    return lines.join('\r\n');
+  };
+
+  // Property-wide feed.
+  app.get("/api/restaurant/:id/hotel/ical/property.ics", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).send(check.error);
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const bookings: any[] = await tenantDb.query(
+        `SELECT b.*, r.name AS room_name
+           FROM room_bookings b
+      LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE b.status NOT IN ('CANCELLED')
+       ORDER BY b.check_in_date`
+      );
+      const ics = buildIcalFeed(bookings, check.restaurant?.name || 'Property', `${check.restaurant?.name || 'Property'} — All bookings`);
+      res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="property.ics"');
+      res.send(ics);
+    } catch (err) {
+      res.status(500).send('Failed to generate iCal feed');
+    }
+  });
+
+  // Per-room feed (useful for OTA channel mapping where each room ID
+  // maps to a separate listing).
+  app.get("/api/restaurant/:id/hotel/ical/room/:roomId.ics", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).send(check.error);
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const room: any = await tenantDb.get("SELECT id, name FROM rooms WHERE id = ?", [req.params.roomId]);
+      if (!room) return res.status(404).send('Room not found');
+      const bookings: any[] = await tenantDb.query(
+        `SELECT b.*, r.name AS room_name
+           FROM room_bookings b
+      LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE b.room_id = ? AND b.status NOT IN ('CANCELLED')
+       ORDER BY b.check_in_date`,
+        [req.params.roomId]
+      );
+      const ics = buildIcalFeed(bookings, check.restaurant?.name || 'Property', `${room.name} — Bookings`);
+      res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+      res.setHeader('Content-Disposition', `inline; filename="room-${room.name.replace(/[^a-z0-9_-]+/gi, '-')}.ics"`);
+      res.send(ics);
+    } catch (err) {
+      res.status(500).send('Failed to generate room iCal feed');
+    }
+  });
+
   // Sprint P2-A — Cancel a whole booking group in one shot.
   // Applies the tenant's refund policy to each child booking
   // independently (the refund window is the same for all of them
@@ -19926,7 +20027,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-group-invoice',
+    commit_marker: 'hotel-ical-export',
     code_features: [
       'subscription-billing',
       'read-only-mode',
