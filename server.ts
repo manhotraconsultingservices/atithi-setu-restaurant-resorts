@@ -20280,7 +20280,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-online-checkin',
+    commit_marker: 'hotel-pre-arrival-emails',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -20992,6 +20992,92 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[billing-reminder] Subscription billing reminder cron started — daily at 09:30 IST');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // Sprint P2-G — Pre-arrival emails (daily at 10:00 IST).
+  // ═════════════════════════════════════════════════════════════════════════
+  // For every hotel-enabled tenant, find BOOKED bookings arriving in
+  // exactly 3 days from today (IST), and fire a GUEST_PRE_ARRIVAL
+  // notification (configurable per-tenant via notification_settings).
+  // Dedup via central sent_pre_arrival_emails table so reruns / manual
+  // triggers don't double-send.
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS sent_pre_arrival_emails (
+      id SERIAL PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      booking_id TEXT NOT NULL,
+      sent_on DATE NOT NULL DEFAULT CURRENT_DATE,
+      UNIQUE (tenant_id, booking_id, sent_on)
+    )
+  `).catch(() => {});
+
+  cron.schedule('0 10 * * *', async () => {
+    try {
+      console.log('[pre-arrival] 10:00 IST — sending pre-arrival emails for T-3 day check-ins');
+      const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' });
+      const todayIST = (tzDate.split(',')[0] || '').trim();
+      const targetDate = new Date(todayIST + 'T00:00:00Z');
+      targetDate.setUTCDate(targetDate.getUTCDate() + 3);
+      const targetIso = targetDate.toISOString().slice(0, 10);
+
+      const tenants = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND (property_type = 'HOTEL' OR property_type = 'BOTH')"
+      );
+      let totalSent = 0;
+      for (const t of tenants) {
+        try {
+          const db = await getTenantDb(t.id);
+          const bookings: any[] = await db.query(
+            `SELECT id, guest_name, guest_phone, guest_email, room_id,
+                    check_in_date, check_out_date
+               FROM room_bookings
+              WHERE status = 'BOOKED' AND check_in_date = ?`,
+            [targetIso]
+          );
+          for (const b of bookings) {
+            // Dedup — skip if already sent today.
+            try {
+              await centralDb.run(
+                `INSERT INTO sent_pre_arrival_emails (tenant_id, booking_id, sent_on)
+                 VALUES (?, ?, CURRENT_DATE)
+                 ON CONFLICT (tenant_id, booking_id, sent_on) DO NOTHING`,
+                [t.id, b.id]
+              );
+              // Use INSERT row count to decide; safer to use SELECT after-insert.
+              const dupCheck: any = await centralDb.get(
+                `SELECT COUNT(*) AS n FROM sent_pre_arrival_emails
+                  WHERE tenant_id = ? AND booking_id = ? AND sent_on = CURRENT_DATE`,
+                [t.id, b.id]
+              );
+              if (Number(dupCheck?.n || 0) > 1) continue;
+            } catch { /* race — fine */ }
+            try {
+              await triggerNotification(t.id, 'GUEST_PRE_ARRIVAL', {
+                bookingId: b.id,
+                guestName: b.guest_name,
+                checkIn: b.check_in_date,
+                checkOut: b.check_out_date,
+                checkinUrl: `https://app.atithi-setu.com/checkin/${t.id}/${b.id}`,
+              });
+              totalSent++;
+            } catch (e) {
+              console.warn(`[pre-arrival] failed for booking ${b.id}:`, e);
+            }
+          }
+        } catch (e) {
+          console.warn(`[pre-arrival] tenant ${t.id} skipped:`, e);
+        }
+      }
+      // Trim audit table after 90 days.
+      await centralDb.run(
+        `DELETE FROM sent_pre_arrival_emails WHERE sent_on < (CURRENT_DATE - INTERVAL '90 days')`
+      ).catch(() => {});
+      console.log(`[pre-arrival] done — ${totalSent} pre-arrival emails sent.`);
+    } catch (err) {
+      console.error('[pre-arrival] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[pre-arrival] Pre-arrival email cron started — daily at 10:00 IST (T-3 days from check-in)');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase 3 — Timesheet materialisation cron (23:59 IST) ────────────────
