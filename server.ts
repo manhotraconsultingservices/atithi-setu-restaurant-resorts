@@ -14862,6 +14862,179 @@ async function startServer() {
     }
   });
 
+  // ─── PUBLIC BOOKING PAGE — Sprint D1 ────────────────────────────────
+  // No-auth endpoints powering a direct-booking page guests can use
+  // without staff intervention. Bypasses OTA commissions.
+
+  // Hotel info card for the landing page.
+  app.get("/api/public/restaurant/:id/hotel", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const roomTypes: any[] = await tenantDb.query(
+        "SELECT id, name, description, base_rate, capacity, amenities, image_url FROM room_types WHERE is_active = 1 ORDER BY display_order, name"
+      );
+      // Always offer a fallback bucket for untagged rooms with their own
+      // base_rate range — so a tenant who hasn't created types can still
+      // accept direct bookings.
+      const untagged: any[] = await tenantDb.query(
+        "SELECT id, name, type, capacity, base_rate, amenities FROM rooms WHERE type_id IS NULL AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name LIMIT 20"
+      );
+      res.json({
+        id: req.params.id,
+        name: check.restaurant?.name,
+        city: check.restaurant?.city,
+        state: check.restaurant?.state,
+        phone: check.restaurant?.phone,
+        logo_url: check.restaurant?.logo_url,
+        currency_symbol: check.restaurant?.currency_symbol || '₹',
+        room_types: roomTypes,
+        untagged_rooms: untagged,
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to load hotel info" });
+    }
+  });
+
+  // Public availability search — same shape as the authed endpoint
+  // (re-uses find-available-rooms logic) but with no PII leakage.
+  app.get("/api/public/restaurant/:id/hotel/availability", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const start = (req.query.start as string) || '';
+      const end   = (req.query.end as string)   || '';
+      const guests = Math.max(1, Number(req.query.guests) || 1);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+        return res.status(400).json({ error: "start and end must be YYYY-MM-DD" });
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      const rooms: any[] = await tenantDb.query(
+        `SELECT r.id, r.name, r.type, r.type_id, r.capacity, r.base_rate, r.status, r.amenities,
+                t.name AS type_name, t.image_url AS type_image_url,
+                t.description AS type_description
+           FROM rooms r LEFT JOIN room_types t ON t.id = r.type_id
+       ORDER BY r.base_rate`
+      );
+      const bookingConflicts: any[] = await tenantDb.query(
+        `SELECT room_id, check_out_date AS conflict_end
+           FROM room_bookings
+          WHERE status NOT IN ('CANCELLED', 'CHECKED_OUT')
+            AND check_in_date < ? AND check_out_date > ?`,
+        [end, start]
+      );
+      const holdConflicts: any[] = await tenantDb.query(
+        `SELECT room_id, end_date AS conflict_end
+           FROM room_holds
+          WHERE start_date < ? AND end_date > ?`,
+        [end, start]
+      );
+      const iso = (v: any): string => {
+        if (!v) return '';
+        if (v instanceof Date) return v.toISOString().slice(0, 10);
+        const s = String(v);
+        return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : new Date(s).toISOString().slice(0, 10);
+      };
+      const conflictByRoom: Record<string, string> = {};
+      for (const c of [...bookingConflicts, ...holdConflicts]) {
+        const end0 = iso(c.conflict_end);
+        if (!conflictByRoom[c.room_id] || end0 > conflictByRoom[c.room_id]) {
+          conflictByRoom[c.room_id] = end0;
+        }
+      }
+      // Compute rate-plan total for each available room.
+      const results: any[] = [];
+      for (const r of rooms) {
+        const fits = Number(r.capacity || 0) >= guests;
+        const blocked = r.status === 'MAINTENANCE' || r.status === 'BLOCKED';
+        const conflict = conflictByRoom[r.id];
+        if (!fits || blocked || conflict) continue;  // public page shows only available
+        const plan = await computeRoomTotal(req.params.id, r.id, start, end);
+        results.push({
+          id: r.id,
+          name: r.name,
+          type: r.type_name || r.type,
+          type_id: r.type_id,
+          capacity: r.capacity,
+          base_rate: Number(r.base_rate || 0),
+          image_url: r.type_image_url,
+          description: r.type_description,
+          amenities: r.amenities,
+          total_rate: plan.total,
+          nights: plan.nights.length,
+        });
+      }
+      results.sort((a, b) => a.total_rate - b.total_rate);
+      res.json({ start, end, guests, rooms: results });
+    } catch (err) {
+      console.error("public availability error:", err);
+      res.status(500).json({ error: "Failed to search rooms" });
+    }
+  });
+
+  // Public booking creation. Anyone can hit this — basic rate-limit-
+  // friendly fields-only; status starts BOOKED, booking_source set to
+  // 'DIRECT_WEB' so reports can attribute revenue.
+  app.post("/api/public/restaurant/:id/hotel/booking", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const {
+        room_id, guest_name, guest_phone, guest_email,
+        check_in_date, check_out_date, num_guests, special_requests,
+      } = req.body || {};
+      if (!guest_name || !String(guest_name).trim()) {
+        return res.status(400).json({ error: "Name is required." });
+      }
+      if (!guest_phone || !String(guest_phone).trim()) {
+        return res.status(400).json({ error: "Phone is required." });
+      }
+      if (!guest_email || !String(guest_email).trim()) {
+        return res.status(400).json({ error: "Email is required so we can confirm your booking." });
+      }
+      const v = await validateBookingRequest(req.params.id, {
+        room_id, check_in_date, check_out_date,
+        booking_type: 'OVERNIGHT', num_guests: num_guests || 1,
+      });
+      if (!v.ok) return res.status(v.status).json({ error: v.error });
+
+      const tenantDb = await getTenantDb(req.params.id);
+      const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const plan = await computeRoomTotal(req.params.id, room_id, check_in_date, check_out_date);
+      const firstRate = plan.nights[0]?.rate || 0;
+
+      await tenantDb.run(
+        `INSERT INTO room_bookings
+         (id, room_id, guest_name, guest_phone, guest_email,
+          num_guests, check_in_date, check_out_date, status, booking_source,
+          room_rate, total_amount, special_requests, booking_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', 'DIRECT_WEB', ?, ?, ?, 'OVERNIGHT')`,
+        [bid, room_id,
+         String(guest_name).trim(),
+         String(guest_phone).trim(),
+         String(guest_email).trim(),
+         num_guests || 1, check_in_date, check_out_date,
+         firstRate, plan.total, special_requests || null]
+      );
+      const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
+      try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date, source: 'DIRECT_WEB' }); } catch {}
+      try { await logChannelSync(req.params.id, row, 'BOOKING_CREATED'); } catch {}
+      // Return minimal confirmation — no PII beyond what they typed in.
+      res.status(201).json({
+        booking_id: bid,
+        guest_name: row.guest_name,
+        check_in_date: row.check_in_date,
+        check_out_date: row.check_out_date,
+        total_amount: row.total_amount,
+        confirmation_message: `Booking confirmed for ${guest_name}.`,
+      });
+    } catch (err: any) {
+      console.error("public booking error:", err);
+      res.status(500).json({ error: "Failed to create booking" });
+    }
+  });
+
   // Sprint P2-F — Online check-in form. Public endpoint, no auth.
   // Guest opens the URL we email them T-3 days before arrival; pre-
   // fills the ID + nationality + special requests fields. Reduces
@@ -20441,7 +20614,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-yield-management',
+    commit_marker: 'hotel-public-booking',
     code_features: [
       'subscription-billing',
       'read-only-mode',
