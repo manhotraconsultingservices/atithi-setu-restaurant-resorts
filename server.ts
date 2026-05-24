@@ -325,6 +325,41 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
 
+    -- Sprint CH-2 — iCal feeds. Owner pastes Booking.com / Airbnb /
+    -- Vrbo / Agoda iCal URLs here. Cron pulls every 30 min, upserts
+    -- bookings tagged with the source channel. The PRACTICAL way
+    -- independent hotels currently sync with OTAs without channel
+    -- manager subscriptions.
+    --   scope        'ROOM' | 'PROPERTY' (apply to all rooms)
+    --   scope_id     room_id or NULL for property-wide
+    --   channel      'BOOKING' | 'AIRBNB' | 'VRBO' | 'AGODA' | etc.
+    --   url          the iCal HTTPS URL the OTA provides
+    --   last_synced  set after each successful pull
+    --   last_error   plain text from the last failure (NULL on success)
+    CREATE TABLE IF NOT EXISTS channel_ical_feeds (
+      id           TEXT PRIMARY KEY,
+      scope        TEXT NOT NULL DEFAULT 'ROOM',
+      scope_id     TEXT,
+      channel      TEXT NOT NULL,
+      url          TEXT NOT NULL,
+      label        TEXT,
+      is_enabled   INT DEFAULT 1,
+      last_synced  TIMESTAMP,
+      last_error   TEXT,
+      created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_ical_feeds_enabled ON channel_ical_feeds (is_enabled);
+
+    -- Tracks which OTA VEVENT UIDs we've already imported so the same
+    -- cron pass over the same feed doesn't duplicate bookings.
+    CREATE TABLE IF NOT EXISTS channel_ical_imports (
+      feed_id      TEXT NOT NULL,
+      external_uid TEXT NOT NULL,
+      booking_id   TEXT,
+      imported_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (feed_id, external_uid)
+    );
+
     -- Sprint D2 — Channel manager integration credentials (stub).
     -- Owner enters per-channel API keys here; real OTA push wiring
     -- (Booking.com / MMT / Agoda) reads from this table in a follow-
@@ -1025,6 +1060,185 @@ async function computeCancellationRefund(
     days_until_checkin: daysUntil,
     policy_text: `Cancellation inside the ${fullDays} day window — no refund per property policy.`,
   };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  iCal feed import — Sprint CH-2
+//
+//  Fetches an OTA iCal feed and creates BOOKED rows for any VEVENT UIDs
+//  we haven't already imported. Returns an audit summary the caller
+//  uses for the manual-sync button + the cron logs.
+//
+//  Parsing strategy: simple line-by-line tokenisation of the iCal RFC.
+//  We handle:
+//   - BEGIN:VEVENT / END:VEVENT blocks
+//   - UID (event id from the OTA)
+//   - DTSTART;VALUE=DATE:YYYYMMDD  (all-day events; the common case
+//     for OTA blocked dates)
+//   - DTEND;VALUE=DATE:YYYYMMDD
+//   - SUMMARY (guest name — often masked by OTA, but use what's there)
+//
+//  Skips events that:
+//   - Have already been imported (channel_ical_imports dedup)
+//   - Are in the past (we don't backfill blocked dates that have passed)
+//   - Have no valid date range
+// ════════════════════════════════════════════════════════════════════════
+function parseIcalFeed(ics: string): Array<{ uid: string; summary: string; start: string; end: string }> {
+  // Unfold lines per RFC 5545 (continuation lines start with space/tab)
+  const unfolded: string[] = [];
+  for (const raw of ics.replace(/\r\n/g, '\n').split('\n')) {
+    if (raw.startsWith(' ') || raw.startsWith('\t')) {
+      if (unfolded.length > 0) unfolded[unfolded.length - 1] += raw.slice(1);
+    } else {
+      unfolded.push(raw);
+    }
+  }
+  const events: Array<{ uid: string; summary: string; start: string; end: string }> = [];
+  let inEvent = false;
+  let cur: { uid?: string; summary?: string; start?: string; end?: string } = {};
+  const dateLine = (line: string): string | null => {
+    // Match DTSTART:20260524 or DTSTART;VALUE=DATE:20260524 or
+    // DTSTART;VALUE=DATE-TIME:20260524T120000Z
+    const m = line.match(/(\d{8})/);
+    if (!m) return null;
+    const s = m[1];
+    return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+  };
+  for (const line of unfolded) {
+    if (line === 'BEGIN:VEVENT') { inEvent = true; cur = {}; continue; }
+    if (line === 'END:VEVENT') {
+      if (cur.uid && cur.start && cur.end) {
+        events.push({
+          uid:     cur.uid,
+          summary: cur.summary || 'OTA booking',
+          start:   cur.start,
+          end:     cur.end,
+        });
+      }
+      inEvent = false; cur = {};
+      continue;
+    }
+    if (!inEvent) continue;
+    if (line.startsWith('UID:')) cur.uid = line.slice(4);
+    else if (line.startsWith('UID;')) cur.uid = line.split(':')[1] || '';
+    else if (line.startsWith('SUMMARY:')) cur.summary = line.slice(8);
+    else if (line.startsWith('SUMMARY;')) cur.summary = line.split(':')[1] || '';
+    else if (line.startsWith('DTSTART')) {
+      const d = dateLine(line);
+      if (d) cur.start = d;
+    }
+    else if (line.startsWith('DTEND')) {
+      const d = dateLine(line);
+      if (d) cur.end = d;
+    }
+  }
+  return events;
+}
+
+async function syncOneIcalFeed(restaurantId: string, feedId: string): Promise<{
+  ok: boolean; feed_id: string; imported: number; skipped: number;
+  failed: number; error?: string;
+}> {
+  const tenantDb = await getTenantDb(restaurantId);
+  const feed: any = await tenantDb.get("SELECT * FROM channel_ical_feeds WHERE id = ?", [feedId]);
+  if (!feed) return { ok: false, feed_id: feedId, imported: 0, skipped: 0, failed: 0, error: 'feed not found' };
+  if (!feed.is_enabled) {
+    return { ok: true, feed_id: feedId, imported: 0, skipped: 0, failed: 0, error: 'feed disabled' };
+  }
+
+  // Fetch the iCal URL. 15s timeout.
+  let icsText: string;
+  try {
+    const controller = new AbortController();
+    const tm = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(feed.url, { signal: controller.signal });
+    clearTimeout(tm);
+    if (!res.ok) {
+      await tenantDb.run(
+        "UPDATE channel_ical_feeds SET last_error = ? WHERE id = ?",
+        [`HTTP ${res.status}`, feedId]
+      );
+      return { ok: false, feed_id: feedId, imported: 0, skipped: 0, failed: 1, error: `HTTP ${res.status}` };
+    }
+    icsText = await res.text();
+  } catch (e: any) {
+    await tenantDb.run(
+      "UPDATE channel_ical_feeds SET last_error = ? WHERE id = ?",
+      [String(e?.message || e).slice(0, 500), feedId]
+    );
+    return { ok: false, feed_id: feedId, imported: 0, skipped: 0, failed: 1, error: e?.message || 'fetch failed' };
+  }
+
+  const events = parseIcalFeed(icsText);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  let imported = 0, skipped = 0, failed = 0;
+  // Determine rooms in scope. PROPERTY scope means we need to assign a
+  // room — for v1 we DO NOT assign automatically (would require choosing
+  // among available rooms by some rule). Instead, PROPERTY-scoped feeds
+  // import as a placeholder room or skip. ROOM scope is the common case.
+  if (feed.scope === 'PROPERTY') {
+    skipped = events.length;
+    await tenantDb.run(
+      "UPDATE channel_ical_feeds SET last_synced = CURRENT_TIMESTAMP, last_error = ? WHERE id = ?",
+      ['PROPERTY-scoped feeds need per-room mapping (not yet supported); use ROOM scope.', feedId]
+    );
+    return { ok: false, feed_id: feedId, imported: 0, skipped, failed: 0, error: 'PROPERTY scope not supported in v1' };
+  }
+  if (!feed.scope_id) {
+    return { ok: false, feed_id: feedId, imported: 0, skipped: 0, failed: 0, error: 'feed has no scope_id' };
+  }
+
+  for (const ev of events) {
+    // Skip past events
+    if (ev.end <= todayIso) { skipped++; continue; }
+    // Idempotent — already imported?
+    const dup: any = await tenantDb.get(
+      "SELECT booking_id FROM channel_ical_imports WHERE feed_id = ? AND external_uid = ?",
+      [feedId, ev.uid]
+    );
+    if (dup) { skipped++; continue; }
+    // Validate against existing bookings (overlap check).
+    const v = await validateBookingRequest(restaurantId, {
+      room_id: feed.scope_id,
+      check_in_date: ev.start,
+      check_out_date: ev.end,
+      booking_type: 'OVERNIGHT',
+      num_guests: 1,
+      skipPastDateCheck: true,  // OTA may sync events spanning midnight
+    });
+    if (!v.ok) {
+      // Log the conflict but don't fail the whole pass.
+      console.warn(`[ical-sync] conflict for feed ${feedId} UID ${ev.uid}: ${v.error}`);
+      failed++;
+      continue;
+    }
+    const bid = `BK-OTA-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    const nights = Math.max(1, Math.ceil((new Date(ev.end).getTime() - new Date(ev.start).getTime()) / 86400000));
+    // Pull room base rate so total_amount has a sane default.
+    const room: any = await tenantDb.get("SELECT base_rate FROM rooms WHERE id = ?", [feed.scope_id]);
+    const rate = Number(room?.base_rate || 0);
+    await tenantDb.run(
+      `INSERT INTO room_bookings
+         (id, room_id, guest_name, num_guests, check_in_date, check_out_date, status, booking_source,
+          room_rate, total_amount, special_requests, booking_type)
+       VALUES (?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, 'OVERNIGHT')`,
+      [bid, feed.scope_id, ev.summary, 1, ev.start, ev.end, String(feed.channel).toUpperCase(),
+       rate, rate * nights, `Imported from ${feed.channel} iCal · UID ${ev.uid}`]
+    );
+    await tenantDb.run(
+      `INSERT INTO channel_ical_imports (feed_id, external_uid, booking_id)
+       VALUES (?, ?, ?)
+       ON CONFLICT (feed_id, external_uid) DO NOTHING`,
+      [feedId, ev.uid, bid]
+    );
+    imported++;
+  }
+
+  await tenantDb.run(
+    "UPDATE channel_ical_feeds SET last_synced = CURRENT_TIMESTAMP, last_error = NULL WHERE id = ?",
+    [feedId]
+  );
+  return { ok: true, feed_id: feedId, imported, skipped, failed };
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -14879,6 +15093,86 @@ async function startServer() {
     }
   });
 
+  // ─── ICAL FEEDS — Sprint CH-2 ──────────────────────────────────────
+  // CRUD for iCal subscription URLs. The cron worker (further down)
+  // fetches each enabled feed every 30 min and creates BOOKED rows for
+  // any new VEVENT UIDs.
+  app.get("/api/restaurant/:id/hotel/ical-feeds", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows = await tenantDb.query(
+        `SELECT f.*,
+                (SELECT COUNT(*) FROM channel_ical_imports WHERE feed_id = f.id) AS imported_count
+           FROM channel_ical_feeds f
+       ORDER BY f.channel, f.created_at DESC`
+      );
+      res.json(rows);
+    } catch {
+      res.status(500).json({ error: "Failed to fetch iCal feeds" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/ical-feeds", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const b = req.body || {};
+      if (!b.channel || !b.url) {
+        return res.status(400).json({ error: "channel + url are required." });
+      }
+      const scope = String(b.scope || 'ROOM').toUpperCase();
+      if (scope !== 'ROOM' && scope !== 'PROPERTY') {
+        return res.status(400).json({ error: "scope must be ROOM or PROPERTY." });
+      }
+      if (scope === 'ROOM' && !b.scope_id) {
+        return res.status(400).json({ error: "scope_id (room) required for ROOM scope." });
+      }
+      try { new URL(b.url); } catch { return res.status(400).json({ error: "url must be a valid HTTPS URL." }); }
+      const tenantDb = await getTenantDb(req.params.id);
+      const id = `ICAL-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO channel_ical_feeds (id, scope, scope_id, channel, url, label, is_enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, scope, b.scope_id || null, String(b.channel).toUpperCase(),
+         String(b.url), b.label || null, b.is_enabled === false ? 0 : 1]
+      );
+      res.status(201).json(await tenantDb.get("SELECT * FROM channel_ical_feeds WHERE id = ?", [id]));
+    } catch (err) {
+      console.error("create ical feed error:", err);
+      res.status(500).json({ error: "Failed to create iCal feed" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hotel/ical-feeds/:feedId", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      // Detach historical imports so the cron doesn't think the
+      // entries are still valid. Bookings created from this feed
+      // remain — operator may want to keep them.
+      await tenantDb.run("DELETE FROM channel_ical_imports WHERE feed_id = ?", [req.params.feedId]);
+      await tenantDb.run("DELETE FROM channel_ical_feeds WHERE id = ?", [req.params.feedId]);
+      res.json({ success: true });
+    } catch {
+      res.status(500).json({ error: "Failed to delete iCal feed" });
+    }
+  });
+
+  // Manual "Sync now" trigger for a single feed.
+  app.post("/api/restaurant/:id/hotel/ical-feeds/:feedId/sync", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const result = await syncOneIcalFeed(req.params.id, req.params.feedId);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'iCal sync failed' });
+    }
+  });
+
   // ─── AT-REST ENCRYPTION HELPERS — Sprint D2 hardening ──────────────
   // Encrypts channel_credentials.api_secret with AES-256-GCM before
   // storing. The key is derived from process.env.CHANNEL_CRED_KEY (or
@@ -20731,7 +21025,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-channel-adapter-framework',
+    commit_marker: 'hotel-ical-import',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -21651,6 +21945,62 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[channel-worker] Channel sync worker started — every 5 minutes');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── CH-2 — iCal IMPORT WORKER (every 30 min IST) ────────────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // Pulls each tenant's enabled iCal feeds (Booking.com / Airbnb / Vrbo /
+  // Agoda export URLs) and ingests new VEVENTs as BOOKED rows.
+  //
+  // Why iCal instead of a real API:
+  //   Real OTA Connectivity APIs (Booking.com OTA, MMT Connect, Agoda YCS)
+  //   require formal partnership applications taking 2-4 months. iCal
+  //   export-URL sync is the practical real-world solution that every
+  //   major OTA supports without a partner agreement, and is what 80% of
+  //   independent hotels use for inbound channel sync today.
+  //
+  // Frequency:
+  //   Every 30 min is the common-recommendation cadence; OTA feeds rarely
+  //   update faster than that and most enforce rate limits at <2/hr.
+  cron.schedule('*/30 * * * *', async () => {
+    try {
+      const tenants = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND (property_type = 'HOTEL' OR property_type = 'BOTH')"
+      );
+      let totalImported = 0;
+      let totalSkipped = 0;
+      let totalFailed = 0;
+      let feedsRun = 0;
+      for (const t of tenants) {
+        try {
+          const tdb = await getTenantDb(t.id);
+          const feeds: any[] = await tdb.query(
+            "SELECT id FROM channel_ical_feeds WHERE is_enabled = 1"
+          );
+          for (const f of feeds) {
+            try {
+              const r = await syncOneIcalFeed(t.id, f.id);
+              totalImported += r.imported;
+              totalSkipped += r.skipped;
+              totalFailed += r.failed;
+              feedsRun++;
+            } catch (e) {
+              console.warn(`[ical-worker] tenant ${t.id} feed ${f.id} failed:`, e);
+              totalFailed++;
+            }
+          }
+        } catch (e) {
+          console.warn(`[ical-worker] tenant ${t.id} skipped:`, e);
+        }
+      }
+      if (feedsRun > 0) {
+        console.log(`[ical-worker] done — feeds ${feedsRun} · imported ${totalImported} · skipped ${totalSkipped} · failed ${totalFailed}`);
+      }
+    } catch (err) {
+      console.error('[ical-worker] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[ical-worker] iCal import worker started — every 30 minutes');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase 3 — Timesheet materialisation cron (23:59 IST) ────────────────
