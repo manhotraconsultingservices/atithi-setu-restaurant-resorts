@@ -6579,6 +6579,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingRoomType, setEditingRoomType] = useState<any | null>(null);
   // Sprint A1 — Availability calendar view toggle for the Bookings tab
   const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR'>('LIST');
+  // Bumped from any mutation that affects availability (new booking,
+  // cancel, check-in, check-out, hold create/lift). The calendar
+  // listens via its refreshNonce prop and re-fetches when this changes,
+  // so the user sees their action reflected without waiting for the
+  // 30 s polling tick.
+  const [calendarRefreshNonce, setCalendarRefreshNonce] = useState(0);
   const [hotelServices, setHotelServices] = useState<any[]>([]);
   const [hotelRequests, setHotelRequests] = useState<any[]>([]);
   const [hotelLoading, setHotelLoading] = useState(false);
@@ -8786,6 +8792,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       setHoldForm({ start_date: '', end_date: '', kind: 'MAINTENANCE', reason: '' });
       await fetchRoomHolds(blockingRoom.id);
+      markAvailabilityDirty();
     } catch (err: any) {
       alert(err?.message || 'Failed to create hold');
     } finally {
@@ -8797,6 +8804,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     try {
       await hotelApi(`/room-holds/${holdId}`, { method: 'DELETE' });
       if (blockingRoom?.id) await fetchRoomHolds(blockingRoom.id);
+      markAvailabilityDirty();
     } catch (err: any) {
       alert(err?.message || 'Failed to lift hold');
     }
@@ -8862,16 +8870,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!isHotelEnabled) return;
     try { setHotelAnalytics(await hotelApi('/analytics')); } catch (err: any) { setHotelError(err.message); }
   };
+  // Bump the calendar's refreshNonce after any mutation that changes
+  // availability. Wraps the setState into a stable helper so call sites
+  // stay terse.
+  const markAvailabilityDirty = () => setCalendarRefreshNonce(n => n + 1);
+
   const saveBooking = async (data: any) => {
     const isNew = !data.id;
     if (isNew) await hotelApi('/bookings', { method: 'POST', body: JSON.stringify(data) });
     else await hotelApi(`/bookings/${data.id}`, { method: 'PATCH', body: JSON.stringify(data) });
     await fetchHotelBookings();
+    markAvailabilityDirty();
   };
   const checkInBooking = async (bookingId: string, force = false) => {
     const result = await hotelApi(`/bookings/${bookingId}/checkin`, { method: 'POST', body: JSON.stringify({ force }) });
     await fetchHotelBookings();
     await fetchHotelRooms();
+    markAvailabilityDirty();
     // Phase H1 — celebrate birthday / anniversary perks. Server returns
     // perk.applies=true when today matches the guest's stored date and
     // it hasn't already fired in IST today. We surface a toast-like
@@ -8950,6 +8965,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     });
     await fetchHotelBookings();
     await fetchHotelRooms();
+    markAvailabilityDirty();
     return result;
   };
   // Open the cancellation confirm modal — fetches the refund preview so
@@ -8984,6 +9000,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setCancelPreview(null);
       setCancelReason('');
       await fetchHotelBookings();
+      markAvailabilityDirty();
     } catch (err: any) {
       alert(err?.message || 'Failed to cancel booking');
     } finally {
@@ -14745,6 +14762,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <AvailabilityCalendar
               restaurantId={restaurantId}
               token={token}
+              refreshNonce={calendarRefreshNonce}
               onCellClick={(roomId, date) => {
                 // Pre-fill the new-booking modal with the room + clicked date.
                 const room = hotelRooms.find(r => r.id === roomId);
@@ -20955,24 +20973,60 @@ const AvailabilityCalendar: React.FC<{
   token: string;
   onCellClick: (roomId: string, date: string) => void;
   onHoldClick?: (roomId: string) => void;
-}> = ({ restaurantId, token, onCellClick, onHoldClick }) => {
+  refreshNonce?: number;   // bump from parent (after booking/hold mutations) to force a re-fetch
+}> = ({ restaurantId, token, onCellClick, onHoldClick, refreshNonce }) => {
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState<number>(14);
   const [start, setStart] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
-  const fetchAvailability = useCallback(async () => {
-    setLoading(true);
+  // Distinguish first-load (show full "Loading…" state) from background
+  // refreshes (silent update — don't blank the grid the user is scanning).
+  const fetchAvailability = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await fetch(
         `/api/restaurant/${restaurantId}/hotel/availability?start=${start}&days=${days}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      if (res.ok) setData(await res.json());
-    } finally { setLoading(false); }
+      if (res.ok) {
+        setData(await res.json());
+        setLastRefresh(new Date());
+      }
+    } finally { if (!silent) setLoading(false); }
   }, [restaurantId, token, start, days]);
 
-  useEffect(() => { fetchAvailability(); }, [fetchAvailability]);
+  // Initial + window-change fetch (foreground).
+  useEffect(() => { fetchAvailability(false); }, [fetchAvailability]);
+
+  // Auto-refresh every 30s in the background. Same cadence as the
+  // HotelCommandCenter so the two views stay in lockstep.
+  useEffect(() => {
+    const id = setInterval(() => fetchAvailability(true), 30_000);
+    return () => clearInterval(id);
+  }, [fetchAvailability]);
+
+  // Refresh-on-focus — when the user comes back from another tab or
+  // from making a booking elsewhere in the app, immediately pull fresh
+  // data instead of waiting up to 30 s for the timer.
+  useEffect(() => {
+    const onFocus = () => fetchAvailability(true);
+    const onVisible = () => { if (document.visibilityState === 'visible') fetchAvailability(true); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [fetchAvailability]);
+
+  // Parent-driven refresh: when refreshNonce changes (parent bumps it
+  // after a booking/hold mutation) we pull immediately.
+  useEffect(() => {
+    if (refreshNonce !== undefined) fetchAvailability(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshNonce]);
 
   // Status palette — keep accessible and high-contrast.
   const cellPalette: Record<string, { bg: string; fg: string; border: string; label: string }> = {
@@ -21038,8 +21092,27 @@ const AvailabilityCalendar: React.FC<{
             </button>
           ))}
         </div>
+        {/* Manual refresh + last-updated. Sits before the legend so the
+            staff sees a clear indicator that the grid is fresh. */}
+        <div className="flex items-center gap-2 ml-auto">
+          <button
+            type="button"
+            onClick={() => fetchAvailability(false)}
+            disabled={loading}
+            title="Refresh now"
+            className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-xs font-bold hover:bg-white disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1"
+          >
+            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+          {lastRefresh && (
+            <span className="text-[10px] text-[#9c8e85] whitespace-nowrap">
+              Updated {lastRefresh.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </span>
+          )}
+        </div>
         {/* Legend */}
-        <div className="ml-auto flex items-center gap-2 text-[10px] text-[#6b5d52] flex-wrap">
+        <div className="flex items-center gap-2 text-[10px] text-[#6b5d52] flex-wrap">
           {Object.entries(cellPalette).filter(([k]) => k !== 'VACANT').map(([k, p]) => (
             <span key={k} className="inline-flex items-center gap-1">
               <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: p.bg, border: `1px solid ${p.border}` }} />
