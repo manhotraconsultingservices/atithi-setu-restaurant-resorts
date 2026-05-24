@@ -2252,6 +2252,40 @@ async function startServer() {
   app.use(express.urlencoded({ extended: true }));
 
   // ─────────────────────────────────────────────────────────────────────
+  // MARKETING-DOMAIN REDIRECT (atithi-setu.com / www.atithi-setu.com)
+  // ─────────────────────────────────────────────────────────────────────
+  // The marketing landing page lives on Cloudflare Pages at
+  // https://atithi-setu.com/. The ERP runs at app.atithi-setu.com and
+  // at per-tenant subdomains like manhotra-kitchen.atithi-setu.com.
+  //
+  // If a request reaches THIS ERP server with Host = "atithi-setu.com"
+  // or "www.atithi-setu.com" (mobile keyboard autocomplete commonly
+  // prepends "www.", Google search results often surface the www
+  // variant, and DNS today CNAMEs www → this ERP backend), the user
+  // sees the ERP login screen even though they meant to read the
+  // marketing pitch. That's a real top-of-funnel leak.
+  //
+  // Until DNS is repointed (add www.atithi-setu.com as a custom
+  // domain on the marketingatithisetu Cloudflare Pages project),
+  // catch the misdirected traffic here and 301-redirect to the
+  // marketing apex. Cheap, harmless once DNS is fixed (Cloudflare
+  // will handle www→apex before requests ever reach Express).
+  //
+  // Tenant subdomains (manhotra-kitchen.atithi-setu.com, app.*, etc.)
+  // are left untouched — only the bare and www variants redirect.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const rawHost = String(req.headers.host || '').toLowerCase().split(':')[0];
+    if (rawHost === 'www.atithi-setu.com' || rawHost === 'atithi-setu.com') {
+      const target = `https://atithi-setu.com${req.originalUrl || req.url || '/'}`;
+      // 301 permanent — fine because the apex is the canonical marketing
+      // URL. Browsers will cache the redirect, sparing future hops.
+      res.set('Cache-Control', 'public, max-age=3600');
+      return res.redirect(301, target);
+    }
+    next();
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
   // GLOBAL TENANT READ-ONLY GUARD
   // ─────────────────────────────────────────────────────────────────────
   // Many tenant-scoped routes are intentionally unauthenticated for guest
@@ -21290,7 +21324,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-channel-sprint-complete',
+    commit_marker: 'hotel-channel-sprint-complete-plus-www-redirect',
     code_features: [
       'subscription-billing',
       'read-only-mode',
