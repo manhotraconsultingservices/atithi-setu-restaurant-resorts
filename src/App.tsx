@@ -6580,6 +6580,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Sprint A1 — Availability calendar view toggle for the Bookings tab
   // (DASHBOARD added in C3 — quick-glance receptionist/GM view)
   const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR' | 'DASHBOARD'>('LIST');
+  // Calendar quick-action popover — opened by clicking a booked cell.
+  // Holds the booking id; the popover looks up the row from hotelBookings
+  // so it stays in sync with the calendar's data without re-fetching.
+  const [calendarBookingPopover, setCalendarBookingPopover] = useState<string | null>(null);
   // Sprint C2 — Group booking modal state. Holds a single "group draft"
   // — name + contact + dates + a list of selected rooms — that the
   // user can build up before clicking Create. Posts as one transaction
@@ -14833,6 +14837,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               restaurantId={restaurantId}
               token={token}
               refreshNonce={calendarRefreshNonce}
+              onBookingClick={(bookingId) => setCalendarBookingPopover(bookingId)}
               onCellClick={(roomId, date) => {
                 // Pre-fill the new-booking modal with the room + clicked date.
                 const room = hotelRooms.find(r => r.id === roomId);
@@ -17314,6 +17319,166 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       )}
+
+      {/* ═════════ Calendar Booking Quick-Actions popover ═════════
+          Opened by clicking a booked / checked-in cell on the
+          Availability Calendar grid. Shows booking summary + status-
+          aware actions (Edit / Cancel / Check-In / Check-Out) so the
+          front desk can manage a booking without leaving the
+          calendar view. Falls back to a "not found" message if the
+          booking has since been cancelled by another tab. */}
+      {calendarBookingPopover && (() => {
+        const b = hotelBookings.find((x: any) => x.id === calendarBookingPopover);
+        const close = () => setCalendarBookingPopover(null);
+        if (!b) {
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 text-center">
+                <p className="text-sm text-[#6b5d52] mb-3">Booking not found. It may have been cancelled in another tab.</p>
+                <button onClick={close} className="px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Close</button>
+              </div>
+            </div>
+          );
+        }
+        const status = b.status;
+        const statusColors: Record<string, { bg: string; text: string; label: string }> = {
+          BOOKED:       { bg: 'bg-amber-100',    text: 'text-amber-800',    label: 'Booked' },
+          CHECKED_IN:   { bg: 'bg-orange-100',   text: 'text-orange-800',   label: 'In-house' },
+          CHECKED_OUT:  { bg: 'bg-slate-100',    text: 'text-slate-700',    label: 'Checked out' },
+          CANCELLED:    { bg: 'bg-rose-100',     text: 'text-rose-800',     label: 'Cancelled' },
+        };
+        const sc = statusColors[status] || statusColors.BOOKED;
+        const room = hotelRooms.find((r: any) => r.id === b.room_id);
+        const ci = normaliseBookingDate(b.check_in_date);
+        const co = normaliseBookingDate(b.check_out_date);
+        const fmt = (d: string) => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+        const nights = ci && co && ci !== co
+          ? Math.max(1, Math.ceil((new Date(co).getTime() - new Date(ci).getTime()) / 86400000))
+          : 1;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={close}>
+            <div
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-xl font-bold font-serif text-[#1a1208] truncate">{b.guest_name}</h3>
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    <span className={cn('text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', sc.bg, sc.text)}>
+                      {sc.label}
+                    </span>
+                    {b.booking_type === 'DAY_USE' && (
+                      <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-teal-100 text-teal-800">Day-use</span>
+                    )}
+                    {b.group_id && (
+                      <span
+                        className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-violet-100 text-violet-800"
+                        title={`Group: ${b.group_name || b.group_id}`}
+                      >
+                        Group{b.group_name ? ` · ${b.group_name}` : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button onClick={close} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] shrink-0"><X size={18} /></button>
+              </div>
+
+              {/* Summary */}
+              <div className="bg-[#faf7f2] rounded-2xl p-4 text-sm space-y-1.5 mb-4">
+                <div className="flex justify-between gap-3">
+                  <span className="text-[#6b5d52]">Room</span>
+                  <span className="font-semibold text-[#1a1208]">{room?.name || b.room_name || b.room_id}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-[#6b5d52]">Check-in</span>
+                  <span className="text-[#1a1208] text-[12px]">{fmt(ci)}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-[#6b5d52]">Check-out</span>
+                  <span className="text-[#1a1208] text-[12px]">{fmt(co)}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-[#6b5d52]">Nights</span>
+                  <span className="text-[#1a1208]">{nights}</span>
+                </div>
+                {b.guest_phone && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-[#6b5d52]">Phone</span>
+                    <span className="text-[#1a1208] text-[12px] font-mono">{b.guest_phone}</span>
+                  </div>
+                )}
+                <div className="flex justify-between gap-3 pt-1 border-t border-[#cc5a16]/10">
+                  <span className="text-[#6b5d52]">Total</span>
+                  <span className="font-bold font-mono text-[#cc5a16]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</span>
+                </div>
+              </div>
+
+              {/* Actions — gated by status */}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    close();
+                    setEditingBooking({ ...b });
+                    setShowBookingModal(true);
+                  }}
+                  className="px-3 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2] flex items-center justify-center gap-1"
+                >
+                  Edit booking
+                </button>
+
+                {status === 'BOOKED' && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      close();
+                      await confirmAndCheckIn(b);
+                    }}
+                    className="px-3 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700"
+                  >
+                    Check in
+                  </button>
+                )}
+
+                {status === 'CHECKED_IN' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      close();
+                      setCheckoutBooking(b);
+                      setShowCheckoutModal(true);
+                    }}
+                    className="px-3 py-2.5 rounded-2xl bg-[#b8860b] text-white text-sm font-bold hover:bg-[#8f6608]"
+                  >
+                    Check out
+                  </button>
+                )}
+
+                {status === 'BOOKED' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      close();
+                      openCancelBookingModal(b);
+                    }}
+                    className="col-span-2 px-3 py-2.5 rounded-2xl bg-[#fdf0f0] text-[#c13b3b] text-sm font-bold hover:bg-[#c13b3b]/10"
+                  >
+                    Cancel booking
+                  </button>
+                )}
+
+                {(status === 'CHECKED_OUT' || status === 'CANCELLED') && (
+                  <p className="col-span-2 text-[11px] text-[#9c8e85] italic text-center pt-1">
+                    No further actions — this booking is finalised.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═════════ Group Booking modal (Sprint C2) ═════════
           Build a multi-room booking under one contact name. Each row
@@ -21770,8 +21935,9 @@ const AvailabilityCalendar: React.FC<{
   token: string;
   onCellClick: (roomId: string, date: string) => void;
   onHoldClick?: (roomId: string) => void;
+  onBookingClick?: (bookingId: string) => void;   // booked/checked-in cell click
   refreshNonce?: number;   // bump from parent (after booking/hold mutations) to force a re-fetch
-}> = ({ restaurantId, token, onCellClick, onHoldClick, refreshNonce }) => {
+}> = ({ restaurantId, token, onCellClick, onHoldClick, onBookingClick, refreshNonce }) => {
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState<number>(14);
@@ -21972,23 +22138,29 @@ const AvailabilityCalendar: React.FC<{
                         const cell = data.grid[r.id]?.[d];
                         const status = cell?.status || 'VACANT';
                         const p = cellPalette[status];
-                        const clickable = status === 'VACANT';
+                        // VACANT cells → new booking; HOLD cells → block-dates
+                        // modal; BOOKED/CHECKED_IN/CHECKED_OUT cells (any cell
+                        // with a booking_id) → open the quick-action popover.
+                        const isVacant = status === 'VACANT';
+                        const isBookingCell = !!cell?.booking_id;
                         return (
                           <td
                             key={d}
                             onClick={() => {
-                              if (clickable) onCellClick(r.id, d);
+                              if (isVacant) onCellClick(r.id, d);
                               else if (status === 'HOLD' && onHoldClick) onHoldClick(r.id);
+                              else if (isBookingCell && onBookingClick) onBookingClick(cell.booking_id);
                             }}
                             title={
-                              status === 'VACANT' ? `Click to create a booking for ${r.name} on ${d}` :
-                              status === 'HOLD'   ? `${cell.kind}${cell.reason ? ` — ${cell.reason}` : ''}` :
-                              cell.guest_name ? `${cell.guest_name} (${status})` : status
+                              isVacant ? `Click to create a booking for ${r.name} on ${d}` :
+                              status === 'HOLD' ? `${cell.kind}${cell.reason ? ` — ${cell.reason}` : ''}` :
+                              cell.guest_name ? `${cell.guest_name} (${status}) · click for actions` : status
                             }
                             className={cn(
                               'p-1 text-center align-middle border-l border-[#cc5a16]/5',
-                              clickable && 'cursor-pointer hover:ring-2 hover:ring-[#cc5a16]/30',
-                              status === 'HOLD' && 'cursor-pointer'
+                              isVacant && 'cursor-pointer hover:ring-2 hover:ring-[#cc5a16]/30',
+                              status === 'HOLD' && 'cursor-pointer hover:ring-2 hover:ring-stone-400',
+                              isBookingCell && 'cursor-pointer hover:ring-2 hover:ring-amber-500 hover:brightness-105'
                             )}
                             style={{
                               background: p.bg,
@@ -21998,7 +22170,7 @@ const AvailabilityCalendar: React.FC<{
                           >
                             {cell?.guest_name && (
                               <div
-                                className="text-[10px] font-bold truncate px-1 leading-tight"
+                                className="text-[10px] font-bold truncate px-1 leading-tight underline decoration-dotted underline-offset-2"
                                 style={{ color: p.fg, maxWidth: 60 }}
                               >
                                 {cell.guest_name.split(' ')[0]}
