@@ -170,7 +170,7 @@ class BookingComAdapter implements ChannelAdapter {
         source: 'BOOKING',
         status: body.cancelled ? 'CANCELLED' : 'BOOKED',
       } : undefined,
-      operation: body.cancelled ? 'CANCELLED' : (body.modified ? 'MODIFIED' : 'CREATED'),
+      operation: (body.cancelled ? 'CANCELLED' : (body.modified ? 'MODIFIED' : 'CREATED')) as 'CREATED' | 'MODIFIED' | 'CANCELLED',
       reason: body.bookingId ? undefined : 'bookingId missing from BDC webhook body',
     };
   }
@@ -225,7 +225,7 @@ class MakeMyTripAdapter implements ChannelAdapter {
         source: 'MMT',
         status: body.status === 'CANCELLED' ? 'CANCELLED' : 'BOOKED',
       },
-      operation: body.status === 'CANCELLED' ? 'CANCELLED' : 'CREATED',
+      operation: (body.status === 'CANCELLED' ? 'CANCELLED' : 'CREATED') as 'CREATED' | 'MODIFIED' | 'CANCELLED',
     };
   }
 }
@@ -280,7 +280,7 @@ class AgodaAdapter implements ChannelAdapter {
         source: 'AGODA',
         status: body.status === 'CANCELLED' ? 'CANCELLED' : 'BOOKED',
       },
-      operation: body.status === 'CANCELLED' ? 'CANCELLED' : 'CREATED',
+      operation: (body.status === 'CANCELLED' ? 'CANCELLED' : 'CREATED') as 'CREATED' | 'MODIFIED' | 'CANCELLED',
     };
   }
 }
