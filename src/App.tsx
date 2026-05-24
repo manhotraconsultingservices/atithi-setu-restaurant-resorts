@@ -6578,7 +6578,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [hotelRoomTypes, setHotelRoomTypes] = useState<any[]>([]);
   const [editingRoomType, setEditingRoomType] = useState<any | null>(null);
   // Sprint A1 — Availability calendar view toggle for the Bookings tab
-  const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR'>('LIST');
+  // (DASHBOARD added in C3 — quick-glance receptionist/GM view)
+  const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR' | 'DASHBOARD'>('LIST');
   // Sprint C2 — Group booking modal state. Holds a single "group draft"
   // — name + contact + dates + a list of selected rooms — that the
   // user can build up before clicking Create. Posts as one transaction
@@ -14801,7 +14802,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="flex items-center gap-2">
               {/* Sprint A1 — view toggle */}
               <div className="flex gap-1 bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shrink-0">
-                {(['LIST','CALENDAR'] as const).map(v => (
+                {(['LIST','CALENDAR','DASHBOARD'] as const).map(v => (
                   <button
                     key={v}
                     onClick={() => setBookingsView(v)}
@@ -14810,7 +14811,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       bookingsView === v ? 'bg-[#cc5a16] text-white shadow' : 'text-[#6b5d52] hover:bg-[#faf7f2]'
                     )}
                   >
-                    {v === 'CALENDAR' ? <><CalendarClock size={12}/> Calendar</> : <>List</>}
+                    {v === 'CALENDAR' ? <><CalendarClock size={12}/> Calendar</>
+                      : v === 'DASHBOARD' ? <>📊 Dashboard</>
+                      : <>List</>}
                   </button>
                 ))}
               </div>
@@ -14845,6 +14848,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               onHoldClick={(roomId) => {
                 const room = hotelRooms.find(r => r.id === roomId);
                 if (room) setBlockingRoom(room);
+              }}
+            />
+          )}
+
+          {/* Sprint C3 — Availability Dashboard.
+              Quick-glance view for receptionists / GMs: KPIs + per-
+              category breakdown + 14-day forecast strip. Reuses the
+              same /hotel/availability endpoint the calendar polls,
+              so they share cache + refresh signal. */}
+          {bookingsView === 'DASHBOARD' && (
+            <AvailabilityDashboard
+              restaurantId={restaurantId}
+              token={token}
+              refreshNonce={calendarRefreshNonce}
+              onDateJump={() => setBookingsView('CALENDAR')}
+              onNewBooking={(roomId, date) => {
+                const room = hotelRooms.find(r => r.id === roomId);
+                setEditingBooking({
+                  room_id: roomId,
+                  room_rate: room?.base_rate || 0,
+                  check_in_date: date,
+                  check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
+                  booking_type: 'OVERNIGHT',
+                });
+                setShowBookingModal(true);
               }}
             />
           )}
@@ -21402,6 +21430,341 @@ const HotelRoomDrawer: React.FC<{
    for a chosen window (7 / 14 / 30 / 60 days). Click an empty cell to
    start a new booking pre-filled with that room and that date. Click
    a HOLD cell to open the block-dates modal for that room.            */
+/* ─── AvailabilityDashboard — Sprint C3 ──────────────────────────────
+   Quick-glance availability summary for receptionists and GMs.
+   Reuses /hotel/availability so it's always in lockstep with the
+   Calendar view (same polling, same parent refresh nonce, same data
+   shape). Three sections:
+     1. Top KPIs — Vacant now / Arriving today / Departing today /
+        Walk-in ready / Total rooms.
+     2. By-category — table of categories with available counts for
+        today / 7 days / 14 days + "Next available" date when none
+        free today.
+     3. 14-day forecast strip — one tile per day with available count,
+        occupancy percent, weekend highlight. Click a tile to jump
+        to the Calendar at that date.                                  */
+const AvailabilityDashboard: React.FC<{
+  restaurantId: string;
+  token: string;
+  refreshNonce?: number;
+  onDateJump?: () => void;
+  onNewBooking?: (roomId: string, date: string) => void;
+}> = ({ restaurantId, token, refreshNonce, onDateJump, onNewBooking }) => {
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [windowDays] = useState(14);
+
+  const fetchData = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const start = new Date().toISOString().slice(0, 10);
+      const res = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/availability?start=${start}&days=${windowDays}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.ok) {
+        setData(await res.json());
+        setLastRefresh(new Date());
+      }
+    } finally { if (!silent) setLoading(false); }
+  }, [restaurantId, token, windowDays]);
+
+  // Initial + window + nonce + auto-refresh + focus-refresh.
+  useEffect(() => { fetchData(false); }, [fetchData]);
+  useEffect(() => {
+    const id = setInterval(() => fetchData(true), 30_000);
+    return () => clearInterval(id);
+  }, [fetchData]);
+  useEffect(() => {
+    const onFocus = () => fetchData(true);
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [fetchData]);
+  useEffect(() => {
+    if (refreshNonce !== undefined) fetchData(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshNonce]);
+
+  // Derive everything from the grid.
+  const summary = useMemo(() => {
+    if (!data) return null;
+    const rooms: any[] = data.rooms || [];
+    const dates: string[] = data.dates || [];
+    const today = dates[0];
+    const grid: Record<string, Record<string, any>> = data.grid || {};
+    const totalRooms = rooms.length;
+
+    // Per-day available count + occupancy.
+    const dailyForecast = dates.map((d) => {
+      let occupiedOrHeld = 0;
+      let arriving = 0;
+      let departing = 0;
+      for (const r of rooms) {
+        const cell = grid[r.id]?.[d];
+        const status = cell?.status;
+        if (status === 'BOOKED' || status === 'CHECKED_IN' || status === 'HOLD') occupiedOrHeld++;
+      }
+      // Arrivals / departures for THIS calendar day — booking starts here
+      // (arriving) or ends here (departing).
+      for (const r of rooms) {
+        const todayCell = grid[r.id]?.[d];
+        const prevDateIdx = dates.indexOf(d) - 1;
+        const prevCell = prevDateIdx >= 0 ? grid[r.id]?.[dates[prevDateIdx]] : null;
+        if (todayCell && (todayCell.status === 'BOOKED' || todayCell.status === 'CHECKED_IN')) {
+          if (!prevCell || prevCell.status === 'VACANT' || prevCell.status === 'CHECKED_OUT' || prevCell.booking_id !== todayCell.booking_id) {
+            arriving++;
+          }
+        }
+        if (prevCell && (prevCell.status === 'BOOKED' || prevCell.status === 'CHECKED_IN')) {
+          if (!todayCell || todayCell.status === 'VACANT' || todayCell.status === 'CHECKED_OUT' || todayCell.booking_id !== prevCell.booking_id) {
+            departing++;
+          }
+        }
+      }
+      const available = Math.max(0, totalRooms - occupiedOrHeld);
+      const occupancy = totalRooms > 0 ? Math.round((occupiedOrHeld * 100) / totalRooms) : 0;
+      return { date: d, available, occupied: occupiedOrHeld, occupancy_pct: occupancy, arriving, departing };
+    });
+
+    // Per-category rollup for today / 7d / 14d.
+    const types: any[] = data.room_types || [];
+    const buckets: Record<string, any[]> = { __untagged__: [] };
+    for (const t of types) buckets[t.id] = [];
+    for (const r of rooms) {
+      const k = r.type_id || '__untagged__';
+      if (!buckets[k]) buckets[k] = [];
+      buckets[k].push(r);
+    }
+    const availableInRange = (room: any, startIdx: number, endIdx: number) => {
+      for (let i = startIdx; i < endIdx; i++) {
+        const d = dates[i];
+        const cell = grid[room.id]?.[d];
+        if (cell?.status === 'BOOKED' || cell?.status === 'CHECKED_IN' || cell?.status === 'HOLD') return false;
+      }
+      return room.status !== 'MAINTENANCE' && room.status !== 'BLOCKED';
+    };
+    const nextAvailableDate = (room: any) => {
+      for (let i = 0; i < dates.length; i++) {
+        const d = dates[i];
+        const cell = grid[room.id]?.[d];
+        if (!cell || cell.status === 'VACANT' || cell.status === 'CHECKED_OUT') return d;
+      }
+      return null;
+    };
+    const categoryRows = Object.entries(buckets)
+      .filter(([_, list]) => list.length > 0)
+      .map(([key, list]) => {
+        const typeMeta = key === '__untagged__'
+          ? { name: 'Untagged Rooms' }
+          : (types.find((t: any) => t.id === key) || { name: key });
+        const sevenDays = Math.min(7, dates.length);
+        const fourteenDays = dates.length;
+        const avail1Day = list.filter(r => availableInRange(r, 0, 1)).length;
+        const avail7Day = list.filter(r => availableInRange(r, 0, sevenDays)).length;
+        const avail14Day = list.filter(r => availableInRange(r, 0, fourteenDays)).length;
+        // Earliest "next available" across all booked rooms in the category.
+        const nextDates = list.map(nextAvailableDate).filter(Boolean) as string[];
+        const nextAvail = nextDates.length > 0 ? nextDates.sort()[0] : null;
+        return {
+          key,
+          name: typeMeta.name,
+          total: list.length,
+          avail_today: avail1Day,
+          avail_7d: avail7Day,
+          avail_14d: avail14Day,
+          next_available: nextAvail,
+        };
+      })
+      .sort((a, b) => b.total - a.total);
+
+    // Today summary.
+    const todayForecast = dailyForecast[0] || { available: 0, occupied: 0, arriving: 0, departing: 0 };
+    return {
+      today,
+      totalRooms,
+      vacantNow: todayForecast.available,
+      occupiedNow: todayForecast.occupied,
+      arrivingToday: todayForecast.arriving,
+      departingToday: todayForecast.departing,
+      occupancyToday: totalRooms > 0 ? Math.round((todayForecast.occupied * 100) / totalRooms) : 0,
+      dailyForecast,
+      categoryRows,
+    };
+  }, [data]);
+
+  const Kpi: React.FC<{ label: string; value: string; sub?: string; tone: 'emerald'|'sky'|'amber'|'violet'|'rose'|'orange' }> = ({ label, value, sub, tone }) => {
+    const tones: Record<string, { border: string; bg: string; text: string }> = {
+      emerald: { border: 'border-emerald-300', bg: 'bg-emerald-50', text: 'text-emerald-700' },
+      sky:     { border: 'border-sky-300',     bg: 'bg-sky-50',     text: 'text-sky-700' },
+      amber:   { border: 'border-amber-300',   bg: 'bg-amber-50',   text: 'text-amber-700' },
+      violet:  { border: 'border-violet-300',  bg: 'bg-violet-50',  text: 'text-violet-700' },
+      rose:    { border: 'border-rose-300',    bg: 'bg-rose-50',    text: 'text-rose-700' },
+      orange:  { border: 'border-[#cc5a16]/40', bg: 'bg-[#cc5a16]/5', text: 'text-[#cc5a16]' },
+    };
+    const t = tones[tone];
+    return (
+      <div className={cn("rounded-2xl border p-4 bg-white", t.border)}>
+        <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{label}</p>
+        <p className={cn("text-3xl font-bold font-mono mt-1", t.text)}>{value}</p>
+        {sub && <p className="text-[10px] text-[#6b5d52] mt-1">{sub}</p>}
+      </div>
+    );
+  };
+
+  if (loading && !data) {
+    return <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-12 text-center text-sm text-[#9c8e85] italic">Loading availability dashboard…</div>;
+  }
+  if (!summary || summary.totalRooms === 0) {
+    return <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-12 text-center text-sm text-[#9c8e85] italic">No rooms configured. Add rooms in the Rooms tab first.</div>;
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* ── Top KPIs ─────────────────────────────────────────────── */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-bold font-serif text-[#1a1208]">Today at a glance</h3>
+          <div className="flex items-center gap-2">
+            {lastRefresh && (
+              <span className="text-[10px] text-[#9c8e85]">
+                Updated {lastRefresh.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              </span>
+            )}
+            <button
+              onClick={() => fetchData(false)}
+              disabled={loading}
+              className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-xs font-bold hover:bg-[#faf7f2] disabled:opacity-60 flex items-center gap-1"
+            >
+              <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+              Refresh
+            </button>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <Kpi label="Vacant now" value={String(summary.vacantNow)} sub={`of ${summary.totalRooms} rooms`} tone="emerald" />
+          <Kpi label="Occupancy" value={`${summary.occupancyToday}%`} sub={`${summary.occupiedNow} occupied`} tone="orange" />
+          <Kpi label="Arriving today" value={String(summary.arrivingToday)} sub="check-ins" tone="sky" />
+          <Kpi label="Departing today" value={String(summary.departingToday)} sub="check-outs" tone="amber" />
+          <Kpi label="Walk-in ready" value={String(summary.vacantNow)} sub={summary.vacantNow > 0 ? 'free for tonight' : 'no walk-in capacity'} tone={summary.vacantNow > 0 ? 'emerald' : 'rose'} />
+        </div>
+      </div>
+
+      {/* ── By-category rollup ──────────────────────────────────── */}
+      <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+        <div className="px-5 py-3 border-b border-[#cc5a16]/10 flex items-center justify-between">
+          <h3 className="text-base font-bold font-serif text-[#1a1208]">By category</h3>
+          <p className="text-[10px] text-[#9c8e85]">availability by window</p>
+        </div>
+        <table className="w-full text-sm">
+          <thead className="bg-[#faf7f2]">
+            <tr>
+              <th className="text-left px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Category</th>
+              <th className="text-right px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Total</th>
+              <th className="text-right px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Today</th>
+              <th className="text-right px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Next 7d</th>
+              <th className="text-right px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Next 14d</th>
+              <th className="text-left px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Next available</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.categoryRows.map((row: any) => (
+              <tr key={row.key} className="border-t border-[#cc5a16]/5">
+                <td className="px-4 py-3 font-semibold text-[#1a1208]">{row.name}</td>
+                <td className="px-4 py-3 text-right font-mono text-[#3d3128]">{row.total}</td>
+                <td className={cn("px-4 py-3 text-right font-mono font-bold", row.avail_today > 0 ? 'text-emerald-700' : 'text-rose-700')}>
+                  {row.avail_today}
+                </td>
+                <td className="px-4 py-3 text-right font-mono text-[#3d3128]">{row.avail_7d}</td>
+                <td className="px-4 py-3 text-right font-mono text-[#3d3128]">{row.avail_14d}</td>
+                <td className="px-4 py-3 text-[11px] text-[#6b5d52]">
+                  {row.next_available
+                    ? new Date(row.next_available + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' })
+                    : <span className="text-rose-700 font-bold">none in next {windowDays}d</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ── 14-day forecast strip ──────────────────────────────── */}
+      <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+        <div className="px-5 py-3 border-b border-[#cc5a16]/10 flex items-center justify-between">
+          <h3 className="text-base font-bold font-serif text-[#1a1208]">Next {windowDays} days</h3>
+          <p className="text-[10px] text-[#9c8e85]">click a day to jump to the calendar</p>
+        </div>
+        <div className="p-3 overflow-x-auto">
+          <div className="flex gap-2 min-w-max">
+            {summary.dailyForecast.map((f: any, idx: number) => {
+              const d = new Date(f.date + 'T00:00:00');
+              const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+              const isToday = idx === 0;
+              const tone =
+                f.available === 0 ? { bg: 'bg-rose-100', border: 'border-rose-300', text: 'text-rose-800' } :
+                f.available / summary.totalRooms <= 0.25 ? { bg: 'bg-amber-100', border: 'border-amber-300', text: 'text-amber-800' } :
+                f.available / summary.totalRooms <= 0.6  ? { bg: 'bg-sky-50',    border: 'border-sky-300',   text: 'text-sky-800' } :
+                                                            { bg: 'bg-emerald-50', border: 'border-emerald-300', text: 'text-emerald-800' };
+              return (
+                <button
+                  key={f.date}
+                  type="button"
+                  onClick={() => onDateJump?.()}
+                  className={cn(
+                    'min-w-[88px] rounded-xl border-2 p-2 text-center cursor-pointer transition-all hover:shadow-md',
+                    tone.bg, tone.border,
+                    isToday && 'ring-2 ring-[#cc5a16]/40 ring-offset-1'
+                  )}
+                >
+                  <p className={cn('text-[9px] font-bold uppercase tracking-widest', isWeekend ? 'text-[#cc5a16]' : 'text-[#6b5d52]')}>
+                    {d.toLocaleDateString('en-IN', { weekday: 'short' })}
+                  </p>
+                  <p className="text-lg font-bold text-[#1a1208]">{d.getDate()}</p>
+                  <p className="text-[9px] text-[#9c8e85] uppercase">{d.toLocaleDateString('en-IN', { month: 'short' })}</p>
+                  <p className={cn('text-base font-bold font-mono mt-1', tone.text)}>
+                    {f.available}
+                  </p>
+                  <p className="text-[9px] text-[#9c8e85]">free</p>
+                  <p className="text-[9px] text-[#6b5d52] mt-0.5">{f.occupancy_pct}% occ</p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Walk-in fast-path ─────────────────────────────────── */}
+      {summary.vacantNow > 0 && data && (
+        <div className="bg-gradient-to-r from-emerald-50 to-white rounded-3xl border border-emerald-200 p-5 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <p className="text-base font-bold font-serif text-[#1a1208]">
+              {summary.vacantNow} room{summary.vacantNow !== 1 ? 's' : ''} available right now
+            </p>
+            <p className="text-xs text-[#6b5d52] mt-0.5">A walk-in guest can be checked in immediately.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              if (!onNewBooking || !data?.rooms) return;
+              // Pick the first vacant room for today.
+              const today = data.dates[0];
+              const r = data.rooms.find((r: any) => {
+                const cell = data.grid[r.id]?.[today];
+                return (!cell || cell.status === 'VACANT' || cell.status === 'CHECKED_OUT')
+                  && r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED';
+              });
+              if (r) onNewBooking(r.id, today);
+            }}
+            className="px-5 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 flex items-center gap-2"
+          >
+            <Plus size={14} /> Walk-in booking
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AvailabilityCalendar: React.FC<{
   restaurantId: string;
   token: string;
