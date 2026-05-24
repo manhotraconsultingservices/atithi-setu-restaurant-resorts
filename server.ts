@@ -324,6 +324,22 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
 
+    -- Sprint D2 — Channel manager integration credentials (stub).
+    -- Owner enters per-channel API keys here; real OTA push wiring
+    -- (Booking.com / MMT / Agoda) reads from this table in a follow-
+    -- up sprint. is_enabled gates whether the queue worker pushes.
+    CREATE TABLE IF NOT EXISTS channel_credentials (
+      id           TEXT PRIMARY KEY,
+      channel      TEXT UNIQUE NOT NULL,    -- 'BOOKING' | 'MMT' | 'AGODA' | 'EXPEDIA' | etc.
+      api_key      TEXT,
+      api_secret   TEXT,
+      property_id  TEXT,                    -- mapping to OTA's property id
+      is_enabled   INT DEFAULT 0,
+      last_synced  TIMESTAMP,
+      created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
     -- Sprint P2-H — Yield management rules.
     -- Owner-defined occupancy-triggered multipliers. Example:
     --   "When occupancy >= 80%, multiply rate by 1.25 (+25%)"
@@ -14862,6 +14878,78 @@ async function startServer() {
     }
   });
 
+  // ─── CHANNEL CREDENTIALS — Sprint D2 (stub) ────────────────────────
+  // CRUD for OTA API credentials. Real push to Booking.com / MMT /
+  // Agoda is out of scope for this sprint; this commit just exposes
+  // the UI surface so the owner can enter keys, which a follow-up
+  // worker can consume.
+  app.get("/api/restaurant/:id/hotel/channel-credentials", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query("SELECT * FROM channel_credentials ORDER BY channel");
+      // Redact api_key / api_secret for safety — only owner can see
+      // them, but masking is defensive.
+      res.json(rows.map(r => ({
+        ...r,
+        api_key:    r.api_key    ? `${String(r.api_key).slice(0, 4)}…${String(r.api_key).slice(-4)}` : null,
+        api_secret: r.api_secret ? '••••••••' : null,
+      })));
+    } catch {
+      res.status(500).json({ error: "Failed to fetch channel credentials" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/channel-credentials", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const b = req.body || {};
+      const channel = String(b.channel || '').toUpperCase().trim();
+      if (!channel) return res.status(400).json({ error: "channel is required (e.g. 'BOOKING', 'MMT', 'AGODA')." });
+      const tenantDb = await getTenantDb(req.params.id);
+      const existing: any = await tenantDb.get("SELECT id FROM channel_credentials WHERE channel = ?", [channel]);
+      if (existing) {
+        await tenantDb.run(
+          `UPDATE channel_credentials
+             SET api_key = COALESCE(?, api_key),
+                 api_secret = COALESCE(?, api_secret),
+                 property_id = COALESCE(?, property_id),
+                 is_enabled = COALESCE(?, is_enabled),
+                 updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [b.api_key ?? null, b.api_secret ?? null, b.property_id ?? null,
+           b.is_enabled == null ? null : (b.is_enabled ? 1 : 0), existing.id]
+        );
+      } else {
+        const id = `CHCRED-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+        await tenantDb.run(
+          `INSERT INTO channel_credentials (id, channel, api_key, api_secret, property_id, is_enabled)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [id, channel, b.api_key || null, b.api_secret || null,
+           b.property_id || null, b.is_enabled ? 1 : 0]
+        );
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error("save channel credentials error:", err);
+      res.status(500).json({ error: "Failed to save channel credentials" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hotel/channel-credentials/:channel", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.run("DELETE FROM channel_credentials WHERE channel = ?", [String(req.params.channel).toUpperCase()]);
+      res.json({ success: true });
+    } catch {
+      res.status(500).json({ error: "Failed to delete channel credentials" });
+    }
+  });
+
   // ─── PUBLIC BOOKING PAGE — Sprint D1 ────────────────────────────────
   // No-auth endpoints powering a direct-booking page guests can use
   // without staff intervention. Bypasses OTA commissions.
@@ -20614,7 +20702,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-public-booking',
+    commit_marker: 'hotel-channel-credentials-stub',
     code_features: [
       'subscription-billing',
       'read-only-mode',
