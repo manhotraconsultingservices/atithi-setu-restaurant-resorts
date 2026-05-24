@@ -15349,6 +15349,129 @@ async function startServer() {
 
   // ─── FOLIO INVOICE PDF (Phase 4) ─────────────────────────────────────────
   // Industry-standard Tax Invoice PDF with Indian GST compliance.
+  // Sprint P2-B — Group consolidated invoice. One PDF summarising
+  // every child folio in a group with a grand-total. Reuses the same
+  // generateInvoicePdf renderer as single-folio invoices by building
+  // a virtual aggregated folio: entries from each child are prefixed
+  // with the room name so the line items remain legible.
+  app.get("/api/restaurant/:id/hotel/booking-groups/:groupId/invoice-pdf", authenticate, async (req: AuthRequest, res: Response) => {
+    const checkRes = await ensureHotelEnabled(req.params.id);
+    if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const group: any = await tenantDb.get(
+        "SELECT * FROM room_booking_groups WHERE id = ?", [req.params.groupId]
+      );
+      const bookings: any[] = await tenantDb.query(
+        `SELECT b.*, r.name AS room_name
+           FROM room_bookings b
+      LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE b.group_id = ?
+       ORDER BY r.name, b.id`,
+        [req.params.groupId]
+      );
+      if (bookings.length === 0) return res.status(404).json({ error: 'Group has no bookings.' });
+
+      // Find folios per booking + aggregate entries.
+      let aggSubtotal = 0;
+      let aggGst = 0;
+      let aggDiscount = 0;
+      let aggGrand = 0;
+      const aggEntries: any[] = [];
+      for (const b of bookings) {
+        const folio: any = await tenantDb.get(
+          "SELECT * FROM folios WHERE booking_id = ? ORDER BY created_at DESC LIMIT 1",
+          [b.id]
+        );
+        if (folio) {
+          aggSubtotal += Number(folio.subtotal || 0);
+          aggGst      += Number(folio.gst_amount || 0);
+          aggDiscount += Number(folio.discount || 0);
+          aggGrand    += Number(folio.grand_total || 0);
+          const entries: any[] = await tenantDb.query(
+            "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
+            [folio.id]
+          );
+          for (const e of entries) {
+            aggEntries.push({
+              description: `[${b.room_name || b.room_id}] ${e.description}`,
+              entryType:   e.entry_type,
+              quantity:    Number(e.quantity || 1),
+              unitPrice:   Number(e.unit_price || 0),
+              amount:      Number(e.amount || 0),
+              gstRate:     Number(e.gst_rate || 0),
+              gstAmount:   Number(e.gst_amount || 0),
+            });
+          }
+        }
+      }
+      if (aggEntries.length === 0) {
+        return res.status(404).json({ error: 'No settled folios in this group yet — nothing to invoice.' });
+      }
+      const first = bookings[0];
+      const hotel = checkRes.restaurant;
+      const settledAt = new Date().toISOString();
+      const invNum = `INV-GRP-${new Date(settledAt).getFullYear()}-${String(req.params.groupId).slice(-6).toUpperCase()}`;
+
+      const pdf = await generateInvoicePdf({
+        hotel: {
+          name:     hotel.name,
+          city:     hotel.city,
+          state:    hotel.state,
+          gstin:    hotel.gst_number,
+          phone:    hotel.phone,
+          email:    hotel.admin_id,
+          logoPath: hotel.logo_url || undefined,
+        },
+        guest: {
+          name:        (group?.contact_name) || first.guest_name || 'Group Guest',
+          phone:       (group?.contact_phone) || first.guest_phone,
+          email:       (group?.contact_email) || first.guest_email,
+          nationality: first.guest_nationality,
+          state:       first.guest_state,
+        },
+        stay: {
+          roomName:         `Group · ${bookings.length} rooms` + (group?.name ? ` · ${group.name}` : ''),
+          bookingId:        req.params.groupId,
+          checkInDate:      first.check_in_date,
+          checkOutDate:     first.check_out_date,
+          actualCheckInAt:  first.actual_checkin_at,
+          actualCheckOutAt: first.actual_checkout_at,
+          numGuests:        bookings.reduce((s, b) => s + Number(b.num_guests || 1), 0),
+        },
+        folio: {
+          id:            req.params.groupId,
+          invoiceNumber: invNum,
+          invoiceDate:   settledAt,
+          subtotal:      aggSubtotal,
+          discount:      aggDiscount,
+          gstAmount:     aggGst,
+          grandTotal:    aggGrand,
+          paymentMethod: null,
+          settledAt,
+          status:        'settled',
+        },
+        entries:       aggEntries,
+        placeOfSupply: hotel.state,
+        isCreditNote:  false,
+        bilingual:     true,
+        tenant: {
+          country:         hotel.country || 'IN',
+          currency_code:   hotel.currency_code || 'INR',
+          currency_symbol: hotel.currency_symbol || '₹',
+          locale:          hotel.locale || 'en-IN',
+        },
+      });
+      const safeName = (group?.name || 'group').replace(/[^a-z0-9_-]+/gi, '-');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${invNum}-${safeName}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) {
+      console.error("Group invoice PDF error:", err);
+      res.status(500).json({ error: "Failed to generate group invoice" });
+    }
+  });
+
   app.get("/api/restaurant/:id/hotel/folios/:folioId/invoice-pdf", authenticate, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
@@ -19803,7 +19926,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-group-cancel',
+    commit_marker: 'hotel-group-invoice',
     code_features: [
       'subscription-billing',
       'read-only-mode',
