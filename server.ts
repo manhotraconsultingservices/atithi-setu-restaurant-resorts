@@ -4,7 +4,7 @@ import path from "path";
 import fs from "fs";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import { randomUUID, createHmac } from "crypto";
+import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
@@ -14878,6 +14878,31 @@ async function startServer() {
     }
   });
 
+  // ─── AT-REST ENCRYPTION HELPERS — Sprint D2 hardening ──────────────
+  // Encrypts channel_credentials.api_secret with AES-256-GCM before
+  // storing. The key is derived from process.env.CHANNEL_CRED_KEY (or
+  // a tenant-bound fallback) so even DB-dump leaks don't expose OTA
+  // secrets. Format: "v1:<iv-hex>:<authTag-hex>:<ciphertext-hex>".
+  // Values without the v1: prefix are returned unchanged (back-compat
+  // for any plaintext entered before this commit shipped).
+  const CHANNEL_CRED_KEY_SOURCE = process.env.CHANNEL_CRED_KEY
+    || process.env.JWT_SECRET
+    || 'atithi-setu-default-channel-cred-key-please-set-CHANNEL_CRED_KEY-in-env';
+  const channelCredKey = scryptSync(CHANNEL_CRED_KEY_SOURCE, 'atithi-channel-cred-v1', 32);
+  const encryptSecret = (plain: string | null | undefined): string | null => {
+    if (!plain) return null;
+    const s = String(plain);
+    if (s.startsWith('v1:')) return s;  // already encrypted (idempotent)
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', channelCredKey, iv);
+    const ct = Buffer.concat([cipher.update(s, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `v1:${iv.toString('hex')}:${tag.toString('hex')}:${ct.toString('hex')}`;
+  };
+  // (decryptSecret intentionally not exposed here — the eventual OTA
+  // push worker imports it via a tiny dedicated helper; the admin UI
+  // only ever sees the masked '••••••••' from the GET endpoint.)
+
   // ─── CHANNEL CREDENTIALS — Sprint D2 (stub) ────────────────────────
   // CRUD for OTA API credentials. Real push to Booking.com / MMT /
   // Agoda is out of scope for this sprint; this commit just exposes
@@ -14910,6 +14935,9 @@ async function startServer() {
       if (!channel) return res.status(400).json({ error: "channel is required (e.g. 'BOOKING', 'MMT', 'AGODA')." });
       const tenantDb = await getTenantDb(req.params.id);
       const existing: any = await tenantDb.get("SELECT id FROM channel_credentials WHERE channel = ?", [channel]);
+      // Encrypt api_secret at rest. api_key stays plaintext (it's
+      // often public/identifiable). Empty/null means "keep existing".
+      const encryptedSecret = b.api_secret ? encryptSecret(b.api_secret) : null;
       if (existing) {
         await tenantDb.run(
           `UPDATE channel_credentials
@@ -14919,7 +14947,7 @@ async function startServer() {
                  is_enabled = COALESCE(?, is_enabled),
                  updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`,
-          [b.api_key ?? null, b.api_secret ?? null, b.property_id ?? null,
+          [b.api_key ?? null, encryptedSecret, b.property_id ?? null,
            b.is_enabled == null ? null : (b.is_enabled ? 1 : 0), existing.id]
         );
       } else {
@@ -14927,7 +14955,7 @@ async function startServer() {
         await tenantDb.run(
           `INSERT INTO channel_credentials (id, channel, api_key, api_secret, property_id, is_enabled)
            VALUES (?, ?, ?, ?, ?, ?)`,
-          [id, channel, b.api_key || null, b.api_secret || null,
+          [id, channel, b.api_key || null, encryptedSecret,
            b.property_id || null, b.is_enabled ? 1 : 0]
         );
       }
@@ -20702,7 +20730,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-public-booking-ui',
+    commit_marker: 'hotel-prearrival-template-encryption',
     code_features: [
       'subscription-billing',
       'read-only-mode',

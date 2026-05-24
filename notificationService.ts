@@ -470,6 +470,39 @@ export function buildNotificationContent(
           `<p style="color:#9c8e85">Ref: ${data.bookingId}</p>`,
       };
 
+    /* ── Sprint P2-G — Pre-arrival email (T-3 days from check-in) ──── */
+
+    case 'GUEST_PRE_ARRIVAL':
+      return {
+        subject: `🏨 Get ready for your stay at ${r}`,
+        text:
+          `Hi ${data.guestName || 'there'}!\n\n` +
+          `We're excited to welcome you to ${r} on ${data.checkIn}.\n\n` +
+          `To save time at the front desk, you can complete your check-in details online:\n` +
+          `${data.checkinUrl || '(link unavailable)'}\n\n` +
+          `Your stay:\n` +
+          `Check-in:  ${data.checkIn}\n` +
+          `Check-out: ${data.checkOut}\n\n` +
+          `Looking forward to hosting you!\n` +
+          `— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">🏨 See you soon at ${r}!</h2>` +
+          `<p>Hi <strong>${data.guestName || 'there'}</strong>,</p>` +
+          `<p>We're getting ready for your stay on <strong>${data.checkIn}</strong>.</p>` +
+          `<p>To save time at the front desk when you arrive, please complete your check-in details online:</p>` +
+          `<p style="text-align:center;margin:24px 0">` +
+          `<a href="${data.checkinUrl || '#'}" style="background:#cc5a16;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Complete Online Check-In</a>` +
+          `</p>` +
+          `<div style="background:#faf7f2;padding:16px;border-radius:8px;margin:16px 0">` +
+          `<p style="margin:0 0 4px 0"><strong>Your stay</strong></p>` +
+          `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Check-in: ${data.checkIn}</p>` +
+          `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Check-out: ${data.checkOut}</p>` +
+          `</div>` +
+          `<p style="color:#6b5d52;font-size:13px">Looking forward to hosting you!<br><strong>${r}</strong></p>` +
+          `</div>`,
+      };
+
     case 'GUEST_CHECKED_IN':
       return {
         subject: `🛎 Guest checked in — Room ${data.roomId} — ${r}`,
