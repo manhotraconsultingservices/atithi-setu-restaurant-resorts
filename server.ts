@@ -9,6 +9,7 @@ import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
 import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, buildNotificationContent } from "./notificationService.ts";
+import { getChannelAdapter, ChannelCredentials } from "./channelAdapters.ts";
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
 import { generatePOPdf, buildPOEmailBody, type POPdfData } from "./poService.ts";
@@ -20730,7 +20731,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-prearrival-template-encryption',
+    commit_marker: 'hotel-channel-adapter-framework',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -21528,6 +21529,128 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[pre-arrival] Pre-arrival email cron started — daily at 10:00 IST (T-3 days from check-in)');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // Sprint CH-1 — Channel sync worker (every 5 minutes).
+  // ═════════════════════════════════════════════════════════════════════════
+  // Drains channel_sync_log rows with status='queued' for tenants that
+  // have credentials configured. For each row:
+  //   1. Look up booking + room info (snapshot at queue time may be stale)
+  //   2. Call adapter.pushBooking()
+  //   3. Update status → 'sent' / 'failed' (with error)
+  //   4. Update channel_credentials.last_synced on success
+  // Defensively scoped: skips channels that aren't enabled / aren't ready.
+  // Failed rows stay 'failed' (no auto-retry) so an operator can review
+  // them in the Channel Manager dashboard. A future cron tick will only
+  // pick rows that are still 'queued'.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const tenants = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND (property_type = 'HOTEL' OR property_type = 'BOTH')"
+      );
+      let totalSent = 0;
+      let totalFailed = 0;
+      let totalSkipped = 0;
+      for (const t of tenants) {
+        try {
+          const db = await getTenantDb(t.id);
+          // Pull queued rows for this tenant, batch of 50 to avoid long
+          // worker passes when a tenant has a big backlog.
+          const queued: any[] = await db.query(
+            `SELECT * FROM channel_sync_log
+              WHERE status = 'queued'
+              ORDER BY created_at ASC
+              LIMIT 50`
+          );
+          if (queued.length === 0) continue;
+          // Load all credentials once.
+          const creds: ChannelCredentials[] = await db.query(
+            "SELECT channel, api_key, api_secret, property_id, is_enabled FROM channel_credentials"
+          );
+          const credsByChannel: Record<string, ChannelCredentials> = {};
+          for (const c of creds) credsByChannel[String(c.channel).toUpperCase()] = c;
+
+          for (const row of queued) {
+            const channelKey = String(row.channel || '').toUpperCase();
+            const cred = credsByChannel[channelKey];
+            const adapter = getChannelAdapter(channelKey);
+            if (!cred || !adapter.isReady(cred)) {
+              // No credentials → mark skipped_no_creds so the dashboard
+              // shows the operator they need to add credentials.
+              await db.run(
+                "UPDATE channel_sync_log SET status = ?, error = ? WHERE id = ?",
+                ['skipped_no_creds', `No enabled credentials for channel ${channelKey}`, row.id]
+              );
+              totalSkipped++;
+              continue;
+            }
+            // Booking payload (snapshot at sync time)
+            const booking: any = await db.get(
+              `SELECT b.*, r.name AS room_name
+                 FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+                WHERE b.id = ?`,
+              [row.booking_id]
+            );
+            if (!booking) {
+              await db.run(
+                "UPDATE channel_sync_log SET status = ?, error = ? WHERE id = ?",
+                ['failed', 'Booking row no longer exists', row.id]
+              );
+              totalFailed++;
+              continue;
+            }
+            try {
+              const result = await adapter.pushBooking(cred, {
+                bookingId:    booking.id,
+                guestName:    booking.guest_name,
+                guestPhone:   booking.guest_phone,
+                guestEmail:   booking.guest_email,
+                roomId:       booking.room_id,
+                roomName:     booking.room_name,
+                checkInDate:  normaliseDateIso(booking.check_in_date),
+                checkOutDate: normaliseDateIso(booking.check_out_date),
+                totalAmount:  Number(booking.total_amount || 0),
+                bookingType:  (booking.booking_type === 'DAY_USE' ? 'DAY_USE' : 'OVERNIGHT'),
+                source:       String(booking.booking_source || ''),
+                status:       String(booking.status || ''),
+              });
+              if (result.ok) {
+                await db.run(
+                  "UPDATE channel_sync_log SET status = ?, error = NULL WHERE id = ?",
+                  ['sent', row.id]
+                );
+                await db.run(
+                  "UPDATE channel_credentials SET last_synced = CURRENT_TIMESTAMP WHERE channel = ?",
+                  [channelKey]
+                );
+                totalSent++;
+              } else {
+                await db.run(
+                  "UPDATE channel_sync_log SET status = ?, error = ? WHERE id = ?",
+                  ['failed', result.message || 'adapter returned !ok', row.id]
+                );
+                totalFailed++;
+              }
+            } catch (e: any) {
+              await db.run(
+                "UPDATE channel_sync_log SET status = ?, error = ? WHERE id = ?",
+                ['failed', String(e?.message || e).slice(0, 500), row.id]
+              );
+              totalFailed++;
+            }
+          }
+        } catch (e) {
+          console.warn(`[channel-worker] tenant ${t.id} skipped:`, e);
+        }
+      }
+      if (totalSent + totalFailed + totalSkipped > 0) {
+        console.log(`[channel-worker] done — sent ${totalSent} · failed ${totalFailed} · skipped_no_creds ${totalSkipped}`);
+      }
+    } catch (err) {
+      console.error('[channel-worker] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[channel-worker] Channel sync worker started — every 5 minutes');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase 3 — Timesheet materialisation cron (23:59 IST) ────────────────
