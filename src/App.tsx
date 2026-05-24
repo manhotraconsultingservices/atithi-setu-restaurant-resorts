@@ -68,6 +68,7 @@ import {
   AlertCircle,
   Globe,
   Package,
+  CalendarClock,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -6580,6 +6581,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [showServiceModal, setShowServiceModal] = useState(false);
   const [editingService, setEditingService] = useState<any>(null);
   const [roomQrPreview, setRoomQrPreview] = useState<any>(null);
+  // Sprint B1 — Room holds modal (block dates for maintenance / owner / OTA)
+  const [blockingRoom, setBlockingRoom] = useState<any>(null);
+  const [roomHolds, setRoomHolds] = useState<any[]>([]);
+  const [holdForm, setHoldForm] = useState<{ start_date: string; end_date: string; kind: string; reason: string }>({
+    start_date: '', end_date: '', kind: 'MAINTENANCE', reason: '',
+  });
+  const [holdSubmitting, setHoldSubmitting] = useState(false);
   // Rooms tab filters
   const [roomStatusFilter, setRoomStatusFilter] = useState<'ALL' | 'VACANT' | 'OCCUPIED' | 'CLEANING' | 'MAINTENANCE' | 'BLOCKED'>('ALL');
   const [roomSmokingFilter, setRoomSmokingFilter] = useState<'ALL' | 'SMOKING' | 'NON_SMOKING'>('ALL');
@@ -8680,6 +8688,57 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const fetchHotelRequests = async () => {
     if (!isHotelEnabled) return;
     try { setHotelRequests(await hotelApi('/service-requests?status=PENDING,ACKNOWLEDGED,IN_PROGRESS')); } catch (err: any) { setHotelError(err.message); }
+  };
+
+  // Auto-fetch holds when the block-dates modal opens for a room.
+  useEffect(() => {
+    if (!blockingRoom?.id) { setRoomHolds([]); return; }
+    fetchRoomHolds(blockingRoom.id);
+    setHoldForm({ start_date: '', end_date: '', kind: 'MAINTENANCE', reason: '' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockingRoom?.id]);
+
+  // Sprint B1 — Room holds: fetch + create + delete.
+  const fetchRoomHolds = async (roomId?: string) => {
+    try {
+      const path = roomId ? `/room-holds?room_id=${encodeURIComponent(roomId)}` : '/room-holds';
+      setRoomHolds(await hotelApi(path));
+    } catch { setRoomHolds([]); }
+  };
+  const submitRoomHold = async () => {
+    if (!blockingRoom?.id) return;
+    if (!holdForm.start_date || !holdForm.end_date) {
+      alert('Pick start and end dates first.');
+      return;
+    }
+    setHoldSubmitting(true);
+    try {
+      await hotelApi('/room-holds', {
+        method: 'POST',
+        body: JSON.stringify({
+          room_id: blockingRoom.id,
+          start_date: holdForm.start_date,
+          end_date: holdForm.end_date,
+          kind: holdForm.kind || 'MAINTENANCE',
+          reason: holdForm.reason || null,
+        }),
+      });
+      setHoldForm({ start_date: '', end_date: '', kind: 'MAINTENANCE', reason: '' });
+      await fetchRoomHolds(blockingRoom.id);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to create hold');
+    } finally {
+      setHoldSubmitting(false);
+    }
+  };
+  const deleteRoomHold = async (holdId: string) => {
+    if (!confirm('Lift this hold? The room will become available for booking again.')) return;
+    try {
+      await hotelApi(`/room-holds/${holdId}`, { method: 'DELETE' });
+      if (blockingRoom?.id) await fetchRoomHolds(blockingRoom.id);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to lift hold');
+    }
   };
 
   const saveRoom = async (data: any) => {
@@ -14400,6 +14459,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <div className="flex gap-2 pt-3 border-t border-[#cc5a16]/10">
                         <button onClick={() => setRoomQrPreview({ ...room, qrUrl })} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/10 flex items-center justify-center gap-1" title="View QR code"><QrCode size={14} /> QR</button>
                         <button onClick={() => { setEditingRoom(room); setShowRoomModal(true); }} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#3d3128] text-xs font-bold hover:bg-[#cc5a16]/10">Edit</button>
+                        <button onClick={() => setBlockingRoom(room)} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#b8860b] text-xs font-bold hover:bg-[#b8860b]/10 flex items-center justify-center gap-1" title="Block dates"><CalendarClock size={14} /> Block</button>
                         <button onClick={() => deleteRoom(room.id)} className="px-3 py-2 rounded-xl bg-[#fdf0f0] text-[#c13b3b] text-xs font-bold hover:bg-[#c13b3b]/10" title="Delete"><Trash2 size={14} /></button>
                       </div>
                     </div>
@@ -16945,6 +17005,117 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">{editingService.id ? 'Save' : 'Create'}</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ═════════ Block dates modal (Sprint B1 — room holds) ═════════
+          Lets staff block a date range on a room for maintenance, owner
+          stays, OTA inventory holds, deep cleaning, etc. Holds are
+          honoured by the booking validator as conflicts. Existing holds
+          on the room are listed below the form with a one-click "Lift"
+          button. */}
+      {blockingRoom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Block dates</h3>
+                <p className="text-xs text-[#9c8e85] mt-0.5">{blockingRoom.name || blockingRoom.room_number}</p>
+              </div>
+              <button onClick={() => setBlockingRoom(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]">
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={e => { e.preventDefault(); submitRoomHold(); }} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From *</label>
+                  <input
+                    required type="date"
+                    min={new Date().toISOString().slice(0, 10)}
+                    value={holdForm.start_date}
+                    onChange={e => setHoldForm(f => ({ ...f, start_date: e.target.value, end_date: f.end_date && f.end_date < e.target.value ? e.target.value : f.end_date }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">To *</label>
+                  <input
+                    required type="date"
+                    min={holdForm.start_date || new Date().toISOString().slice(0, 10)}
+                    value={holdForm.end_date}
+                    onChange={e => setHoldForm(f => ({ ...f, end_date: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Kind</label>
+                <select
+                  value={holdForm.kind}
+                  onChange={e => setHoldForm(f => ({ ...f, kind: e.target.value }))}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                >
+                  <option value="MAINTENANCE">🔧 Maintenance</option>
+                  <option value="OWNER_STAY">🏠 Owner stay</option>
+                  <option value="OTA_HOLD">🌐 OTA inventory hold</option>
+                  <option value="CLEANING">🧽 Deep cleaning</option>
+                  <option value="OTHER">📋 Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Reason (optional)</label>
+                <input
+                  type="text" maxLength={200}
+                  value={holdForm.reason}
+                  onChange={e => setHoldForm(f => ({ ...f, reason: e.target.value }))}
+                  placeholder="e.g. AC unit replacement"
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={holdSubmitting || !holdForm.start_date || !holdForm.end_date}
+                className={cn(
+                  "w-full px-4 py-2.5 rounded-2xl text-sm font-bold transition-all",
+                  holdForm.start_date && holdForm.end_date && !holdSubmitting
+                    ? "bg-[#cc5a16] text-white hover:bg-[#a84612]"
+                    : "bg-[#cc5a16]/30 text-white cursor-not-allowed"
+                )}
+              >
+                {holdSubmitting ? 'Blocking…' : 'Block these dates'}
+              </button>
+            </form>
+
+            {/* Existing holds list */}
+            <div className="mt-5 pt-5 border-t border-[#cc5a16]/10">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Active holds</p>
+              {roomHolds.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic">No active holds on this room.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {roomHolds.map((h: any) => (
+                    <li key={h.id} className="flex items-start justify-between gap-2 bg-[#faf7f2] rounded-xl px-3 py-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11px] font-bold text-[#1a1208]">
+                          {String(h.kind).replace(/_/g, ' ')} · {String(h.start_date).slice(0,10)} → {String(h.end_date).slice(0,10)}
+                        </p>
+                        {h.reason && <p className="text-[10px] text-[#6b5d52] mt-0.5">{h.reason}</p>}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => deleteRoomHold(h.id)}
+                        className="text-[10px] font-bold text-[#c13b3b] hover:underline shrink-0"
+                      >
+                        Lift
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
         </div>
       )}

@@ -270,6 +270,32 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+
+    -- Phase H3 / Sprint B1 — Room holds.
+    -- Non-booking unavailability records: maintenance windows, owner stays,
+    -- OTA inventory holds, deep cleaning, etc. Behave the same way as a
+    -- booking for overlap purposes — block the room for the date range —
+    -- but don't have a guest/folio/payment lifecycle.
+    --
+    --   kind         'MAINTENANCE' | 'OWNER_STAY' | 'OTA_HOLD' | 'CLEANING'
+    --                | 'OTHER' (free-text via reason).
+    --   start_date / end_date — half-open interval [start, end). For a
+    --                single-day hold pass start == end and a special
+    --                same-date sweep flag (we mirror the booking overlap
+    --                semantics so the validator stays simple).
+    --   reason       Free-text shown on the calendar tooltip.
+    --   created_by   Staff user id (best-effort for audit).
+    CREATE TABLE IF NOT EXISTS room_holds (
+      id          TEXT PRIMARY KEY,
+      room_id     TEXT NOT NULL,
+      start_date  DATE NOT NULL,
+      end_date    DATE NOT NULL,
+      kind        TEXT NOT NULL DEFAULT 'MAINTENANCE',
+      reason      TEXT,
+      created_by  TEXT,
+      created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_room_holds_room_dates ON room_holds (room_id, start_date, end_date);
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_refund_pct DOUBLE PRECISION;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_refund_amount DOUBLE PRECISION;
 
@@ -764,6 +790,25 @@ async function validateBookingRequest(
     return {
       ok: false, status: 409,
       error: `Room is already booked for "${c.guest_name}" (${c.status}) from ${c.check_in_date} to ${c.check_out_date}. Pick a different room or date range.`,
+    };
+  }
+
+  // Sprint B1 — Room holds. Maintenance / owner-stay / OTA-hold rows also
+  // block the room. Same half-open interval rule as bookings.
+  const holdConflict: any = await tenantDb.get(
+    `SELECT id, kind, reason, start_date, end_date
+       FROM room_holds
+      WHERE room_id = ?
+        AND start_date < ?
+        AND end_date > ?
+      LIMIT 1`,
+    [room_id, check_out_date, check_in_date]
+  );
+  if (holdConflict) {
+    const label = String(holdConflict.kind || 'HOLD').toLowerCase().replace(/_/g, ' ');
+    return {
+      ok: false, status: 409,
+      error: `Room is held for ${label}${holdConflict.reason ? ` (${holdConflict.reason})` : ''} from ${holdConflict.start_date} to ${holdConflict.end_date}. Lift the hold first or pick a different room.`,
     };
   }
 
@@ -13398,6 +13443,96 @@ async function startServer() {
     }
   });
 
+  // ─── ROOM HOLDS — Sprint B1 ────────────────────────────────────────
+  // Non-booking unavailability records (maintenance, owner stays, OTA holds).
+  // Treated identically to bookings by the availability/overlap check but
+  // have no guest / folio / payment lifecycle.
+  app.get("/api/restaurant/:id/hotel/room-holds", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const roomId = (req.query.room_id as string) || null;
+      const start  = (req.query.start as string) || null;   // optional date-range filter
+      const end    = (req.query.end as string) || null;
+      let sql = "SELECT * FROM room_holds WHERE 1 = 1";
+      const params: any[] = [];
+      if (roomId) { sql += " AND room_id = ?"; params.push(roomId); }
+      if (start && end) {
+        // Holds that overlap the visible window
+        sql += " AND start_date < ? AND end_date > ?";
+        params.push(end, start);
+      }
+      sql += " ORDER BY start_date ASC";
+      res.json(await tenantDb.query(sql, params));
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch room holds" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/room-holds", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { room_id, start_date, end_date, kind, reason } = req.body || {};
+      if (!room_id || !start_date || !end_date) {
+        return res.status(400).json({ error: "room_id, start_date, end_date are required." });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(start_date) || !/^\d{4}-\d{2}-\d{2}$/.test(end_date)) {
+        return res.status(400).json({ error: "Dates must be in YYYY-MM-DD format." });
+      }
+      if (end_date < start_date) {
+        return res.status(400).json({ error: "end_date must be on or after start_date." });
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      // Conflict check — both bookings AND existing holds block the dates.
+      const conflictBooking: any = await tenantDb.get(
+        `SELECT id, guest_name FROM room_bookings
+          WHERE room_id = ? AND status NOT IN ('CANCELLED','CHECKED_OUT')
+            AND check_in_date < ? AND check_out_date > ?
+          LIMIT 1`,
+        [room_id, end_date, start_date]
+      );
+      if (conflictBooking) {
+        return res.status(409).json({
+          error: `Room has an existing booking for "${conflictBooking.guest_name}" in that range. Cancel or shift the booking first.`,
+        });
+      }
+      const conflictHold: any = await tenantDb.get(
+        `SELECT id, kind FROM room_holds
+          WHERE room_id = ? AND start_date < ? AND end_date > ?
+          LIMIT 1`,
+        [room_id, end_date, start_date]
+      );
+      if (conflictHold) {
+        return res.status(409).json({ error: `Room already has a ${conflictHold.kind} hold in that range.` });
+      }
+      const id = `HOLD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const kindUpper = String(kind || 'MAINTENANCE').toUpperCase();
+      await tenantDb.run(
+        `INSERT INTO room_holds (id, room_id, start_date, end_date, kind, reason, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, room_id, start_date, end_date, kindUpper, reason || null, req.user?.id || null]
+      );
+      res.status(201).json(await tenantDb.get("SELECT * FROM room_holds WHERE id = ?", [id]));
+    } catch (err) {
+      console.error("create room-hold error:", err);
+      res.status(500).json({ error: "Failed to create room hold" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hotel/room-holds/:holdId", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.run("DELETE FROM room_holds WHERE id = ?", [req.params.holdId]);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to remove hold" });
+    }
+  });
+
   // ─── SERVICES (catalogue) CRUD ────────────────────────────────────────────
   app.get("/api/restaurant/:id/hotel/services", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
@@ -18816,7 +18951,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-invoice-pdf-auth-fix',
+    commit_marker: 'hotel-room-holds',
     code_features: [
       'subscription-billing',
       'read-only-mode',
