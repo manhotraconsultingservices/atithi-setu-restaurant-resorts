@@ -360,6 +360,32 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
       PRIMARY KEY (feed_id, external_uid)
     );
 
+    -- Sprint CH-3 — Inbound webhook audit trail. Every hit on the
+    -- /api/public/restaurant/:id/channel-webhook/:channel endpoint
+    -- writes one row here, regardless of whether the body is valid.
+    -- Used by the channel-manager dashboard ("last 50 inbound events")
+    -- and as the de-dup ledger for idempotency tokens.
+    --   channel        the channel name from the URL ('BOOKING' etc.)
+    --   external_id    OTA-side booking/event id (idempotency key)
+    --   operation      CREATED | MODIFIED | CANCELLED | INVALID | REJECTED
+    --   status         accepted | rejected | duplicate | error
+    --   booking_id     the local booking id (if we created/modified one)
+    --   payload        body excerpt (truncated to 4KB) for audit
+    --   error          rejection reason (when status != 'accepted')
+    CREATE TABLE IF NOT EXISTS channel_webhook_log (
+      id           SERIAL PRIMARY KEY,
+      channel      TEXT NOT NULL,
+      external_id  TEXT,
+      operation    TEXT,
+      status       TEXT NOT NULL,
+      booking_id   TEXT,
+      payload      TEXT,
+      error        TEXT,
+      received_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_channel_webhook_channel ON channel_webhook_log (channel, received_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_channel_webhook_external ON channel_webhook_log (channel, external_id);
+
     -- Sprint D2 — Channel manager integration credentials (stub).
     -- Owner enters per-channel API keys here; real OTA push wiring
     -- (Booking.com / MMT / Agoda) reads from this table in a follow-
@@ -15273,6 +15299,245 @@ async function startServer() {
     }
   });
 
+  // ════════════════════════════════════════════════════════════════════
+  // ─── INBOUND WEBHOOK RECEIVER — Sprint CH-3 ────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // POST /api/public/restaurant/:id/channel-webhook/:channel
+  //
+  // The single endpoint that ALL OTA channels post to when they have
+  // an event (new reservation, modification, cancellation) for our
+  // property. We use one URL per (tenant, channel) and route via the
+  // path-mounted :channel parameter so partners can configure their
+  // dashboards with stable URLs that don't leak credentials.
+  //
+  // Flow:
+  //   1. Resolve adapter for :channel (BOOKING | MMT | GOIBIBO | AGODA | etc).
+  //   2. Load that tenant's saved credentials row (api_key, api_secret).
+  //   3. Hand raw body + headers to adapter.validateWebhook() — fails on
+  //      missing signature, bad HMAC, expired timestamp, replayed nonce.
+  //      (Real signature validation lives in the adapter. The stubs in
+  //      channelAdapters.ts accept any body that has the expected shape;
+  //      production-ready means swapping in HMAC checks per channel.)
+  //   4. adapter.parseInbound() → { booking, operation } in our internal shape.
+  //   5. Dedup against channel_webhook_log on (channel, external_id) so an
+  //      OTA retry doesn't create duplicate bookings.
+  //   6. Apply the operation:
+  //        CREATED   → INSERT into room_bookings (status='BOOKED')
+  //        MODIFIED  → UPDATE the matching row
+  //        CANCELLED → UPDATE status='CANCELLED'
+  //   7. Audit row written to channel_webhook_log regardless of outcome.
+  //   8. Respond 200 fast (OTAs retry aggressively on non-2xx).
+  //
+  // Idempotency:
+  //   external_id is the OTA's booking/event id. Two webhook calls with
+  //   the same (channel, external_id) and the same operation get the
+  //   second one logged as 'duplicate' and never touch room_bookings
+  //   twice. Different operations on the same external_id (e.g. CREATED
+  //   then CANCELLED) are processed normally.
+  //
+  // Why no auth middleware:
+  //   OTAs can't carry our JWT. Signature validation in the adapter is
+  //   how this endpoint authenticates the caller — using the api_secret
+  //   the tenant entered into channel_credentials.
+  app.post("/api/public/restaurant/:id/channel-webhook/:channel", async (req: Request, res: Response) => {
+    const restaurantId = req.params.id;
+    const channelKey = String(req.params.channel || '').toUpperCase().trim();
+    const check = await ensureHotelEnabled(restaurantId);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+
+    let tenantDb: any;
+    try {
+      tenantDb = await getTenantDb(restaurantId);
+    } catch {
+      return res.status(500).json({ error: 'tenant db unavailable' });
+    }
+
+    // ── Helper: persist one audit row + respond
+    const audit = async (
+      externalId: string | null,
+      operation: string | null,
+      status: 'accepted' | 'rejected' | 'duplicate' | 'error',
+      bookingId: string | null,
+      errorMsg: string | null,
+    ) => {
+      try {
+        await tenantDb.run(
+          `INSERT INTO channel_webhook_log (channel, external_id, operation, status, booking_id, payload, error)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [channelKey, externalId || null, operation || null, status, bookingId || null,
+           JSON.stringify(req.body || {}).slice(0, 4000), errorMsg || null]
+        );
+      } catch (e) {
+        console.warn(`[channel-webhook] failed to write audit row:`, e);
+      }
+    };
+
+    // 1. Adapter
+    const adapter = getChannelAdapter(channelKey);
+    if (!adapter || adapter.channel === 'MOCK') {
+      await audit(null, null, 'rejected', null, `Unknown channel '${channelKey}'`);
+      return res.status(400).json({ error: `Unknown channel '${channelKey}'` });
+    }
+
+    // 2. Credentials
+    let cred: ChannelCredentials | null = null;
+    try {
+      cred = await tenantDb.get(
+        "SELECT channel, api_key, api_secret, property_id, is_enabled FROM channel_credentials WHERE channel = ?",
+        [channelKey]
+      );
+    } catch { /* fall through — cred=null */ }
+    if (!cred) {
+      await audit(null, null, 'rejected', null, `No credentials configured for ${channelKey}`);
+      return res.status(401).json({ error: `No credentials configured for ${channelKey}` });
+    }
+
+    // 3. Validate
+    const v = adapter.validateWebhook(cred, req.headers, req.body);
+    if (!v.ok) {
+      await audit(null, null, 'rejected', null, v.reason || 'signature validation failed');
+      return res.status(401).json({ error: v.reason || 'signature validation failed' });
+    }
+
+    // 4. Parse
+    const parsed = adapter.parseInbound(cred, req.body);
+    if (!parsed.ok || !parsed.booking) {
+      await audit(null, parsed.operation || 'INVALID', 'rejected', null, parsed.reason || 'unparseable');
+      return res.status(400).json({ error: parsed.reason || 'unparseable webhook body' });
+    }
+    const b = parsed.booking;
+    const externalId = String(b.bookingId || '').trim();
+    const operation = parsed.operation || 'CREATED';
+    if (!externalId) {
+      await audit(null, operation, 'rejected', null, 'missing external booking id');
+      return res.status(400).json({ error: 'missing external booking id' });
+    }
+
+    // 5. Dedup — same operation already processed for this external_id?
+    const dup: any = await tenantDb.get(
+      `SELECT id, booking_id FROM channel_webhook_log
+        WHERE channel = ? AND external_id = ? AND operation = ? AND status = 'accepted'
+        ORDER BY received_at DESC LIMIT 1`,
+      [channelKey, externalId, operation]
+    );
+    if (dup) {
+      await audit(externalId, operation, 'duplicate', dup.booking_id, 'idempotent retry');
+      return res.json({ success: true, duplicate: true, booking_id: dup.booking_id });
+    }
+
+    // 6. Apply operation
+    try {
+      const ci = normaliseDateIso(b.checkInDate || '');
+      const co = normaliseDateIso(b.checkOutDate || '');
+      if (operation === 'CREATED') {
+        if (!ci || !co || !b.roomId) {
+          await audit(externalId, operation, 'rejected', null, 'missing room_id / dates');
+          return res.status(400).json({ error: 'missing room_id / dates' });
+        }
+        // Overlap check
+        const conflict: any = await tenantDb.get(
+          `SELECT id FROM room_bookings
+            WHERE room_id = ?
+              AND status NOT IN ('CANCELLED','CHECKED_OUT')
+              AND NOT (check_out_date <= ? OR check_in_date >= ?)
+            LIMIT 1`,
+          [b.roomId, ci, co]
+        );
+        if (conflict) {
+          await audit(externalId, operation, 'rejected', null, `overlap with booking ${conflict.id}`);
+          return res.status(409).json({ error: `room ${b.roomId} not available for ${ci} → ${co}` });
+        }
+        const nights = Math.max(1, Math.ceil((new Date(co).getTime() - new Date(ci).getTime()) / 86400000));
+        const room: any = await tenantDb.get("SELECT base_rate FROM rooms WHERE id = ?", [b.roomId]);
+        const rate = Number(room?.base_rate || b.totalAmount && nights ? (b.totalAmount as number) / nights : 0);
+        const localId = `BK-OTA-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        await tenantDb.run(
+          `INSERT INTO room_bookings
+             (id, room_id, guest_name, guest_phone, guest_email, num_guests,
+              check_in_date, check_out_date, status, booking_source,
+              room_rate, total_amount, special_requests, booking_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, 'OVERNIGHT')`,
+          [localId, b.roomId, b.guestName || `${channelKey} Guest`,
+           b.guestPhone || null, b.guestEmail || null, 1,
+           ci, co, channelKey, rate, Number(b.totalAmount || rate * nights),
+           `Imported via ${channelKey} webhook · external id ${externalId}`]
+        );
+        await audit(externalId, operation, 'accepted', localId, null);
+        return res.json({ success: true, booking_id: localId });
+      }
+
+      if (operation === 'MODIFIED' || operation === 'CANCELLED') {
+        // Find the local booking via prior audit row
+        const prior: any = await tenantDb.get(
+          `SELECT booking_id FROM channel_webhook_log
+            WHERE channel = ? AND external_id = ? AND status = 'accepted' AND booking_id IS NOT NULL
+            ORDER BY received_at DESC LIMIT 1`,
+          [channelKey, externalId]
+        );
+        if (!prior?.booking_id) {
+          await audit(externalId, operation, 'rejected', null, 'no prior booking to ' + operation.toLowerCase());
+          return res.status(404).json({ error: `no prior booking found for external id ${externalId}` });
+        }
+        if (operation === 'CANCELLED') {
+          await tenantDb.run(
+            `UPDATE room_bookings
+                SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP,
+                    cancellation_reason = ?
+              WHERE id = ?`,
+            [`Cancelled via ${channelKey} webhook`, prior.booking_id]
+          );
+        } else {
+          // MODIFIED — only adjust dates / amount if provided
+          await tenantDb.run(
+            `UPDATE room_bookings
+                SET check_in_date = COALESCE(?, check_in_date),
+                    check_out_date = COALESCE(?, check_out_date),
+                    total_amount = COALESCE(?, total_amount),
+                    guest_name = COALESCE(?, guest_name),
+                    guest_phone = COALESCE(?, guest_phone),
+                    guest_email = COALESCE(?, guest_email)
+              WHERE id = ?`,
+            [ci || null, co || null,
+             b.totalAmount != null ? Number(b.totalAmount) : null,
+             b.guestName || null, b.guestPhone || null, b.guestEmail || null,
+             prior.booking_id]
+          );
+        }
+        await audit(externalId, operation, 'accepted', prior.booking_id, null);
+        return res.json({ success: true, booking_id: prior.booking_id });
+      }
+
+      await audit(externalId, operation, 'rejected', null, `unknown operation ${operation}`);
+      return res.status(400).json({ error: `unknown operation ${operation}` });
+    } catch (err: any) {
+      await audit(externalId, operation, 'error', null, String(err?.message || err).slice(0, 500));
+      console.error(`[channel-webhook] ${channelKey} ${externalId} failed:`, err);
+      return res.status(500).json({ error: 'webhook processing failed' });
+    }
+  });
+
+  // ─── WEBHOOK AUDIT LOG VIEWER (owner-facing) ───────────────────────
+  // Powers the channel-manager dashboard's "Recent inbound events" pane.
+  app.get("/api/restaurant/:id/hotel/webhook-log", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+      const rows: any[] = await tenantDb.query(
+        `SELECT id, channel, external_id, operation, status, booking_id, error, received_at
+           FROM channel_webhook_log
+          ORDER BY received_at DESC
+          LIMIT ?`,
+        [limit]
+      );
+      res.json(rows);
+    } catch {
+      res.status(500).json({ error: 'Failed to fetch webhook log' });
+    }
+  });
+
   // ─── PUBLIC BOOKING PAGE — Sprint D1 ────────────────────────────────
   // No-auth endpoints powering a direct-booking page guests can use
   // without staff intervention. Bypasses OTA commissions.
@@ -21025,7 +21290,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-ical-import',
+    commit_marker: 'hotel-webhook-receiver',
     code_features: [
       'subscription-billing',
       'read-only-mode',
