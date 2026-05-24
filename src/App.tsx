@@ -6595,6 +6595,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [checkoutBooking, setCheckoutBooking] = useState<any>(null);
 
   // Phase H1 — cancellation confirm modal (refund preview + reason)
+  // Phase H1 — early check-in confirm modal (state-based, not window.confirm).
+  // window.confirm was unreliable in the field — sometimes blocked by
+  // popup-suppressors, never visually consistent with the rest of the app,
+  // and led to the recurring "system not allowing check-in" reports.
+  const [earlyCheckInTarget, setEarlyCheckInTarget] = useState<any>(null);
+  const [earlyCheckInSubmitting, setEarlyCheckInSubmitting] = useState(false);
+
   const [cancelBookingTarget, setCancelBookingTarget] = useState<any>(null);
   const [cancelPreview, setCancelPreview] = useState<{
     refund_pct: number | null; refund_amount: number;
@@ -8716,29 +8723,64 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
     return result;
   };
+  // Normalise check-in-date to YYYY-MM-DD regardless of whether the API
+  // returned a string ("2026-05-24T00:00:00.000Z") or a JS Date object
+  // (some legacy JSON serialisers do this). Mirrors the server-side
+  // normaliseDateIso() helper so client + server agree on what "today"
+  // means before we hit the wire.
+  const normaliseBookingDate = (v: any): string => {
+    if (!v) return '';
+    if (v instanceof Date) {
+      if (isNaN(v.getTime())) return '';
+      return v.toISOString().slice(0, 10);
+    }
+    const s = String(v);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+  };
+
   // Wrapper that guards against accidental early check-ins. If the
-  // booking is scheduled for a future date, ask the cashier to
-  // confirm before calling — server enforces the same rule for
-  // defense in depth (rejects unless { force: true } is passed).
+  // booking is scheduled for a future date, open an inline confirm
+  // modal — replaces the previous window.confirm() which suffered from
+  // popup-suppressor blocks and inconsistent styling. The actual
+  // check-in fires only after the cashier clicks the explicit
+  // "Confirm Early Check-In" button in submitEarlyCheckIn().
   const confirmAndCheckIn = async (b: any) => {
     if (!b?.id) return;
     const today = new Date().toISOString().slice(0, 10);
-    const scheduled = String(b.check_in_date || '').slice(0, 10);
-    let force = false;
+    const scheduled = normaliseBookingDate(b.check_in_date);
     if (scheduled && scheduled > today) {
-      const fmt = new Date(scheduled).toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short', year: 'numeric' });
-      const ok = window.confirm(
-        `${b.guest_name || 'This guest'} is booked for ${fmt}.\n\n` +
-        `Today is earlier than the scheduled check-in date. ` +
-        `Confirm early arrival? The room status and folio will start now.`
-      );
-      if (!ok) return;
-      force = true;
+      setEarlyCheckInTarget(b);
+      return;
     }
     try {
-      await checkInBooking(b.id, force);
+      await checkInBooking(b.id, false);
     } catch (err: any) {
-      setHotelError(err?.message || 'Check-in failed');
+      // Server side may still flag early — surface the modal if so.
+      const msg = err?.message || '';
+      if (/scheduled for/i.test(msg) || /early/i.test(msg)) {
+        setEarlyCheckInTarget(b);
+      } else {
+        setHotelError(msg || 'Check-in failed');
+      }
+    }
+  };
+
+  // Confirm button on the early-check-in modal. Sends force=true so the
+  // server bypasses the date guard. Errors stay in the modal so the
+  // cashier can see what went wrong without losing context.
+  const submitEarlyCheckIn = async () => {
+    if (!earlyCheckInTarget) return;
+    setEarlyCheckInSubmitting(true);
+    try {
+      await checkInBooking(earlyCheckInTarget.id, true);
+      setEarlyCheckInTarget(null);
+    } catch (err: any) {
+      setHotelError(err?.message || 'Early check-in failed');
+      setEarlyCheckInTarget(null);
+    } finally {
+      setEarlyCheckInSubmitting(false);
     }
   };
   const checkOutBooking = async (bookingId: string, payment: string, discount: number) => {
@@ -16989,6 +17031,73 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       )}
+
+      {/* ═════════ Early check-in confirm modal (Phase H1) ═════════
+          Opened by confirmAndCheckIn() when the booking's scheduled date
+          is in the future. Replaces window.confirm so the prompt is
+          unambiguous + always shows (popup blockers used to suppress it).
+          The actual check-in POST happens on submitEarlyCheckIn() with
+          force=true so the server's date guard is bypassed. */}
+      {earlyCheckInTarget && (() => {
+        const scheduled = normaliseBookingDate(earlyCheckInTarget.check_in_date);
+        const fmt = scheduled
+          ? new Date(scheduled + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short', year: 'numeric' })
+          : '(unknown date)';
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Confirm early check-in</h3>
+                <button onClick={() => setEarlyCheckInTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]">
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3 mb-4">
+                <p className="text-[12px] text-amber-900 leading-snug">
+                  <strong>{earlyCheckInTarget.guest_name || 'This guest'}</strong> is booked for{' '}
+                  <strong>{fmt}</strong> — that's later than today. Confirming will start the
+                  room status and folio <strong>now</strong>.
+                </p>
+              </div>
+
+              <div className="bg-[#faf7f2] rounded-2xl p-4 mb-4 text-sm">
+                <div className="flex justify-between mb-1">
+                  <span className="text-[#6b5d52]">Room</span>
+                  <span className="font-semibold">{earlyCheckInTarget.room_name || earlyCheckInTarget.room_id}</span>
+                </div>
+                {earlyCheckInTarget.check_out_date && (
+                  <div className="flex justify-between">
+                    <span className="text-[#6b5d52]">Check-out</span>
+                    <span>{normaliseBookingDate(earlyCheckInTarget.check_out_date) || '—'}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEarlyCheckInTarget(null)}
+                  className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]"
+                >
+                  Not yet
+                </button>
+                <button
+                  type="button"
+                  onClick={submitEarlyCheckIn}
+                  disabled={earlyCheckInSubmitting}
+                  className={cn(
+                    "flex-1 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700",
+                    earlyCheckInSubmitting && "opacity-60 cursor-not-allowed"
+                  )}
+                >
+                  {earlyCheckInSubmitting ? 'Checking in…' : 'Confirm early check-in'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═════════ Cancel-booking confirm modal (Phase H1) ═════════
           Shows the refund preview computed from the tenant's refund policy

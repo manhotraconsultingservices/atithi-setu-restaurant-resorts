@@ -417,6 +417,34 @@ const DEFAULT_HOTEL_SERVICES: Array<{
 
 // ====== Folio engine helpers (Phase 3) ======
 
+// ════════════════════════════════════════════════════════════════════════
+// Date normalisation helper.
+//
+// PostgreSQL DATE columns are parsed by node-postgres into JS Date objects
+// at midnight UTC. Naive code that does `String(b.check_in_date).slice(0,10)`
+// gets "Sun May 24 2026 ..." → "Sun May 24" — NOT the expected "2026-05-24".
+// String comparison against "2026-05-20" then trips on the alphabetical
+// 'S' > '2' and incorrectly flags every booking as "in the future".
+//
+// This helper accepts a Date or a string and always returns "YYYY-MM-DD".
+// ════════════════════════════════════════════════════════════════════════
+function normaliseDateIso(v: any): string {
+  if (v == null || v === '') return '';
+  if (v instanceof Date) {
+    // toISOString uses UTC. pg's DATE comes back as midnight UTC so this
+    // round-trips correctly for the calendar date the user actually typed.
+    if (isNaN(v.getTime())) return '';
+    return v.toISOString().slice(0, 10);
+  }
+  const s = String(v);
+  // Already in YYYY-MM-DD or ISO timestamp shape — first 10 chars give the date.
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  // Fall back to Date parsing (handles other formats like "May 24 2026").
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return '';
+  return d.toISOString().slice(0, 10);
+}
+
 // Phase H2 — Hotel tax config (per-tenant slabs + service charge).
 // Loaded once per folio operation. Defaults match the post-2022 Indian
 // GST Council slabs (0 / 12 / 18 based on tariff) so existing tenants
@@ -593,14 +621,19 @@ async function validateBookingRequest(
 ): Promise<{ ok: boolean; status: number; error: string }> {
   // Flat shape (not a discriminated union) so call sites can read
   // .status/.error without TS narrowing — matches ensureHotelEnabled.
-  const { room_id, check_in_date, check_out_date, excludeBookingId } = opts;
+  const { room_id, excludeBookingId } = opts;
+  // Inputs may be raw strings (POST from the form) OR Date objects (PATCH
+  // composed from a DB row pg returned as a Date). Normalise both to
+  // 'YYYY-MM-DD' so the rest of this validator works against a single shape.
+  const check_in_date  = normaliseDateIso(opts.check_in_date);
+  const check_out_date = normaliseDateIso(opts.check_out_date);
   const bookingType = String(opts.booking_type || 'OVERNIGHT').toUpperCase();
   const numGuests = Number(opts.num_guests || 1);
 
   if (!room_id || !check_in_date || !check_out_date) {
     return { ok: false, status: 400, error: 'room_id, check_in_date, check_out_date are required.' };
   }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(check_in_date)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(check_out_date))) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(check_in_date) || !/^\d{4}-\d{2}-\d{2}$/.test(check_out_date)) {
     return { ok: false, status: 400, error: 'Dates must be in YYYY-MM-DD format.' };
   }
 
@@ -835,7 +868,7 @@ async function computeLateCheckoutFee(
   const nowHour = Number(hhStr || 0);
   const nowMin  = Number(mmStr || 0);
 
-  const checkoutISO = String(booking.check_out_date || '').slice(0, 10);
+  const checkoutISO = normaliseDateIso(booking.check_out_date);
 
   // If today is AFTER check-out date, the guest is fully overstayed.
   if (todayIST > checkoutISO) {
@@ -968,8 +1001,10 @@ async function computeGuestPerkOnCheckIn(
 
     const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' });
     const todayMMDD = (tzDate.split(',')[0] || '').slice(5, 10);  // MM-DD
-    const bday = c.birthday ? String(c.birthday).slice(5, 10) : '';
-    const anni = c.anniversary ? String(c.anniversary).slice(5, 10) : '';
+    // normaliseDateIso → 'YYYY-MM-DD' regardless of Date object vs string,
+    // then slice(5, 10) gives the month-day portion.
+    const bday = normaliseDateIso(c.birthday).slice(5, 10);
+    const anni = normaliseDateIso(c.anniversary).slice(5, 10);
 
     if (bday && bday === todayMMDD) {
       return {
@@ -13795,15 +13830,20 @@ async function startServer() {
       // on or after their scheduled check-in date. Most hotels do
       // accommodate early arrivals when a room is ready, so this is an
       // overridable guard rather than a hard block — pass { force: true }
-      // in the body (the UI prompts the cashier to confirm before
-      // sending). The dropdown's underlying overlap check still runs
-      // at booking-create time, so an early check-in won't collide
-      // with another guest because the date range was already vetted.
+      // in the body (the UI shows a confirm banner before sending). The
+      // dropdown's underlying overlap check still runs at booking-create
+      // time, so an early check-in won't collide with another guest
+      // because the date range was already vetted.
+      //
+      // ⚠ normaliseDateIso() — pg returns DATE as a JS Date object, so
+      // String(...).slice(0,10) previously produced "Sun May 24" and the
+      // string comparison against "2026-05-20" tripped on 'S' > '2',
+      // causing the guard to fire for EVERY booking (including today's).
       const today = new Date().toISOString().slice(0, 10);
-      const scheduledDate = String(b.check_in_date || '').slice(0, 10);
-      if (scheduledDate > today && !req.body?.force) {
+      const scheduledDate = normaliseDateIso(b.check_in_date);
+      if (scheduledDate && scheduledDate > today && !req.body?.force) {
         return res.status(400).json({
-          error: `This booking is scheduled for ${scheduledDate}. Tap Check-In again to confirm an early arrival.`,
+          error: `This booking is scheduled for ${scheduledDate}. Confirm the early arrival to proceed.`,
           early_checkin_required: true,
           scheduled_date: scheduledDate,
           today,
@@ -18751,7 +18791,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'service-charge-editable-per-invoice',
+    commit_marker: 'hotel-checkin-date-normalisation-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
