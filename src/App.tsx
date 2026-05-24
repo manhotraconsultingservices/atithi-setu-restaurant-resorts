@@ -16912,25 +16912,81 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Room *</label>
-                <select required value={editingBooking.room_id || ''} onChange={e => {
-                  const room = hotelRooms.find(r => r.id === e.target.value);
-                  setEditingBooking({...editingBooking, room_id: e.target.value, room_rate: room?.base_rate || editingBooking.room_rate });
-                }} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none">
-                  <option value="">Select a room…</option>
-                  {/* Disable rooms in MAINTENANCE / BLOCKED state — they
-                      cannot accept a booking. OCCUPIED is allowed (you can
-                      still create a future booking on a currently-occupied
-                      room as long as dates don't overlap; the server-side
-                      overlap check catches the conflict). */}
-                  {hotelRooms.map(r => {
-                    const blocked = r.status === 'MAINTENANCE' || r.status === 'BLOCKED';
-                    return (
-                      <option key={r.id} value={r.id} disabled={blocked}>
-                        {r.name} · ₹{r.base_rate}/night{r.status !== 'VACANT' ? ` · ${r.status}${blocked ? ' (unavailable)' : ''}` : ''}
-                      </option>
-                    );
-                  })}
-                </select>
+                {(() => {
+                  // Filter out rooms that already have an overlapping
+                  // booking for the selected date range. Mirrors the
+                  // server-side overlap check in validateBookingRequest()
+                  // so the dropdown never offers rooms the server would
+                  // reject. Cancelled / checked-out bookings don't
+                  // contend. The booking currently being edited is
+                  // excluded so a PATCH doesn't flag itself.
+                  const ciStr = normaliseBookingDate(editingBooking.check_in_date);
+                  const coStr = normaliseBookingDate(editingBooking.check_out_date);
+                  const bt    = editingBooking.booking_type || 'OVERNIGHT';
+                  const myId  = editingBooking.id;
+                  const conflictRoomIds = new Set<string>();
+                  if (ciStr && coStr) {
+                    for (const b of hotelBookings) {
+                      if (myId && b.id === myId) continue;
+                      if (!b.room_id) continue;
+                      if (b.status === 'CANCELLED' || b.status === 'CHECKED_OUT') continue;
+                      const bci = normaliseBookingDate(b.check_in_date);
+                      const bco = normaliseBookingDate(b.check_out_date);
+                      if (!bci || !bco) continue;
+                      // Half-open interval overlap: [bci, bco) ∩ [ci, co) ≠ ∅
+                      const overlap = bci < coStr && bco > ciStr;
+                      // Same-date day-use ↔ day-use collision (the half-open
+                      // check above doesn't fire when ci === co).
+                      const dayUseSameDate =
+                        bt === 'DAY_USE' && b.booking_type === 'DAY_USE' && bci === ciStr;
+                      if (overlap || dayUseSameDate) conflictRoomIds.add(b.room_id);
+                    }
+                  }
+                  // Visible rooms = not in conflict. MAINTENANCE / BLOCKED
+                  // stay visible-but-disabled so staff can see the room
+                  // exists and understands why it can't be booked.
+                  const availableRooms = hotelRooms.filter(r => !conflictRoomIds.has(r.id));
+                  const allBlocked = availableRooms.length > 0 &&
+                    availableRooms.every(r => r.status === 'MAINTENANCE' || r.status === 'BLOCKED');
+                  return (
+                    <>
+                      <select
+                        required
+                        value={editingBooking.room_id || ''}
+                        onChange={e => {
+                          const room = hotelRooms.find(r => r.id === e.target.value);
+                          setEditingBooking({...editingBooking, room_id: e.target.value, room_rate: room?.base_rate || editingBooking.room_rate });
+                        }}
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                      >
+                        <option value="">Select a room…</option>
+                        {availableRooms.map(r => {
+                          const blocked = r.status === 'MAINTENANCE' || r.status === 'BLOCKED';
+                          return (
+                            <option key={r.id} value={r.id} disabled={blocked}>
+                              {r.name} · ₹{r.base_rate}/night{r.status !== 'VACANT' ? ` · ${r.status}${blocked ? ' (unavailable)' : ''}` : ''}
+                            </option>
+                          );
+                        })}
+                      </select>
+                      {ciStr && coStr && availableRooms.length === 0 && (
+                        <p className="text-[11px] text-[#c13b3b] mt-1">
+                          No rooms available for {ciStr} → {coStr}. Try a different date range.
+                        </p>
+                      )}
+                      {ciStr && coStr && availableRooms.length > 0 && conflictRoomIds.size > 0 && (
+                        <p className="text-[10px] text-[#9c8e85] mt-1">
+                          {conflictRoomIds.size} room{conflictRoomIds.size > 1 ? 's' : ''} hidden — already booked for these dates.
+                        </p>
+                      )}
+                      {ciStr && coStr && allBlocked && (
+                        <p className="text-[11px] text-amber-700 mt-1">
+                          All available rooms are in maintenance or blocked. Clear room status first.
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
               {/* Booking type — overnight vs day-use. Default OVERNIGHT
                   for existing bookings so nothing changes for legacy rows. */}
