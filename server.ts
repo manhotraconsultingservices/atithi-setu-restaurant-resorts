@@ -15244,7 +15244,11 @@ async function startServer() {
       const toDate = String(req.query.to || '').trim();
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
 
-      let sql = `SELECT b.*, r.name AS room_name
+      // Req 1b — surface ID-doc count alongside each booking so the
+      // pre-check-in checklist UI can show "✓/✗ ID documents" without
+      // an extra fetch per row.
+      let sql = `SELECT b.*, r.name AS room_name,
+                        (SELECT COUNT(*)::int FROM guest_documents gd WHERE gd.booking_id = b.id) AS document_count
                  FROM room_bookings b
                  LEFT JOIN rooms r ON r.id = b.room_id
                  WHERE 1 = 1`;
@@ -16756,6 +16760,34 @@ async function startServer() {
         });
       }
 
+      // ── REQ 1b: At least one ID-proof document required at check-in ──
+      // Statutory baseline for India:
+      //   • Form-C: foreign guests must have ID captured at check-in
+      //   • FRRO reporting depends on a copy of the passport+visa
+      //   • DPDP best-practice for Indian guests (Aadhaar / DL / Voter)
+      //
+      // Configurable per tenant via `hotel_require_id_at_checkin` (default
+      // 1). Set to 0 for transit / day-use / business-meeting-only
+      // properties that don't accommodate overnight guests.
+      const tenantCfg: any = await centralDb.get(
+        "SELECT hotel_require_id_at_checkin FROM restaurants WHERE id = ?",
+        [req.params.id]
+      );
+      const requireId = Number(tenantCfg?.hotel_require_id_at_checkin ?? 1) === 1;
+      if (requireId) {
+        const docCount: any = await tenantDb.get(
+          "SELECT COUNT(*)::int AS n FROM guest_documents WHERE booking_id = ?",
+          [req.params.bookingId]
+        );
+        if (Number(docCount?.n || 0) === 0) {
+          return res.status(400).json({
+            error: "At least one ID-proof document (Aadhaar / Passport / Driving License / etc.) must be uploaded before check-in. Open the booking and add the document, then retry check-in.",
+            missing_field: 'guest_documents',
+            require_id_at_checkin: true,
+          });
+        }
+      }
+
       // Early-check-in rule: by default a guest can only be checked in
       // on or after their scheduled check-in date. Most hotels do
       // accommodate early arrivals when a room is ready, so this is an
@@ -17296,7 +17328,8 @@ async function startServer() {
                 hotel_gst_slab1_max, hotel_gst_slab1_rate,
                 hotel_gst_slab2_max, hotel_gst_slab2_rate,
                 hotel_gst_slab3_rate,
-                hotel_service_charge_percent
+                hotel_service_charge_percent,
+                hotel_require_id_at_checkin
            FROM restaurants WHERE id = ?`,
         [req.params.id]
       );
@@ -17313,6 +17346,8 @@ async function startServer() {
         gst_slab2_rate:         r?.hotel_gst_slab2_rate ?? 12,
         gst_slab3_rate:         r?.hotel_gst_slab3_rate ?? 18,
         service_charge_percent: r?.hotel_service_charge_percent ?? 0,
+        // Req 1b — pre-check-in ID gate (default ON)
+        require_id_at_checkin:  Number(r?.hotel_require_id_at_checkin ?? 1) === 1,
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch hotel settings" });
@@ -17356,6 +17391,11 @@ async function startServer() {
       if (slab1Max != null && slab2Max != null && slab2Max <= slab1Max) {
         return res.status(400).json({ error: 'Slab 2 maximum must be greater than slab 1 maximum.' });
       }
+      // Req 1b — pre-check-in ID gate. Truthy → 1, explicit false → 0,
+      // omitted → leave existing setting untouched via COALESCE.
+      const requireIdAtCheckin = b.require_id_at_checkin == null
+        ? null
+        : (b.require_id_at_checkin ? 1 : 0);
 
       await centralDb.run(
         `UPDATE restaurants
@@ -17369,10 +17409,12 @@ async function startServer() {
                 hotel_gst_slab2_max          = COALESCE(?, hotel_gst_slab2_max),
                 hotel_gst_slab2_rate         = COALESCE(?, hotel_gst_slab2_rate),
                 hotel_gst_slab3_rate         = COALESCE(?, hotel_gst_slab3_rate),
-                hotel_service_charge_percent = COALESCE(?, hotel_service_charge_percent)
+                hotel_service_charge_percent = COALESCE(?, hotel_service_charge_percent),
+                hotel_require_id_at_checkin  = COALESCE(?, hotel_require_id_at_checkin)
           WHERE id = ?`,
         [minStay ?? 1, maxStay, refundFullDays, refundPartial, lateTime,
          slab1Max, slab1Rate, slab2Max, slab2Rate, slab3Rate, svcPct,
+         requireIdAtCheckin,
          req.params.id]
       );
       res.json({ success: true });
@@ -22046,7 +22088,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-pms-hardening-5-reqs-plus-room-service',
+    commit_marker: 'hotel-pre-checkin-id-gate-req1b',
     code_features: [
       'subscription-billing',
       'read-only-mode',

@@ -237,6 +237,14 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_refund_full_days INT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_refund_partial_pct DOUBLE PRECISION;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_late_checkout_time TEXT;
+    -- Req 1b — Pre-check-in ID gate. When 1 (default), the check-in
+    -- endpoint refuses to flip a booking to CHECKED_IN unless at least
+    -- one row exists in guest_documents for that booking. Statutory
+    -- baseline for India: Form-C / FRRO for foreign guests requires
+    -- ID, DPDP best-practice for Indian guests. Owners running transit
+    -- / day-use only properties (truck-stops, business meeting rooms)
+    -- can set this to 0 to opt out.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_require_id_at_checkin INT DEFAULT 1;
     -- Phase H2 — Hotel-specific GST + service charge.
     -- Indian hotels follow a tariff-slab GST regime (post-2022 GST Council):
     --   ≤ ₹1,000/night  → 0%   (exempt)

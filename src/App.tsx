@@ -7054,6 +7054,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     gst_slab2_rate: number;
     gst_slab3_rate: number;
     service_charge_percent: number;
+    // Req 1b — pre-check-in ID gate
+    require_id_at_checkin: boolean;
   }>({
     min_stay_nights: 1, max_stay_nights: null,
     refund_full_days: null, refund_partial_pct: null, late_checkout_time: null,
@@ -7061,7 +7063,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     gst_slab2_max: 7500, gst_slab2_rate: 12,
     gst_slab3_rate: 18,
     service_charge_percent: 0,
+    require_id_at_checkin: true,
   });
+  // Req 1b — pre-check-in checklist modal target. Holds the booking
+  // row when the staff clicks "Check In" but phone or ID documents
+  // are missing. The modal embeds the GuestDocumentsWidget so the
+  // gap can be fixed inline before retrying.
+  const [checkInChecklistTarget, setCheckInChecklistTarget] = useState<any>(null);
   const [hotelSettingsSaving, setHotelSettingsSaving] = useState(false);
   // Sprint P2-H — Yield rules CRUD state.
   const [yieldRules, setYieldRules] = useState<any[]>([]);
@@ -9203,14 +9211,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
   };
 
-  // Wrapper that guards against accidental early check-ins. If the
-  // booking is scheduled for a future date, open an inline confirm
-  // modal — replaces the previous window.confirm() which suffered from
-  // popup-suppressor blocks and inconsistent styling. The actual
-  // check-in fires only after the cashier clicks the explicit
-  // "Confirm Early Check-In" button in submitEarlyCheckIn().
+  // Wrapper that guards against accidental early check-ins AND enforces
+  // the pre-check-in document gate (Req 1b). Two guard layers:
+  //   1. Early check-in → confirm modal (existing behavior)
+  //   2. Missing phone / missing ID-proof docs → checklist modal that
+  //      lets the receptionist fix the gaps inline before retrying
+  // The actual check-in fires only after the cashier clicks the
+  // primary CTA on whichever modal opens.
   const confirmAndCheckIn = async (b: any) => {
     if (!b?.id) return;
+
+    // Req 1b — local pre-flight: if we already know phone is empty OR
+    // document_count is 0, surface the checklist modal up-front so the
+    // staff doesn't get a 400 from the server. Server still enforces
+    // the gate as a defensive backstop.
+    const hasPhone = !!String(b.guest_phone || '').trim();
+    const docCount = Number(b.document_count || 0);
+    const requireDocs = hotelSettings?.require_id_at_checkin !== false; // default true
+    if (!hasPhone || (requireDocs && docCount === 0)) {
+      setCheckInChecklistTarget(b);
+      return;
+    }
+
     const today = new Date().toISOString().slice(0, 10);
     const scheduled = normaliseBookingDate(b.check_in_date);
     if (scheduled && scheduled > today) {
@@ -9224,6 +9246,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const msg = err?.message || '';
       if (/scheduled for/i.test(msg) || /early/i.test(msg)) {
         setEarlyCheckInTarget(b);
+      } else if (/id-proof/i.test(msg) || /phone number is required/i.test(msg)) {
+        // Backstop — server caught a gap our local data missed.
+        setCheckInChecklistTarget(b);
       } else {
         setHotelError(msg || 'Check-in failed');
       }
@@ -19789,6 +19814,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       )}
 
+      {/* ═════════ Pre-check-in checklist modal (Req 1b) ═════════
+          Opens when staff clicks "Check In" but the booking is missing
+          phone or ID documents. Embeds the GuestDocumentsWidget so the
+          gap can be fixed inline. "Confirm Check-In" stays disabled
+          until both items are green. Server-side guard is the final
+          backstop — this is the UX layer. */}
+      {checkInChecklistTarget && (() => {
+        const b = checkInChecklistTarget;
+        const hasPhone = !!String(b.guest_phone || '').trim();
+        const requireDocs = hotelSettings.require_id_at_checkin !== false;
+        return (
+          <CheckInChecklistModal
+            booking={b}
+            requireDocs={requireDocs}
+            hasPhone={hasPhone}
+            restaurantId={restaurantId}
+            token={token}
+            onCancel={() => setCheckInChecklistTarget(null)}
+            onCheckIn={async () => {
+              try {
+                await checkInBooking(b.id, false);
+                setCheckInChecklistTarget(null);
+              } catch (err: any) {
+                const msg = err?.message || '';
+                if (/scheduled for/i.test(msg) || /early/i.test(msg)) {
+                  // Promote to early-check-in modal
+                  setCheckInChecklistTarget(null);
+                  setEarlyCheckInTarget(b);
+                } else {
+                  alert(msg || 'Check-in failed');
+                }
+              }
+            }}
+          />
+        );
+      })()}
+
       {/* ═════════ Early check-in confirm modal (Phase H1) ═════════
           Opened by confirmAndCheckIn() when the booking's scheduled date
           is in the future. Replaces window.confirm so the prompt is
@@ -24009,6 +24071,177 @@ const GuestDocumentsWidget: React.FC<{
         >
           {uploading ? 'Uploading…' : 'Upload'}
         </button>
+      </div>
+    </div>
+  );
+};
+
+/* ─── CheckInChecklistModal — Req 1b ─────────────────────────────
+   Pre-check-in gate enforced in the UI. Opens when staff clicks
+   "Check In" on a row where phone or ID documents are missing.
+   Embeds the existing GuestDocumentsWidget so the staff can upload
+   ID inline without navigating away. Re-fetches document count on
+   each render of the widget so the "Confirm Check-In" button
+   toggles enabled the moment the first doc lands.
+
+   Doesn't allow direct phone entry — that's a booking field. If
+   phone is missing the staff has to open Edit Booking, fix it,
+   and come back. Rationale: avoid duplicating the contact form
+   here, and force a save through the audited PATCH endpoint.
+*/
+const CheckInChecklistModal: React.FC<{
+  booking: any;
+  requireDocs: boolean;
+  hasPhone: boolean;
+  restaurantId: string;
+  token: string;
+  onCancel: () => void;
+  onCheckIn: () => void | Promise<void>;
+}> = ({ booking, requireDocs, hasPhone, restaurantId, token, onCancel, onCheckIn }) => {
+  const [docCount, setDocCount] = useState<number>(Number(booking.document_count || 0));
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+
+  // Re-fetch doc count whenever the embedded widget might have changed
+  // it (we trigger a refresh via key bump on upload success — see below).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/restaurant/${restaurantId}/hotel/bookings/${booking.id}/documents`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!cancelled && res.ok) {
+          const docs = await res.json();
+          setDocCount(Array.isArray(docs) ? docs.length : 0);
+        }
+      } catch {/* swallow */}
+    })();
+    return () => { cancelled = true; };
+  }, [refreshNonce, restaurantId, booking.id, token]);
+
+  const phoneOk = hasPhone;
+  const docsOk = !requireDocs || docCount > 0;
+  const ready = phoneOk && docsOk;
+
+  const confirm = async () => {
+    if (!ready || submitting) return;
+    setSubmitting(true);
+    try { await onCheckIn(); } finally { setSubmitting(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[55] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onCancel}>
+      <div
+        className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-7 max-h-[92vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <div>
+            <h3 className="text-xl font-bold font-serif text-[#1a1208]">Pre-check-in checklist</h3>
+            <p className="text-[11px] text-[#6b5d52] mt-0.5">
+              {booking.guest_name} · {booking.room_name || booking.room_id}
+            </p>
+          </div>
+          <button onClick={onCancel} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18}/></button>
+        </div>
+
+        {/* Checklist items */}
+        <div className="mt-4 space-y-2.5">
+          {/* Phone */}
+          <div className={cn(
+            "flex items-center gap-3 rounded-2xl px-4 py-3 border",
+            phoneOk
+              ? "bg-emerald-50 border-emerald-200 text-emerald-900"
+              : "bg-amber-50 border-amber-200 text-amber-900"
+          )}>
+            {phoneOk
+              ? <CheckCircle2 size={20} className="text-emerald-600 flex-shrink-0" />
+              : <AlertCircle size={20} className="text-amber-600 flex-shrink-0" />}
+            <div className="flex-1 min-w-0">
+              <p className="font-bold text-sm">Guest phone number</p>
+              <p className="text-xs opacity-80 mt-0.5">
+                {phoneOk
+                  ? <>On file: <span className="font-mono">{booking.guest_phone}</span></>
+                  : <>Required. Open <strong>Edit Booking</strong> and add a phone number — Form-C / FRRO / WhatsApp need it.</>}
+              </p>
+            </div>
+          </div>
+
+          {/* ID Documents */}
+          <div className={cn(
+            "rounded-2xl px-4 py-3 border",
+            !requireDocs ? "bg-slate-50 border-slate-200" :
+            docsOk     ? "bg-emerald-50 border-emerald-200"
+                       : "bg-amber-50 border-amber-200"
+          )}>
+            <div className="flex items-center gap-3">
+              {!requireDocs ? (
+                <Bell size={20} className="text-slate-400 flex-shrink-0" />
+              ) : docsOk ? (
+                <CheckCircle2 size={20} className="text-emerald-600 flex-shrink-0" />
+              ) : (
+                <AlertCircle size={20} className="text-amber-600 flex-shrink-0" />
+              )}
+              <div className="flex-1 min-w-0">
+                <p className="font-bold text-sm text-[#1a1208]">ID-proof documents</p>
+                <p className="text-xs text-[#6b5d52] mt-0.5">
+                  {!requireDocs
+                    ? "Optional (property setting). Skip OK."
+                    : docCount === 0
+                      ? "At least one document required. Upload below."
+                      : `${docCount} document${docCount > 1 ? 's' : ''} on file. Add more if needed.`}
+                </p>
+              </div>
+            </div>
+
+            {/* Embedded upload widget. We bump the refreshNonce after a
+                successful upload by remounting via key — the widget
+                manages its own list, we just need to re-count. */}
+            <div className="mt-3" key={refreshNonce}>
+              <GuestDocumentsWidget
+                bookingId={booking.id}
+                bookingStatus={booking.status || 'BOOKED'}
+                restaurantId={restaurantId}
+                token={token}
+              />
+              {/* A tiny ping so the parent re-fetches its own count. */}
+              <button
+                type="button"
+                onClick={() => setRefreshNonce(n => n + 1)}
+                className="mt-2 text-[10px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest"
+              >Refresh checklist after upload</button>
+            </div>
+          </div>
+        </div>
+
+        {/* Statutory reminder */}
+        {requireDocs && !docsOk && (
+          <p className="text-[10px] text-[#9c8e85] italic mt-3 leading-relaxed">
+            Per Indian hotel regulations (Form-C for foreign guests, FRRO reporting, DPDP 2023 baseline), ID verification is required at check-in. To turn this off for transit-only properties, open <strong>Settings → Hotel</strong> and uncheck "Require ID proof at check-in".
+          </p>
+        )}
+
+        {/* Footer */}
+        <div className="flex gap-2 pt-4 mt-3 border-t border-[#cc5a16]/10">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]"
+          >Cancel</button>
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={!ready || submitting}
+            className={cn(
+              "flex-1 px-4 py-2.5 rounded-2xl text-white text-sm font-bold transition-all",
+              ready && !submitting
+                ? "bg-emerald-600 hover:bg-emerald-700"
+                : "bg-stone-300 cursor-not-allowed"
+            )}
+          >{submitting ? 'Checking in…' : 'Confirm Check-In'}</button>
+        </div>
       </div>
     </div>
   );
