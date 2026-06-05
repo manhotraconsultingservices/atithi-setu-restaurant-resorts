@@ -91,13 +91,17 @@ export GITHUB_SHA="$REMOTE_SHA"
 export GITHUB_ACTOR="cron-poll"
 export GITHUB_REF_NAME="$BRANCH"
 
-if [ -x "$DEPLOY_SCRIPT" ]; then
-  if "$DEPLOY_SCRIPT" >>"$LOG_FILE" 2>&1; then
-    log "✅ Deploy completed for $REMOTE_SHA"
-  else
-    log "❌ Deploy failed for $REMOTE_SHA (exit $?). See deploy-history.log + docker logs."
-  fi
-else
-  log "❌ Deploy script missing or not executable: $DEPLOY_SCRIPT"
+if [ ! -f "$DEPLOY_SCRIPT" ]; then
+  log "❌ Deploy script missing: $DEPLOY_SCRIPT"
   exit 1
+fi
+# Defensive: git checkout doesn't always preserve the executable bit
+# (especially on platforms with core.fileMode=false). Re-apply it on
+# every run so the cron never breaks just because someone reset --hard.
+chmod +x "$DEPLOY_SCRIPT" "$APP_DIR/deploy/poll-and-deploy.sh" 2>/dev/null || true
+
+if "$DEPLOY_SCRIPT" >>"$LOG_FILE" 2>&1; then
+  log "✅ Deploy completed for $REMOTE_SHA"
+else
+  log "❌ Deploy failed for $REMOTE_SHA (exit $?). See deploy-history.log + docker logs."
 fi
