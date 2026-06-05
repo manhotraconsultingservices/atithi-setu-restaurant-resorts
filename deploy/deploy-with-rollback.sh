@@ -105,8 +105,15 @@ NEW_SHA=$(git rev-parse HEAD)
 log "✓ Code updated: $OLD_SHA → $NEW_SHA"
 
 if [[ "$OLD_SHA" == "$NEW_SHA" ]]; then
-  log "ℹ No new commits. Exiting early."
-  exit 0
+  # By default, exit cleanly when nothing changed — that's the right
+  # behavior for the per-minute cron poller. But sometimes an operator
+  # needs to force a rebuild (e.g. working copy is correct but container
+  # is stale because a previous run died mid-deploy). FORCE=1 bypasses.
+  if [[ "${FORCE:-0}" != "1" ]]; then
+    log "ℹ No new commits. Exiting early. (Pass FORCE=1 to rebuild anyway.)"
+    exit 0
+  fi
+  log "ℹ FORCE=1 set — rebuilding even though SHAs match"
 fi
 
 # Step 3+4: Build + swap containers (with retry on transient build failures)
