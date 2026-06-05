@@ -6824,6 +6824,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [checkoutPayment, setCheckoutPayment] = useState<'CASH'|'CARD'|'UPI'|'BANK'>('CASH');
   const [checkoutDiscount, setCheckoutDiscount] = useState(0);
   const [viewFolio, setViewFolio] = useState<any>(null);
+  // Sprint RS — F&B charge modal state (phone-in room service, minibar, banquet)
+  const [fnbChargeFolio, setFnbChargeFolio] = useState<any>(null);
   // Phase 4
   const [hotelFaqs, setHotelFaqs] = useState<any[]>([]);
   const [editingFaq, setEditingFaq] = useState<any>(null);
@@ -20178,9 +20180,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   ><RefreshCw size={14}/> Generate Credit Note</button>
                 )}
               </div>
+
+              {/* Sprint RS — Staff-side "Add F&B charge" (open folios only) */}
+              {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'open' && (
+                <div className="pt-2">
+                  <button
+                    onClick={() => setFnbChargeFolio(viewFolio)}
+                    className="w-full px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 flex items-center justify-center gap-2"
+                  >
+                    <ChefHat size={14}/> Add F&amp;B Charge to Folio
+                  </button>
+                  <p className="text-[10px] text-[#9c8e85] mt-1.5 text-center italic">
+                    For phone-in room service, minibar restock, banquet overage, etc. Charge is posted as an itemized entry on the folio.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
+      )}
+
+      {/* Sprint RS — F&B charge entry modal (RS-3) */}
+      {fnbChargeFolio && (
+        <FnbChargeModal
+          folio={fnbChargeFolio}
+          restaurantId={restaurantId}
+          token={token}
+          onClose={() => setFnbChargeFolio(null)}
+          onPosted={async () => {
+            await fetchHotelFolios();
+            // Re-open the just-charged folio so staff sees the new entry
+            try {
+              const r = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${fnbChargeFolio.id}`, { headers: { Authorization: `Bearer ${token}` } });
+              if (r.ok) setViewFolio(await r.json());
+            } catch {/* swallow */}
+            setFnbChargeFolio(null);
+          }}
+        />
       )}
 
       {/* Add Item Modal */}
@@ -23978,6 +24014,181 @@ const GuestDocumentsWidget: React.FC<{
   );
 };
 
+/* ─── FnbChargeModal — Sprint RS (Room-service to folio) ────────
+   Staff-side modal that posts an itemized F&B charge to an OPEN
+   hotel folio. Used for phone-in room service, minibar restocking,
+   banquet overage, etc.
+
+   POSTs to /hotel/folios/:folioId/charge-fnb which creates a
+   synthetic order (so reversal still works via reference_number)
+   and routes through postOrderToFolio for the actual entry inserts.
+*/
+const FnbChargeModal: React.FC<{
+  folio: any;
+  restaurantId: string;
+  token: string;
+  onClose: () => void;
+  onPosted: () => void | Promise<void>;
+}> = ({ folio, restaurantId, token, onClose, onPosted }) => {
+  const [subtype, setSubtype] = useState<'IRD' | 'RESTAURANT' | 'BAR' | 'MINIBAR' | 'BANQUET'>('IRD');
+  const [items, setItems] = useState<Array<{ name: string; quantity: number; unit_price: number; gst_rate: string }>>([
+    { name: '', quantity: 1, unit_price: 0, gst_rate: '' },
+  ]);
+  const [note, setNote] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const subtotal = items.reduce((s, it) => s + (Number(it.quantity || 0) * Number(it.unit_price || 0)), 0);
+  const valid = items.some(it => it.name.trim() && Number(it.quantity) > 0 && Number(it.unit_price) > 0);
+
+  const updateItem = (idx: number, patch: Partial<typeof items[0]>) =>
+    setItems(prev => prev.map((it, i) => i === idx ? { ...it, ...patch } : it));
+  const addRow = () => setItems(prev => [...prev, { name: '', quantity: 1, unit_price: 0, gst_rate: '' }]);
+  const removeRow = (idx: number) => setItems(prev => prev.filter((_, i) => i !== idx));
+
+  const submit = async () => {
+    setError('');
+    const cleanItems = items
+      .filter(it => it.name.trim() && Number(it.quantity) > 0 && Number(it.unit_price) > 0)
+      .map(it => ({
+        name: it.name.trim(),
+        quantity: Number(it.quantity),
+        unit_price: Number(it.unit_price),
+        gst_rate: it.gst_rate.trim() ? Number(it.gst_rate) : undefined,
+      }));
+    if (cleanItems.length === 0) { setError('Add at least one item with name, quantity and unit price.'); return; }
+    setSubmitting(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${folio.id}/charge-fnb`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ items: cleanItems, subtype, note: note.trim() || undefined }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
+      await onPosted();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to post charge');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-7 max-h-[92vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
+          <div>
+            <h3 className="text-xl font-bold font-serif text-[#1a1208]">Add F&amp;B Charge</h3>
+            <p className="text-[11px] text-[#6b5d52]">Posting to folio <span className="font-mono">{folio.id}</span></p>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18}/></button>
+        </div>
+
+        <div className="mt-4 space-y-3">
+          {/* Subtype selector */}
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Category</label>
+            <div className="grid grid-cols-5 gap-1.5">
+              {(['IRD','RESTAURANT','BAR','MINIBAR','BANQUET'] as const).map(s => (
+                <button
+                  key={s} type="button"
+                  onClick={() => setSubtype(s)}
+                  className={cn(
+                    'py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all',
+                    subtype === s ? 'bg-[#cc5a16] text-white shadow-md' : 'bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10'
+                  )}
+                >{s === 'IRD' ? 'Room Svc' : s.toLowerCase()}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Item rows */}
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Items</label>
+            <div className="space-y-2">
+              {items.map((it, idx) => (
+                <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                  <input
+                    value={it.name}
+                    onChange={e => updateItem(idx, { name: e.target.value })}
+                    placeholder="Item name (e.g. Chicken Tikka)"
+                    className="col-span-5 bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                  <input
+                    type="number" min="1" step="1"
+                    value={it.quantity}
+                    onChange={e => updateItem(idx, { quantity: Number(e.target.value) })}
+                    placeholder="Qty"
+                    className="col-span-2 bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                  <input
+                    type="number" min="0" step="0.01"
+                    value={it.unit_price || ''}
+                    onChange={e => updateItem(idx, { unit_price: Number(e.target.value) })}
+                    placeholder="Price"
+                    className="col-span-2 bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                  <input
+                    type="number" min="0" max="28" step="1"
+                    value={it.gst_rate}
+                    onChange={e => updateItem(idx, { gst_rate: e.target.value })}
+                    placeholder="GST%"
+                    title="Leave blank to use hotel default (5% or 18% based on specified-premises status)"
+                    className="col-span-2 bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeRow(idx)}
+                    disabled={items.length === 1}
+                    className="col-span-1 p-1.5 rounded-lg text-[#c13b3b] hover:bg-[#fdf0f0] disabled:opacity-30"
+                  ><X size={14}/></button>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={addRow}
+              className="mt-2 text-[11px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest"
+            >+ Add another item</button>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Note (optional)</label>
+            <input
+              value={note}
+              onChange={e => setNote(e.target.value)}
+              placeholder="Reason / source (e.g. phone-in 9:42 PM)"
+              className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none"
+            />
+          </div>
+
+          <div className="flex items-center justify-between bg-[#faf7f2] rounded-2xl px-4 py-3">
+            <span className="text-xs text-[#6b5d52] font-bold uppercase tracking-widest">Subtotal</span>
+            <span className="font-mono text-base font-bold text-[#1a1208]">
+              ₹{subtotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </span>
+          </div>
+          <p className="text-[10px] text-[#9c8e85] italic">
+            Taxes are calculated automatically by the folio (5% non-specified or 18% specified-premises F&amp;B GST, or your per-item override).
+          </p>
+
+          {error && <p className="text-xs text-[#c13b3b] bg-[#fdf0f0] rounded-xl px-3 py-2">{error}</p>}
+
+          <div className="flex gap-2 pt-2">
+            <button onClick={onClose} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+            <button
+              onClick={submit}
+              disabled={!valid || submitting}
+              className="flex-1 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50"
+            >{submitting ? 'Posting…' : 'Post to Folio'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 /* ─── PickupPaceChart — Sprint P2-E ──────────────────────────────
    Current vs prior-year window pace. KPI deltas + recharts line
    chart for daily booking creation rate + source-mix breakdown.   */
@@ -25241,6 +25452,16 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
   const [session, setSession] = useState<any>(null);
   const [guestName, setGuestName] = useState('');
   const [guestPhone, setGuestPhone] = useState('');
+  // Sprint RS — Room-service / F&B ordering. New "Order Food" tab next
+  // to "Services". Fetches the restaurant's public menu, lets the guest
+  // build a cart, POSTs an order with payment_method=CHARGE_TO_ROOM
+  // which the backend bridges to the active folio for this room.
+  const [activeTab, setActiveTab] = useState<'SERVICES' | 'FOOD'>('SERVICES');
+  const [menu, setMenu] = useState<any[]>([]);
+  const [cart, setCart] = useState<Record<string, number>>({}); // itemId → quantity
+  const [foodCategory, setFoodCategory] = useState<string>('ALL');
+  const [placingFoodOrder, setPlacingFoodOrder] = useState(false);
+  const [foodOrderConfirm, setFoodOrderConfirm] = useState<{ folioId?: string; reason?: string } | null>(null);
   // Bug 2 fix — the previous form rendered conditionally on `!guestName`
   // so the input element unmounted the moment the user typed their first
   // character, making it appear that the screen "auto-saved" after one
@@ -25306,6 +25527,15 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
         if (pubReqRes.ok) {
           setMyRequests(await pubReqRes.json());
         }
+        // Sprint RS — fetch the F&B menu (public endpoint) for the "Order Food" tab
+        try {
+          const menuRes = await fetch(`/api/restaurant/${restaurantId}/menu`);
+          if (menuRes.ok) {
+            const items = await menuRes.json();
+            // Only show available items, drop disabled ones
+            setMenu((items || []).filter((it: any) => it.is_active !== 0 && it.is_active !== false));
+          }
+        } catch { /* non-blocking — F&B tab will show empty */ }
       } catch (err: any) {
         setError(err.message || 'Failed to load');
       } finally {
@@ -25317,6 +25547,62 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
 
   const categories: string[] = (Array.from(new Set(services.map((s: any) => String(s.category || '')))) as string[]).filter(Boolean).sort();
   const filtered = activeCategory === 'ALL' ? services : services.filter(s => s.category === activeCategory);
+
+  // Sprint RS — F&B menu derivations
+  const foodCategories: string[] = (Array.from(new Set(menu.map((m: any) => String(m.category || '')))) as string[]).filter(Boolean).sort();
+  const visibleMenu = foodCategory === 'ALL' ? menu : menu.filter(m => m.category === foodCategory);
+  const cartLines = menu.filter(m => cart[m.id] > 0).map(m => ({
+    ...m, qty: cart[m.id], lineTotal: cart[m.id] * Number(m.price || 0),
+  }));
+  const cartSubtotal = cartLines.reduce((s, l) => s + l.lineTotal, 0);
+  const cartCount = cartLines.reduce((s, l) => s + l.qty, 0);
+
+  const addToCart = (id: string) => setCart(c => ({ ...c, [id]: (c[id] || 0) + 1 }));
+  const removeFromCart = (id: string) => setCart(c => {
+    const next = (c[id] || 0) - 1;
+    if (next <= 0) { const { [id]: _drop, ...rest } = c; return rest; }
+    return { ...c, [id]: next };
+  });
+
+  const placeRoomServiceOrder = async () => {
+    if (cartLines.length === 0 || placingFoodOrder) return;
+    setPlacingFoodOrder(true);
+    setFoodOrderConfirm(null);
+    try {
+      const itemsPayload = cartLines.map(l => ({
+        id: l.id, name: l.name, quantity: l.qty,
+        price: Number(l.price || 0), unit_price: Number(l.price || 0),
+      }));
+      const res = await fetch(`/api/restaurant/${restaurantId}/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: itemsPayload,
+          total_amount: cartSubtotal,
+          customer_name: guestName || session?.guest_name || null,
+          customer_phone: guestPhone || session?.guest_phone || null,
+          payment_method: 'CHARGE_TO_ROOM',
+          room_id: roomId,
+          booking_id: session?.booking_id || null,
+          table_number: `Room ${room?.room_number || room?.name || roomId}`,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Order failed');
+      // The backend returns `room_service: { ok, folio_id, reason }` when
+      // payment_method=CHARGE_TO_ROOM. Show a confirmation that matches.
+      const rs = data?.room_service || {};
+      setFoodOrderConfirm({
+        folioId: rs.folio_id,
+        reason: rs.ok ? undefined : (rs.reason || 'no-folio'),
+      });
+      setCart({});  // clear cart on success
+    } catch (err: any) {
+      setFoodOrderConfirm({ reason: err?.message || 'Order failed' });
+    } finally {
+      setPlacingFoodOrder(false);
+    }
+  };
 
   const submitRequest = async (service: any, note?: string, quantity?: number) => {
     if (!session) return;
@@ -25468,8 +25754,37 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
           </div>
         )}
 
-        {/* Category tabs */}
-        {categories.length > 0 && (
+        {/* Sprint RS — Top-level tab toggle between Services and Order Food */}
+        {menu.length > 0 && (
+          <div className="grid grid-cols-2 gap-2 mb-4 bg-white rounded-2xl p-1 border border-[#cc5a16]/10">
+            <button
+              onClick={() => setActiveTab('SERVICES')}
+              className={cn(
+                "py-2.5 rounded-xl text-xs font-bold uppercase tracking-wide transition-all flex items-center justify-center gap-1.5",
+                activeTab === 'SERVICES' ? 'bg-[#cc5a16] text-white shadow-md' : 'text-[#6b5d52]'
+              )}
+            >
+              <Bell size={14} /> Services
+            </button>
+            <button
+              onClick={() => setActiveTab('FOOD')}
+              className={cn(
+                "py-2.5 rounded-xl text-xs font-bold uppercase tracking-wide transition-all flex items-center justify-center gap-1.5 relative",
+                activeTab === 'FOOD' ? 'bg-[#cc5a16] text-white shadow-md' : 'text-[#6b5d52]'
+              )}
+            >
+              <ChefHat size={14} /> Order Food
+              {cartCount > 0 && (
+                <span className="absolute -top-1 -right-1 bg-emerald-500 text-white text-[9px] font-bold rounded-full px-1.5 py-0.5">
+                  {cartCount}
+                </span>
+              )}
+            </button>
+          </div>
+        )}
+
+        {/* SERVICES TAB — concierge requests (original UX) */}
+        {activeTab === 'SERVICES' && categories.length > 0 && (
           <div className="flex gap-2 mb-4 overflow-x-auto pb-2 no-scrollbar">
             <button
               onClick={() => setActiveCategory('ALL')}
@@ -25491,7 +25806,126 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
           </div>
         )}
 
-        {/* Service cards */}
+        {/* FOOD TAB — F&B menu with cart, charges to folio */}
+        {activeTab === 'FOOD' && (
+          <>
+            {/* Industry-leading messaging — "Charge to your room" upfront so the
+                guest knows the payment model before scrolling the menu. */}
+            <div className="bg-emerald-50 border border-emerald-200 rounded-2xl px-4 py-3 mb-4 text-xs text-emerald-800">
+              <strong>Charged to your room.</strong> Your selection is added to your folio. Pay everything together at check-out.
+            </div>
+
+            {/* Food category chips */}
+            {foodCategories.length > 0 && (
+              <div className="flex gap-2 mb-4 overflow-x-auto pb-2 no-scrollbar">
+                <button
+                  onClick={() => setFoodCategory('ALL')}
+                  className={cn(
+                    "px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wide whitespace-nowrap transition-all",
+                    foodCategory === 'ALL' ? 'bg-[#cc5a16] text-white shadow-md' : 'bg-white border border-[#cc5a16]/10 text-[#6b5d52]'
+                  )}
+                >All</button>
+                {foodCategories.map(cat => (
+                  <button
+                    key={cat}
+                    onClick={() => setFoodCategory(cat)}
+                    className={cn(
+                      "px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wide whitespace-nowrap transition-all",
+                      foodCategory === cat ? 'bg-[#cc5a16] text-white shadow-md' : 'bg-white border border-[#cc5a16]/10 text-[#6b5d52]'
+                    )}
+                  >{cat.replace('_', ' ').toLowerCase()}</button>
+                ))}
+              </div>
+            )}
+
+            {/* Menu cards */}
+            <div className="space-y-3 mb-4">
+              {visibleMenu.map((item: any) => (
+                <div key={item.id} className="bg-white rounded-2xl p-4 border border-[#cc5a16]/10 flex items-start gap-3 shadow-sm">
+                  {item.image_url && (
+                    <img src={item.image_url} alt="" className="w-16 h-16 rounded-xl object-cover shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <h3 className="font-serif font-bold text-[#1a1208] text-sm">{item.name}</h3>
+                      <span className="text-[#cc5a16] text-xs font-bold font-mono shrink-0">₹{Number(item.price || 0).toLocaleString('en-IN')}</span>
+                    </div>
+                    {item.description && <p className="text-xs text-[#6b5d52] mt-1 line-clamp-2">{item.description}</p>}
+                    <div className="flex items-center justify-end gap-2 mt-2">
+                      {cart[item.id] > 0 ? (
+                        <>
+                          <button onClick={() => removeFromCart(item.id)} className="w-7 h-7 rounded-full bg-[#cc5a16]/10 text-[#cc5a16] font-bold text-sm">−</button>
+                          <span className="text-sm font-bold text-[#1a1208] min-w-[20px] text-center">{cart[item.id]}</span>
+                          <button onClick={() => addToCart(item.id)} className="w-7 h-7 rounded-full bg-[#cc5a16] text-white font-bold text-sm">+</button>
+                        </>
+                      ) : (
+                        <button onClick={() => addToCart(item.id)} className="px-3 py-1.5 rounded-full bg-[#cc5a16] text-white text-[11px] font-bold uppercase tracking-wide">Add</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {visibleMenu.length === 0 && (
+                <div className="bg-white rounded-2xl p-6 text-center text-sm text-[#6b5d52] border border-[#cc5a16]/10">
+                  No items available right now.
+                </div>
+              )}
+            </div>
+
+            {/* Sticky cart footer */}
+            {cartCount > 0 && (
+              <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-[#cc5a16]/10 px-5 py-4 shadow-2xl z-50">
+                <div className="max-w-md mx-auto flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[10px] text-[#9c8e85] uppercase tracking-widest font-bold">{cartCount} item{cartCount > 1 ? 's' : ''}</p>
+                    <p className="font-mono text-base font-bold text-[#1a1208]">₹{cartSubtotal.toLocaleString('en-IN')}</p>
+                    <p className="text-[10px] text-[#9c8e85]">+ taxes at folio</p>
+                  </div>
+                  <button
+                    onClick={placeRoomServiceOrder}
+                    disabled={placingFoodOrder}
+                    className="flex-1 max-w-[200px] px-4 py-3.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold uppercase tracking-wide hover:bg-[#a84612] disabled:opacity-50"
+                  >
+                    {placingFoodOrder ? 'Placing…' : 'Charge to my room'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Confirmation / error toast */}
+            {foodOrderConfirm && (
+              <div className={cn(
+                "fixed top-20 left-5 right-5 max-w-md mx-auto z-50 rounded-2xl p-4 shadow-2xl border-2",
+                foodOrderConfirm.folioId ? "bg-emerald-50 border-emerald-300 text-emerald-900" : "bg-rose-50 border-rose-300 text-rose-900"
+              )}>
+                <div className="flex items-start gap-3">
+                  {foodOrderConfirm.folioId
+                    ? <CheckCircle2 size={20} className="text-emerald-700 mt-0.5 shrink-0" />
+                    : <AlertCircle size={20} className="text-rose-700 mt-0.5 shrink-0" />}
+                  <div className="flex-1 min-w-0">
+                    {foodOrderConfirm.folioId ? (
+                      <>
+                        <p className="font-bold text-sm">Added to your room bill</p>
+                        <p className="text-xs mt-0.5">Your kitchen will start preparing shortly. View everything together at check-out.</p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="font-bold text-sm">Order received but not yet on the folio</p>
+                        <p className="text-xs mt-0.5">{foodOrderConfirm.reason === 'no-open-folio-for-room-or-booking'
+                          ? "Please ask the front desk to link this room to a booking — they can settle the charge then."
+                          : (foodOrderConfirm.reason || 'Please ask the front desk.')}</p>
+                      </>
+                    )}
+                  </div>
+                  <button onClick={() => setFoodOrderConfirm(null)} className="text-current opacity-60 hover:opacity-100"><X size={16} /></button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Service cards — only in SERVICES tab */}
+        {activeTab === 'SERVICES' && (<>
         <div className="space-y-3 mb-6">
           {filtered.map((svc: any) => (
             <button
@@ -25557,6 +25991,7 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
             ))}
           </div>
         )}
+        </>)}{/* /activeTab === 'SERVICES' */}
 
         <p className="text-center text-[10px] text-[#9c8e85] mt-8 uppercase tracking-widest">Powered by Atithi Setu™</p>
       </div>

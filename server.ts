@@ -613,6 +613,23 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
       source_id  TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    -- Room-service / F&B-to-folio bridge (Sprint RS — 2026-05).
+    --   entry_subtype        Opera-style classifier — 'IRD' (In-Room Dining),
+    --                        'RESTAURANT', 'BAR', 'MINIBAR', 'BANQUET'.
+    --                        Lets the folio render show "Room Service" vs
+    --                        "Bar" distinctly even though both are entry_type='F_AND_B'.
+    --   reference_number     POS check number (orders.id) for reconciliation
+    --                        with the restaurant POS module.
+    --   reversal_of_entry_id when this row is a reversal posting, points
+    --                        back at the original entry. Industry rule:
+    --                        never delete a posting — always reverse with
+    --                        a matched negative entry.
+    --   posted_by            staff user id who triggered the posting.
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS entry_subtype TEXT;
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS reference_number TEXT;
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS reversal_of_entry_id TEXT;
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS posted_by TEXT;
+    CREATE INDEX IF NOT EXISTS idx_folio_entries_ref ON folio_entries (reference_number);
 
     CREATE TABLE IF NOT EXISTS guest_compliance_log (
       id                   TEXT PRIMARY KEY,
@@ -843,6 +860,197 @@ async function postServiceChargeToFolio(restaurantId: string, sr: any): Promise<
   );
   await tenantDb.run("UPDATE service_requests SET folio_entry_id = ? WHERE id = ?", [entryId, sr.id]);
   await recomputeFolioTotals(tenantDb, folioId);
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Sprint RS — Room-service / F&B-to-folio posting
+// ════════════════════════════════════════════════════════════════════════
+//
+// Industry leading practice (Opera Cloud, Cloudbeds, Mews, Hotelogix) —
+// when a hotel guest orders F&B via room service (or any POS check is
+// tagged "charge to room"), the POS transaction posts in real time to
+// the guest's active folio as one or more itemized entries. Standard
+// classifier for room service is **IRD** (In-Room Dining).
+//
+// Our model:
+//   • Reuses the existing folio_entries table with entry_type='F_AND_B'.
+//   • Stores the original POS check number in reference_number for
+//     reconciliation with the restaurant POS module.
+//   • Records entry_subtype ('IRD' | 'RESTAURANT' | 'BAR' | 'MINIBAR' |
+//     'BANQUET') so the folio render can group F&B by venue.
+//   • Tax rate resolved via the existing hotel tax_config helper
+//     (loadHotelTaxConfig → gstRateForTariff) — falls back to 5% which
+//     is the GST rate for F&B in non-"specified premises" Indian hotels
+//     (rooms ≤ ₹7,500/night). Hotels above that threshold ("specified
+//     premises") use 18% and should configure their tax_config row.
+//
+// Reversal: voids NEVER hard-delete a folio_entries row. They insert a
+// mirrored negative posting with reversal_of_entry_id pointing at the
+// original. Both lines stay visible — required for audit + GSTR-1.
+//
+// Idempotency: a single order is posted at most once. Re-calling
+// postOrderToFolio for an already-posted order returns the existing
+// folio_id without inserting a duplicate.
+type FolioOrderItem = {
+  name: string;
+  quantity?: number;
+  unitPrice?: number;     // pre-tax per-unit price
+  gstRate?: number;       // optional override; otherwise resolved from tax_config
+};
+
+async function resolveActiveFolioForRoom(
+  tenantDb: DbInterface,
+  opts: { bookingId?: string | null; roomId?: string | null }
+): Promise<{ folioId: string | null; bookingId: string | null; roomId: string | null }> {
+  let folioId: string | null = null;
+  let bookingId: string | null = opts.bookingId || null;
+  let roomId: string | null = opts.roomId || null;
+
+  // Path 1: explicit booking → its open folio.
+  if (bookingId) {
+    const f: any = await tenantDb.get(
+      "SELECT id, room_id FROM folios WHERE booking_id = ? AND status = 'open'",
+      [bookingId]
+    );
+    if (f) { folioId = f.id; roomId = roomId || f.room_id; }
+  }
+  // Path 2: room → most recent open folio.
+  if (!folioId && roomId) {
+    const f: any = await tenantDb.get(
+      "SELECT id, booking_id FROM folios WHERE room_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+      [roomId]
+    );
+    if (f) { folioId = f.id; bookingId = bookingId || f.booking_id; }
+  }
+  return { folioId, bookingId, roomId };
+}
+
+async function postOrderToFolio(
+  restaurantId: string,
+  order: {
+    id: string;
+    room_id?: string | null;
+    booking_id?: string | null;
+    items: FolioOrderItem[];
+    subtype?: 'IRD' | 'RESTAURANT' | 'BAR' | 'MINIBAR' | 'BANQUET';
+    posted_by?: string | null;
+  }
+): Promise<{ ok: boolean; folio_id?: string; reason?: string; entry_ids?: string[] }> {
+  const tenantDb = await getTenantDb(restaurantId);
+
+  // Idempotency — bail if this order id is already posted.
+  const existing: any = await tenantDb.get(
+    "SELECT folio_id, posted_to_folio_at FROM orders WHERE id = ?",
+    [order.id]
+  );
+  if (existing?.folio_id && existing?.posted_to_folio_at) {
+    return { ok: true, folio_id: existing.folio_id, reason: 'already-posted' };
+  }
+
+  const { folioId } = await resolveActiveFolioForRoom(tenantDb, {
+    bookingId: order.booking_id, roomId: order.room_id,
+  });
+  if (!folioId) {
+    return { ok: false, reason: 'no-open-folio-for-room-or-booking' };
+  }
+
+  // Resolve F&B GST rate. India rule (post-2022):
+  //   • F&B in "non-specified premises" (no room over ₹7,500/night) → 5%
+  //   • F&B in "specified premises" (any room over ₹7,500/night)     → 18%
+  //
+  // We infer the bucket from the tenant's hotel_gst_slab2_max — if any
+  // room is priced above the slab-2 cap (the high-tariff threshold,
+  // typically ₹7,500), the property is treated as specified premises
+  // and F&B follows the 18% rate. The per-item override in the order
+  // payload (item.gstRate) wins over this default — useful when the
+  // restaurant menu already carries item-level GST (e.g. liquor at 18%
+  // even in non-specified premises).
+  let defaultGst = 5;
+  try {
+    const cfg = await loadHotelTaxConfig(restaurantId);
+    const high: any = await tenantDb.get(
+      "SELECT 1 AS specified FROM rooms WHERE base_rate > ? LIMIT 1",
+      [cfg.slab2Max]
+    );
+    if (high?.specified) defaultGst = 18;
+  } catch { /* fall back to 5% */ }
+
+  const subtype = order.subtype || 'IRD';
+  const entryIds: string[] = [];
+
+  for (const item of (order.items || [])) {
+    const qty = Math.max(1, Number(item.quantity || 1));
+    const unit = Math.max(0, Number(item.unitPrice || 0));
+    const amount = qty * unit;
+    if (amount <= 0) continue;
+    const gstRate = item.gstRate != null ? Number(item.gstRate) : defaultGst;
+    const gstAmt = Math.round(amount * gstRate) / 100;
+    const entryId = `FE-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    await tenantDb.run(
+      `INSERT INTO folio_entries
+         (id, folio_id, entry_type, entry_subtype, description,
+          quantity, unit_price, amount, gst_rate, gst_amount,
+          source_id, reference_number, posted_by)
+       VALUES (?, ?, 'F_AND_B', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [entryId, folioId, subtype, item.name,
+       qty, unit, amount, gstRate, gstAmt,
+       order.id, order.id, order.posted_by || null]
+    );
+    entryIds.push(entryId);
+  }
+
+  // Stamp order with folio link for audit + idempotency on retry.
+  await tenantDb.run(
+    "UPDATE orders SET folio_id = ?, room_id = COALESCE(room_id, ?), booking_id = COALESCE(booking_id, ?), posted_to_folio_at = CURRENT_TIMESTAMP WHERE id = ?",
+    [folioId, order.room_id || null, order.booking_id || null, order.id]
+  );
+  await recomputeFolioTotals(tenantDb, folioId);
+  return { ok: true, folio_id: folioId, entry_ids: entryIds };
+}
+
+// Reversal: insert mirrored negative entries linking back to the original
+// postings, then recompute totals. The original rows stay visible — audit
+// log behavior matches Opera's Reverse semantics.
+async function reverseOrderFolioPosting(
+  restaurantId: string,
+  orderId: string,
+  reason: string,
+  reversedBy?: string | null,
+): Promise<{ ok: boolean; reversed_count: number; folio_id?: string }> {
+  const tenantDb = await getTenantDb(restaurantId);
+  const order: any = await tenantDb.get(
+    "SELECT folio_id FROM orders WHERE id = ?", [orderId]
+  );
+  if (!order?.folio_id) return { ok: false, reversed_count: 0 };
+  const originals: any[] = await tenantDb.query(
+    "SELECT * FROM folio_entries WHERE reference_number = ? AND folio_id = ? AND reversal_of_entry_id IS NULL",
+    [orderId, order.folio_id]
+  );
+  let reversed = 0;
+  for (const o of originals) {
+    // Idempotency — skip if a reversal for this row already exists.
+    const dup: any = await tenantDb.get(
+      "SELECT id FROM folio_entries WHERE reversal_of_entry_id = ? LIMIT 1",
+      [o.id]
+    );
+    if (dup) continue;
+    const negId = `FE-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    await tenantDb.run(
+      `INSERT INTO folio_entries
+         (id, folio_id, entry_type, entry_subtype, description,
+          quantity, unit_price, amount, gst_rate, gst_amount,
+          source_id, reference_number, reversal_of_entry_id, posted_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [negId, o.folio_id, o.entry_type, o.entry_subtype,
+       `REVERSAL — ${o.description} (${reason})`,
+       o.quantity, o.unit_price, -Number(o.amount || 0),
+       o.gst_rate, -Number(o.gst_amount || 0),
+       o.source_id, o.reference_number, o.id, reversedBy || null]
+    );
+    reversed++;
+  }
+  if (reversed > 0) await recomputeFolioTotals(tenantDb, order.folio_id);
+  return { ok: true, reversed_count: reversed, folio_id: order.folio_id };
 }
 
 async function recomputeFolioTotals(tenantDb: DbInterface, folioId: string): Promise<void> {
@@ -4397,6 +4605,18 @@ async function startServer() {
           customer_email TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        -- Sprint RS — Room-service / F&B-to-folio bridge.
+        -- These columns are populated when a hotel guest in a known room
+        -- places an order via the room QR code, OR when staff posts a
+        -- phone-in F&B charge to a folio. payment_method='CHARGE_TO_ROOM'
+        -- triggers postOrderToFolio() on insert. posted_to_folio_at /
+        -- folio_id are written by that helper after a successful post.
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_id TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS posted_to_folio_at TIMESTAMP;
+        CREATE INDEX IF NOT EXISTS idx_orders_room ON orders (room_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_folio ON orders (folio_id);
         CREATE TABLE IF NOT EXISTS table_sessions (
           session_token TEXT PRIMARY KEY,
           table_id TEXT,
@@ -16057,6 +16277,109 @@ async function startServer() {
 
   // Sprint P2-D — Hotel promo codes. Re-uses the existing promo_codes
   // table (created for the restaurant module) and applies a discount
+  // ════════════════════════════════════════════════════════════════════
+  // Sprint RS — Staff-side "Add F&B charge" to a folio (RS-3)
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // For phone-in room-service orders, minibar restocking, banquet
+  // overages — anything where the front desk needs to post F&B
+  // directly without going through the restaurant POS flow.
+  //
+  // Body:
+  //   { items: [{ name, quantity, unit_price, gst_rate? }],
+  //     subtype: 'IRD' | 'RESTAURANT' | 'BAR' | 'MINIBAR' | 'BANQUET',
+  //     note?: string }
+  //
+  // Creates a synthetic "STAFF-POSTED" order_id (so reversal still works
+  // via reference_number lookup) and reuses postOrderToFolio() for the
+  // actual posting logic. Idempotent on the synthetic id.
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/charge-fnb", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const folio: any = await tenantDb.get(
+        "SELECT id, booking_id, room_id, status FROM folios WHERE id = ?",
+        [req.params.folioId]
+      );
+      if (!folio) return res.status(404).json({ error: "Folio not found" });
+      if (folio.status !== 'open') {
+        return res.status(409).json({ error: `Folio is ${folio.status}. Use credit-note flow for adjustments on settled folios.` });
+      }
+      const items = Array.isArray(req.body?.items) ? req.body.items : [];
+      if (items.length === 0) return res.status(400).json({ error: "items array is required" });
+      const subtype = String(req.body?.subtype || 'IRD').toUpperCase() as 'IRD' | 'RESTAURANT' | 'BAR' | 'MINIBAR' | 'BANQUET';
+      const validSubtypes = ['IRD', 'RESTAURANT', 'BAR', 'MINIBAR', 'BANQUET'];
+      if (!validSubtypes.includes(subtype)) {
+        return res.status(400).json({ error: `subtype must be one of: ${validSubtypes.join(', ')}` });
+      }
+
+      // Synthetic POS-check id so reversal still works via reference_number.
+      const syntheticOrderId = `MAN-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      // Persist the synthetic order row so /orders lists + per-channel
+      // reports see this charge. checkout_mode='manual_fnb' marks the
+      // origin so analytics can separate POS vs front-desk postings.
+      const totalAmount = items.reduce((s: number, it: any) =>
+        s + (Number(it.quantity || 1) * Number(it.unit_price || it.unitPrice || 0)), 0);
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_mode TEXT DEFAULT 'postpaid'");
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT");
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT");
+      await tenantDb.run(
+        `INSERT INTO orders
+           (id, table_number, items, total_amount, gst_amount, status,
+            payment_method, checkout_mode, room_id, booking_id, customer_name)
+         VALUES (?, NULL, ?, ?, 0, 'CONFIRMED', 'CHARGE_TO_ROOM', 'manual_fnb', ?, ?, ?)`,
+        [syntheticOrderId, JSON.stringify(items), totalAmount,
+         folio.room_id, folio.booking_id,
+         (req.body?.note || `Posted by ${req.user?.id || 'staff'}`).slice(0, 120)]
+      );
+
+      const result = await postOrderToFolio(req.params.id, {
+        id: syntheticOrderId,
+        room_id: folio.room_id,
+        booking_id: folio.booking_id,
+        items: items.map((it: any) => ({
+          name: String(it.name || 'F&B Charge'),
+          quantity: Number(it.quantity || 1),
+          unitPrice: Number(it.unit_price || it.unitPrice || 0),
+          gstRate: it.gst_rate != null ? Number(it.gst_rate) : undefined,
+        })),
+        subtype,
+        posted_by: req.user?.id || null,
+      });
+      if (!result.ok) {
+        return res.status(409).json({ error: result.reason || 'Failed to post charge' });
+      }
+      res.status(201).json({
+        success: true,
+        folio_id: result.folio_id,
+        entry_ids: result.entry_ids,
+        order_id: syntheticOrderId,
+      });
+    } catch (err: any) {
+      console.error('charge-fnb error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to charge F&B' });
+    }
+  });
+
+  // Reverse a previously-posted F&B charge. Inserts mirrored negative
+  // entries; the original lines stay visible (audit trail).
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/reverse-charge/:orderId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const reason = String(req.body?.reason || 'Manual reversal').slice(0, 200);
+      const result = await reverseOrderFolioPosting(
+        req.params.id, req.params.orderId, reason, req.user?.id || null
+      );
+      if (!result.ok) return res.status(404).json({ error: "No postings found for this order" });
+      res.json(result);
+    } catch (err: any) {
+      console.error('reverse-charge error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to reverse charge' });
+    }
+  });
+
   // to an open folio. Validation rules:
   //   - promo must be enabled + within its starts_at/expires_at window
   //   - folio subtotal must meet min_order_amount
@@ -19166,6 +19489,12 @@ async function startServer() {
         customer_city, customerCity,
         customer_pincode, customerPincode,
         customer_landmark, customerLandmark,
+        // Sprint RS — room-service routing. When a hotel guest in a known
+        // room scans the room QR and orders F&B, the room_id arrives here
+        // and we post the resulting order to that room's open folio.
+        // payment_method='CHARGE_TO_ROOM' is the explicit opt-in signal.
+        room_id, roomId,
+        booking_id, bookingId,
       } = req.body;
 
       const db = await getTenantDb(req.params.id);
@@ -19313,13 +19642,20 @@ async function startServer() {
         console.warn(`[orders-post] Failed to read GST settings for ${req.params.id}; storing defaults:`, gstErr);
       }
 
+      // Sprint RS — room-service routing fields. Resolved before the
+      // INSERT so they land on the row and downstream queries can see them.
+      const finalRoomId = room_id || roomId || null;
+      const finalBookingId = booking_id || bookingId || null;
+      const isChargeToRoom = String(finalPaymentMethod || '').toUpperCase() === 'CHARGE_TO_ROOM';
+
       await db.run(`
         INSERT INTO orders
           (id, table_number, items, total_amount, gst_amount, status, customer_name, customer_phone,
            customer_email, payment_method, session_id, checkout_mode, round_number, kitchen_status, invoice_number,
            gst_percent, apply_gst, invoice_status,
-           customer_address_line1, customer_address_line2, customer_city, customer_pincode, customer_landmark)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           customer_address_line1, customer_address_line2, customer_city, customer_pincode, customer_landmark,
+           room_id, booking_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         id,
         finalTableNumber || null,
@@ -19344,7 +19680,36 @@ async function startServer() {
         finalCity,
         finalPincode,
         finalLandmark,
+        finalRoomId,
+        finalBookingId,
       ]);
+
+      // Sprint RS — post to hotel folio if this is a room-service charge.
+      // SYNCHRONOUS (before responding) so the customer-side UI can show
+      // "Added to your room bill" with certainty, OR surface "No active
+      // folio — please ask the front desk" when there's no room match.
+      // Falls back silently if the tenant doesn't have hotel tables.
+      let folioResult: { ok: boolean; folio_id?: string; reason?: string } | null = null;
+      if (isChargeToRoom && (finalRoomId || finalBookingId)) {
+        try {
+          const itemsForFolio: FolioOrderItem[] = (Array.isArray(items) ? items : []).map((it: any) => ({
+            name: it.name || it.menuName || 'Item',
+            quantity: Number(it.quantity || it.qty || 1),
+            unitPrice: Number(it.price || it.unitPrice || it.unit_price || 0),
+            gstRate: it.gstRate != null ? Number(it.gstRate) : undefined,
+          }));
+          folioResult = await postOrderToFolio(req.params.id, {
+            id, room_id: finalRoomId, booking_id: finalBookingId,
+            items: itemsForFolio, subtype: 'IRD',
+            posted_by: 'CUSTOMER_QR',
+          });
+          if (!folioResult.ok) {
+            console.warn(`[orders-post] CHARGE_TO_ROOM order ${id} could not post to folio: ${folioResult.reason}`);
+          }
+        } catch (e) {
+          console.error(`[orders-post] CHARGE_TO_ROOM folio posting failed for ${id}:`, e);
+        }
+      }
 
       res.json({
         success: true,
@@ -19354,6 +19719,7 @@ async function startServer() {
         kitchen_status: kitchenStatus,
         invoice_number: orderInvoiceNumber,
         invoice_status: invoiceStatus,
+        room_service: isChargeToRoom ? folioResult : undefined,
       });
 
       // ── Loyalty: upsert customer + recompute tier (non-blocking) ─────────
@@ -21680,7 +22046,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-pms-hardening-5-reqs',
+    commit_marker: 'hotel-pms-hardening-5-reqs-plus-room-service',
     code_features: [
       'subscription-billing',
       'read-only-mode',
