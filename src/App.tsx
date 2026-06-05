@@ -6607,6 +6607,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Sprint A1 — Availability calendar view toggle for the Bookings tab
   // (DASHBOARD added in C3 — quick-glance receptionist/GM view)
   const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR' | 'DASHBOARD'>('LIST');
+  // REQ 5: booking-history search/filter state. Receptionists need to
+  // look up a returning guest by phone/name (mid-call) or pull a past
+  // booking by invoice number for an enquiry.
+  const [bookingHistoryFilter, setBookingHistoryFilter] = useState<{
+    search: string; status: string; from: string; to: string;
+  }>({ search: '', status: '', from: '', to: '' });
   // Sprint C-WI — Walk-in fast-path modal. Single-screen flow for
   // "guest arrives now": pick a vacant room (auto-suggested), enter
   // name + phone, click "Walk-in & Check-In" → creates booking +
@@ -9126,9 +9132,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   // ─── Phase 2 & 3: bookings, folios, compliance, analytics ────────────────
-  const fetchHotelBookings = async () => {
+  const fetchHotelBookings = async (opts?: { search?: string; status?: string; from?: string; to?: string }) => {
     if (!isHotelEnabled) return;
-    try { setHotelBookings(await hotelApi('/bookings')); } catch (err: any) { setHotelError(err.message); }
+    try {
+      const qs = new URLSearchParams();
+      if (opts?.search) qs.set('search', opts.search);
+      if (opts?.status) qs.set('status', opts.status);
+      if (opts?.from)   qs.set('from', opts.from);
+      if (opts?.to)     qs.set('to', opts.to);
+      const path = '/bookings' + (qs.toString() ? `?${qs}` : '');
+      setHotelBookings(await hotelApi(path));
+    } catch (err: any) { setHotelError(err.message); }
   };
   const fetchHotelFolios = async () => {
     if (!isHotelEnabled) return;
@@ -15248,10 +15262,83 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             );
           })()}
 
+          {/* REQ 5 — Booking-history search bar */}
+          <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 p-4 sm:p-5 mb-4 shadow-sm">
+            <div className="flex items-center gap-2 mb-3">
+              <Search size={16} className="text-[#cc5a16]" />
+              <h4 className="text-sm font-bold text-[#1a1208]">Search bookings &amp; guest history</h4>
+              {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to) && (
+                <button
+                  onClick={async () => {
+                    setBookingHistoryFilter({ search: '', status: '', from: '', to: '' });
+                    await fetchHotelBookings();
+                  }}
+                  className="ml-auto text-[10px] font-bold uppercase tracking-widest text-[#c13b3b] hover:underline"
+                >Clear filters</button>
+              )}
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                await fetchHotelBookings({
+                  search: bookingHistoryFilter.search || undefined,
+                  status: bookingHistoryFilter.status || undefined,
+                  from:   bookingHistoryFilter.from   || undefined,
+                  to:     bookingHistoryFilter.to     || undefined,
+                });
+              }}
+              className="grid grid-cols-1 sm:grid-cols-12 gap-2"
+            >
+              <input
+                type="search"
+                value={bookingHistoryFilter.search}
+                onChange={e => setBookingHistoryFilter(f => ({ ...f, search: e.target.value }))}
+                placeholder="Guest name, phone, email, booking ID, or invoice number"
+                className="sm:col-span-5 bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+              />
+              <select
+                value={bookingHistoryFilter.status}
+                onChange={e => setBookingHistoryFilter(f => ({ ...f, status: e.target.value }))}
+                className="sm:col-span-2 bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+              >
+                <option value="">Any status</option>
+                <option value="BOOKED">Booked</option>
+                <option value="CHECKED_IN">Checked-in</option>
+                <option value="CHECKED_OUT">Checked-out (past)</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select>
+              <input
+                type="date"
+                value={bookingHistoryFilter.from}
+                onChange={e => setBookingHistoryFilter(f => ({ ...f, from: e.target.value }))}
+                title="Check-in from"
+                className="sm:col-span-2 bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+              />
+              <input
+                type="date"
+                value={bookingHistoryFilter.to}
+                onChange={e => setBookingHistoryFilter(f => ({ ...f, to: e.target.value }))}
+                title="Check-out to"
+                className="sm:col-span-2 bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+              />
+              <button
+                type="submit"
+                className="sm:col-span-1 bg-[#cc5a16] text-white rounded-2xl px-4 py-2.5 text-xs font-bold uppercase tracking-widest hover:bg-[#a84612]"
+              >Search</button>
+            </form>
+            <p className="text-[10px] text-[#9c8e85] mt-2 italic">
+              Tip — phone <code>9876543210</code>, name <code>Sharma</code>, or invoice number all work. Past check-out records are searchable.
+            </p>
+          </div>
+
           {/* All bookings list */}
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-hidden shadow-sm">
             {hotelBookings.length === 0 ? (
-              <div className="p-12 text-center text-sm text-[#6b5d52]">No bookings yet. Create your first booking above.</div>
+              <div className="p-12 text-center text-sm text-[#6b5d52]">
+                {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to)
+                  ? 'No bookings match your filters. Try a wider date range or clear the search.'
+                  : 'No bookings yet. Create your first booking above.'}
+              </div>
             ) : (
               <table className="w-full text-sm">
                 <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
@@ -17911,13 +17998,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone</label>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    Phone <span className="text-[#c13b3b]">*</span>
+                  </label>
                   <input
+                    required
+                    type="tel"
+                    pattern="[+0-9\s\-]{7,}"
+                    title="Enter a valid phone number (digits, optional + and spaces)"
                     value={draft.guest_phone}
                     onChange={e => setDraft({ guest_phone: e.target.value })}
                     placeholder="+91 9876543210"
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
                   />
+                  <p className="text-[10px] text-[#9c8e85] mt-1 italic">Mandatory for check-in — used for Form-C, WhatsApp notifications, and loyalty lookup.</p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -19390,8 +19484,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone</label>
-                  <input value={editingBooking.guest_phone || ''} onChange={e => setEditingBooking({...editingBooking, guest_phone: e.target.value})} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    Phone <span className="text-[#c13b3b]">*</span>
+                  </label>
+                  <input
+                    required
+                    type="tel"
+                    pattern="[+0-9\s\-]{7,}"
+                    title="Phone is required at check-in (Form-C / FRRO / WhatsApp)"
+                    value={editingBooking.guest_phone || ''}
+                    onChange={e => setEditingBooking({...editingBooking, guest_phone: e.target.value})}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Email</label>
@@ -19661,6 +19765,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Special Requests</label>
                 <textarea value={editingBooking.special_requests || ''} onChange={e => setEditingBooking({...editingBooking, special_requests: e.target.value})} rows={2} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
               </div>
+
+              {/* REQ 1 — ID-proof documents. Only shown on existing bookings
+                  (need a booking ID first). On a new draft this section is
+                  hidden; staff can attach docs immediately after Save. */}
+              {editingBooking.id && (
+                <GuestDocumentsWidget
+                  bookingId={editingBooking.id}
+                  bookingStatus={editingBooking.status || 'BOOKED'}
+                  restaurantId={restaurantId}
+                  token={token}
+                />
+              )}
+
               <div className="flex gap-2 pt-2">
                 <button type="button" onClick={() => { setShowBookingModal(false); setEditingBooking(null); }} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
                 <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">{editingBooking.id ? 'Save' : 'Create Booking'}</button>
@@ -23672,6 +23789,191 @@ const HotelAnalyticsDashboard: React.FC<{
           <PickupPaceChart restaurantId={restaurantId} token={token} />
         </>
       )}
+    </div>
+  );
+};
+
+/* ─── GuestDocumentsWidget — REQ 1 ────────────────────────────────
+   Inline document manager mounted inside the edit-booking modal.
+
+   Renders:
+     • An upload control (label + file picker + doc-type select)
+     • A list of existing documents with: filename, type, locked badge,
+       preview link, delete button (disabled when locked)
+     • Lock-rules info banner if the booking is CHECKED_IN/CHECKED_OUT
+
+   Maps directly to the new server endpoints:
+     GET    /hotel/bookings/:id/documents
+     POST   /hotel/bookings/:id/documents       (multipart/form-data)
+     DELETE /hotel/bookings/:id/documents/:docId
+*/
+const GuestDocumentsWidget: React.FC<{
+  bookingId: string;
+  bookingStatus: string;
+  restaurantId: string;
+  token: string;
+}> = ({ bookingId, bookingStatus, restaurantId, token }) => {
+  const [docs, setDocs] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
+  const [draftLabel, setDraftLabel] = useState('');
+  const [draftType, setDraftType] = useState<string>('AADHAAR');
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const isFinalized = bookingStatus === 'CHECKED_IN' || bookingStatus === 'CHECKED_OUT' || bookingStatus === 'CANCELLED';
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/bookings/${bookingId}/documents`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.ok) setDocs(await res.json());
+    } catch {/* swallow */}
+    setLoading(false);
+  }, [restaurantId, bookingId, token]);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  const handleUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const f = fileRef.current?.files?.[0];
+    if (!f) { setError('Choose a file first'); return; }
+    setError('');
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      if (draftLabel.trim()) fd.append('label', draftLabel.trim());
+      if (draftType) fd.append('doc_type', draftType);
+      const res = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/bookings/${bookingId}/documents`,
+        { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Upload failed (${res.status})`);
+      setDraftLabel('');
+      if (fileRef.current) fileRef.current.value = '';
+      await reload();
+    } catch (err: any) {
+      setError(err?.message || 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDelete = async (docId: string) => {
+    if (!confirm('Delete this document? This cannot be undone.')) return;
+    setError('');
+    try {
+      const res = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/bookings/${bookingId}/documents/${docId}`,
+        { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Delete failed');
+      await reload();
+    } catch (err: any) {
+      setError(err?.message || 'Delete failed');
+    }
+  };
+
+  return (
+    <div className="border-t border-[#cc5a16]/10 pt-4 mt-2">
+      <div className="flex items-center justify-between mb-2">
+        <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
+          ID Documents
+        </label>
+        <span className="text-[10px] text-[#9c8e85]">
+          {docs.length} on file
+        </span>
+      </div>
+
+      {isFinalized && (
+        <div className="text-[10px] bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-3 py-2 mb-2">
+          🔒 Booking is <strong>{bookingStatus.replace('_', ' ').toLowerCase()}</strong>.
+          You can still <strong>add</strong> documents, but existing documents cannot be removed.
+        </div>
+      )}
+
+      {/* Existing documents list */}
+      {loading ? (
+        <p className="text-xs text-[#9c8e85] italic">Loading…</p>
+      ) : docs.length === 0 ? (
+        <p className="text-xs text-[#9c8e85] italic mb-2">No documents uploaded yet.</p>
+      ) : (
+        <div className="space-y-1.5 mb-3">
+          {docs.map(d => (
+            <div key={d.id} className="flex items-center gap-2 bg-[#faf7f2] rounded-xl px-3 py-2 text-xs">
+              <span className="text-[#cc5a16]">📄</span>
+              <a href={d.file_url} target="_blank" rel="noopener noreferrer" className="font-bold text-[#1a1208] truncate hover:underline flex-1" title={d.file_name || d.file_url}>
+                {d.file_name || 'document'}
+              </a>
+              {d.doc_type && (
+                <span className="text-[9px] font-bold uppercase tracking-widest bg-stone-200 text-stone-700 px-1.5 py-0.5 rounded">
+                  {d.doc_type}
+                </span>
+              )}
+              {d.locked_at ? (
+                <span className="text-[9px] font-bold uppercase tracking-widest bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded" title={`Locked at ${new Date(d.locked_at).toLocaleString()}`}>
+                  🔒 Locked
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleDelete(d.id)}
+                  className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                >Delete</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Upload form */}
+      <div className="bg-white border border-[#cc5a16]/10 rounded-2xl p-3">
+        <p className="text-[10px] text-[#6b5d52] mb-2 font-bold uppercase tracking-widest">Add document</p>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <select
+            value={draftType}
+            onChange={e => setDraftType(e.target.value)}
+            className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none"
+          >
+            <option value="AADHAAR">Aadhaar</option>
+            <option value="PASSPORT">Passport</option>
+            <option value="DRIVING_LICENSE">Driving License</option>
+            <option value="VOTER_ID">Voter ID</option>
+            <option value="PAN">PAN Card</option>
+            <option value="VISA">Visa</option>
+            <option value="OTHER">Other</option>
+          </select>
+          <input
+            type="text"
+            value={draftLabel}
+            onChange={e => setDraftLabel(e.target.value)}
+            placeholder="Label (e.g. Aadhaar front)"
+            className="sm:col-span-2 bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none"
+          />
+        </div>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf"
+          className="mt-2 text-xs"
+        />
+        <p className="text-[10px] text-[#9c8e85] mt-1">JPG / PNG / WebP / HEIC / PDF · max 10 MB.</p>
+        {error && <p className="text-[10px] text-[#c13b3b] mt-1 font-bold">{error}</p>}
+        <button
+          type="button"
+          onClick={handleUpload}
+          disabled={uploading}
+          className="mt-2 px-4 py-1.5 rounded-xl bg-[#cc5a16] text-white text-[11px] font-bold hover:bg-[#a84612] disabled:opacity-50"
+        >
+          {uploading ? 'Uploading…' : 'Upload'}
+        </button>
+      </div>
     </div>
   );
 };

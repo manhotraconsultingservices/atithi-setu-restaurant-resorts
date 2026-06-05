@@ -386,6 +386,45 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_channel_webhook_channel ON channel_webhook_log (channel, received_at DESC);
     CREATE INDEX IF NOT EXISTS idx_channel_webhook_external ON channel_webhook_log (channel, external_id);
 
+    -- REQ 1 — Guest ID-proof documents (file uploads).
+    --
+    -- A booking can have N documents (e.g. Aadhaar front + back, passport,
+    -- accompanying-guest ID, visa scan). Each row carries a URL pointing
+    -- to the persisted file (R2 when UPLOAD_BACKEND=r2, /uploads/* on
+    -- disk otherwise) along with audit metadata.
+    --
+    -- Lock semantics (enforced in the route handler, not the schema):
+    --   • POST /documents (upload): always allowed at any booking status,
+    --     so the front desk can add a missing copy or an accompanying
+    --     guest's ID even mid-stay or after check-out.
+    --   • DELETE /documents/:id: allowed ONLY when locked_at IS NULL.
+    --     The check-in transition stamps locked_at on every existing row
+    --     for that booking. Newly-uploaded post-checkin documents start
+    --     locked too — the moment a document is part of the official
+    --     check-in record it's immutable.
+    --   • A second guard at the booking level: documents on
+    --     CHECKED_OUT / CANCELLED bookings can never be deleted, even
+    --     if locked_at is NULL by some legacy data path.
+    --
+    -- Why a separate table (not a JSON column on room_bookings):
+    --   • Per-row audit (who uploaded, when, when locked)
+    --   • Independent indexing for compliance lookups
+    --   • Per-row delete that doesn't rewrite the booking row
+    CREATE TABLE IF NOT EXISTS guest_documents (
+      id           TEXT PRIMARY KEY,
+      booking_id   TEXT NOT NULL,
+      file_url     TEXT NOT NULL,         -- R2 https URL or /uploads/<filename>
+      file_name    TEXT,                  -- original filename (for download UX)
+      mime_type    TEXT,
+      size_bytes   INT,
+      label        TEXT,                  -- "Aadhaar front" / "Passport" / "Accompanying guest"
+      doc_type     TEXT,                  -- 'AADHAAR' | 'PASSPORT' | 'DRIVING_LICENSE' | 'VOTER_ID' | 'PAN' | 'VISA' | 'OTHER'
+      uploaded_by  TEXT,                  -- staff user id
+      uploaded_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      locked_at    TIMESTAMP              -- NULL = editable; non-null = immutable
+    );
+    CREATE INDEX IF NOT EXISTS idx_guest_documents_booking ON guest_documents (booking_id, uploaded_at DESC);
+
     -- Sprint D2 — Channel manager integration credentials (stub).
     -- Owner enters per-channel API keys here; real OTA push wiring
     -- (Booking.com / MMT / Agoda) reads from this table in a follow-
@@ -1876,6 +1915,49 @@ const isAdmin = (req: AuthRequest, res: Response, next: NextFunction) => {
   }
   next();
 };
+
+// ─────────────────────────────────────────────────────────────────────────
+// REQ 2 — Role-based access control middleware for hotel mutations
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Tab-level RBAC already exists in the frontend (`isTabVisible()` in App.tsx)
+// and is configurable per tenant via the role-permissions admin endpoint.
+// However that's UI-only — any authenticated user (e.g. a CHEF whose JWT
+// was somehow re-used, or a WAITER calling the API directly) could still
+// invoke hotel mutation endpoints because authenticate() never checked
+// role. This middleware closes that gap.
+//
+// Default allowlist (HOTEL_OPERATIONAL_ROLES) covers everyone who legit
+// touches hotel operations: platform admins, the owner, hotel managers,
+// receptionists, and concierges. Roles that should NOT mutate hotel data
+// (CHEF, WAITER, CASHIER, HOUSEKEEPING — they have their own narrower
+// workflows: KOT, table billing, service-request acknowledgment) are
+// excluded by omission.
+//
+// Per-endpoint overrides are easy: `requireRole(['SUPER_ADMIN', 'OWNER'])`
+// on truly admin-only routes (e.g. delete-credentials).
+const HOTEL_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE'];
+
+function requireRole(allowedRoles: string[]) {
+  const allowSet = new Set(allowedRoles.map(r => r.toUpperCase()));
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    const role = String(req.user?.role || '').toUpperCase();
+    if (!role) return res.status(401).json({ error: "Authentication required" });
+    if (!allowSet.has(role)) {
+      return res.status(403).json({
+        error: `Your role (${role}) is not authorized for this action. Contact the property owner if you believe this is incorrect.`,
+        required_one_of: [...allowSet],
+      });
+    }
+    next();
+  };
+}
+
+// Shorthand for hotel-mutation endpoints — used in place of `authenticate`
+// alone on POST/PATCH/DELETE routes that touch booking, folio, credentials,
+// or document state. Owners and managers can configure granular UI access
+// separately; this is the server-side defense-in-depth layer.
+const hotelStaff = requireRole(HOTEL_OPERATIONAL_ROLES);
 
 // Resolve the target tenant for a request:
 //  • SUPER_ADMIN / CTO may target any tenant via ?restaurantId= (acting-as flow).
@@ -13785,7 +13867,7 @@ async function startServer() {
   // sales/billing team has confirmed the customer is on a Hotel tier.
   //
   // Idempotent: creating tables multiple times is safe.
-  app.post("/api/restaurant/:id/hotel/enable", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/enable", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
       const restaurantId = req.params.id;
 
@@ -13871,7 +13953,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/rooms", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/rooms", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -13897,7 +13979,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/rooms/:roomId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/rooms/:roomId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -13941,7 +14023,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/rooms/:roomId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/rooms/:roomId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -13953,7 +14035,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/rooms/:roomId/status", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/rooms/:roomId/status", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -13989,7 +14071,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/rate-overrides", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/rate-overrides", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14035,7 +14117,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/rate-overrides/:overrideId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/rate-overrides/:overrideId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14086,7 +14168,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/yield-rules", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/yield-rules", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14121,7 +14203,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/yield-rules/:ruleId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/yield-rules/:ruleId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14472,7 +14554,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/room-types", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/room-types", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14496,7 +14578,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/room-types/:typeId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/room-types/:typeId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14513,7 +14595,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/room-types/:typeId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/room-types/:typeId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14554,7 +14636,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/room-holds", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/room-holds", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14605,7 +14687,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/room-holds/:holdId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/room-holds/:holdId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14630,7 +14712,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/services", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/services", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14653,7 +14735,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/services/:serviceId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/services/:serviceId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14688,7 +14770,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/services/:serviceId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/services/:serviceId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14884,7 +14966,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/service-requests/:requestId/status", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/service-requests/:requestId/status", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -14936,6 +15018,12 @@ async function startServer() {
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const status = (req.query.status as string) || null;
+      // REQ 5: search + date-range filters for booking-history lookup
+      const search = String(req.query.search || '').trim();
+      const fromDate = String(req.query.from || '').trim();
+      const toDate = String(req.query.to || '').trim();
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+
       let sql = `SELECT b.*, r.name AS room_name
                  FROM room_bookings b
                  LEFT JOIN rooms r ON r.id = b.room_id
@@ -14948,14 +15036,70 @@ async function startServer() {
           params.push(...statuses);
         }
       }
-      sql += ` ORDER BY b.check_in_date DESC, b.created_at DESC`;
+      // REQ 5: free-text search across guest contact fields + ids.
+      // Receptionists need to find a returning guest from a phone number
+      // they're holding (call-in booking) or an email a guest mentions.
+      if (search) {
+        sql += ` AND (
+          b.guest_name  ILIKE ? OR
+          b.guest_phone ILIKE ? OR
+          b.guest_email ILIKE ? OR
+          b.id          ILIKE ? OR
+          b.invoice_number ILIKE ?
+        )`;
+        const like = `%${search}%`;
+        params.push(like, like, like, like, like);
+      }
+      if (fromDate) { sql += ` AND b.check_in_date >= ?`;  params.push(fromDate); }
+      if (toDate)   { sql += ` AND b.check_out_date <= ?`; params.push(toDate); }
+
+      sql += ` ORDER BY b.check_in_date DESC, b.created_at DESC LIMIT ?`;
+      params.push(limit);
       res.json(await tenantDb.query(sql, params));
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch bookings" });
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/bookings", authenticate, async (req: AuthRequest, res: Response) => {
+  // REQ 5 — Returning-guest lookup: aggregate every past stay for a phone
+  // number. Surfaces lifetime stays, total spend, and the most recent
+  // stay so the front desk can welcome a returning guest with context.
+  app.get("/api/restaurant/:id/hotel/guests/lookup", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const phone = String(req.query.phone || '').trim();
+      const email = String(req.query.email || '').trim();
+      if (!phone && !email) {
+        return res.status(400).json({ error: "phone or email query param required" });
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      let where = '1=0';
+      const params: any[] = [];
+      if (phone) { where += ' OR guest_phone ILIKE ?'; params.push(`%${phone}%`); }
+      if (email) { where += ' OR guest_email ILIKE ?'; params.push(`%${email}%`); }
+      const stays: any[] = await tenantDb.query(
+        `SELECT b.id, b.guest_name, b.guest_phone, b.guest_email,
+                b.check_in_date, b.check_out_date, b.status,
+                b.total_amount, b.invoice_number, b.room_id,
+                r.name AS room_name
+           FROM room_bookings b
+           LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE ${where}
+          ORDER BY b.check_in_date DESC
+          LIMIT 50`,
+        params
+      );
+      const totalStays = stays.length;
+      const totalSpent = stays.reduce((s, x) => s + Number(x.total_amount || 0), 0);
+      const lastStay = stays[0] || null;
+      res.json({ total_stays: totalStays, total_spent: totalSpent, last_stay: lastStay, stays });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to lookup guest history" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/bookings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -15037,7 +15181,7 @@ async function startServer() {
   //   booking_source, special_requests,
   //   rooms: [ { room_id, room_rate?, num_guests? }, ... ]
   // }
-  app.post("/api/restaurant/:id/hotel/bookings/group", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/group", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -15174,7 +15318,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/ical-feeds", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/ical-feeds", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -15205,7 +15349,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/ical-feeds/:feedId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/ical-feeds/:feedId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -15222,7 +15366,7 @@ async function startServer() {
   });
 
   // Manual "Sync now" trigger for a single feed.
-  app.post("/api/restaurant/:id/hotel/ical-feeds/:feedId/sync", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/ical-feeds/:feedId/sync", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -15281,7 +15425,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/channel-credentials", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/channel-credentials", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -15321,7 +15465,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/channel-credentials/:channel", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/channel-credentials/:channel", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -15920,7 +16064,7 @@ async function startServer() {
   //   - per-customer cap honoured if customer_phone is on file
   //   - restricted_tier_id ignored for hotel for now (could be wired up
   //     to a tier-aware lookup later)
-  app.post("/api/restaurant/:id/hotel/folios/:folioId/apply-promo", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/apply-promo", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -16105,7 +16249,7 @@ async function startServer() {
   // since they share check_in_date, but per-row math + audit row).
   // Skips children that are already CHECKED_IN / CHECKED_OUT /
   // CANCELLED so the caller doesn't accidentally undo a settled stay.
-  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/cancel", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -16176,17 +16320,50 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/bookings/:bookingId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/bookings/:bookingId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const b: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!b) return res.status(404).json({ error: "Booking not found" });
+
+      // ── REQ 3: Lock financial / commercial fields after checkout ─────
+      // Once the guest has checked out OR the booking has been cancelled,
+      // the commercial terms are locked. The folio has been settled, the
+      // invoice has been issued, and any drift between booking and folio
+      // records breaks the audit trail.
+      //
+      // Locked fields (rejected when status IN CHECKED_OUT/CANCELLED):
+      //   room_rate, check_in_date, check_out_date, room_id, booking_type,
+      //   num_guests, status (re-opening a closed booking)
+      //
+      // Allowed at any status (back-office hygiene — phone correction,
+      // email fix, special-requests notes etc.):
+      //   guest_name, guest_phone, guest_email, guest_id_proof,
+      //   guest_nationality, guest_state, special_requests
+      //
+      // For a genuine correction on a closed booking the owner can issue
+      // a credit-note (server.ts:17106) — that preserves the audit trail.
+      const isFinalized = b.status === 'CHECKED_OUT' || b.status === 'CANCELLED';
+      const LOCKED_AFTER_CHECKOUT = ['room_rate','check_in_date','check_out_date','room_id','booking_type','num_guests','status'];
       const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','num_guests','check_in_date','check_out_date','room_rate','special_requests','status','booking_type'];
       const patch: any = {};
       for (const k of allow) if (k in (req.body || {})) patch[k] = req.body[k];
       if (Object.keys(patch).length === 0) return res.json(b);
+
+      if (isFinalized) {
+        const blocked = Object.keys(patch).filter(k => LOCKED_AFTER_CHECKOUT.includes(k));
+        if (blocked.length > 0) {
+          return res.status(409).json({
+            error: `Booking is ${b.status === 'CHECKED_OUT' ? 'checked out' : 'cancelled'} and cannot be edited. ` +
+                   `Field(s) "${blocked.join(', ')}" are locked. ` +
+                   `Use a credit note for billing corrections, or contact platform admin.`,
+            locked_fields: blocked,
+            booking_status: b.status,
+          });
+        }
+      }
 
       // Re-validate business rules if dates / room / capacity / type changed.
       // Skip validation when the only change is status (e.g. cancel) — that
@@ -16226,7 +16403,7 @@ async function startServer() {
   });
 
   // Check-in: mark booking CHECKED_IN, set room OCCUPIED, open a folio with initial nightly charges
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkin", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkin", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -16235,6 +16412,26 @@ async function startServer() {
       if (!b) return res.status(404).json({ error: "Booking not found" });
       if (b.status === 'CHECKED_IN') return res.status(400).json({ error: "Already checked in" });
       if (b.status === 'CHECKED_OUT' || b.status === 'CANCELLED') return res.status(400).json({ error: "Booking is finalized" });
+
+      // ── REQ 4: Phone is mandatory at check-in ───────────────────────
+      // Statutory + operational requirement: a hotel must capture a
+      // contactable mobile number for every guest. Used for:
+      //   • Form-C (foreign guests) and FRRO reporting
+      //   • Pre-arrival / post-departure WhatsApp notifications
+      //   • Emergency contact during the stay
+      //   • Loyalty lookup on return visits
+      //
+      // The check is enforced HERE (at check-in transition) rather than
+      // at booking-create, because OTA imports and group placeholders
+      // sometimes legitimately arrive without a phone — but no guest
+      // walks through the front desk without one.
+      const guestPhone = String(b.guest_phone || '').trim();
+      if (!guestPhone) {
+        return res.status(400).json({
+          error: "Phone number is required at check-in. Please edit the booking to add the guest's mobile number before proceeding.",
+          missing_field: 'guest_phone',
+        });
+      }
 
       // Early-check-in rule: by default a guest can only be checked in
       // on or after their scheduled check-in date. Most hotels do
@@ -16266,6 +16463,19 @@ async function startServer() {
         [now, req.params.bookingId]
       );
       await tenantDb.run("UPDATE rooms SET status = 'OCCUPIED' WHERE id = ?", [b.room_id]);
+
+      // ── REQ 1: lock every existing ID-proof document for this booking ──
+      // The moment a guest checks in, the ID-proof documents that were
+      // submitted become the official record of the stay (statutory for
+      // foreign guests under Form-C, and best-practice for everyone).
+      // Stamping locked_at = now makes the DELETE endpoint refuse to
+      // remove these rows. New uploads (e.g. accompanying-guest ID
+      // brought in next day) are still allowed and ALSO start locked
+      // — once a document touches a checked-in booking, it's immutable.
+      await tenantDb.run(
+        "UPDATE guest_documents SET locked_at = ? WHERE booking_id = ? AND locked_at IS NULL",
+        [now, req.params.bookingId]
+      );
 
       // Open a folio with ROOM_CHARGE entries (Phase 3 — folio engine)
       const folio = await createFolioWithRoomCharges(req.params.id, b);
@@ -16336,8 +16546,154 @@ async function startServer() {
     }
   });
 
+  // ════════════════════════════════════════════════════════════════════
+  // REQ 1 — Guest ID-proof documents
+  // ════════════════════════════════════════════════════════════════════
+  // Three endpoints around the new `guest_documents` table:
+  //   GET    /bookings/:id/documents          — list all documents
+  //   POST   /bookings/:id/documents          — multipart upload (multer + R2)
+  //   DELETE /bookings/:id/documents/:docId   — only if locked_at IS NULL
+  //                                              AND booking is not finalized
+  //
+  // Upload IS allowed at every booking status (including CHECKED_OUT),
+  // because operators sometimes receive a missing copy of an ID after
+  // the guest has departed (e.g. damaged Aadhaar replaced). New uploads
+  // on a CHECKED_IN or CHECKED_OUT booking start LOCKED — once a
+  // document is associated with a non-pending booking, it's permanent.
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/documents", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows = await tenantDb.query(
+        `SELECT id, booking_id, file_url, file_name, mime_type, size_bytes,
+                label, doc_type, uploaded_by, uploaded_at, locked_at
+           FROM guest_documents
+          WHERE booking_id = ?
+          ORDER BY uploaded_at DESC`,
+        [req.params.bookingId]
+      );
+      res.json(rows);
+    } catch {
+      res.status(500).json({ error: "Failed to fetch documents" });
+    }
+  });
+
+  app.post(
+    "/api/restaurant/:id/hotel/bookings/:bookingId/documents",
+    authenticate,
+    menuImageUpload.single('file'),
+    async (req: AuthRequest, res: Response) => {
+      const check = await ensureHotelEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      try {
+        const tenantDb = await getTenantDb(req.params.id);
+        const b: any = await tenantDb.get("SELECT id, status FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+        if (!b) return res.status(404).json({ error: "Booking not found" });
+        if (!req.file) return res.status(400).json({ error: "No file uploaded (field name 'file' expected)" });
+
+        // File-type guard. Accept the common ID/scan formats only — keeps
+        // the document folder clean and trims attack surface.
+        const okTypes = new Set([
+          'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif',
+          'application/pdf'
+        ]);
+        if (req.file.mimetype && !okTypes.has(req.file.mimetype)) {
+          return res.status(415).json({ error: `Unsupported file type "${req.file.mimetype}". Accepted: JPG, PNG, WebP, HEIC, PDF.` });
+        }
+        if (req.file.size > 10 * 1024 * 1024) {
+          return res.status(413).json({ error: "File too large (max 10 MB)." });
+        }
+
+        // Persist to R2 or local disk via the existing helper, but under
+        // a "documents/" prefix so it's distinct from menu images.
+        let fileUrl: string;
+        if (useR2ForMenuImages()) {
+          const bucket = process.env.R2_BUCKET;
+          const baseUrl = process.env.R2_PUBLIC_BASE_URL;
+          if (!bucket || !baseUrl) throw new Error("R2 misconfigured (R2_BUCKET / R2_PUBLIC_BASE_URL)");
+          const ext = (req.file.originalname.match(/\.[a-zA-Z0-9]+$/)?.[0] || '').toLowerCase();
+          const key = `documents/${req.params.id}/${req.params.bookingId}/${randomUUID()}${ext}`;
+          await getR2Client().send(new PutObjectCommand({
+            Bucket: bucket, Key: key,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype || 'application/octet-stream',
+            CacheControl: 'private, max-age=3600',
+          }));
+          fileUrl = `${baseUrl.replace(/\/$/, '')}/${key}`;
+        } else {
+          const uploadDir = path.join(process.cwd(), "public", "uploads", "documents");
+          if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+          const safeName = req.file.originalname.replace(/[^\w.\-]+/g, '_');
+          const filename = `${Date.now()}-${safeName}`;
+          fs.writeFileSync(path.join(uploadDir, filename), req.file.buffer);
+          fileUrl = `/uploads/documents/${filename}`;
+        }
+
+        const docId = `DOC-${Date.now()}-${randomUUID().slice(0, 8)}`;
+        // Auto-lock if booking is already CHECKED_IN / CHECKED_OUT — see header comment.
+        const lockedAt = (b.status === 'CHECKED_IN' || b.status === 'CHECKED_OUT')
+          ? new Date().toISOString() : null;
+
+        await tenantDb.run(
+          `INSERT INTO guest_documents
+             (id, booking_id, file_url, file_name, mime_type, size_bytes, label, doc_type, uploaded_by, locked_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [docId, req.params.bookingId, fileUrl,
+           req.file.originalname || null,
+           req.file.mimetype || null,
+           req.file.size || null,
+           req.body?.label || null,
+           req.body?.doc_type || null,
+           req.user?.id || null,
+           lockedAt]
+        );
+        const row = await tenantDb.get(`SELECT * FROM guest_documents WHERE id = ?`, [docId]);
+        res.status(201).json(row);
+      } catch (err: any) {
+        console.error('Document upload failed:', err);
+        res.status(500).json({ error: err?.message || "Failed to upload document" });
+      }
+    }
+  );
+
+  app.delete("/api/restaurant/:id/hotel/bookings/:bookingId/documents/:docId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const doc: any = await tenantDb.get(
+        `SELECT g.id, g.locked_at, b.status AS booking_status
+           FROM guest_documents g
+           JOIN room_bookings b ON b.id = g.booking_id
+          WHERE g.id = ? AND g.booking_id = ?`,
+        [req.params.docId, req.params.bookingId]
+      );
+      if (!doc) return res.status(404).json({ error: "Document not found" });
+      // Double guard: locked_at AND booking status. Either alone is fatal.
+      if (doc.locked_at) {
+        return res.status(409).json({
+          error: "Document is locked (booking has been checked in or checked out). Documents can only be ADDED to a finalized booking, never removed.",
+        });
+      }
+      if (doc.booking_status === 'CHECKED_IN' || doc.booking_status === 'CHECKED_OUT' || doc.booking_status === 'CANCELLED') {
+        return res.status(409).json({
+          error: `Booking is ${doc.booking_status} — documents cannot be deleted from a finalized booking.`,
+        });
+      }
+      await tenantDb.run(`DELETE FROM guest_documents WHERE id = ?`, [req.params.docId]);
+      // Note: we deliberately do NOT delete the underlying file from R2
+      // here. Even though the row is gone, the file may be referenced by
+      // an audit log or operator export. A periodic janitor job can
+      // sweep orphaned files separately if storage cost becomes an issue.
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to delete document" });
+    }
+  });
+
   // Check-out: close folio if not already, set room CLEANING, mark booking CHECKED_OUT
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkout", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkout", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -16490,7 +16846,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/cancel", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/cancel", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -16581,7 +16937,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/channel-sync/booking/:bookingId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/channel-sync/booking/:bookingId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -16640,7 +16996,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/settings", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/settings", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     // Owner / Manager scope check — only the owning tenant or SUPER_ADMIN/CTO
@@ -16985,7 +17341,7 @@ async function startServer() {
   // ─── EMAIL INVOICE TO GUEST (Phase 5) ─────────────────────────────────────
   // POST /hotel/folios/:folioId/email-invoice
   // body: { to?: string (override) }
-  app.post("/api/restaurant/:id/hotel/folios/:folioId/email-invoice", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/email-invoice", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -17103,7 +17459,7 @@ async function startServer() {
   // POST /hotel/folios/:folioId/credit-note
   // body: { reason?: string, partial?: { [entryId]: amount } }
   // For simplicity, v1 creates a full-refund credit note that mirrors the parent folio entries.
-  app.post("/api/restaurant/:id/hotel/folios/:folioId/credit-note", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/credit-note", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -17236,7 +17592,7 @@ async function startServer() {
   });
 
   // POST /hotel/compliance/form-c/:bookingId — record a Form-C draft
-  app.post("/api/restaurant/:id/hotel/compliance/form-c/:bookingId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/compliance/form-c/:bookingId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -17367,7 +17723,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/restaurant/:id/hotel/concierge/faqs", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/concierge/faqs", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -17388,7 +17744,7 @@ async function startServer() {
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/concierge/faqs/:faqId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/concierge/faqs/:faqId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -17412,7 +17768,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/restaurant/:id/hotel/concierge/faqs/:faqId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel/concierge/faqs/:faqId", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -17425,7 +17781,7 @@ async function startServer() {
   });
 
   // ─── ON-DEMAND SENTIMENT ANALYSIS (Phase 4) ──────────────────────────────
-  app.post("/api/restaurant/:id/hotel/analytics/sentiment", authenticate, async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/hotel/analytics/sentiment", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -21324,7 +21680,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-channel-sprint-complete-plus-www-redirect',
+    commit_marker: 'hotel-pms-hardening-5-reqs',
     code_features: [
       'subscription-billing',
       'read-only-mode',
