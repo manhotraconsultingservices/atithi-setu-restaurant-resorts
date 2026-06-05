@@ -243,6 +243,7 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
       guest_id_proof     TEXT,
       guest_nationality  TEXT,
       guest_state        TEXT,
+      guest_gstin        TEXT,    -- CHK-3: optional GST number for B2B invoice / ITC claim
       num_guests         INT DEFAULT 1,
       check_in_date      DATE NOT NULL,
       check_out_date     DATE NOT NULL,
@@ -262,6 +263,10 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     );
     -- Phase 5 migration for existing tenants
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS guest_state TEXT;
+    -- CHK-3: optional GST number captured during check-in for B2B
+    -- invoices. When non-empty, the invoice PDF includes a "Buyer
+    -- GSTIN" line so the guest's employer can claim Input Tax Credit.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS guest_gstin TEXT;
     -- Day-use booking type (idempotent — existing rows default to OVERNIGHT)
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS booking_type TEXT DEFAULT 'OVERNIGHT';
     UPDATE room_bookings SET booking_type = 'OVERNIGHT' WHERE booking_type IS NULL;
@@ -16655,37 +16660,47 @@ async function startServer() {
       const b: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!b) return res.status(404).json({ error: "Booking not found" });
 
-      // ── REQ 3: Lock financial / commercial fields after checkout ─────
-      // Once the guest has checked out OR the booking has been cancelled,
-      // the commercial terms are locked. The folio has been settled, the
-      // invoice has been issued, and any drift between booking and folio
-      // records breaks the audit trail.
+      // ── REQ 3 (tightened CHK-1): Lock edits once booking is in
+      //   CHECKED_IN, CHECKED_OUT, or CANCELLED. The check-in moment is
+      //   the formal lock point — staff confirm details + capture ID
+      //   during the check-in wizard (CHK-2), after which the audit
+      //   trail must be immutable. The folio has been opened, the
+      //   guest is on the property, and any drift between booking and
+      //   folio records breaks invoice integrity + statutory reporting.
       //
-      // Locked fields (rejected when status IN CHECKED_OUT/CANCELLED):
+      // Locked fields (rejected when status IN CHECKED_IN/CHECKED_OUT/CANCELLED):
       //   room_rate, check_in_date, check_out_date, room_id, booking_type,
-      //   num_guests, status (re-opening a closed booking)
-      //
-      // Allowed at any status (back-office hygiene — phone correction,
-      // email fix, special-requests notes etc.):
+      //   num_guests, status (re-opening a closed booking),
       //   guest_name, guest_phone, guest_email, guest_id_proof,
-      //   guest_nationality, guest_state, special_requests
+      //   guest_nationality, guest_state, guest_gstin
       //
-      // For a genuine correction on a closed booking the owner can issue
-      // a credit-note (server.ts:17106) — that preserves the audit trail.
-      const isFinalized = b.status === 'CHECKED_OUT' || b.status === 'CANCELLED';
-      const LOCKED_AFTER_CHECKOUT = ['room_rate','check_in_date','check_out_date','room_id','booking_type','num_guests','status'];
-      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','num_guests','check_in_date','check_out_date','room_rate','special_requests','status','booking_type'];
+      // ALL guest-facing fields are now locked once status >= CHECKED_IN.
+      // The only field still editable post-checkin is `special_requests`
+      // (housekeeping notes, allergy adds, etc — back-office hygiene).
+      //
+      // For a genuine correction on a finalized booking the owner can
+      // issue a credit-note (server.ts:17106) — that path preserves the
+      // audit trail.
+      const isFinalized = b.status === 'CHECKED_IN' || b.status === 'CHECKED_OUT' || b.status === 'CANCELLED';
+      const LOCKED_AFTER_CHECKIN = [
+        'room_rate','check_in_date','check_out_date','room_id','booking_type','num_guests','status',
+        'guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin'
+      ];
+      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','check_in_date','check_out_date','room_rate','special_requests','status','booking_type'];
       const patch: any = {};
       for (const k of allow) if (k in (req.body || {})) patch[k] = req.body[k];
       if (Object.keys(patch).length === 0) return res.json(b);
 
       if (isFinalized) {
-        const blocked = Object.keys(patch).filter(k => LOCKED_AFTER_CHECKOUT.includes(k));
+        const blocked = Object.keys(patch).filter(k => LOCKED_AFTER_CHECKIN.includes(k));
         if (blocked.length > 0) {
+          const stateLabel = b.status === 'CHECKED_IN' ? 'checked in'
+                           : b.status === 'CHECKED_OUT' ? 'checked out'
+                           : 'cancelled';
           return res.status(409).json({
-            error: `Booking is ${b.status === 'CHECKED_OUT' ? 'checked out' : 'cancelled'} and cannot be edited. ` +
+            error: `Booking is ${stateLabel} and cannot be edited. ` +
                    `Field(s) "${blocked.join(', ')}" are locked. ` +
-                   `Use a credit note for billing corrections, or contact platform admin.`,
+                   `Edits must happen during the check-in flow; after that, use a credit note for billing corrections.`,
             locked_fields: blocked,
             booking_status: b.status,
           });
@@ -17598,7 +17613,7 @@ async function startServer() {
       const tenantDb = await getTenantDb(req.params.id);
       const folio: any = await tenantDb.get(
         `SELECT f.*, b.id AS booking_id, b.guest_name, b.guest_phone, b.guest_email,
-                b.guest_nationality, b.guest_state, b.check_in_date, b.check_out_date,
+                b.guest_nationality, b.guest_state, b.guest_gstin, b.check_in_date, b.check_out_date,
                 b.actual_checkin_at, b.actual_checkout_at, b.num_guests, r.name AS room_name
          FROM folios f
          LEFT JOIN room_bookings b ON b.id = f.booking_id
@@ -17645,6 +17660,7 @@ async function startServer() {
           email:        folio.guest_email,
           nationality:  folio.guest_nationality,
           state:        folio.guest_state,
+          gstin:        folio.guest_gstin || null,   // CHK-3: B2B ITC line
         },
         stay: {
           roomName:          folio.room_name || folio.room_id,
@@ -17713,7 +17729,7 @@ async function startServer() {
       const tenantDb = await getTenantDb(req.params.id);
       const folio: any = await tenantDb.get(
         `SELECT f.*, b.id AS booking_id, b.guest_name, b.guest_phone, b.guest_email,
-                b.guest_nationality, b.guest_state, b.check_in_date, b.check_out_date,
+                b.guest_nationality, b.guest_state, b.guest_gstin, b.check_in_date, b.check_out_date,
                 b.actual_checkin_at, b.actual_checkout_at, b.num_guests, r.name AS room_name
          FROM folios f
          LEFT JOIN room_bookings b ON b.id = f.booking_id
@@ -22088,7 +22104,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-booking-row-edit-docs-preview',
+    commit_marker: 'hotel-checkin-wizard-gstin-lock',
     code_features: [
       'subscription-billing',
       'read-only-mode',

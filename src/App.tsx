@@ -9226,41 +9226,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   //      lets the receptionist fix the gaps inline before retrying
   // The actual check-in fires only after the cashier clicks the
   // primary CTA on whichever modal opens.
+  // CHK-2 — "Check In" ALWAYS opens the 2-page wizard. Staff
+  // verifies/edits guest details on page 1, uploads documents on
+  // page 2, then confirms. This is the only moment guest fields
+  // can be changed — CHK-1 server lock kicks in once status flips
+  // to CHECKED_IN.
+  //
+  // Early-check-in date guard still runs first: if the booking is
+  // for a future date, we route through the existing confirmation
+  // modal before opening the wizard.
   const confirmAndCheckIn = async (b: any) => {
     if (!b?.id) return;
-
-    // Req 1b — local pre-flight: if we already know phone is empty OR
-    // document_count is 0, surface the checklist modal up-front so the
-    // staff doesn't get a 400 from the server. Server still enforces
-    // the gate as a defensive backstop.
-    const hasPhone = !!String(b.guest_phone || '').trim();
-    const docCount = Number(b.document_count || 0);
-    const requireDocs = hotelSettings?.require_id_at_checkin !== false; // default true
-    if (!hasPhone || (requireDocs && docCount === 0)) {
-      setCheckInChecklistTarget(b);
-      return;
-    }
-
     const today = new Date().toISOString().slice(0, 10);
     const scheduled = normaliseBookingDate(b.check_in_date);
     if (scheduled && scheduled > today) {
       setEarlyCheckInTarget(b);
       return;
     }
-    try {
-      await checkInBooking(b.id, false);
-    } catch (err: any) {
-      // Server side may still flag early — surface the modal if so.
-      const msg = err?.message || '';
-      if (/scheduled for/i.test(msg) || /early/i.test(msg)) {
-        setEarlyCheckInTarget(b);
-      } else if (/id-proof/i.test(msg) || /phone number is required/i.test(msg)) {
-        // Backstop — server caught a gap our local data missed.
-        setCheckInChecklistTarget(b);
-      } else {
-        setHotelError(msg || 'Check-in failed');
-      }
-    }
+    // Open the wizard for every check-in, whether or not data is
+    // already complete. Staff often want to double-check phone /
+    // ID number even if the row looks clean.
+    setCheckInChecklistTarget(b);
   };
 
   // Confirm button on the early-check-in modal. Sends force=true so the
@@ -15417,11 +15403,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>
                         <td className="px-4 py-3 text-right">
                           <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                            {/* UI-1 — Edit button: lets staff update phone / name /
-                                ID metadata BEFORE check-in. Hidden on CHECKED_OUT /
-                                CANCELLED because Req-3 server guard locks those
-                                fields anyway (would just return 409). */}
-                            {(b.status === 'BOOKED' || b.status === 'CHECKED_IN') && (
+                            {/* UI-1 / CHK-1 — Edit button: ONLY on BOOKED rows.
+                                After check-in (CHECKED_IN/OUT/CANCELLED) the
+                                server-side Req-3 guard locks all guest-facing
+                                fields, so showing an Edit button that would
+                                always 409 is bad UX. Edits during check-in
+                                happen inside the Check-In Wizard (CHK-2).
+                                Post-checkin, only credit notes can adjust. */}
+                            {b.status === 'BOOKED' && (
                               <button
                                 onClick={() => { setEditingBooking({ ...b }); setShowBookingModal(true); }}
                                 title="Edit booking (phone, name, dates, etc.)"
@@ -19857,25 +19846,29 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       )}
 
-      {/* ═════════ Pre-check-in checklist modal (Req 1b) ═════════
-          Opens when staff clicks "Check In" but the booking is missing
-          phone or ID documents. Embeds the GuestDocumentsWidget so the
-          gap can be fixed inline. "Confirm Check-In" stays disabled
-          until both items are green. Server-side guard is the final
-          backstop — this is the UX layer. */}
+      {/* ═════════ Check-In Wizard (CHK-2 — replaces CheckInChecklistModal) ═════════
+          2-page wizard that opens on EVERY "Check In" click:
+            Page 1 — Edit guest details (name, phone, GSTIN, etc.)
+            Page 2 — Upload ID documents
+          Then "Confirm Check-In" flips status. Once CHECKED_IN the
+          server-side lock (CHK-1) blocks further edits, so this is
+          the ONE chance to capture / correct guest data.
+      */}
       {checkInChecklistTarget && (() => {
         const b = checkInChecklistTarget;
-        const hasPhone = !!String(b.guest_phone || '').trim();
         const requireDocs = hotelSettings.require_id_at_checkin !== false;
         return (
-          <CheckInChecklistModal
+          <CheckInWizardModal
             booking={b}
             requireDocs={requireDocs}
-            hasPhone={hasPhone}
             restaurantId={restaurantId}
             token={token}
             onPreview={(doc: any) => setDocPreview(doc)}
             onCancel={() => setCheckInChecklistTarget(null)}
+            onSaved={(patched: any) => {
+              // Optimistically merge saved fields back into the bookings list
+              setHotelBookings((rows: any[]) => rows.map(r => r.id === patched.id ? { ...r, ...patched } : r));
+            }}
             onCheckIn={async () => {
               try {
                 await checkInBooking(b.id, false);
@@ -19883,7 +19876,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               } catch (err: any) {
                 const msg = err?.message || '';
                 if (/scheduled for/i.test(msg) || /early/i.test(msg)) {
-                  // Promote to early-check-in modal
                   setCheckInChecklistTarget(null);
                   setEarlyCheckInTarget(b);
                 } else {
@@ -24269,7 +24261,378 @@ const GuestDocumentsWidget: React.FC<{
   );
 };
 
-/* ─── CheckInChecklistModal — Req 1b ─────────────────────────────
+/* ─── CheckInWizardModal — CHK-2 (supersedes CheckInChecklistModal) ─
+   2-page wizard that opens on every "Check In" click. Replaces
+   the older single-page checklist with a structured flow:
+
+   PAGE 1 — Edit guest details:
+     • Name (required)
+     • Phone (required — Req 4)
+     • Email
+     • Nationality / State (FRRO / Form-C triggers)
+     • Num guests
+     • ID-proof number (free-text — kept for back-compat)
+     • CHK-3: GST Number (GSTIN) — for B2B invoice ITC claim
+     • Special requests
+   PAGE 2 — Upload ID documents (GuestDocumentsWidget embedded)
+   FOOTER — Cancel / Back / Next / Confirm Check-In
+
+   The wizard is the only place staff can edit guest fields after
+   booking creation — CHK-1 server lock blocks PATCH once status =
+   CHECKED_IN. So Page 1 captures the canonical record.
+
+   Save flow on Next: PATCH /bookings/:id with the form data. If
+   the server returns 409 (CHK-1 lock — booking already checked in),
+   we show an inline error and don't advance.
+*/
+const CheckInWizardModal: React.FC<{
+  booking: any;
+  requireDocs: boolean;
+  restaurantId: string;
+  token: string;
+  onPreview?: (doc: any) => void;
+  onCancel: () => void;
+  onSaved?: (patched: any) => void;
+  onCheckIn: () => void | Promise<void>;
+}> = ({ booking, requireDocs, restaurantId, token, onPreview, onCancel, onSaved, onCheckIn }) => {
+  const [step, setStep] = useState<1 | 2>(1);
+  const [draft, setDraft] = useState<any>({
+    guest_name:        booking.guest_name || '',
+    guest_phone:       booking.guest_phone || '',
+    guest_email:       booking.guest_email || '',
+    guest_nationality: booking.guest_nationality || '',
+    guest_state:       booking.guest_state || '',
+    guest_id_proof:    booking.guest_id_proof || '',
+    guest_gstin:       booking.guest_gstin || '',
+    num_guests:        booking.num_guests || 1,
+    special_requests:  booking.special_requests || '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [docCount, setDocCount] = useState<number>(Number(booking.document_count || 0));
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+
+  // Re-fetch document count whenever the embedded widget refreshes.
+  useEffect(() => {
+    if (step !== 2) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/restaurant/${restaurantId}/hotel/bookings/${booking.id}/documents`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!cancelled && res.ok) {
+          const docs = await res.json();
+          setDocCount(Array.isArray(docs) ? docs.length : 0);
+        }
+      } catch {/* swallow */}
+    })();
+    return () => { cancelled = true; };
+  }, [refreshNonce, step, restaurantId, booking.id, token]);
+
+  // GSTIN format: 15 chars — 2 digits + 5 letters + 4 digits + 1 letter
+  // + 1 alnum + Z + 1 alnum. Used loosely (just length + charset) so
+  // the staff isn't blocked by edge-case format variants.
+  const gstinError = (() => {
+    const g = String(draft.guest_gstin || '').trim().toUpperCase();
+    if (!g) return null;
+    if (g.length !== 15) return 'GSTIN must be exactly 15 characters';
+    if (!/^[0-9A-Z]+$/.test(g)) return 'GSTIN must contain only digits and uppercase letters';
+    return null;
+  })();
+  const phoneOk = String(draft.guest_phone || '').trim().length >= 7;
+  const nameOk = String(draft.guest_name || '').trim().length > 0;
+  const page1Valid = nameOk && phoneOk && !gstinError;
+
+  const saveAndNext = async () => {
+    if (!page1Valid || saving) return;
+    setError('');
+    setSaving(true);
+    try {
+      const body: any = {};
+      // Only PATCH fields that actually changed (lighter payload + clear audit)
+      for (const k of Object.keys(draft)) {
+        const newVal = draft[k];
+        const oldVal = booking[k];
+        if ((newVal ?? '') !== (oldVal ?? '')) body[k] = (newVal === '' ? null : newVal);
+      }
+      if (Object.keys(body).length > 0) {
+        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings/${booking.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || `Save failed (${res.status})`);
+        if (onSaved) onSaved(data);
+      }
+      setStep(2);
+    } catch (err: any) {
+      setError(err?.message || 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const docsOk = !requireDocs || docCount > 0;
+  const canCheckIn = docsOk;
+
+  const confirm = async () => {
+    if (!canCheckIn || submitting) return;
+    setSubmitting(true);
+    try { await onCheckIn(); } finally { setSubmitting(false); }
+  };
+
+  const updateDraft = (patch: any) => setDraft((d: any) => ({ ...d, ...patch }));
+
+  return (
+    <div className="fixed inset-0 z-[55] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onCancel}>
+      <div
+        className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-6 max-h-[94vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header + step indicator */}
+        <div className="flex items-start justify-between mb-4">
+          <div>
+            <h3 className="text-xl font-bold font-serif text-[#1a1208]">Check in: {booking.guest_name}</h3>
+            <p className="text-[11px] text-[#6b5d52] mt-0.5">
+              {booking.room_name || booking.room_id} ·{' '}
+              <span className="font-mono">{booking.id}</span>
+            </p>
+          </div>
+          <button onClick={onCancel} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18}/></button>
+        </div>
+
+        {/* Step indicator */}
+        <div className="flex items-center gap-2 mb-5">
+          {[1, 2].map(n => (
+            <React.Fragment key={n}>
+              <div className={cn(
+                "flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-widest",
+                step === n ? "bg-[#cc5a16] text-white" :
+                step > n ? "bg-emerald-100 text-emerald-800" : "bg-[#faf7f2] text-[#9c8e85]"
+              )}>
+                <span className={cn(
+                  "w-5 h-5 rounded-full flex items-center justify-center text-[10px]",
+                  step === n ? "bg-white text-[#cc5a16]" :
+                  step > n ? "bg-emerald-600 text-white" : "bg-stone-300 text-white"
+                )}>{step > n ? '✓' : n}</span>
+                {n === 1 ? 'Guest details' : 'ID documents'}
+              </div>
+              {n === 1 && <div className="flex-1 h-px bg-stone-200" />}
+            </React.Fragment>
+          ))}
+        </div>
+
+        {/* ─── PAGE 1 ─── */}
+        {step === 1 && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                  Guest Name <span className="text-[#c13b3b]">*</span>
+                </label>
+                <input
+                  value={draft.guest_name}
+                  onChange={e => updateDraft({ guest_name: e.target.value })}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                  Phone <span className="text-[#c13b3b]">*</span>
+                </label>
+                <input
+                  type="tel"
+                  value={draft.guest_phone}
+                  onChange={e => updateDraft({ guest_phone: e.target.value })}
+                  placeholder="+91 9876543210"
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Email</label>
+              <input
+                type="email"
+                value={draft.guest_email}
+                onChange={e => updateDraft({ guest_email: e.target.value })}
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Nationality</label>
+                <input
+                  value={draft.guest_nationality}
+                  onChange={e => updateDraft({ guest_nationality: e.target.value })}
+                  placeholder="India / US / UK …"
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                />
+                <p className="text-[10px] text-[#9c8e85] mt-1">Non-Indian → Form-C / FRRO triggered.</p>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">State</label>
+                <input
+                  value={draft.guest_state}
+                  onChange={e => updateDraft({ guest_state: e.target.value })}
+                  placeholder="e.g. Maharashtra"
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">ID Proof Number</label>
+                <input
+                  value={draft.guest_id_proof}
+                  onChange={e => updateDraft({ guest_id_proof: e.target.value })}
+                  placeholder="e.g. AADHAAR-1234-5678-9012"
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                />
+                <p className="text-[10px] text-[#9c8e85] mt-1">Text reference. Upload the scan on the next page.</p>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
+                <input
+                  type="number" min="1" max="20"
+                  value={draft.num_guests}
+                  onChange={e => updateDraft({ num_guests: Math.max(1, Number(e.target.value) || 1) })}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                />
+              </div>
+            </div>
+
+            {/* CHK-3: GSTIN for B2B ITC */}
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                GST Number (GSTIN) — optional
+              </label>
+              <input
+                value={draft.guest_gstin}
+                onChange={e => updateDraft({ guest_gstin: e.target.value.toUpperCase() })}
+                placeholder="29ABCDE1234F1Z5"
+                maxLength={15}
+                className={cn(
+                  "w-full border-none rounded-2xl px-4 py-3 text-sm font-mono focus:ring-2 ring-[#cc5a16]/20 outline-none uppercase",
+                  gstinError ? "bg-rose-50" : "bg-[#faf7f2]"
+                )}
+              />
+              <p className="text-[10px] text-[#9c8e85] mt-1">
+                {gstinError
+                  ? <span className="text-[#c13b3b] font-bold">{gstinError}</span>
+                  : 'If the guest wants the invoice in the company\'s name (for Input Tax Credit), enter the 15-char GSTIN here.'}
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Special Requests</label>
+              <textarea
+                rows={2}
+                value={draft.special_requests}
+                onChange={e => updateDraft({ special_requests: e.target.value })}
+                placeholder="e.g. high floor, late check-out, allergy notes"
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none resize-none"
+              />
+            </div>
+
+            {error && <p className="text-xs text-[#c13b3b] bg-[#fdf0f0] rounded-xl px-3 py-2">{error}</p>}
+
+            <p className="text-[10px] text-[#9c8e85] italic pt-1">
+              ⚠ Once checked in, these fields lock — verify carefully now.
+            </p>
+
+            <div className="flex gap-2 pt-2">
+              <button onClick={onCancel} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+              <button
+                onClick={saveAndNext}
+                disabled={!page1Valid || saving}
+                className={cn(
+                  "flex-1 px-4 py-2.5 rounded-2xl text-white text-sm font-bold transition-all flex items-center justify-center gap-2",
+                  page1Valid && !saving ? "bg-[#cc5a16] hover:bg-[#a84612]" : "bg-stone-300 cursor-not-allowed"
+                )}
+              >{saving ? 'Saving…' : <>Save &amp; Next <ChevronRight size={16}/></>}</button>
+            </div>
+          </div>
+        )}
+
+        {/* ─── PAGE 2 ─── */}
+        {step === 2 && (
+          <div className="space-y-3">
+            <div className={cn(
+              "rounded-2xl px-4 py-3 border",
+              docsOk ? "bg-emerald-50 border-emerald-200" : "bg-amber-50 border-amber-200"
+            )}>
+              <div className="flex items-center gap-3">
+                {docsOk
+                  ? <CheckCircle2 size={20} className="text-emerald-600 flex-shrink-0" />
+                  : <AlertCircle size={20} className="text-amber-600 flex-shrink-0" />}
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-sm text-[#1a1208]">ID-proof documents</p>
+                  <p className="text-xs text-[#6b5d52] mt-0.5">
+                    {!requireDocs
+                      ? "Optional (property setting). Skip OK."
+                      : docCount === 0
+                        ? "At least one document required. Upload below."
+                        : `${docCount} document${docCount > 1 ? 's' : ''} on file. Add more if needed.`}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div key={refreshNonce}>
+              <GuestDocumentsWidget
+                bookingId={booking.id}
+                bookingStatus={booking.status || 'BOOKED'}
+                restaurantId={restaurantId}
+                token={token}
+                onPreview={onPreview}
+              />
+              <button
+                type="button"
+                onClick={() => setRefreshNonce(n => n + 1)}
+                className="mt-2 text-[10px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest"
+              >Refresh document count</button>
+            </div>
+
+            {requireDocs && !docsOk && (
+              <p className="text-[10px] text-[#9c8e85] italic mt-3 leading-relaxed">
+                Per Indian regulations (Form-C / FRRO / DPDP 2023), ID verification is required at check-in.
+                To turn this off for transit properties, open <strong>Settings → Hotel</strong>.
+              </p>
+            )}
+
+            <div className="flex gap-2 pt-3 mt-1 border-t border-[#cc5a16]/10">
+              <button
+                onClick={() => setStep(1)}
+                className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2] flex items-center gap-1"
+              ><ChevronRight size={16} className="rotate-180" /> Back</button>
+              <button
+                onClick={onCancel}
+                className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]"
+              >Cancel</button>
+              <button
+                onClick={confirm}
+                disabled={!canCheckIn || submitting}
+                className={cn(
+                  "flex-1 px-4 py-2.5 rounded-2xl text-white text-sm font-bold transition-all",
+                  canCheckIn && !submitting ? "bg-emerald-600 hover:bg-emerald-700" : "bg-stone-300 cursor-not-allowed"
+                )}
+              >{submitting ? 'Checking in…' : 'Confirm Check-In'}</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* ─── CheckInChecklistModal — Req 1b (DEPRECATED, kept for reference) ─
    Pre-check-in gate enforced in the UI. Opens when staff clicks
    "Check In" on a row where phone or ID documents are missing.
    Embeds the existing GuestDocumentsWidget so the staff can upload
