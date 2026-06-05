@@ -22088,7 +22088,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-pre-checkin-id-gate-req1b',
+    commit_marker: 'hotel-booking-row-edit-docs-preview',
     code_features: [
       'subscription-billing',
       'read-only-mode',

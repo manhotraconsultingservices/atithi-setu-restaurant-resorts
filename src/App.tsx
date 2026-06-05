@@ -7070,6 +7070,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // are missing. The modal embeds the GuestDocumentsWidget so the
   // gap can be fixed inline before retrying.
   const [checkInChecklistTarget, setCheckInChecklistTarget] = useState<any>(null);
+  // UI-2 — Focused documents modal target. Opened by the "📄 Docs"
+  // button on a booking row. Same widget as the booking-edit modal,
+  // just hosted in a smaller dedicated dialog so staff doesn't have
+  // to scroll past every booking field to add a document.
+  const [docsTargetBooking, setDocsTargetBooking] = useState<any>(null);
+  // UI-3 — Preview lightbox state. Holds the document row currently
+  // being previewed (image rendered full-size, PDF iframe-embedded).
+  const [docPreview, setDocPreview] = useState<any>(null);
   const [hotelSettingsSaving, setHotelSettingsSaving] = useState(false);
   // Sprint P2-H — Yield rules CRUD state.
   const [yieldRules, setYieldRules] = useState<any[]>([]);
@@ -15408,13 +15416,47 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <td className="px-4 py-3"><span className={cn("px-2 py-1 rounded-md text-[10px] font-bold uppercase", statusColor)}>{b.status.replace('_', ' ')}</span></td>
                         <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>
                         <td className="px-4 py-3 text-right">
-                          {b.status === 'BOOKED' && <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600 mr-1">Check In</button>}
-                          {b.status === 'CHECKED_IN' && <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608] mr-1">Check Out</button>}
-                          {(b.status === 'BOOKED') && <button onClick={() => cancelBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10 mr-1">Cancel</button>}
-                          {/* Phase H1 — channel re-sync. Only shown for OTA-sourced bookings */}
-                          {b.booking_source && !['DIRECT','WALKIN',''].includes(String(b.booking_source).toUpperCase()) && (
-                            <button onClick={() => resyncBookingToChannel(b)} title="Re-sync to channel manager" className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2]">Re-sync</button>
-                          )}
+                          <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                            {/* UI-1 — Edit button: lets staff update phone / name /
+                                ID metadata BEFORE check-in. Hidden on CHECKED_OUT /
+                                CANCELLED because Req-3 server guard locks those
+                                fields anyway (would just return 409). */}
+                            {(b.status === 'BOOKED' || b.status === 'CHECKED_IN') && (
+                              <button
+                                onClick={() => { setEditingBooking({ ...b }); setShowBookingModal(true); }}
+                                title="Edit booking (phone, name, dates, etc.)"
+                                className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2]"
+                              >Edit</button>
+                            )}
+                            {/* UI-2 — Docs button: focused docs modal with upload
+                                + preview. Shows live count; turns amber if 0 docs
+                                on a BOOKED row + property requires ID at check-in. */}
+                            {b.status !== 'CANCELLED' && (() => {
+                              const count = Number(b.document_count || 0);
+                              const needsDocs = hotelSettings.require_id_at_checkin !== false
+                                                && b.status === 'BOOKED'
+                                                && count === 0;
+                              return (
+                                <button
+                                  onClick={() => setDocsTargetBooking({ ...b })}
+                                  title="View / upload ID documents"
+                                  className={cn(
+                                    "px-3 py-1.5 rounded-lg text-[11px] font-bold border",
+                                    needsDocs
+                                      ? "bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100"
+                                      : "bg-white border-[#cc5a16]/20 text-[#3d3128] hover:bg-[#faf7f2]"
+                                  )}
+                                >📄 Docs {count > 0 && <span className="font-mono opacity-70">· {count}</span>}{needsDocs && <span className="ml-1">⚠</span>}</button>
+                              );
+                            })()}
+                            {b.status === 'BOOKED' && <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600">Check In</button>}
+                            {b.status === 'CHECKED_IN' && <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608]">Check Out</button>}
+                            {(b.status === 'BOOKED') && <button onClick={() => cancelBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Cancel</button>}
+                            {/* Phase H1 — channel re-sync. Only shown for OTA-sourced bookings */}
+                            {b.booking_source && !['DIRECT','WALKIN',''].includes(String(b.booking_source).toUpperCase()) && (
+                              <button onClick={() => resyncBookingToChannel(b)} title="Re-sync to channel manager" className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2]">Re-sync</button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -19802,6 +19844,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   bookingStatus={editingBooking.status || 'BOOKED'}
                   restaurantId={restaurantId}
                   token={token}
+                  onPreview={(doc: any) => setDocPreview(doc)}
                 />
               )}
 
@@ -19831,6 +19874,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             hasPhone={hasPhone}
             restaurantId={restaurantId}
             token={token}
+            onPreview={(doc: any) => setDocPreview(doc)}
             onCancel={() => setCheckInChecklistTarget(null)}
             onCheckIn={async () => {
               try {
@@ -19848,6 +19892,123 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               }
             }}
           />
+        );
+      })()}
+
+      {/* ═════════ Focused Documents modal (UI-2) ═════════
+          Opened by the "📄 Docs" button on a booking row. Hosts the
+          GuestDocumentsWidget by itself so staff can manage docs
+          without scrolling past every booking field. Same widget,
+          same lock semantics. */}
+      {docsTargetBooking && (() => {
+        const b = docsTargetBooking;
+        return (
+          <div
+            className="fixed inset-0 z-[55] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+            onClick={() => { setDocsTargetBooking(null); fetchHotelBookings(); }}
+          >
+            <div
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-7 max-h-[92vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-xl font-bold font-serif text-[#1a1208]">ID Documents</h3>
+                  <p className="text-[11px] text-[#6b5d52] mt-0.5">
+                    {b.guest_name} · {b.room_name || b.room_id} · {b.status.replace('_', ' ').toLowerCase()}
+                  </p>
+                </div>
+                <button
+                  onClick={() => { setDocsTargetBooking(null); fetchHotelBookings(); }}
+                  className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"
+                ><X size={18}/></button>
+              </div>
+              <GuestDocumentsWidget
+                bookingId={b.id}
+                bookingStatus={b.status || 'BOOKED'}
+                restaurantId={restaurantId}
+                token={token}
+                onPreview={(doc: any) => setDocPreview(doc)}
+              />
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => { setDocsTargetBooking(null); fetchHotelBookings(); }}
+                  className="px-5 py-2 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]"
+                >Done</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═════════ Document Preview lightbox (UI-3) ═════════
+          Renders any image-MIME document full-size, embeds PDFs via
+          iframe. Click backdrop or ESC to close. */}
+      {docPreview && (() => {
+        const isImage = String(docPreview.mime_type || '').startsWith('image/');
+        const isPdf = String(docPreview.mime_type || '').toLowerCase().includes('pdf');
+        return (
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm"
+            onClick={() => setDocPreview(null)}
+          >
+            <div
+              className="relative max-w-5xl max-h-[95vh] w-full flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header bar */}
+              <div className="flex items-center justify-between gap-3 bg-white rounded-t-2xl px-5 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="font-bold text-[#1a1208] truncate">{docPreview.file_name || 'document'}</p>
+                  <p className="text-[10px] text-[#9c8e85] uppercase tracking-widest">
+                    {docPreview.doc_type || 'OTHER'} · {docPreview.mime_type}
+                    {docPreview.size_bytes ? ` · ${Math.round(Number(docPreview.size_bytes) / 1024)} KB` : ''}
+                  </p>
+                </div>
+                <a
+                  href={docPreview.file_url}
+                  download={docPreview.file_name || true}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-[11px] font-bold uppercase tracking-widest hover:bg-[#a84612] flex items-center gap-1.5"
+                >Download</a>
+                <button
+                  onClick={() => setDocPreview(null)}
+                  className="p-2 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"
+                ><X size={18}/></button>
+              </div>
+
+              {/* Preview canvas */}
+              <div className="flex-1 bg-stone-900 rounded-b-2xl overflow-auto flex items-center justify-center min-h-[60vh]">
+                {isImage && (
+                  <img
+                    src={docPreview.file_url}
+                    alt={docPreview.file_name || 'document'}
+                    className="max-w-full max-h-[80vh] object-contain"
+                  />
+                )}
+                {isPdf && (
+                  <iframe
+                    src={docPreview.file_url}
+                    title={docPreview.file_name || 'document'}
+                    className="w-full h-[80vh] bg-white"
+                  />
+                )}
+                {!isImage && !isPdf && (
+                  <div className="text-center p-12 text-white/80">
+                    <p className="text-sm">Preview not supported for {docPreview.mime_type || 'this file type'}.</p>
+                    <a
+                      href={docPreview.file_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-3 inline-block underline text-saffron"
+                    >Open in new tab →</a>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         );
       })()}
 
@@ -23910,7 +24071,11 @@ const GuestDocumentsWidget: React.FC<{
   bookingStatus: string;
   restaurantId: string;
   token: string;
-}> = ({ bookingId, bookingStatus, restaurantId, token }) => {
+  /** UI-3: optional preview callback. When supplied, clicking a document
+   *  invokes this with the document row instead of opening file_url in a
+   *  new tab. Lets the parent host a lightbox / iframe preview. */
+  onPreview?: (doc: any) => void;
+}> = ({ bookingId, bookingStatus, restaurantId, token, onPreview }) => {
   const [docs, setDocs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -24003,30 +24168,58 @@ const GuestDocumentsWidget: React.FC<{
         <p className="text-xs text-[#9c8e85] italic mb-2">No documents uploaded yet.</p>
       ) : (
         <div className="space-y-1.5 mb-3">
-          {docs.map(d => (
-            <div key={d.id} className="flex items-center gap-2 bg-[#faf7f2] rounded-xl px-3 py-2 text-xs">
-              <span className="text-[#cc5a16]">📄</span>
-              <a href={d.file_url} target="_blank" rel="noopener noreferrer" className="font-bold text-[#1a1208] truncate hover:underline flex-1" title={d.file_name || d.file_url}>
-                {d.file_name || 'document'}
-              </a>
-              {d.doc_type && (
-                <span className="text-[9px] font-bold uppercase tracking-widest bg-stone-200 text-stone-700 px-1.5 py-0.5 rounded">
-                  {d.doc_type}
-                </span>
-              )}
-              {d.locked_at ? (
-                <span className="text-[9px] font-bold uppercase tracking-widest bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded" title={`Locked at ${new Date(d.locked_at).toLocaleString()}`}>
-                  🔒 Locked
-                </span>
-              ) : (
+          {docs.map(d => {
+            const isImage = String(d.mime_type || '').startsWith('image/');
+            const isPdf = String(d.mime_type || '').toLowerCase().includes('pdf');
+            return (
+              <div key={d.id} className="flex items-center gap-2 bg-[#faf7f2] rounded-xl px-2.5 py-2 text-xs">
+                {/* UI-3 — thumbnail. Images render an actual preview;
+                    PDFs and others get a typed icon tile. */}
                 <button
                   type="button"
-                  onClick={() => handleDelete(d.id)}
-                  className="text-[10px] font-bold text-[#c13b3b] hover:underline"
-                >Delete</button>
-              )}
-            </div>
-          ))}
+                  onClick={() => onPreview ? onPreview(d) : window.open(d.file_url, '_blank', 'noopener,noreferrer')}
+                  className="w-10 h-10 rounded-lg overflow-hidden flex items-center justify-center bg-white border border-[#cc5a16]/10 hover:ring-2 hover:ring-[#cc5a16]/30 transition-all shrink-0"
+                  title="Preview"
+                >
+                  {isImage ? (
+                    <img src={d.file_url} alt="" className="w-full h-full object-cover" loading="lazy" />
+                  ) : isPdf ? (
+                    <span className="text-base">📕</span>
+                  ) : (
+                    <span className="text-base">📄</span>
+                  )}
+                </button>
+
+                {/* Filename — also clickable to preview */}
+                <button
+                  type="button"
+                  onClick={() => onPreview ? onPreview(d) : window.open(d.file_url, '_blank', 'noopener,noreferrer')}
+                  className="font-bold text-[#1a1208] truncate hover:underline flex-1 text-left"
+                  title={d.file_name || d.file_url}
+                >
+                  {d.file_name || 'document'}
+                  {d.label && <span className="block text-[10px] font-normal text-[#9c8e85] truncate">{d.label}</span>}
+                </button>
+
+                {d.doc_type && (
+                  <span className="text-[9px] font-bold uppercase tracking-widest bg-stone-200 text-stone-700 px-1.5 py-0.5 rounded">
+                    {d.doc_type}
+                  </span>
+                )}
+                {d.locked_at ? (
+                  <span className="text-[9px] font-bold uppercase tracking-widest bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded" title={`Locked at ${new Date(d.locked_at).toLocaleString()}`}>
+                    🔒 Locked
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(d.id)}
+                    className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                  >Delete</button>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -24097,7 +24290,9 @@ const CheckInChecklistModal: React.FC<{
   token: string;
   onCancel: () => void;
   onCheckIn: () => void | Promise<void>;
-}> = ({ booking, requireDocs, hasPhone, restaurantId, token, onCancel, onCheckIn }) => {
+  /** UI-3: optional document-preview callback forwarded to the embedded widget. */
+  onPreview?: (doc: any) => void;
+}> = ({ booking, requireDocs, hasPhone, restaurantId, token, onCancel, onCheckIn, onPreview }) => {
   const [docCount, setDocCount] = useState<number>(Number(booking.document_count || 0));
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [submitting, setSubmitting] = useState(false);
@@ -24205,6 +24400,7 @@ const CheckInChecklistModal: React.FC<{
                 bookingStatus={booking.status || 'BOOKED'}
                 restaurantId={restaurantId}
                 token={token}
+                onPreview={onPreview}
               />
               {/* A tiny ping so the parent re-fetches its own count. */}
               <button
