@@ -109,11 +109,28 @@ if [[ "$OLD_SHA" == "$NEW_SHA" ]]; then
   exit 0
 fi
 
-# Step 3+4: Build + swap containers
+# Step 3+4: Build + swap containers (with retry on transient build failures)
+# Docker pulls can flake on the first try if upstream registries throttle, or
+# if a layer download breaks midway. We retry once before declaring defeat —
+# costs at most an extra ~60s on a true failure, saves a full rollback cycle
+# (~3 min) on a transient flake.
 cd "$DEPLOY_DIR"
-log "→ Building new image and swapping containers…"
-if ! docker compose -f "$COMPOSE_FILE" up -d --build app 2>&1 | tee -a "$LOG_FILE"; then
-  log "‼ Docker build failed"
+build_attempts=2
+build_ok=false
+for attempt in $(seq 1 $build_attempts); do
+  log "→ Build attempt ${attempt}/${build_attempts}: building new image and swapping containers…"
+  if docker compose -f "$COMPOSE_FILE" up -d --build app 2>&1 | tee -a "$LOG_FILE"; then
+    build_ok=true
+    break
+  fi
+  if [ $attempt -lt $build_attempts ]; then
+    log "‼ Build attempt ${attempt} failed — retrying in 20s after pruning dangling layers"
+    docker image prune -f 2>&1 | tee -a "$LOG_FILE" || true
+    sleep 20
+  fi
+done
+if [ "$build_ok" != "true" ]; then
+  log "‼ All build attempts failed"
   rollback
   fail "build error"
 fi

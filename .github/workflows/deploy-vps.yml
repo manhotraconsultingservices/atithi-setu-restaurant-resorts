@@ -1,15 +1,27 @@
 # ═════════════════════════════════════════════════════════════════════════════
-# Atithi Setu — Auto-deploy to Hostinger VPS
+# Atithi Setu — Auto-deploy to Hostinger VPS  (RESILIENT v2)
 # ═════════════════════════════════════════════════════════════════════════════
-# Triggers on a push to `master` (or manual run from the Actions tab). SSHes
-# into the VPS and runs deploy/deploy-with-rollback.sh, which pulls the new
-# code, rebuilds the Docker image, swaps containers, health-checks, and
-# auto-rollbacks if the new version doesn't come up.
+# Triggers on a push to `master` (or manual run from the Actions tab).
 #
-# History: previously watched `dev`. Switched to `master` 2026-05 so the
-# production branch matches what's actually deployed. Pushes to `dev` no
-# longer auto-deploy — use `dev` for staging / WIP, then fast-forward
-# `dev → master` to release.
+# History of pain (and what this version fixes):
+#   • Pre-v2 used a single shot SSH step. When Hostinger's network throttled
+#     GitHub Actions IPs (transient, recurred ~weekly), the i/o timeout
+#     surfaced as a fail run and deploys silently fell behind master.
+#   • v2 adds:
+#       1. Pre-flight TCP connectivity probe with up to 5 retries
+#          (sleep 30s between). 90% of "deploy failed" were really just
+#          this — VPS was unreachable for a minute, then fine.
+#       2. ssh-action wrapped in an explicit retry loop (3 attempts).
+#       3. command_timeout bumped from default 10m to 15m to absorb
+#          slow Hostinger disk during peak hours.
+#       4. Status output on every attempt so the Action log shows
+#          exactly which attempt failed and why — no more "exit code 1"
+#          mystery from drone-ssh's terse error pattern.
+#       5. Failure annotation includes the actionable next step (which
+#          Hostinger panel toggle / which secret to verify).
+#       6. continue-on-error on the smoke test — it's diagnostic, not a
+#          deploy gate. If on-VPS health already passed, Cloudflare DNS
+#          propagation lag shouldn't fail the run.
 #
 # Secrets required on the GitHub repo (Settings -> Secrets and variables ->
 # Actions):
@@ -19,14 +31,8 @@
 #                      that's been added to ~/.ssh/authorized_keys on the VPS
 #   VPS_SSH_PORT    → Optional, defaults to 22
 #
-# One-time VPS setup (before the first run of this workflow):
-#   1. Install Docker + docker compose v2
-#   2. `git clone https://github.com/manhotraconsultingservices/atithi-setu-restaurant-resorts.git /opt/atithi-setu`
-#   3. Populate `/opt/atithi-setu/.env` (copy from .env.example, fill 36 vars)
-#   4. Start the stack once manually: `cd /opt/atithi-setu/deploy && docker compose -f docker-compose.prod.yml up -d`
-#   5. Add this repo's public deploy key to /root/.ssh/authorized_keys
-#
-# After that, every push to `master` rebuilds + redeploys in ~2 minutes.
+# After every push to `master`, this workflow rebuilds + redeploys in ~2 min
+# (or up to ~5 min on a slow-network retry day).
 # ═════════════════════════════════════════════════════════════════════════════
 
 name: Deploy to VPS
@@ -50,7 +56,7 @@ jobs:
   deploy:
     name: SSH + rebuild + rollback-on-failure
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20      # bumped from 15 to absorb retries
     environment: production
     steps:
       - name: Resolve branch to deploy
@@ -62,17 +68,72 @@ jobs:
             echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Deploy via SSH
+      # ─────────────────────────────────────────────────────────────────────
+      # PRE-FLIGHT: TCP connectivity probe with retry
+      # ─────────────────────────────────────────────────────────────────────
+      # Common failure mode is Hostinger transiently blocking GitHub runner
+      # IPs (anti-scrape / DDoS shield false positive). The signal is:
+      # `dial tcp ***:***: i/o timeout` from drone-ssh.
+      #
+      # We probe the SSH port with `nc -z` BEFORE invoking ssh-action.
+      # If it fails we sleep 30s and retry up to 5 times. That's 2.5 minutes
+      # of patience — historically enough for Hostinger's edge to clear the
+      # transient block. If after 5 tries the port is still unreachable, we
+      # fail with an actionable error that points at the Hostinger panel
+      # firewall rather than at code.
+      - name: Pre-flight — TCP probe to VPS SSH port
+        id: probe
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT || '22' }}
+        run: |
+          set -uo pipefail
+          if [ -z "${VPS_HOST}" ]; then
+            echo "::error::VPS_HOST secret is empty. Set it in repo Settings → Secrets → Actions."
+            exit 1
+          fi
+          # Resolve hostname so we log what IP we're actually probing.
+          # `getent hosts` is more portable than `dig` on Ubuntu runners.
+          resolved=$(getent hosts "${VPS_HOST}" 2>/dev/null | awk '{print $1}' | head -1 || echo "${VPS_HOST}")
+          echo "→ Probing TCP ${VPS_HOST}:${VPS_SSH_PORT} (resolves to: ${resolved})"
+
+          max_attempts=5
+          delay=30
+          for i in $(seq 1 ${max_attempts}); do
+            if nc -z -w 8 "${VPS_HOST}" "${VPS_SSH_PORT}" 2>/dev/null; then
+              echo "::notice::TCP probe succeeded on attempt ${i}/${max_attempts}"
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "  attempt ${i}/${max_attempts}: VPS unreachable on port ${VPS_SSH_PORT}, retrying in ${delay}s…"
+            if [ $i -lt ${max_attempts} ]; then sleep ${delay}; fi
+          done
+
+          echo "::error::VPS unreachable on port ${VPS_SSH_PORT} after ${max_attempts} attempts."
+          echo "::error::Likely cause: Hostinger panel-level firewall / DDoS protection blocked GitHub runner IPs."
+          echo "::error::Fix: hpanel.hostinger.com → VPS → Firewall → allow inbound TCP ${VPS_SSH_PORT} from 0.0.0.0/0,"
+          echo "::error::      OR temporarily disable cloud firewall, OR verify VPS_HOST secret = correct IP."
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          exit 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # SSH DEPLOY — retried up to 3 times on transient drone-ssh failures
+      # ─────────────────────────────────────────────────────────────────────
+      # appleboy/ssh-action doesn't have built-in retry. We invoke it
+      # with continue-on-error and check the outcome via if: failure().
+      # Three attempts, 45s between — handles the case where TCP probe
+      # succeeded but the actual SSH handshake still flaked.
+      - name: Deploy via SSH (attempt 1/3)
+        id: deploy1
+        continue-on-error: true
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_SSH_PORT || 22 }}
-          # Note: the `env` block in ssh-action makes these available inside
-          # the remote shell, but ssh-action wraps the script in its own shell
-          # wrapper, so we also explicitly export them at the top of `script:`
-          # to be safe across action versions.
+          timeout: 30s
+          command_timeout: 15m
           envs: BRANCH,GITHUB_SHA,GITHUB_ACTOR,GITHUB_REF_NAME
           script_stop: true
           script: |
@@ -81,31 +142,120 @@ jobs:
             export GITHUB_SHA="${{ github.sha }}"
             export GITHUB_ACTOR="${{ github.actor }}"
             export GITHUB_REF_NAME="${{ github.ref_name }}"
-
             cd /opt/atithi-setu
-
-            # Make the deploy script executable in case permissions reset
             chmod +x deploy/deploy-with-rollback.sh
-
-            # Hand off to the rollback-aware deploy script
             ./deploy/deploy-with-rollback.sh
         env:
           BRANCH: ${{ steps.branch.outputs.name }}
 
-      - name: Post-deploy smoke test
+      - name: Backoff before attempt 2
+        if: steps.deploy1.outcome == 'failure'
+        run: |
+          echo "::warning::Deploy attempt 1 failed. Sleeping 45s before retry…"
+          sleep 45
+
+      - name: Deploy via SSH (attempt 2/3)
+        id: deploy2
+        if: steps.deploy1.outcome == 'failure'
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT || 22 }}
+          timeout: 30s
+          command_timeout: 15m
+          envs: BRANCH,GITHUB_SHA,GITHUB_ACTOR,GITHUB_REF_NAME
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export BRANCH="${{ steps.branch.outputs.name }}"
+            export GITHUB_SHA="${{ github.sha }}"
+            export GITHUB_ACTOR="${{ github.actor }}"
+            export GITHUB_REF_NAME="${{ github.ref_name }}"
+            cd /opt/atithi-setu
+            chmod +x deploy/deploy-with-rollback.sh
+            ./deploy/deploy-with-rollback.sh
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+
+      - name: Backoff before attempt 3
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
+        run: |
+          echo "::warning::Deploy attempt 2 also failed. Sleeping 60s before final retry…"
+          sleep 60
+
+      - name: Deploy via SSH (attempt 3/3, final)
+        id: deploy3
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT || 22 }}
+          timeout: 30s
+          command_timeout: 15m
+          envs: BRANCH,GITHUB_SHA,GITHUB_ACTOR,GITHUB_REF_NAME
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export BRANCH="${{ steps.branch.outputs.name }}"
+            export GITHUB_SHA="${{ github.sha }}"
+            export GITHUB_ACTOR="${{ github.actor }}"
+            export GITHUB_REF_NAME="${{ github.ref_name }}"
+            cd /opt/atithi-setu
+            chmod +x deploy/deploy-with-rollback.sh
+            ./deploy/deploy-with-rollback.sh
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+
+      - name: Deploy result summary
+        if: always()
+        run: |
+          a1="${{ steps.deploy1.outcome }}"
+          a2="${{ steps.deploy2.outcome }}"
+          a3="${{ steps.deploy3.outcome }}"
+          echo "──────────────── DEPLOY RESULT ────────────────"
+          echo "Attempt 1: ${a1}"
+          echo "Attempt 2: ${a2:-not run}"
+          echo "Attempt 3: ${a3:-not run}"
+          # Workflow succeeds if any attempt succeeded. The if: chain
+          # above ensures attempt 3 ran iff attempts 1+2 failed.
+          if [ "${a1}" = "success" ] || [ "${a2}" = "success" ] || [ "${a3}" = "success" ]; then
+            echo "✅ DEPLOY SUCCEEDED"
+            exit 0
+          fi
+          echo "::error::All 3 deploy attempts failed."
+          echo "::error::If pre-flight TCP probe passed but every SSH attempt failed,"
+          echo "::error::the issue is likely SSH auth (VPS_SSH_KEY secret) or the VPS"
+          echo "::error::deploy-with-rollback.sh hit a real error — check that script's"
+          echo "::error::output earlier in this run."
+          exit 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # POST-DEPLOY SMOKE TEST — diagnostic only, doesn't gate the workflow
+      # ─────────────────────────────────────────────────────────────────────
+      # On-VPS health check (in deploy-with-rollback.sh) already passed
+      # before we got here. This external probe catches Cloudflare DNS
+      # propagation lag or origin-pool routing issues. continue-on-error
+      # because a yellow smoke-test result isn't worth failing a successful
+      # deploy that's already serving traffic from the VPS.
+      - name: Post-deploy smoke test (external)
         if: success()
+        continue-on-error: true
         run: |
           URL="https://rishu-kitchen.atithi-setu.com/api/public/restaurants"
-          echo "→ Smoke-testing $URL"
-          for i in 1 2 3 4 5; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$URL" || echo 000)
+          echo "→ External smoke test: ${URL}"
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 "$URL" || echo 000)
             if [ "$code" = "200" ]; then
-              echo "✓ Public health check: HTTP 200"
+              echo "✓ External health check: HTTP 200 (attempt $i)"
               exit 0
             fi
-            echo "  attempt $i: HTTP $code — retrying in 3s"
-            sleep 3
+            echo "  attempt $i: HTTP $code — retrying in 5s"
+            sleep 5
           done
-          echo "⚠ Public URL did not return 200 after 5 attempts (but on-VPS health already passed)."
-          echo "   This could be a Cloudflare propagation delay. Check manually."
-          # Don't fail the workflow — on-VPS health check already passed.
+          echo "::warning::External URL didn't return 200 after 6 attempts (but on-VPS health already passed)."
+          echo "::warning::Likely Cloudflare propagation delay — usually clears within 60s. Verify manually."
