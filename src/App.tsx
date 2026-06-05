@@ -7078,6 +7078,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // UI-3 — Preview lightbox state. Holds the document row currently
   // being previewed (image rendered full-size, PDF iframe-embedded).
   const [docPreview, setDocPreview] = useState<any>(null);
+  // RBAC-1 — Tenant-scoped Staff Access matrix. role → allowed_tabs[].
+  // Empty array = no access. Missing role = no restriction (sees all).
+  const [staffAccess, setStaffAccess] = useState<Record<string, string[]>>({});
+  const [staffAccessSaving, setStaffAccessSaving] = useState(false);
+  const [staffAccessSaved, setStaffAccessSaved] = useState(false);
   const [hotelSettingsSaving, setHotelSettingsSaving] = useState(false);
   // Sprint P2-H — Yield rules CRUD state.
   const [yieldRules, setYieldRules] = useState<any[]>([]);
@@ -9044,6 +9049,47 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!isHotelEnabled) return;
     try { setWebhookLog(await hotelApi('/webhook-log?limit=50')); } catch { setWebhookLog([]); }
   };
+
+  // RBAC-1 — Staff Access (role → allowed_tabs[]). Tenant-scoped
+  // (owner-managed), uses the new /api/restaurant/:id/role-permissions
+  // endpoint added in the same sprint.
+  const fetchStaffAccess = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/role-permissions`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setStaffAccess(await res.json() || {});
+    } catch {/* swallow — non-blocking */}
+  };
+  const saveStaffAccess = async () => {
+    if (!restaurantId) return;
+    setStaffAccessSaving(true);
+    setStaffAccessSaved(false);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/role-permissions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(staffAccess),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Save failed');
+      setStaffAccessSaved(true);
+      setTimeout(() => setStaffAccessSaved(false), 3000);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to save Staff Access');
+    } finally {
+      setStaffAccessSaving(false);
+    }
+  };
+  const toggleStaffTab = (role: string, tab: string) => {
+    setStaffAccess(prev => {
+      const cur = prev[role] || [];
+      const has = cur.includes(tab);
+      const next = has ? cur.filter(t => t !== tab) : [...cur, tab];
+      return { ...prev, [role]: next };
+    });
+  };
   const fetchHotelServices = async () => {
     if (!isHotelEnabled) return;
     try { setHotelServices(await hotelApi('/services')); } catch (err: any) { setHotelError(err.message); }
@@ -9397,7 +9443,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
-    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); }
+    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchStaffAccess(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
 
@@ -15348,8 +15394,42 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               >Search</button>
             </form>
             <p className="text-[10px] text-[#9c8e85] mt-2 italic">
-              Tip — phone <code>9876543210</code>, name <code>Sharma</code>, or invoice number all work. Past check-out records are searchable.
+              Tip — phone <code>9876543210</code>, name <code>Sharma</code>, or invoice number all work. Past check-out records are searchable. Best matches appear first.
             </p>
+
+            {/* FIX-1 — quick-filter chips. Date filter uses OVERLAP semantics
+                now, so "Today" finds every booking active today (including
+                overnight stays that started yesterday or end tomorrow). */}
+            <div className="flex flex-wrap gap-1.5 mt-3">
+              {(() => {
+                const today = new Date().toISOString().slice(0, 10);
+                const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+                const sevenDaysAhead = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+                const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+                const presets: Array<{ label: string; f: any }> = [
+                  { label: 'Today',           f: { from: today,         to: today,           status: '' } },
+                  { label: 'Arrivals today',  f: { from: today,         to: today,           status: 'BOOKED' } },
+                  { label: 'In-house now',    f: { from: today,         to: today,           status: 'CHECKED_IN' } },
+                  { label: 'Yesterday',       f: { from: yesterday,     to: yesterday,       status: '' } },
+                  { label: 'Next 7 days',     f: { from: today,         to: sevenDaysAhead,  status: 'BOOKED' } },
+                  { label: 'Last 7 days',     f: { from: sevenDaysAgo,  to: today,           status: 'CHECKED_OUT' } },
+                ];
+                return presets.map(p => (
+                  <button
+                    key={p.label}
+                    type="button"
+                    onClick={async () => {
+                      setBookingHistoryFilter({ search: bookingHistoryFilter.search, ...p.f });
+                      await fetchHotelBookings({
+                        search: bookingHistoryFilter.search || undefined,
+                        ...p.f,
+                      });
+                    }}
+                    className="px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-white border border-[#cc5a16]/20 text-[#3d3128] hover:bg-[#faf7f2]"
+                  >{p.label}</button>
+                ));
+              })()}
+            </div>
           </div>
 
           {/* All bookings list */}
@@ -15390,6 +15470,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               >
                                 Group{b.group_name ? ` · ${b.group_name}` : ''}
                               </span>
+                            )}
+                            {/* FIX-1 — show which field matched the search so
+                                "irrelevant" results are obviously explained. */}
+                            {b.matched_field && (
+                              <span
+                                className="inline-block text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-[#cc5a16]/10 text-[#cc5a16]"
+                                title="Match source for the current search"
+                              >match: {b.matched_field}</span>
                             )}
                           </div>
                           <div className="text-[11px] text-[#9c8e85]">{b.guest_phone || '—'} {b.guest_nationality ? `· ${b.guest_nationality}` : ''}</div>
@@ -16159,6 +16247,152 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             </div>
           )}
+
+          {/* ── RBAC-1 — Staff Access (role × tab matrix) ─────────────
+              The owner configures here which staff roles see which tabs
+              in the app. Owner + Super Admin always see everything; the
+              matrix only manages MANAGER, FRONT_DESK, CONCIERGE, CHEF,
+              WAITER, CASHIER, HOUSEKEEPING, MAINTENANCE.
+
+              Save POSTs to /api/restaurant/:id/role-permissions. Server
+              ignores OWNER/SUPER_ADMIN rows from the payload as a
+              defensive lockout-prevention. */}
+          {(() => {
+            // Tabs the user can grant access to. Hotel tabs only show
+            // when the property has the hotel module enabled.
+            const PERMISSIBLE_TABS: { id: string; label: string; hotelOnly?: boolean }[] = [
+              { id: 'MONITOR',           label: 'Monitor / Dashboard' },
+              { id: 'ORDERS',            label: 'Orders (POS)' },
+              { id: 'INVOICES',          label: 'Invoices' },
+              { id: 'MENU',              label: 'Menu Management' },
+              { id: 'INVENTORY',         label: 'Inventory' },
+              { id: 'DELIVERY',          label: 'Aggregator Delivery' },
+              { id: 'QR',                label: 'QR / Table Management' },
+              { id: 'BOOKINGS',          label: 'Table Reservations' },
+              { id: 'LOYALTY',           label: 'Loyalty' },
+              { id: 'STAFF',             label: 'Staff Directory' },
+              { id: 'ROSTER',            label: 'Roster' },
+              { id: 'TIMESHEET',         label: 'Timesheet' },
+              { id: 'ATTENDANCE',        label: 'Attendance' },
+              { id: 'REPORTS',           label: 'Reports & Analytics' },
+              { id: 'FEEDBACK',          label: 'Feedback / Reviews' },
+              { id: 'NOTIFICATIONS',     label: 'Notifications' },
+              { id: 'SUBSCRIPTION',      label: 'Subscription / Billing' },
+              { id: 'SETTINGS',          label: 'Settings' },
+              // Hotel tabs
+              { id: 'ROOMS',             label: 'Rooms',               hotelOnly: true },
+              { id: 'HOTEL_BOOKINGS',    label: 'Hotel Bookings',      hotelOnly: true },
+              { id: 'SERVICES',          label: 'Hotel Services',      hotelOnly: true },
+              { id: 'SERVICE_REQUESTS',  label: 'Service Requests',    hotelOnly: true },
+              { id: 'FOLIOS',            label: 'Folios / Hotel Bills',hotelOnly: true },
+              { id: 'COMPLIANCE',        label: 'Compliance (Form-C)', hotelOnly: true },
+              { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',       hotelOnly: true },
+            ];
+            const visibleTabs = PERMISSIBLE_TABS.filter(t => !t.hotelOnly || isHotelEnabled);
+
+            // Roles to manage. OWNER + SUPER_ADMIN/CTO are excluded —
+            // they always see everything (server enforces this too).
+            const MANAGED_ROLES: { id: string; label: string; hint: string }[] = [
+              { id: 'MANAGER',      label: 'Manager',      hint: 'Senior staff — typically full operational access' },
+              { id: 'FRONT_DESK',   label: 'Front Desk',   hint: 'Receptionist — bookings, folios, guest services' },
+              { id: 'CONCIERGE',    label: 'Concierge',    hint: 'Guest service coordinator' },
+              { id: 'CASHIER',      label: 'Cashier',      hint: 'Orders + invoices, no settings' },
+              { id: 'WAITER',       label: 'Waiter',       hint: 'Table orders, KOT' },
+              { id: 'CHEF',         label: 'Chef / KDS',   hint: 'Kitchen display, recipes' },
+              { id: 'HOUSEKEEPING', label: 'Housekeeping', hint: 'Service requests + room status' },
+              { id: 'MAINTENANCE',  label: 'Maintenance',  hint: 'Service requests, room status' },
+            ];
+
+            return (
+              <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+                <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
+                  <div>
+                    <h3 className="text-2xl font-bold font-serif">Staff Access</h3>
+                    <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
+                      Control which tabs each staff role can see. Check a box → that role gets access to that tab. Leave a row entirely empty to give that role <strong>no restriction</strong> (they see everything).
+                      Owners + platform admins always see everything regardless of these settings.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {staffAccessSaved && (
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 bg-emerald-50 px-2 py-1 rounded-full">Saved ✓</span>
+                    )}
+                    <button
+                      onClick={saveStaffAccess}
+                      disabled={staffAccessSaving}
+                      className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase tracking-widest hover:bg-[#a84612] disabled:opacity-50"
+                    >{staffAccessSaving ? 'Saving…' : 'Save changes'}</button>
+                  </div>
+                </div>
+
+                <div className="mt-5 overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-white">
+                      <tr className="border-b border-[#cc5a16]/10">
+                        <th className="text-left py-2 pr-3 sticky left-0 bg-white z-10 min-w-[140px]">Role</th>
+                        {visibleTabs.map(t => (
+                          <th key={t.id} className="px-2 py-2 text-center min-w-[80px]" title={t.label}>
+                            <span className="block font-bold text-[10px] uppercase tracking-widest text-[#3d3128] -rotate-12 origin-bottom-left whitespace-nowrap">
+                              {t.label}
+                            </span>
+                          </th>
+                        ))}
+                        <th className="px-2 py-2 text-center text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">All</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {MANAGED_ROLES.map(r => {
+                        const allowed = staffAccess[r.id] || [];
+                        const noRestriction = allowed.length === 0;
+                        return (
+                          <tr key={r.id} className="border-b border-[#cc5a16]/5 hover:bg-[#faf7f2]/40">
+                            <td className="py-2 pr-3 sticky left-0 bg-white z-10">
+                              <div className="font-bold text-[#1a1208]">{r.label}</div>
+                              <div className="text-[10px] text-[#9c8e85] truncate" title={r.hint}>{r.hint}</div>
+                              {noRestriction && (
+                                <span className="inline-block text-[9px] font-bold uppercase tracking-widest mt-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">No restriction — sees all</span>
+                              )}
+                            </td>
+                            {visibleTabs.map(t => {
+                              const checked = allowed.includes(t.id);
+                              return (
+                                <td key={t.id} className="px-2 py-2 text-center">
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => toggleStaffTab(r.id, t.id)}
+                                    className="w-4 h-4 accent-[#cc5a16] cursor-pointer"
+                                    aria-label={`${r.label} can see ${t.label}`}
+                                  />
+                                </td>
+                              );
+                            })}
+                            <td className="px-2 py-2 text-center">
+                              <button
+                                type="button"
+                                onClick={() => setStaffAccess(prev => ({
+                                  ...prev,
+                                  [r.id]: noRestriction || allowed.length < visibleTabs.length
+                                    ? visibleTabs.map(t => t.id)
+                                    : []
+                                }))}
+                                className="text-[10px] font-bold text-[#cc5a16] hover:underline"
+                              >{noRestriction || allowed.length < visibleTabs.length ? 'Grant all' : 'Clear'}</button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <p className="text-[10px] text-[#9c8e85] italic mt-3 leading-relaxed">
+                  Server enforces this on top of the UI: a CHEF who somehow loads a hidden tab via direct URL still gets 403 from the API.
+                  Owners can adjust without contacting platform admin.
+                </p>
+              </div>
+            );
+          })()}
 
           {/* ── Brand Logo (used on invoice PDF) ───────────────────── */}
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">

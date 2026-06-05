@@ -3224,6 +3224,84 @@ async function startServer() {
     }
   });
 
+  // ─────────────────────────────────────────────────────────────────
+  // RBAC-1 — Tenant-scoped role-permissions management
+  // ─────────────────────────────────────────────────────────────────
+  // Same backing table as the SUPER_ADMIN endpoints above, but
+  // accessible to the property OWNER (and SUPER_ADMIN/CTO).
+  // Business owners need to configure which staff role sees which
+  // tab — front desk gets BOOKINGS but not REPORTS, housekeeping
+  // gets only SERVICE_REQUESTS, etc. Without this, owners were
+  // blocked from managing their own staff visibility.
+  //
+  // Guard: caller must be SUPER_ADMIN/CTO OR be the OWNER of this
+  // specific tenant. Managers cannot modify permissions — they're
+  // the role being managed (least-privilege principle).
+  function requireOwnerOrAdmin(req: AuthRequest, res: Response): boolean {
+    const role = String(req.user?.role || '').toUpperCase();
+    const isPlatformAdmin = role === 'SUPER_ADMIN' || role === 'CTO';
+    const isOwnerOfTenant = role === 'OWNER' && req.user?.restaurantId === req.params.id;
+    if (!isPlatformAdmin && !isOwnerOfTenant) {
+      res.status(403).json({
+        error: "Only the property owner (or platform admin) can manage staff access permissions.",
+        your_role: role,
+      });
+      return false;
+    }
+    return true;
+  }
+
+  app.get("/api/restaurant/:id/role-permissions", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const rows = await centralDb.query(
+        "SELECT role, allowed_tabs FROM restaurant_role_permissions WHERE restaurant_id = ?",
+        [req.params.id]
+      );
+      const result: Record<string, string[]> = {};
+      for (const row of rows) {
+        try { result[row.role] = JSON.parse(row.allowed_tabs || '[]'); }
+        catch { result[row.role] = []; }
+      }
+      res.json(result);
+    } catch (err) {
+      console.error("role-permissions GET error:", err);
+      res.status(500).json({ error: "Failed to fetch permissions" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/role-permissions", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const permissions: Record<string, string[]> = req.body || {};
+      if (typeof permissions !== 'object' || Array.isArray(permissions)) {
+        return res.status(400).json({ error: "Body must be an object mapping role → allowedTabs[]" });
+      }
+      // Safety: never let the OWNER lock themselves out by saving an
+      // empty allowedTabs list against their own role. We DROP any
+      // OWNER row from the payload — OWNER always sees everything.
+      const sanitized: Record<string, string[]> = {};
+      for (const [role, tabs] of Object.entries(permissions)) {
+        const upper = String(role).toUpperCase();
+        if (upper === 'OWNER' || upper === 'SUPER_ADMIN' || upper === 'CTO') continue;
+        if (!Array.isArray(tabs)) continue;
+        sanitized[upper] = tabs.map(t => String(t));
+      }
+      for (const [role, tabs] of Object.entries(sanitized)) {
+        await centralDb.run(
+          `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, updated_at)
+           VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT (restaurant_id, role) DO UPDATE SET allowed_tabs = EXCLUDED.allowed_tabs, updated_at = CURRENT_TIMESTAMP`,
+          [req.params.id, role, JSON.stringify(tabs)]
+        );
+      }
+      res.json({ success: true, saved_roles: Object.keys(sanitized) });
+    } catch (err) {
+      console.error("role-permissions POST error:", err);
+      res.status(500).json({ error: "Failed to save permissions" });
+    }
+  });
+
   // Owner/Manager: Get my tab permissions (null allowed_tabs = no restriction = all tabs)
   app.get("/api/restaurant/:id/my-permissions", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -15265,24 +15343,113 @@ async function startServer() {
           params.push(...statuses);
         }
       }
-      // REQ 5: free-text search across guest contact fields + ids.
+      // REQ 5 + FIX-1: free-text search across guest contact fields + ids.
       // Receptionists need to find a returning guest from a phone number
       // they're holding (call-in booking) or an email a guest mentions.
+      //
+      // Relevance ranking — when `search` is set, we expose a `match_score`
+      // column that lets the result be ordered by best-match first:
+      //   100 = exact (case-insensitive) name / phone / email / id match
+      //    80 = name STARTS WITH search
+      //    60 = phone STARTS WITH search (digits only)
+      //    40 = name / phone / email / id / invoice contains search
+      // Same column is also surfaced to the client so the UI can show
+      // a "matched: name | phone | email | id" badge per row.
+      let searchSelect = `, NULL::int AS match_score, NULL::text AS matched_field`;
       if (search) {
+        const like  = `%${search}%`;
+        const prefx = `${search}%`;
+        // Digits-only normalised phone — strip everything except digits so
+        // "+91 98765" and "9876512345" both match "98765".
+        const digits = search.replace(/\D/g, '');
+        searchSelect = `
+          , CASE
+              WHEN LOWER(b.guest_name)  = LOWER(?) THEN 100
+              WHEN b.guest_phone        = ?         THEN 100
+              WHEN LOWER(b.guest_email) = LOWER(?) THEN 100
+              WHEN b.id                 = ?         THEN 100
+              WHEN LOWER(b.guest_name)  ILIKE LOWER(?) THEN 80
+              WHEN REGEXP_REPLACE(COALESCE(b.guest_phone,''), '\\D', '', 'g') ILIKE ? THEN 60
+              WHEN LOWER(b.guest_name)  ILIKE LOWER(?) THEN 40
+              WHEN b.guest_phone        ILIKE ? THEN 40
+              WHEN LOWER(b.guest_email) ILIKE LOWER(?) THEN 40
+              WHEN b.id                 ILIKE ? THEN 40
+              WHEN b.invoice_number     ILIKE ? THEN 40
+              ELSE 0
+            END AS match_score
+          , CASE
+              WHEN LOWER(b.guest_name)  = LOWER(?) OR LOWER(b.guest_name)  ILIKE LOWER(?) OR LOWER(b.guest_name)  ILIKE LOWER(?) THEN 'name'
+              WHEN b.guest_phone        = ? OR REGEXP_REPLACE(COALESCE(b.guest_phone,''), '\\D', '', 'g') ILIKE ? OR b.guest_phone ILIKE ? THEN 'phone'
+              WHEN LOWER(b.guest_email) = LOWER(?) OR LOWER(b.guest_email) ILIKE LOWER(?) THEN 'email'
+              WHEN b.id                 = ? OR b.id ILIKE ? THEN 'booking-id'
+              WHEN b.invoice_number     ILIKE ? THEN 'invoice'
+              ELSE NULL
+            END AS matched_field`;
+        // The select binds 11 + 13 = 24 params before the WHERE. Push them now.
+        params.push(
+          // match_score bindings (in order matching CASE above)
+          search, search, search, search,        // 4× exact
+          prefx,                                  // name ILIKE prefix
+          `${digits}%`,                           // phone digits ILIKE prefix
+          like, like, like, like, like,           // 5× contains
+          // matched_field bindings
+          search, prefx, like,                    // name 3×
+          search, `${digits}%`, like,             // phone 3×
+          search, like,                           // email 2×
+          search, like,                           // booking-id 2×
+          like                                    // invoice 1×
+        );
+      }
+
+      // Rebuild SQL with the search ranking columns prepended (they need
+      // to come right after b.* in the SELECT). We patched the original
+      // SQL fragment above; just re-do it cleanly.
+      sql = `SELECT b.*, r.name AS room_name,
+                    (SELECT COUNT(*)::int FROM guest_documents gd WHERE gd.booking_id = b.id) AS document_count
+                    ${searchSelect}
+             FROM room_bookings b
+             LEFT JOIN rooms r ON r.id = b.room_id
+             WHERE 1 = 1`;
+
+      // Re-apply status filter (params order: searchSelect bindings, then status, then search WHERE, then date range)
+      if (status) {
+        const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+        if (statuses.length > 0) {
+          sql += ` AND b.status IN (${statuses.map(() => '?').join(',')})`;
+          params.push(...statuses);
+        }
+      }
+      if (search) {
+        // Bare-minimum WHERE — match any of the score-bearing predicates.
         sql += ` AND (
-          b.guest_name  ILIKE ? OR
-          b.guest_phone ILIKE ? OR
-          b.guest_email ILIKE ? OR
-          b.id          ILIKE ? OR
-          b.invoice_number ILIKE ?
+          LOWER(b.guest_name)  ILIKE LOWER(?) OR
+          b.guest_phone        ILIKE ?         OR
+          REGEXP_REPLACE(COALESCE(b.guest_phone,''), '\\D', '', 'g') ILIKE ? OR
+          LOWER(b.guest_email) ILIKE LOWER(?) OR
+          b.id                 ILIKE ?         OR
+          b.invoice_number     ILIKE ?
         )`;
         const like = `%${search}%`;
-        params.push(like, like, like, like, like);
+        const digits = search.replace(/\D/g, '');
+        params.push(like, like, `%${digits}%`, like, like, like);
       }
-      if (fromDate) { sql += ` AND b.check_in_date >= ?`;  params.push(fromDate); }
-      if (toDate)   { sql += ` AND b.check_out_date <= ?`; params.push(toDate); }
 
-      sql += ` ORDER BY b.check_in_date DESC, b.created_at DESC LIMIT ?`;
+      // FIX-1: Date filter — OVERLAP, not containment. A booking matches
+      // if its stay window intersects [fromDate, toDate].
+      //   booking range:  [check_in_date, check_out_date)  -- half-open
+      //   filter range:   [fromDate, toDate] inclusive
+      //   overlap:        check_in_date <= toDate AND check_out_date > fromDate
+      // Previously we required containment (`check_in_date >= fromDate AND
+      // check_out_date <= toDate`), which meant an overnight booking
+      // checking in today (out tomorrow) would NEVER match a "today only"
+      // filter — the receptionist's #1 use case. Fixed.
+      if (fromDate) { sql += ` AND b.check_out_date > ?`;  params.push(fromDate); }
+      if (toDate)   { sql += ` AND b.check_in_date  <= ?`; params.push(toDate); }
+
+      // Ranking: when searching, best matches first; otherwise newest first.
+      sql += search
+        ? ` ORDER BY match_score DESC NULLS LAST, b.check_in_date DESC, b.created_at DESC LIMIT ?`
+        : ` ORDER BY b.check_in_date DESC, b.created_at DESC LIMIT ?`;
       params.push(limit);
       res.json(await tenantDb.query(sql, params));
     } catch (err) {
@@ -22104,7 +22271,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-checkin-wizard-gstin-lock',
+    commit_marker: 'hotel-search-overlap-and-owner-rbac',
     code_features: [
       'subscription-billing',
       'read-only-mode',
