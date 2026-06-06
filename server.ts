@@ -984,7 +984,13 @@ async function postOrderToFolio(
   const entryIds: string[] = [];
 
   for (const item of (order.items || [])) {
-    const qty = Math.max(1, Number(item.quantity || 1));
+    // QA-BUGFIX-3 — skip qty=0 items explicitly. Previous code coerced
+    // `Number(item.quantity || 1)` → 1 (because `0 || 1` is 1), silently
+    // charging 1× the unit price for a zero-qty line. UI's min="1" guard
+    // makes this unlikely in practice but a curl-direct hit could trip it.
+    const rawQty = Number(item.quantity);
+    if (!Number.isFinite(rawQty) || rawQty <= 0) continue;
+    const qty = Math.max(1, Math.floor(rawQty));
     const unit = Math.max(0, Number(item.unitPrice || 0));
     const amount = qty * unit;
     if (amount <= 0) continue;
@@ -18366,11 +18372,34 @@ async function startServer() {
       const occupiedN = Number(occupied?.n || 0);
       const occupancy_pct = totalRoomsN > 0 ? (occupiedN / totalRoomsN) * 100 : 0;
 
-      // Revenue and ADR from settled folios (last 30 days)
+      // Revenue and ADR from settled folios (last 30 days).
+      //
+      // QA-BUGFIX-2 — Exclude CREDIT_NOTE folios from gross revenue.
+      // Credit notes are stored with positive amounts (PDF flips sign at
+      // render time), so summing them double-inflated reported revenue:
+      // a ₹5,000 booking later refunded would show as ₹10,000 revenue
+      // instead of ₹0. Filtering doc_type='INVOICE' (or NULL for legacy
+      // rows) gives the correct net-after-refund picture.
       const revenueRow: any = await tenantDb.get(
         `SELECT COALESCE(SUM(grand_total), 0) AS rev, COUNT(*) AS n
-         FROM folios WHERE status = 'settled' AND settled_at >= NOW() - INTERVAL '30 days'`
+         FROM folios
+         WHERE status = 'settled'
+           AND settled_at >= NOW() - INTERVAL '30 days'
+           AND (doc_type IS NULL OR doc_type = 'INVOICE')`
       );
+      // For accurate NET revenue, also subtract credit notes issued in the
+      // same window (they represent refunds against earlier-period
+      // invoices, but for monthly KPI purposes belong here).
+      const refundRow: any = await tenantDb.get(
+        `SELECT COALESCE(SUM(grand_total), 0) AS refunds
+         FROM folios
+         WHERE doc_type = 'CREDIT_NOTE'
+           AND settled_at >= NOW() - INTERVAL '30 days'`
+      );
+      const grossRevenue = Number(revenueRow?.rev || 0);
+      const totalRefunds = Number(refundRow?.refunds || 0);
+      // Reassign revenueRow.rev for downstream code (ADR, RevPAR) using net.
+      (revenueRow as any).rev = Math.max(0, grossRevenue - totalRefunds);
       const revenue_30d = Number(revenueRow?.rev || 0);
       const folio_count_30d = Number(revenueRow?.n || 0);
       const adr = folio_count_30d > 0 ? revenue_30d / folio_count_30d : 0;
@@ -19125,14 +19154,46 @@ async function startServer() {
         }
       }
 
-      // Recompute GST on the post-discount subtotal so the customer doesn't
-      // pay GST on the discounted-away portion. If no loyalty applies, keep
-      // the pre-existing per-order GST sum.
+      // ── QA-BUGFIX-1 — Include service charge in the customer-facing
+      //    bill so it matches what PostpaidInvoiceModal (staff side) shows.
+      //
+      //    Previously this endpoint omitted service charge entirely —
+      //    customer's "Bill is Ready" view showed (subtotal - loyalty + GST)
+      //    while the staff modal showed (subtotal - loyalty + svc + GST).
+      //    Per the project's own "all-three-flows-must-agree" contract
+      //    (see CLAUDE.md Mandatory Invoice Test Matrix), this is a contract
+      //    violation that caused customer UPI to undercharge.
+      //
+      //    Formula (same as Flow B + Flow C):
+      //      subAfterDisc = max(0, gross − loyalty)
+      //      svc          = round2(subAfterDisc × service_charge_percent / 100)
+      //      taxableBase  = subAfterDisc + svc                          ← SVC included
+      //      finalGst     = round2(taxableBase × gst% / 100)
+      //      billAmount   = taxableBase + finalGst
       const subtotalAfterLoyalty = Math.max(0, grossSubtotal - loyaltyDiscount);
-      const finalGst = loyaltyDiscount > 0 && sessionApplyGst && sessionGstPct > 0
-        ? Math.round(subtotalAfterLoyalty * sessionGstPct / 100 * 100) / 100
+      let sessionSvcPct = Number((session as any).service_charge_percent || 0);
+      if (sessionSvcPct === 0) {
+        // Fall back to tenant-wide default if session doesn't have one
+        try {
+          const restoSvc: any = await centralDb.get(
+            "SELECT service_charge_percent FROM restaurants WHERE id = ?",
+            [req.params.id]
+          );
+          sessionSvcPct = Number(restoSvc?.service_charge_percent || 0);
+        } catch { /* fall through to 0 */ }
+      }
+      const serviceCharge = sessionSvcPct > 0
+        ? Math.round(subtotalAfterLoyalty * sessionSvcPct / 100 * 100) / 100
+        : 0;
+      const taxableBase = subtotalAfterLoyalty + serviceCharge;
+      // Recompute GST on the post-discount + service-charge base. If no
+      // loyalty discount AND no service charge AND GST is enabled, fall
+      // back to the per-order GST sum (faster, no recompute needed).
+      const needsRecompute = (loyaltyDiscount > 0 || serviceCharge > 0) && sessionApplyGst && sessionGstPct > 0;
+      const finalGst = needsRecompute
+        ? Math.round(taxableBase * sessionGstPct / 100 * 100) / 100
         : grossGst;
-      const billAmount = subtotalAfterLoyalty + finalGst;
+      const billAmount = taxableBase + finalGst;
 
       // Safety net: if SEQUENTIAL invoice numbering is enabled and the session
       // never got an invoice_number (because it was created via QR before the
@@ -22571,7 +22632,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-5-audit-preview-tooltips-copy',
+    commit_marker: 'qa-invoice-math-flow-a-fix-credit-note-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
