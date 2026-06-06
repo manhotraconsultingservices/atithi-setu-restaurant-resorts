@@ -21662,6 +21662,19 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS currency_snapshot TEXT").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_label_snapshot TEXT").catch(() => {});
 
+      // QR-FIX-2 (live customer screenshot): room_id + booking_id are
+      // Sprint-RS columns the INSERT references unconditionally (the room-
+      // service path passes them when CHARGE_TO_ROOM; restaurant flow passes
+      // null). They're added by createHotelTables() in db.ts:5442-5445 —
+      // but that helper is ONLY called for HOTEL / BOTH property_type
+      // tenants. A pure-RESTAURANT tenant (e.g. Vivek's Cafe RESTO-1003)
+      // never had createHotelTables() run, so room_id/booking_id columns
+      // don't exist, and the INSERT 500s with "column does not exist".
+      // Add the columns defensively for every tenant; nullable so writes
+      // with null values succeed unchanged.
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT").catch(() => {});
+
       // Resolve restaurant checkout_mode (body overrides, then DB, then default)
       let checkoutMode = bodyCheckoutMode;
       if (!checkoutMode) {
@@ -24293,7 +24306,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'bill-fix-defensive-migrations-end-to-end',
+    commit_marker: 'qr-fix-2-room-booking-cols-for-resto-only-tenants',
     code_features: [
       'subscription-billing',
       'read-only-mode',
