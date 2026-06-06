@@ -75,6 +75,8 @@ export interface InvoiceData {
     email?: string;
     website?: string;
     logoPath?: string;      // absolute path or /uploads/... path — we'll resolve
+    fssai?: string | null;        // R-2 — 14-digit FSSAI licence (food-safety mandatory in India)
+    fssaiValidUntil?: string | null;
   };
   guest: {
     name: string;
@@ -144,6 +146,18 @@ export interface InvoiceData {
   // nearest whole rupee. Off by default — preserves current byte-for-byte
   // output for tenants who haven't opted in.
   roundToRupee?: boolean;
+  // R-3 (BCG follow-up) — GST E-Invoice. When IRN is present, the PDF
+  // renders the IRN string + the signed QR (base64-decoded into an
+  // image block). Until the GSP returns IRN we render an "IRN PENDING"
+  // marker so staff knows the invoice isn't yet a valid GST document.
+  irn?: {
+    irn?: string | null;            // 64-char hex hash from IRP
+    ackNo?: string | null;          // IRP acknowledgement number
+    ackDate?: string | null;        // ISO date
+    signedQrCode?: string | null;   // base64 PNG (preferred) or signed payload
+    status?: string | null;         // PENDING | GENERATED | CANCELLED | FAILED
+    eInvoiceMandatory?: boolean;    // tenant ≥₹5cr threshold → must show
+  };
 }
 
 /**
@@ -236,6 +250,11 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
         [data.hotel.phone, data.hotel.email].filter(Boolean).join(' · '),
         data.hotel.website,
         data.hotel.gstin ? `GSTIN: ${data.hotel.gstin}` : null,
+        // R-2 (BCG follow-up) — FSSAI licence is mandatory on every Indian
+        // food-business invoice. Sec 31 FSS Act, 2006 + Sec 7(3) FSS
+        // (Licensing & Registration) Regulations, 2011. Render directly
+        // below the GSTIN so an inspector can see both in one glance.
+        data.hotel.fssai ? `FSSAI Lic: ${data.hotel.fssai}${data.hotel.fssaiValidUntil ? ` (valid until ${data.hotel.fssaiValidUntil})` : ''}` : null,
       ].filter(Boolean) as string[];
       doc.fillColor(MUTED).font('Helvetica').fontSize(8.5);
       let hY = y + 28;
@@ -555,6 +574,71 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       doc.fillColor(INK).font('Helvetica-BoldOblique').fontSize(10)
          .text(amountInWords(Math.abs(displayedGrand), data.tenant), M + 12, y + (amtLbl.hi ? 20 : 14), { width: INNER_W - 24 });
       y += (drawBilingual ? 44 : 36);
+
+      // ────────────── R-3: GST E-INVOICE (IRN) ──────────────
+      // Per Notification 13/2020 read with 10/2023, every B2B invoice
+      // issued by a tenant ≥₹5cr aggregate turnover MUST carry the IRN
+      // and signed QR returned by the IRP. We render:
+      //   • IRN string + ACK number (machine-readable text)
+      //   • Signed QR as an image (PNG bytes, expected base64-encoded)
+      //   • Or "IRN PENDING" notice when the GSP hasn't responded yet
+      const irn = data.irn;
+      if (irn && (irn.eInvoiceMandatory || irn.irn || irn.status)) {
+        const isGenerated = String(irn.status || '').toUpperCase() === 'GENERATED' && irn.irn;
+        const irnBoxH = isGenerated ? 86 : 44;
+        const irnBg = isGenerated ? '#f0f7f3' : '#fff5e6';
+        const irnBorder = isGenerated ? '#2d7d5a' : '#cc5a16';
+        doc.roundedRect(M, y, INNER_W, irnBoxH, 4).fillAndStroke(irnBg, irnBorder);
+        doc.fillColor(irnBorder).font('Helvetica-Bold').fontSize(8.5)
+           .text(isGenerated ? 'GST E-INVOICE (IRN)' : 'GST E-INVOICE — IRN PENDING',
+                 M + 12, y + 7, { characterSpacing: 0.8 });
+        if (isGenerated) {
+          // Left column: IRN + ACK text
+          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5)
+             .text('IRN', M + 12, y + 22);
+          doc.fillColor(INK).font('Helvetica-Bold').fontSize(7.5)
+             .text(String(irn.irn || '').slice(0, 64), M + 12, y + 32, { width: INNER_W - 110 });
+          if (irn.ackNo) {
+            doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5)
+               .text(`ACK ${irn.ackNo}${irn.ackDate ? ' · ' + irn.ackDate : ''}`,
+                     M + 12, y + 56);
+          }
+          // Right side: signed QR as embedded image when present.
+          if (irn.signedQrCode) {
+            try {
+              // Accept either a raw base64 PNG or a data: URL. The IRP
+              // returns the QR as base64 of a PNG (or as a signed
+              // payload that the GSP renders into a PNG on our behalf).
+              let qrBytes: Buffer | null = null;
+              const raw = String(irn.signedQrCode);
+              if (raw.startsWith('data:image/')) {
+                const comma = raw.indexOf(',');
+                if (comma > 0) qrBytes = Buffer.from(raw.slice(comma + 1), 'base64');
+              } else if (/^[A-Za-z0-9+/=\s]+$/.test(raw) && raw.length > 200) {
+                qrBytes = Buffer.from(raw.replace(/\s+/g, ''), 'base64');
+              }
+              if (qrBytes) {
+                doc.image(qrBytes, PAGE_W - M - 78, y + 6, { fit: [70, 70] } as any);
+              } else {
+                doc.fillColor(MUTED).font('Helvetica').fontSize(6.5)
+                   .text('QR not previewable here — scan the source.', PAGE_W - M - 130, y + 60, { width: 120 });
+              }
+            } catch {
+              // ignore image failure — text IRN is still legally sufficient
+            }
+          }
+        } else {
+          // PENDING / FAILED state — surface it loudly so staff know to follow up.
+          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(8.5)
+             .text(
+               irn.eInvoiceMandatory
+                 ? 'This invoice will be replaced by an IRN-stamped version after the GSP returns IRP confirmation. Per Sec 31(1) CGST Rules, an e-invoice without IRN is not a valid tax invoice for B2B sales.'
+                 : 'IRN registration pending.',
+               M + 12, y + 22, { width: INNER_W - 24 }
+             );
+        }
+        y += irnBoxH + 12;
+      }
 
       // ────────────── PAYMENT STATUS ──────────────
       const statusText = data.isCreditNote

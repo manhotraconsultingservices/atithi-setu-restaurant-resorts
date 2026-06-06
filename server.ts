@@ -12817,6 +12817,711 @@ async function startServer() {
     }
   });
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // R-1 — DPDP 2023 (Digital Personal Data Protection Act) compliance
+  // ═══════════════════════════════════════════════════════════════════════
+  // India's DPDP Act, effective Aug 2023, mandates:
+  //   (a) explicit consent before processing personal data (Sec 6)
+  //   (b) verifiable records of consent grant/withdrawal (Sec 6(2))
+  //   (c) Data Principal Rights — access, correction, erasure, grievance,
+  //       portability (Sec 11-14)
+  //   (d) designation of a Data Protection / Grievance Officer (Sec 10)
+  //   (e) breach notification within 72h (Sec 8)
+  //   (f) reasonable security safeguards (Sec 8) — covered by Tier 1
+  //
+  // This block ships (a)-(d) end-to-end. (e) breach notification is a
+  // procedure document, not code; CLAUDE.md should reference it.
+  // Penalties: up to ₹250 crore per breach (Sec 33).
+
+  // POST — log a consent grant. PUBLIC by design: customer-side QR
+  // ordering, booking, and feedback forms all hit this WITHOUT auth
+  // because the principal is the customer themselves. Rate-limited via
+  // the global limiter (200/min/IP) to prevent log-flood DoS.
+  app.post("/api/restaurant/:id/dpdp/consent", async (req: Request, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const subjectPhone = b.phone ? String(b.phone).trim() : null;
+      const subjectEmail = b.email ? String(b.email).trim().toLowerCase() : null;
+      const subjectType  = String(b.subject_type || 'CUSTOMER').toUpperCase();
+      const consentAction = String(b.action || 'GRANTED').toUpperCase();
+      const consentScope  = String(b.scope || 'DATA_PROCESSING').toUpperCase();
+      const sourceChannel = String(b.source_channel || 'UNKNOWN').toUpperCase().slice(0, 40);
+      const policyVersion = String(b.policy_version || 'v1');
+
+      const allowedActions = new Set(['GRANTED', 'WITHDRAWN']);
+      const allowedScopes  = new Set(['DATA_PROCESSING', 'MARKETING', 'ANALYTICS', 'THIRD_PARTY_SHARE']);
+      if (!allowedActions.has(consentAction)) {
+        return res.status(400).json({ error: "action must be GRANTED or WITHDRAWN" });
+      }
+      if (!allowedScopes.has(consentScope)) {
+        return res.status(400).json({ error: "scope must be one of: DATA_PROCESSING, MARKETING, ANALYTICS, THIRD_PARTY_SHARE" });
+      }
+      if (!subjectPhone && !subjectEmail) {
+        return res.status(400).json({ error: "Either phone or email is required to identify the data subject" });
+      }
+
+      const id = `DPDP-C-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
+              || (req.socket as any)?.remoteAddress
+              || '';
+      const ua = String(req.headers['user-agent'] || '').slice(0, 240);
+      await tenantDb.run(
+        `INSERT INTO dpdp_consent_log
+         (id, subject_phone, subject_email, subject_type, consent_action, consent_scope,
+          policy_version, source_channel, source_ip, user_agent, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, subjectPhone, subjectEmail, subjectType, consentAction, consentScope,
+         policyVersion, sourceChannel, ip, ua, b.notes || null]
+      );
+      res.status(201).json({ id, recorded_at: new Date().toISOString() });
+    } catch (err: any) {
+      console.error("dpdp consent error:", err);
+      res.status(500).json({ error: "Failed to record consent" });
+    }
+  });
+
+  // GET — staff/owner audit of consent log. Filter by subject phone.
+  app.get("/api/restaurant/:id/dpdp/consent/audit", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const phone = (req.query.phone as string) || '';
+      const limit = Math.min(500, Math.max(10, Number(req.query.limit || 100)));
+      const rows = phone
+        ? await tenantDb.query(
+            `SELECT * FROM dpdp_consent_log WHERE subject_phone = ? ORDER BY recorded_at DESC LIMIT ?`,
+            [phone, limit]
+          )
+        : await tenantDb.query(
+            `SELECT * FROM dpdp_consent_log ORDER BY recorded_at DESC LIMIT ?`,
+            [limit]
+          );
+      res.json(rows);
+    } catch (err: any) {
+      console.error("dpdp consent audit error:", err);
+      res.status(500).json({ error: "Failed to fetch consent audit" });
+    }
+  });
+
+  // POST — public: subject files a Data Principal Rights request.
+  // ACCESS / ERASURE / CORRECTION / PORTABILITY / GRIEVANCE.
+  // The tenant has 30 days to fulfil (Rule under DPDP).
+  app.post("/api/restaurant/:id/dpdp/subject-requests", async (req: Request, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const subjectPhone = b.phone ? String(b.phone).trim() : null;
+      const subjectEmail = b.email ? String(b.email).trim().toLowerCase() : null;
+      const requestType = String(b.request_type || '').toUpperCase();
+      const allowed = new Set(['ACCESS', 'ERASURE', 'CORRECTION', 'PORTABILITY', 'GRIEVANCE']);
+      if (!allowed.has(requestType)) {
+        return res.status(400).json({
+          error: "request_type must be one of: ACCESS, ERASURE, CORRECTION, PORTABILITY, GRIEVANCE",
+        });
+      }
+      if (!subjectPhone && !subjectEmail) {
+        return res.status(400).json({ error: "Phone or email is required" });
+      }
+      const id = `DPDP-R-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || '';
+      const ua = String(req.headers['user-agent'] || '').slice(0, 240);
+      await tenantDb.run(
+        `INSERT INTO dpdp_subject_requests
+         (id, subject_phone, subject_email, request_type, status, requester_note, source_channel, source_ip, user_agent)
+         VALUES (?, ?, ?, ?, 'RECEIVED', ?, ?, ?, ?)`,
+        [id, subjectPhone, subjectEmail, requestType,
+         b.note || null, String(b.source_channel || 'WEB').slice(0, 40), ip, ua]
+      );
+
+      // Notify DPO if configured. Non-blocking.
+      try {
+        const r: any = await centralDb.get(
+          "SELECT dpo_email, name FROM restaurants WHERE id = ?", [req.params.id]
+        );
+        if (r?.dpo_email) {
+          await sendEmail(
+            r.dpo_email,
+            `[DPDP] New ${requestType} request for ${r.name}`,
+            `A data principal has filed a ${requestType} request.\n\n` +
+            `Request ID: ${id}\n` +
+            `Subject phone: ${maskPhone(subjectPhone)}\n` +
+            `Subject email: ${subjectEmail ? maskEmail(subjectEmail) : '—'}\n` +
+            `Note: ${b.note || '—'}\n\n` +
+            `Under DPDP 2023 you have 30 days to respond. Please log in to Atithi-Setu and process this request.`,
+            null
+          );
+        }
+      } catch { /* non-fatal */ }
+
+      res.status(201).json({ id, status: 'RECEIVED', sla_days: 30 });
+    } catch (err: any) {
+      console.error("dpdp subject request error:", err);
+      res.status(500).json({ error: "Failed to file request" });
+    }
+  });
+
+  // GET — staff list of pending DPDP requests
+  app.get("/api/restaurant/:id/dpdp/subject-requests", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const status = (req.query.status as string) || null;
+      const rows = status
+        ? await tenantDb.query(
+            `SELECT * FROM dpdp_subject_requests WHERE status = ? ORDER BY requested_at DESC LIMIT 200`,
+            [status]
+          )
+        : await tenantDb.query(
+            `SELECT * FROM dpdp_subject_requests ORDER BY requested_at DESC LIMIT 200`
+          );
+      res.json(rows);
+    } catch (err: any) {
+      console.error("dpdp subject-requests list error:", err);
+      res.status(500).json({ error: "Failed to fetch requests" });
+    }
+  });
+
+  // PATCH — staff fulfils a request (mark IN_PROGRESS, FULFILLED, REJECTED)
+  app.patch("/api/restaurant/:id/dpdp/subject-requests/:reqId", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const status = String(b.status || '').toUpperCase();
+      const allowed = new Set(['IN_PROGRESS', 'FULFILLED', 'REJECTED']);
+      if (!allowed.has(status)) {
+        return res.status(400).json({ error: "status must be IN_PROGRESS, FULFILLED, or REJECTED" });
+      }
+      const fulfilledAt = (status === 'FULFILLED' || status === 'REJECTED') ? 'NOW()' : 'NULL';
+      await tenantDb.run(
+        `UPDATE dpdp_subject_requests
+            SET status = ?,
+                assigned_to = COALESCE(?, assigned_to),
+                response_note = COALESCE(?, response_note),
+                fulfilled_at = ${fulfilledAt === 'NOW()' ? 'NOW()' : 'fulfilled_at'}
+          WHERE id = ?`,
+        [status, req.user?.id || null, b.response_note || null, req.params.reqId]
+      );
+      const row = await tenantDb.get(
+        `SELECT * FROM dpdp_subject_requests WHERE id = ?`, [req.params.reqId]
+      );
+      res.json(row);
+    } catch (err: any) {
+      console.error("dpdp subject-request update error:", err);
+      res.status(500).json({ error: "Failed to update request" });
+    }
+  });
+
+  // GET — one-click ACCESS / PORTABILITY fulfilment. Returns every piece
+  // of data the tenant holds about the subject phone in a machine-
+  // readable JSON. Compliant with Sec 11 (right to access).
+  app.get("/api/restaurant/:id/dpdp/data-export", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const phone = (req.query.phone as string) || '';
+      if (!phone) return res.status(400).json({ error: "phone query param is required" });
+      // Gather everything that references this phone across the tenant.
+      const [orders, bookings, feedback, loyalty, loyaltyRedeem, consents,
+             reservations, sessions] = await Promise.all([
+        tenantDb.query("SELECT * FROM orders WHERE customer_phone = ? ORDER BY created_at DESC", [phone]).catch(() => []),
+        tenantDb.query("SELECT * FROM room_bookings WHERE guest_phone = ? ORDER BY created_at DESC", [phone]).catch(() => []),
+        tenantDb.query("SELECT * FROM feedback WHERE customer_phone = ? ORDER BY created_at DESC", [phone]).catch(() => []),
+        tenantDb.query("SELECT * FROM loyalty_customers WHERE phone = ?", [phone]).catch(() => []),
+        tenantDb.query("SELECT * FROM loyalty_redemptions WHERE customer_phone = ?", [phone]).catch(() => []),
+        tenantDb.query("SELECT * FROM dpdp_consent_log WHERE subject_phone = ? ORDER BY recorded_at DESC", [phone]).catch(() => []),
+        tenantDb.query("SELECT * FROM bookings WHERE customer_phone = ?", [phone]).catch(() => []),
+        tenantDb.query("SELECT * FROM table_sessions WHERE customer_phone = ?", [phone]).catch(() => []),
+      ]);
+      res.json({
+        export_metadata: {
+          tenant_id: req.params.id,
+          subject_phone: phone,
+          exported_at: new Date().toISOString(),
+          exported_by: req.user?.id || null,
+          format_version: '1.0',
+          dpdp_act_2023_section: '11',
+        },
+        loyalty_profile: loyalty,
+        loyalty_redemptions: loyaltyRedeem,
+        restaurant_orders: orders,
+        restaurant_sessions: sessions,
+        restaurant_reservations: reservations,
+        hotel_bookings: bookings,
+        feedback_records: feedback,
+        consent_history: consents,
+      });
+    } catch (err: any) {
+      console.error("dpdp data-export error:", err);
+      res.status(500).json({ error: "Failed to build data export" });
+    }
+  });
+
+  // POST — ERASURE fulfilment. Anonymises rather than hard-deletes so
+  // GST/accounting retention obligations (7 years, Rule 56 CGST) aren't
+  // violated. The DPDP Act explicitly recognises this: Sec 4 allows
+  // retention where another law requires it.
+  app.post("/api/restaurant/:id/dpdp/erase", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const phone = (req.body?.phone as string) || '';
+      if (!phone) return res.status(400).json({ error: "phone is required" });
+      const stamp = `ERASED-${Date.now()}`;
+      // Anonymise — keep the row for accounting reconciliation but wipe
+      // anything that can identify the natural person.
+      const stats: Record<string, number> = {};
+      const sweep = async (table: string, phoneCol: string, nameCols: string[], emailCol: string | null) => {
+        const cols = [
+          `${phoneCol} = ?`,
+          ...nameCols.map(c => `${c} = ?`),
+          ...(emailCol ? [`${emailCol} = ?`] : []),
+        ];
+        const params = [
+          stamp,
+          ...nameCols.map(() => 'ERASED'),
+          ...(emailCol ? [`${stamp}@erased.invalid`] : []),
+          phone,
+        ];
+        try {
+          const r: any = await tenantDb.run(
+            `UPDATE ${table} SET ${cols.join(', ')} WHERE ${phoneCol} = ?`,
+            params
+          );
+          stats[table] = Number(r?.changes || 0);
+        } catch { stats[table] = 0; }
+      };
+      await sweep('orders', 'customer_phone', ['customer_name'], 'customer_email');
+      await sweep('room_bookings', 'guest_phone', ['guest_name'], 'guest_email');
+      await sweep('feedback', 'customer_phone', ['customer_name'], 'customer_email');
+      await sweep('table_sessions', 'customer_phone', ['customer_name'], null);
+      await sweep('bookings', 'customer_phone', ['customer_name'], 'customer_email');
+      try {
+        const r: any = await tenantDb.run(
+          "DELETE FROM loyalty_customers WHERE phone = ?", [phone]
+        );
+        stats['loyalty_customers'] = Number(r?.changes || 0);
+      } catch { /* table may not exist */ }
+      // Log the erasure itself in the consent ledger
+      await tenantDb.run(
+        `INSERT INTO dpdp_consent_log
+         (id, subject_phone, subject_type, consent_action, consent_scope, source_channel, notes)
+         VALUES (?, ?, 'CUSTOMER', 'WITHDRAWN', 'DATA_PROCESSING', 'STAFF_ERASURE', ?)`,
+        [`DPDP-E-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+         phone, `Erased by ${req.user?.id} per DPDP 2023 right-to-erasure request. Stamp=${stamp}`]
+      ).catch(() => {});
+      res.json({ success: true, stamp, anonymised: stats });
+    } catch (err: any) {
+      console.error("dpdp erase error:", err);
+      res.status(500).json({ error: "Failed to anonymise subject data" });
+    }
+  });
+
+  // GET — public privacy notice. Renders the tenant's DPO contact + the
+  // URL to their full privacy policy. This satisfies the "transparent
+  // notice" requirement of Sec 5(1)(a).
+  app.get("/api/public/dpdp/notice/:idOrSlug", async (req: Request, res: Response) => {
+    try {
+      const id = req.params.idOrSlug;
+      const r: any = await centralDb.get(
+        `SELECT id, name, slug, privacy_policy_url, privacy_policy_version,
+                dpo_name, dpo_email, dpo_phone, data_retention_days
+           FROM restaurants
+          WHERE id = ? OR slug = ?
+          LIMIT 1`,
+        [id, id]
+      );
+      if (!r) return res.status(404).json({ error: "Tenant not found" });
+      res.json({
+        tenant: { id: r.id, name: r.name, slug: r.slug },
+        privacy_policy_url: r.privacy_policy_url,
+        policy_version: r.privacy_policy_version || 'v1',
+        dpo: {
+          name: r.dpo_name,
+          email: r.dpo_email,
+          phone: r.dpo_phone,
+        },
+        data_retention_days: r.data_retention_days || 2555,
+        dpdp_rights: [
+          'ACCESS — request a copy of your data',
+          'CORRECTION — fix errors in your data',
+          'ERASURE — request deletion (subject to GST 7-yr retention)',
+          'PORTABILITY — machine-readable export of your data',
+          'GRIEVANCE — escalate a complaint to the DPO',
+        ],
+        file_request_endpoint: `/api/restaurant/${r.id}/dpdp/subject-requests`,
+        statutory_basis: 'Digital Personal Data Protection Act, 2023',
+      });
+    } catch (err: any) {
+      console.error("dpdp public notice error:", err);
+      res.status(500).json({ error: "Failed to fetch notice" });
+    }
+  });
+
+  // GET/PATCH — owner manages DPO + privacy URL
+  app.get("/api/restaurant/:id/compliance/dpdp", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const r: any = await centralDb.get(
+        `SELECT privacy_policy_url, privacy_policy_version, dpo_name, dpo_email, dpo_phone, data_retention_days
+           FROM restaurants WHERE id = ?`,
+        [req.params.id]
+      );
+      res.json({
+        privacy_policy_url:     r?.privacy_policy_url || null,
+        privacy_policy_version: r?.privacy_policy_version || 'v1',
+        dpo_name:               r?.dpo_name || null,
+        dpo_email:              r?.dpo_email || null,
+        dpo_phone:              r?.dpo_phone || null,
+        data_retention_days:    Number(r?.data_retention_days || 2555),
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch DPDP settings" });
+    }
+  });
+
+  app.patch("/api/restaurant/:id/compliance/dpdp", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      // Bump policy_version automatically when the URL changes, so old
+      // consent records remain tied to the version that was actually
+      // shown to the principal at the time.
+      const current: any = await centralDb.get(
+        "SELECT privacy_policy_url, privacy_policy_version FROM restaurants WHERE id = ?",
+        [req.params.id]
+      );
+      let nextVersion = current?.privacy_policy_version || 'v1';
+      if (b.privacy_policy_url !== undefined && b.privacy_policy_url !== current?.privacy_policy_url) {
+        const cur = String(nextVersion || 'v1').match(/v(\d+)/);
+        nextVersion = `v${cur ? Number(cur[1]) + 1 : 2}`;
+      }
+      await centralDb.run(
+        `UPDATE restaurants
+            SET privacy_policy_url     = COALESCE(?, privacy_policy_url),
+                privacy_policy_version = ?,
+                dpo_name               = COALESCE(?, dpo_name),
+                dpo_email              = COALESCE(?, dpo_email),
+                dpo_phone              = COALESCE(?, dpo_phone),
+                data_retention_days    = COALESCE(?, data_retention_days)
+          WHERE id = ?`,
+        [b.privacy_policy_url ?? null, nextVersion,
+         b.dpo_name ?? null, b.dpo_email ?? null, b.dpo_phone ?? null,
+         b.data_retention_days != null ? Math.max(30, Number(b.data_retention_days)) : null,
+         req.params.id]
+      );
+      res.json({ success: true, policy_version: nextVersion });
+    } catch (err) {
+      console.error("dpdp settings update error:", err);
+      res.status(500).json({ error: "Failed to update DPDP settings" });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // R-3 — GST E-Invoice (IRN) endpoints
+  // ═══════════════════════════════════════════════════════════════════════
+  // Tenants with annual aggregate turnover ≥ ₹5 crore (CBIC Notification
+  // 10/2023, effective 1-Aug-2023) MUST e-invoice every B2B sale. The
+  // flow:
+  //   1. Generate invoice locally → POST /irn-payload returns the canonical
+  //      JSON the tenant's GSP (Master India / ClearTax / IRIS / NIC API)
+  //      needs to submit to the IRP.
+  //   2. GSP submits → receives IRN + ACK + signed QR.
+  //   3. Tenant calls POST /irn-result with the IRP response, OR the
+  //      direct-GSP integration writes the result via webhook.
+  //   4. Invoice PDF reprints with the IRN + QR (Sec 31(1) compliant).
+
+  // GET — tenant's e-invoicing config
+  app.get("/api/restaurant/:id/compliance/e-invoicing", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const r: any = await centralDb.get(
+        `SELECT e_invoicing_enabled, e_invoicing_provider,
+                e_invoicing_turnover_threshold_met,
+                e_invoice_seller_legal_name, e_invoice_seller_trade_name,
+                gst_number
+           FROM restaurants WHERE id = ?`,
+        [req.params.id]
+      );
+      res.json({
+        enabled:                    Number(r?.e_invoicing_enabled || 0) === 1,
+        provider:                   r?.e_invoicing_provider || null,
+        turnover_threshold_met:     Number(r?.e_invoicing_turnover_threshold_met || 0) === 1,
+        seller_legal_name:          r?.e_invoice_seller_legal_name || null,
+        seller_trade_name:          r?.e_invoice_seller_trade_name || null,
+        gstin:                      r?.gst_number || null,
+        threshold_inr:              50000000,
+        threshold_note:             'GST E-Invoice is mandatory for tenants with annual aggregate turnover ≥ ₹5 crore (CBIC 10/2023).',
+        provider_options:           ['NIC_DIRECT', 'MASTERS_INDIA', 'CLEARTAX', 'IRIS_GST', 'TAXILLA', 'OTHER'],
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch e-invoicing settings" });
+    }
+  });
+
+  app.patch("/api/restaurant/:id/compliance/e-invoicing", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      const enabled = b.enabled == null ? null : (b.enabled ? 1 : 0);
+      const threshMet = b.turnover_threshold_met == null ? null : (b.turnover_threshold_met ? 1 : 0);
+      await centralDb.run(
+        `UPDATE restaurants
+            SET e_invoicing_enabled                  = COALESCE(?, e_invoicing_enabled),
+                e_invoicing_provider                 = COALESCE(?, e_invoicing_provider),
+                e_invoicing_turnover_threshold_met   = COALESCE(?, e_invoicing_turnover_threshold_met),
+                e_invoice_seller_legal_name          = COALESCE(?, e_invoice_seller_legal_name),
+                e_invoice_seller_trade_name          = COALESCE(?, e_invoice_seller_trade_name)
+          WHERE id = ?`,
+        [enabled, b.provider ?? null, threshMet,
+         b.seller_legal_name ?? null, b.seller_trade_name ?? null,
+         req.params.id]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      console.error("e-invoicing settings update error:", err);
+      res.status(500).json({ error: "Failed to update e-invoicing settings" });
+    }
+  });
+
+  // Helper — build the NIC IRP-compliant JSON payload for an order/folio.
+  // Schema follows the IRP v1.1 spec (https://einv-apisandbox.nic.in/docs).
+  // Tenants who use NIC_DIRECT submit this verbatim. GSP integrations
+  // sometimes transform it slightly; we expose it so they can wrap.
+  async function _buildIrnPayload(tenantId: string, source: 'order' | 'folio', rowId: string): Promise<any> {
+    const r: any = await centralDb.get(
+      `SELECT id, name, gst_number, e_invoice_seller_legal_name, e_invoice_seller_trade_name,
+              address_line1, address_line2, city, state, pincode
+         FROM restaurants WHERE id = ?`,
+      [tenantId]
+    );
+    if (!r?.gst_number) throw new Error("Tenant GSTIN not configured — e-invoicing requires it");
+    const tenantDb = await getTenantDb(tenantId);
+    let head: any;
+    let lines: any[] = [];
+    let buyerGstin: string | null = null;
+    let buyerName: string | null = null;
+    let buyerState: string | null = null;
+    if (source === 'order') {
+      head = await tenantDb.get(
+        `SELECT id, invoice_number, customer_name, customer_phone, customer_city,
+                total_amount, gst_amount, gst_percent, items, created_at
+           FROM orders WHERE id = ? AND deleted_at IS NULL`, [rowId]
+      );
+      if (!head) throw new Error("Order not found");
+      try {
+        const items = typeof head.items === 'string' ? JSON.parse(head.items) : head.items;
+        lines = (items || []).map((it: any, i: number) => ({
+          SlNo: String(i + 1),
+          PrdDesc: String(it.name || `Item ${i + 1}`).slice(0, 300),
+          IsServc: 'Y',
+          HsnCd: String(it.hsn_code || '996331'), // 996331 = restaurant services default SAC
+          Qty: Number(it.quantity || 1),
+          Unit: 'NOS',
+          UnitPrice: Number(it.price || 0),
+          TotAmt: Number(it.price || 0) * Number(it.quantity || 1),
+          Discount: 0,
+          AssAmt: Number(it.price || 0) * Number(it.quantity || 1),
+          GstRt: Number(head.gst_percent || 5),
+          IgstAmt: 0,
+          CgstAmt: 0,
+          SgstAmt: 0,
+          CesRt: 0, CesAmt: 0, CesNonAdvlAmt: 0, StateCesRt: 0, StateCesAmt: 0, StateCesNonAdvlAmt: 0,
+          OthChrg: 0,
+          TotItemVal: Number(it.price || 0) * Number(it.quantity || 1),
+        }));
+      } catch { lines = []; }
+      buyerName = head.customer_name || 'Walk-in customer';
+      buyerState = head.customer_city || null;
+    } else {
+      head = await tenantDb.get(
+        `SELECT f.*, b.guest_name, b.guest_gstin, b.guest_state
+           FROM folios f
+      LEFT JOIN room_bookings b ON b.id = f.booking_id
+          WHERE f.id = ?`,
+        [rowId]
+      );
+      if (!head) throw new Error("Folio not found");
+      const entries: any[] = await tenantDb.query(
+        `SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at`, [rowId]
+      );
+      lines = entries.filter(e => !['TAX', 'DISCOUNT', 'PAYMENT'].includes(e.entry_type)).map((e: any, i: number) => ({
+        SlNo: String(i + 1),
+        PrdDesc: String(e.description || `Line ${i + 1}`).slice(0, 300),
+        IsServc: 'Y',
+        HsnCd: e.entry_type === 'ROOM_CHARGE' ? '996311' : e.entry_type === 'F_AND_B' ? '996331' : '996319',
+        Qty: Number(e.quantity || 1),
+        Unit: 'NOS',
+        UnitPrice: Number(e.unit_price || 0),
+        TotAmt: Number(e.amount || 0),
+        Discount: 0,
+        AssAmt: Number(e.amount || 0),
+        GstRt: Number(e.gst_rate || 0),
+        IgstAmt: 0, CgstAmt: 0, SgstAmt: 0,
+        CesRt: 0, CesAmt: 0, CesNonAdvlAmt: 0, StateCesRt: 0, StateCesAmt: 0, StateCesNonAdvlAmt: 0,
+        OthChrg: 0,
+        TotItemVal: Number(e.amount || 0) + Number(e.gst_amount || 0),
+      }));
+      buyerGstin = head.guest_gstin || null;
+      buyerName = head.guest_name || 'Hotel guest';
+      buyerState = head.guest_state || null;
+    }
+
+    // Stamp CGST/SGST split on each line. Intrastate (seller state == buyer
+    // state) → CGST + SGST; interstate → IGST.
+    const sellerStateCode = _stateNameToGstCode(r.state);
+    const buyerStateCode  = _stateNameToGstCode(buyerState) || sellerStateCode;
+    const isIntra = sellerStateCode === buyerStateCode;
+    for (const ln of lines) {
+      const gstAmt = ln.AssAmt * (ln.GstRt || 0) / 100;
+      if (isIntra) {
+        ln.CgstAmt = Math.round(gstAmt / 2 * 100) / 100;
+        ln.SgstAmt = Math.round(gstAmt / 2 * 100) / 100;
+      } else {
+        ln.IgstAmt = Math.round(gstAmt * 100) / 100;
+      }
+      ln.TotItemVal = Math.round((ln.AssAmt + gstAmt) * 100) / 100;
+    }
+
+    const totalAssVal = lines.reduce((s, l) => s + Number(l.AssAmt || 0), 0);
+    const totalCgst   = lines.reduce((s, l) => s + Number(l.CgstAmt || 0), 0);
+    const totalSgst   = lines.reduce((s, l) => s + Number(l.SgstAmt || 0), 0);
+    const totalIgst   = lines.reduce((s, l) => s + Number(l.IgstAmt || 0), 0);
+    const totalInvVal = totalAssVal + totalCgst + totalSgst + totalIgst;
+
+    // Document type: B2B (buyer GSTIN known) vs B2C (no buyer GSTIN).
+    // Note: B2C invoices below ₹5cr threshold don't need IRN — but if the
+    // tenant opts in, NIC accepts B2C voluntary submissions.
+    const docType = buyerGstin ? 'INV' : 'INV';
+
+    return {
+      Version: '1.1',
+      TranDtls: {
+        TaxSch: 'GST',
+        SupTyp: buyerGstin ? 'B2B' : 'B2C',
+        RegRev: 'N',
+        EcmGstin: null,
+        IgstOnIntra: 'N',
+      },
+      DocDtls: {
+        Typ: docType,
+        No: head.invoice_number || `${source.toUpperCase()}-${rowId.slice(-8)}`,
+        Dt: new Date(head.created_at || head.invoice_date || Date.now())
+              .toISOString().slice(0, 10).split('-').reverse().join('/'),
+      },
+      SellerDtls: {
+        Gstin: r.gst_number,
+        LglNm: r.e_invoice_seller_legal_name || r.name,
+        TrdNm: r.e_invoice_seller_trade_name || r.name,
+        Addr1: r.address_line1 || r.name,
+        Addr2: r.address_line2 || '',
+        Loc:   r.city || '',
+        Pin:   Number(r.pincode || 0) || 110001,
+        Stcd:  sellerStateCode || '07',
+      },
+      BuyerDtls: {
+        Gstin: buyerGstin || 'URP',
+        LglNm: buyerName || 'Walk-in',
+        Pos:   buyerStateCode || sellerStateCode || '07',
+        Addr1: '',
+        Loc:   buyerState || r.city || '',
+        Pin:   110001,
+        Stcd:  buyerStateCode || sellerStateCode || '07',
+      },
+      ItemList: lines,
+      ValDtls: {
+        AssVal: Math.round(totalAssVal * 100) / 100,
+        CgstVal: Math.round(totalCgst * 100) / 100,
+        SgstVal: Math.round(totalSgst * 100) / 100,
+        IgstVal: Math.round(totalIgst * 100) / 100,
+        CesVal: 0, StCesVal: 0, Discount: 0, OthChrg: 0, RndOffAmt: 0,
+        TotInvVal: Math.round(totalInvVal * 100) / 100,
+      },
+    };
+  }
+
+  // Helper — Indian state name → GST code (2-digit). Partial map; defaults
+  // to '07' (Delhi) when unknown so a payload still validates structurally.
+  function _stateNameToGstCode(s: string | null | undefined): string {
+    if (!s) return '07';
+    const norm = String(s).toLowerCase().trim();
+    const map: Record<string, string> = {
+      'jammu and kashmir': '01', 'himachal pradesh': '02', 'punjab': '03',
+      'chandigarh': '04', 'uttarakhand': '05', 'haryana': '06', 'delhi': '07',
+      'rajasthan': '08', 'uttar pradesh': '09', 'bihar': '10', 'sikkim': '11',
+      'arunachal pradesh': '12', 'nagaland': '13', 'manipur': '14',
+      'mizoram': '15', 'tripura': '16', 'meghalaya': '17', 'assam': '18',
+      'west bengal': '19', 'jharkhand': '20', 'odisha': '21',
+      'chhattisgarh': '22', 'madhya pradesh': '23', 'gujarat': '24',
+      'daman and diu': '25', 'dadra and nagar haveli': '26',
+      'maharashtra': '27', 'karnataka': '29', 'goa': '30', 'lakshadweep': '31',
+      'kerala': '32', 'tamil nadu': '33', 'puducherry': '34',
+      'andaman and nicobar islands': '35', 'telangana': '36',
+      'andhra pradesh': '37', 'ladakh': '38',
+    };
+    return map[norm] || '07';
+  }
+
+  // GET — return the NIC-compliant payload for the tenant's GSP to submit.
+  app.get("/api/restaurant/:id/invoices/:source(order|folio)/:rowId/irn-payload", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const source = req.params.source as 'order' | 'folio';
+      const payload = await _buildIrnPayload(req.params.id, source, req.params.rowId);
+      res.json({
+        payload,
+        meta: {
+          source, source_id: req.params.rowId,
+          tenant_id: req.params.id,
+          spec_version: 'NIC IRP v1.1',
+          submit_to: 'https://einvoice1.gst.gov.in/eivital/dashboard (or your GSP)',
+          generated_at: new Date().toISOString(),
+        },
+      });
+    } catch (err: any) {
+      console.error("irn-payload error:", err);
+      res.status(500).json({ error: err?.message || "Failed to build IRN payload" });
+    }
+  });
+
+  // POST — accept the IRP response (IRN, ACK, signed QR) and stamp it on
+  // the order / folio. Called either by the tenant's GSP webhook OR by
+  // a staff member pasting in the values manually after their accountant
+  // submitted to the NIC portal.
+  app.post("/api/restaurant/:id/invoices/:source(order|folio)/:rowId/irn-result", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
+    try {
+      const source = req.params.source as 'order' | 'folio';
+      const b = req.body || {};
+      const irn = String(b.irn || '').trim();
+      const ackNo = b.ack_no ? String(b.ack_no).trim() : null;
+      const ackDate = b.ack_date ? String(b.ack_date).trim() : null;
+      const qrCode = b.signed_qr_code ? String(b.signed_qr_code).trim() : null;
+      const status = String(b.status || 'GENERATED').toUpperCase();
+      const allowed = new Set(['GENERATED', 'CANCELLED', 'FAILED']);
+      if (!allowed.has(status)) {
+        return res.status(400).json({ error: "status must be GENERATED, CANCELLED, or FAILED" });
+      }
+      // GENERATED requires IRN; others may not have one (e.g. FAILED).
+      if (status === 'GENERATED' && (!irn || irn.length < 32)) {
+        return res.status(400).json({ error: "irn (64-char hash) is required when status=GENERATED" });
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      const table = source === 'order' ? 'orders' : 'folios';
+      await tenantDb.run(
+        `UPDATE ${table}
+            SET irn = COALESCE(?, irn),
+                ack_no = COALESCE(?, ack_no),
+                ack_date = COALESCE(?, ack_date),
+                signed_qr_code = COALESCE(?, signed_qr_code),
+                irn_status = ?,
+                irn_cancel_reason = COALESCE(?, irn_cancel_reason),
+                irn_applied_at = NOW()
+          WHERE id = ?`,
+        [irn || null, ackNo, ackDate, qrCode, status, b.cancel_reason || null, req.params.rowId]
+      );
+      const row = await tenantDb.get(
+        `SELECT id, irn, ack_no, ack_date, irn_status, irn_applied_at
+           FROM ${table} WHERE id = ?`,
+        [req.params.rowId]
+      );
+      res.json(row);
+    } catch (err: any) {
+      console.error("irn-result error:", err);
+      res.status(500).json({ error: "Failed to record IRN result" });
+    }
+  });
+
   // ─────────────────────────────────────────────────────────────────────
   // M-4 — Sec 9(5) ECO GST report (BCG follow-up)
   // ─────────────────────────────────────────────────────────────────────
@@ -18492,6 +19197,11 @@ async function startServer() {
       const settledAt = new Date().toISOString();
       const invNum = `INV-GRP-${new Date(settledAt).getFullYear()}-${String(req.params.groupId).slice(-6).toUpperCase()}`;
 
+      // R-3 — group invoices don't have a single folio; we don't surface
+      // IRN on the consolidated PDF (a group has N child folios, each
+      // would carry its own IRN). _irnRow stays null so the IRN block
+      // is suppressed.
+      const _irnRow: any = null;
       const pdf = await generateInvoicePdf({
         hotel: {
           name:     hotel.name,
@@ -18501,6 +19211,8 @@ async function startServer() {
           phone:    hotel.phone,
           email:    hotel.admin_id,
           logoPath: hotel.logo_url || undefined,
+          fssai:           hotel.fssai_license_number || null,
+          fssaiValidUntil: hotel.fssai_license_valid_until || null,
         },
         guest: {
           name:        (group?.contact_name) || first.guest_name || 'Group Guest',
@@ -18543,6 +19255,21 @@ async function startServer() {
         // M-6 — opt-in round-off line. Off by default (preserves byte-identical
         // PDFs for tenants who haven't migrated their accountant workflow).
         roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
+        // R-3 — pass IRN data when this row has been registered. The
+        // per-site `_irnRow` variable is declared just before each
+        // generateInvoicePdf call (different scopes: group aggregate
+        // has no single folio; single-folio download + email both bind
+        // to `folio`). eInvoiceMandatory tells the renderer whether to
+        // show "PENDING" loudly or stay silent.
+        irn: {
+          irn:               _irnRow?.irn || null,
+          ackNo:             _irnRow?.ack_no || null,
+          ackDate:           _irnRow?.ack_date || null,
+          signedQrCode:      _irnRow?.signed_qr_code || null,
+          status:            _irnRow?.irn_status || 'PENDING',
+          eInvoiceMandatory: Number(hotel.e_invoicing_enabled || 0) === 1
+                          && Number(hotel.e_invoicing_turnover_threshold_met || 0) === 1,
+        },
       });
       const safeName = (group?.name || 'group').replace(/[^a-z0-9_-]+/gi, '-');
       res.setHeader('Content-Type', 'application/pdf');
@@ -18592,6 +19319,9 @@ async function startServer() {
       }
 
       const hotel = checkRes.restaurant;
+      // R-3 — pull IRN row attached to this folio (any/all may be null
+      // when the GSP hasn't returned yet).
+      const _irnRow: any = folio;
       const pdf = await generateInvoicePdf({
         hotel: {
           name:     hotel.name,
@@ -18601,6 +19331,8 @@ async function startServer() {
           phone:    hotel.phone,
           email:    hotel.admin_id,
           logoPath: hotel.logo_url || undefined,
+          fssai:           hotel.fssai_license_number || null,
+          fssaiValidUntil: hotel.fssai_license_valid_until || null,
         },
         guest: {
           name:         folio.guest_name || 'Guest',
@@ -18658,6 +19390,21 @@ async function startServer() {
         // M-6 — opt-in round-off line. Off by default (preserves byte-identical
         // PDFs for tenants who haven't migrated their accountant workflow).
         roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
+        // R-3 — pass IRN data when this row has been registered. The
+        // per-site `_irnRow` variable is declared just before each
+        // generateInvoicePdf call (different scopes: group aggregate
+        // has no single folio; single-folio download + email both bind
+        // to `folio`). eInvoiceMandatory tells the renderer whether to
+        // show "PENDING" loudly or stay silent.
+        irn: {
+          irn:               _irnRow?.irn || null,
+          ackNo:             _irnRow?.ack_no || null,
+          ackDate:           _irnRow?.ack_date || null,
+          signedQrCode:      _irnRow?.signed_qr_code || null,
+          status:            _irnRow?.irn_status || 'PENDING',
+          eInvoiceMandatory: Number(hotel.e_invoicing_enabled || 0) === 1
+                          && Number(hotel.e_invoicing_turnover_threshold_met || 0) === 1,
+        },
       });
 
       const safeName = String(folio.guest_name || 'guest').replace(/[^a-z0-9_-]+/gi, '-');
@@ -18712,8 +19459,11 @@ async function startServer() {
       }
 
       const hotel = checkRes.restaurant;
+      // R-3 — pull IRN row attached to this folio (any/all may be null
+      // when the GSP hasn't returned yet).
+      const _irnRow: any = folio;
       const pdf = await generateInvoicePdf({
-        hotel: { name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number, phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined },
+        hotel: { name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number, phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined, fssai: hotel.fssai_license_number || null, fssaiValidUntil: hotel.fssai_license_valid_until || null },
         guest: { name: folio.guest_name || 'Guest', phone: folio.guest_phone, email: folio.guest_email, nationality: folio.guest_nationality, state: folio.guest_state },
         stay:  {
           roomName: folio.room_name || folio.room_id,
@@ -18750,6 +19500,21 @@ async function startServer() {
         // M-6 — opt-in round-off line. Off by default (preserves byte-identical
         // PDFs for tenants who haven't migrated their accountant workflow).
         roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
+        // R-3 — pass IRN data when this row has been registered. The
+        // per-site `_irnRow` variable is declared just before each
+        // generateInvoicePdf call (different scopes: group aggregate
+        // has no single folio; single-folio download + email both bind
+        // to `folio`). eInvoiceMandatory tells the renderer whether to
+        // show "PENDING" loudly or stay silent.
+        irn: {
+          irn:               _irnRow?.irn || null,
+          ackNo:             _irnRow?.ack_no || null,
+          ackDate:           _irnRow?.ack_date || null,
+          signedQrCode:      _irnRow?.signed_qr_code || null,
+          status:            _irnRow?.irn_status || 'PENDING',
+          eInvoiceMandatory: Number(hotel.e_invoicing_enabled || 0) === 1
+                          && Number(hotel.e_invoicing_turnover_threshold_met || 0) === 1,
+        },
       });
 
       const safeName = String(folio.guest_name || 'guest').replace(/[^a-z0-9_-]+/gi, '-');
@@ -19185,7 +19950,31 @@ async function startServer() {
         name, gst_number, gst_percentage, is_gst_enabled, template_id, table_count,
         upi_id, checkout_mode, logo_url, menu_display_mode, alerts_enabled,
         invoice_numbering_mode, invoice_number_prefix, invoice_yearly_reset,
+        // R-2 — FSSAI mandatory food-safety identifier
+        fssai_license_number, fssai_license_valid_until,
       } = req.body;
+      // R-2 — FSSAI sanity check. Real licences are 14 digits all-numeric.
+      // We accept any 8-20 char alphanumeric string to avoid blocking
+      // edge cases (provisional / state-issued numbers occasionally
+      // arrive in non-standard formats) but enforce the basic shape.
+      let safeFssai: string | null = null;
+      if (fssai_license_number !== undefined) {
+        const f = String(fssai_license_number || '').trim();
+        if (f && !/^[A-Za-z0-9-]{8,20}$/.test(f)) {
+          return res.status(400).json({
+            error: "FSSAI licence number must be 8-20 alphanumeric characters (typically 14 digits)."
+          });
+        }
+        safeFssai = f || null;
+      }
+      let safeFssaiValid: string | null = null;
+      if (fssai_license_valid_until !== undefined) {
+        const d = String(fssai_license_valid_until || '').trim();
+        if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+          return res.status(400).json({ error: "FSSAI expiry must be YYYY-MM-DD." });
+        }
+        safeFssaiValid = d || null;
+      }
       const allowedModes = ['PHOTO', 'CARD', 'COMPACT', 'MAGAZINE'];
       const menuMode = menu_display_mode !== undefined
         ? (allowedModes.includes(menu_display_mode) ? menu_display_mode : null)
@@ -19234,7 +20023,9 @@ async function startServer() {
           alerts_enabled = COALESCE(?, alerts_enabled),
           invoice_numbering_mode = COALESCE(?, invoice_numbering_mode),
           invoice_number_prefix = COALESCE(?, invoice_number_prefix),
-          invoice_yearly_reset = COALESCE(?, invoice_yearly_reset)
+          invoice_yearly_reset = COALESCE(?, invoice_yearly_reset),
+          fssai_license_number = COALESCE(?, fssai_license_number),
+          fssai_license_valid_until = COALESCE(?, fssai_license_valid_until)
         WHERE id = ?
       `, [
         name,
@@ -19251,6 +20042,8 @@ async function startServer() {
         safeInvoiceMode,
         safeInvoicePrefix,
         safeYearlyReset,
+        safeFssai,
+        safeFssaiValid,
         req.params.id
       ]);
 
@@ -23213,7 +24006,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tier2-medium-severity-followups',
+    commit_marker: 'tier3-regulations-dpdp-fssai-irn',
     code_features: [
       'subscription-billing',
       'read-only-mode',

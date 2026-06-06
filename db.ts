@@ -188,6 +188,52 @@ export async function initDb() {
     -- this convention and reconcile their ledgers against it. Off by
     -- default; tenant opts in via Settings → Tax & Currency.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS round_invoice_to_rupee INT DEFAULT 0;
+
+    -- R-2 (BCG follow-up) — FSSAI license. Mandatory for every food
+    -- business in India per Sec 31 of the FSS Act, 2006. Restaurants
+    -- must display the 14-digit licence number on every invoice/bill.
+    -- Without it, an FSSAI inspector can suspend operations on the
+    -- spot. Allowing tenant to skip is policy-violating, but we keep
+    -- it nullable for pre-launch onboarding and non-India tenants who
+    -- aren't subject to FSSAI.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS fssai_license_number TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS fssai_license_valid_until DATE;
+
+    -- R-3 (BCG follow-up) — GST E-Invoice (IRN). Mandatory for tenants
+    -- with annual turnover ≥ ₹5 crore (current threshold as of 2026;
+    -- it has dropped from ₹500cr → ₹100cr → ₹20cr → ₹10cr → ₹5cr in
+    -- successive notifications). The flow is: invoice generated →
+    -- payload POSTed to NIC Invoice Registration Portal (IRP) via a
+    -- GSP (Master India / ClearTax / IRIS) → IRP returns IRN +
+    -- signed QR + ACK number. Until the IRN is stored against the
+    -- invoice it is NOT a valid GST invoice (per Notification 13/2020).
+    --
+    --   e_invoicing_enabled         tenant toggle (Settings → Compliance)
+    --   e_invoicing_provider        free-text — which GSP they use, for support
+    --   e_invoicing_turnover_aboveΘ informational; threshold derived from CA filing
+    --   e_invoice_seller_legal_name needed in the payload (different from brand name)
+    --   e_invoice_seller_trade_name optional alt-name on invoice
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS e_invoicing_enabled INT DEFAULT 0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS e_invoicing_provider TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS e_invoicing_turnover_threshold_met INT DEFAULT 0;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS e_invoice_seller_legal_name TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS e_invoice_seller_trade_name TEXT;
+
+    -- R-1 (BCG follow-up) — DPDP Act 2023 compliance.
+    -- The Digital Personal Data Protection Act, 2023 (effective Aug 2023)
+    -- mandates: explicit consent before processing personal data, the
+    -- right to access / correction / erasure, breach notification, and
+    -- designation of a Data Protection Officer / Grievance Officer.
+    -- These columns store the per-tenant DPO contact + the URL to
+    -- the tenant's privacy notice (rendered publicly via /privacy/:slug).
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS privacy_policy_url TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS privacy_policy_version TEXT DEFAULT 'v1';
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS dpo_name TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS dpo_email TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS dpo_phone TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS data_retention_days INT DEFAULT 2555;
+    -- 2555 days ≈ 7 years — matches GST record-retention requirement
+    -- (Rule 56 CGST Rules) and Companies Act bookkeeping windows.
     -- Phase F2 (Customer Experience v2) — feedback settings.
     --   auto_feedback_request_enabled    0 (default) = no auto-send. Owner
     --                                    must opt in via Settings.
@@ -1661,6 +1707,89 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_eco_paid INT DEFAULT 0`).catch(() => {});
   await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS eco_platform TEXT`).catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_eco ON orders (eco_platform, created_at DESC) WHERE is_eco_paid = 1`).catch(() => {});
+
+  // R-3 (BCG follow-up) — GST E-Invoice IRN columns on orders + folios.
+  // Storage of the IRP response. Either populated by the tenant's GSP
+  // integration via POST /invoices/.../irn, or pasted in manually by the
+  // accountant. Without these, the invoice PDF prints "IRN PENDING" and
+  // the tenant is at risk of a compliance fine when reconciling.
+  //   irn               64-char hex hash returned by IRP
+  //   ack_no            IRP acknowledgement number
+  //   ack_date          ISO date IRP accepted the invoice
+  //   signed_qr_code    base64 of the signed QR payload (embeds GSTIN+IRN+amount)
+  //   irn_status        'PENDING' (default) | 'GENERATED' | 'CANCELLED' | 'FAILED'
+  //   irn_cancel_reason populated when status=CANCELLED
+  //   irn_applied_at    when we POSTed to IRP
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS irn TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS ack_no TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS ack_date TIMESTAMP`).catch(() => {});
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS signed_qr_code TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS irn_status TEXT DEFAULT 'PENDING'`).catch(() => {});
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS irn_cancel_reason TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS irn_applied_at TIMESTAMP`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_irn_pending ON orders (created_at) WHERE irn IS NULL`).catch(() => {});
+
+  await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS irn TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS ack_no TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS ack_date TIMESTAMP`).catch(() => {});
+  await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS signed_qr_code TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS irn_status TEXT DEFAULT 'PENDING'`).catch(() => {});
+  await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS irn_cancel_reason TEXT`).catch(() => {});
+  await db.exec(`ALTER TABLE folios ADD COLUMN IF NOT EXISTS irn_applied_at TIMESTAMP`).catch(() => {});
+
+  // R-1 (BCG follow-up) — DPDP 2023 per-tenant tables.
+  //
+  // dpdp_consent_log — append-only ledger of every consent grant or
+  //   withdrawal. The Act requires "verifiable consent" with proof that
+  //   the principal was shown the notice; we log the policy version,
+  //   IP, user-agent, and scope.
+  //
+  // dpdp_subject_requests — Data Principal Rights requests (Sec 11-14):
+  //   ACCESS    → tenant must return all data for the subject
+  //   ERASURE   → subject wants their data deleted/anonymised
+  //   CORRECTION→ correct an error
+  //   GRIEVANCE → complaint routed to DPO
+  //   PORTABILITY → machine-readable export (we treat same as ACCESS)
+  //   Status transitions: RECEIVED → IN_PROGRESS → FULFILLED / REJECTED
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS dpdp_consent_log (
+      id              TEXT PRIMARY KEY,
+      subject_phone   TEXT,
+      subject_email   TEXT,
+      subject_type    TEXT NOT NULL,             -- 'GUEST' | 'CUSTOMER' | 'STAFF' | 'PROSPECT'
+      consent_action  TEXT NOT NULL,             -- 'GRANTED' | 'WITHDRAWN'
+      consent_scope   TEXT NOT NULL,             -- 'DATA_PROCESSING' | 'MARKETING' | 'ANALYTICS' | 'THIRD_PARTY_SHARE'
+      policy_version  TEXT,
+      source_channel  TEXT,                      -- 'BOOKING' | 'CHECKOUT' | 'QR' | 'STAFF_ENTRY' | 'OWNER_BACKFILL'
+      source_ip       TEXT,
+      user_agent      TEXT,
+      notes           TEXT,
+      recorded_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_dpdp_consent_phone ON dpdp_consent_log (subject_phone)`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_dpdp_consent_recorded ON dpdp_consent_log (recorded_at DESC)`).catch(() => {});
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS dpdp_subject_requests (
+      id              TEXT PRIMARY KEY,
+      subject_phone   TEXT,
+      subject_email   TEXT,
+      request_type    TEXT NOT NULL,             -- ACCESS | ERASURE | CORRECTION | GRIEVANCE | PORTABILITY
+      status          TEXT NOT NULL DEFAULT 'RECEIVED',
+      requester_note  TEXT,
+      requested_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      assigned_to     TEXT,                      -- user id of staff handling it
+      fulfilled_at    TIMESTAMP,
+      fulfillment_payload TEXT,                  -- JSON snapshot for ACCESS/PORTABILITY
+      response_note   TEXT,
+      source_channel  TEXT,
+      source_ip       TEXT,
+      user_agent      TEXT
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_dpdp_req_status ON dpdp_subject_requests (status, requested_at DESC)`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_dpdp_req_phone ON dpdp_subject_requests (subject_phone)`).catch(() => {});
 
   // ─────────────────────────────────────────────────────────────────────
   // STAFF ROSTER + TIMESHEET (Phase 3)
