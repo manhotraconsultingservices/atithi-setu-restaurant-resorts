@@ -525,6 +525,25 @@ export async function initDb() {
       PRIMARY KEY (restaurant_id, role)
     )
   `);
+
+  // RBAC-5a — Audit log of every permission change. Captured on each POST
+  // to /role-permissions so the owner can answer "who removed CASHIER's
+  // access to REPORTS last Tuesday?". Both before/after stored as JSON.
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS permission_audit_log (
+      id                   SERIAL PRIMARY KEY,
+      restaurant_id        TEXT NOT NULL,
+      role                 TEXT NOT NULL,
+      allowed_tabs_before  TEXT,    -- JSON array (nullable for fresh inserts)
+      allowed_tabs_after   TEXT,    -- JSON array
+      changed_by_id        TEXT,    -- user id of the actor
+      changed_by_email     TEXT,    -- email (for legacy users without ids)
+      changed_by_role      TEXT,
+      changed_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_perm_audit_restaurant
+      ON permission_audit_log (restaurant_id, changed_at DESC);
+  `);
 }
 
 // ---------------------------------------------------------------------------

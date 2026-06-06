@@ -3411,12 +3411,44 @@ async function startServer() {
         if (!Array.isArray(tabs)) continue;
         sanitized[upper] = tabs.map(t => String(t));
       }
+      // RBAC-5a — Pre-load existing rows so we can emit before/after diffs
+      // to the audit log. One SELECT covers every role in the payload.
+      const existing: Record<string, string[]> = {};
+      const roles = Object.keys(sanitized);
+      if (roles.length > 0) {
+        const placeholders = roles.map(() => '?').join(',');
+        const rows: any[] = await centralDb.query(
+          `SELECT role, allowed_tabs FROM restaurant_role_permissions
+            WHERE restaurant_id = ? AND role IN (${placeholders})`,
+          [req.params.id, ...roles]
+        );
+        for (const r of rows) {
+          try { existing[r.role] = JSON.parse(r.allowed_tabs || '[]'); }
+          catch { existing[r.role] = []; }
+        }
+      }
+
       for (const [role, tabs] of Object.entries(sanitized)) {
+        const beforeJson = existing[role] !== undefined ? JSON.stringify(existing[role]) : null;
+        const afterJson = JSON.stringify(tabs);
+        // Skip the write + audit row if nothing actually changed — keeps
+        // the log clean and avoids touching updated_at unnecessarily.
+        if (beforeJson === afterJson) continue;
         await centralDb.run(
           `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, updated_at)
            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
            ON CONFLICT (restaurant_id, role) DO UPDATE SET allowed_tabs = EXCLUDED.allowed_tabs, updated_at = CURRENT_TIMESTAMP`,
-          [req.params.id, role, JSON.stringify(tabs)]
+          [req.params.id, role, afterJson]
+        );
+        // RBAC-5a — write audit row. Captures both directions so the
+        // owner can answer "what changed and when".
+        await centralDb.run(
+          `INSERT INTO permission_audit_log
+             (restaurant_id, role, allowed_tabs_before, allowed_tabs_after,
+              changed_by_id, changed_by_email, changed_by_role)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [req.params.id, role, beforeJson, afterJson,
+           req.user?.id || null, req.user?.email || null, req.user?.role || null]
         );
       }
       // RBAC-4: invalidate the in-memory tab cache so the new matrix
@@ -3427,6 +3459,146 @@ async function startServer() {
     } catch (err) {
       console.error("role-permissions POST error:", err);
       res.status(500).json({ error: "Failed to save permissions" });
+    }
+  });
+
+  // RBAC-5a — Read audit log. Last 100 changes, newest first.
+  app.get("/api/restaurant/:id/role-permissions/audit", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!requireOwnerOrAdmin(req, res)) return;
+    try {
+      const rows = await centralDb.query(
+        `SELECT id, role, allowed_tabs_before, allowed_tabs_after,
+                changed_by_id, changed_by_email, changed_by_role, changed_at
+           FROM permission_audit_log
+          WHERE restaurant_id = ?
+          ORDER BY changed_at DESC
+          LIMIT 100`,
+        [req.params.id]
+      );
+      // Parse JSON so the client doesn't have to.
+      const parsed = rows.map((r: any) => ({
+        ...r,
+        allowed_tabs_before: r.allowed_tabs_before ? JSON.parse(r.allowed_tabs_before) : null,
+        allowed_tabs_after:  r.allowed_tabs_after  ? JSON.parse(r.allowed_tabs_after)  : null,
+      }));
+      res.json(parsed);
+    } catch (err) {
+      console.error("role-permissions audit GET error:", err);
+      res.status(500).json({ error: "Failed to fetch audit log" });
+    }
+  });
+
+  // RBAC-5d — List tenants this user can manage permissions on. Used to
+  // power the "Copy from another location" dropdown. Returns lightweight
+  // metadata (id, name, property_type) for tenants where the caller is
+  // OWNER (or for SUPER_ADMIN/CTO — every tenant).
+  app.get("/api/restaurant/role-permissions/my-tenants", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const role = String(req.user?.role || '').toUpperCase();
+      const isAdmin = role === 'SUPER_ADMIN' || role === 'CTO';
+      const email = req.user?.email;
+      const ownerRestaurantId = req.user?.restaurantId;
+
+      let rows: any[] = [];
+      if (isAdmin) {
+        rows = await centralDb.query(
+          `SELECT id, name, property_type FROM restaurants WHERE is_active = 1 ORDER BY name LIMIT 100`
+        );
+      } else if (email) {
+        // Modern email-based owner accounts: lookup restaurants by owner email.
+        rows = await centralDb.query(
+          `SELECT id, name, property_type FROM restaurants
+            WHERE LOWER(admin_id) = LOWER(?) AND is_active = 1
+            ORDER BY name`,
+          [email]
+        );
+      } else if (ownerRestaurantId) {
+        // Legacy id-based owner: just their own tenant.
+        rows = await centralDb.query(
+          `SELECT id, name, property_type FROM restaurants WHERE id = ? AND is_active = 1`,
+          [ownerRestaurantId]
+        );
+      }
+      res.json(rows);
+    } catch (err) {
+      console.error("role-permissions my-tenants error:", err);
+      res.status(500).json({ error: "Failed to list manageable tenants" });
+    }
+  });
+
+  // RBAC-5d — Copy permission matrix from source tenant to target tenant.
+  // Caller must be OWNER of both (or platform admin). All rows for the
+  // source are bulk-upserted onto the target. Audit log captures each
+  // resulting change.
+  app.post("/api/restaurant/:id/role-permissions/copy-from/:sourceId", authenticate, async (req: AuthRequest, res: Response) => {
+    const targetId = req.params.id;
+    const sourceId = req.params.sourceId;
+    if (targetId === sourceId) {
+      return res.status(400).json({ error: "Source and target must be different tenants" });
+    }
+    const role = String(req.user?.role || '').toUpperCase();
+    const isPlatformAdmin = role === 'SUPER_ADMIN' || role === 'CTO';
+    try {
+      // Authorization: caller must own/admin BOTH tenants. For email-based
+      // owners, both must list this email as admin_id.
+      if (!isPlatformAdmin) {
+        const email = req.user?.email;
+        if (!email) return res.status(403).json({ error: "Only the property owner (or platform admin) can copy permissions." });
+        const rows = await centralDb.query(
+          `SELECT id FROM restaurants WHERE id IN (?, ?) AND LOWER(admin_id) = LOWER(?)`,
+          [targetId, sourceId, email]
+        );
+        if (rows.length !== 2) {
+          return res.status(403).json({
+            error: "You must own both the source and target properties to copy permissions between them.",
+          });
+        }
+      }
+
+      const sourceRows: any[] = await centralDb.query(
+        "SELECT role, allowed_tabs FROM restaurant_role_permissions WHERE restaurant_id = ?",
+        [sourceId]
+      );
+      if (sourceRows.length === 0) {
+        return res.json({ success: true, copied: 0, note: "Source has no configured permissions — nothing to copy." });
+      }
+
+      // Pre-load target's existing rows so audit captures real diffs.
+      const targetExisting: Record<string, string> = {};
+      const targetRows: any[] = await centralDb.query(
+        "SELECT role, allowed_tabs FROM restaurant_role_permissions WHERE restaurant_id = ?",
+        [targetId]
+      );
+      for (const r of targetRows) targetExisting[r.role] = r.allowed_tabs || '[]';
+
+      let copied = 0;
+      for (const r of sourceRows) {
+        // Skip privileged roles defensively.
+        if (['OWNER', 'SUPER_ADMIN', 'CTO'].includes(r.role)) continue;
+        const before = targetExisting[r.role] ?? null;
+        const after = r.allowed_tabs;
+        if (before === after) continue;
+        await centralDb.run(
+          `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, updated_at)
+           VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT (restaurant_id, role) DO UPDATE SET allowed_tabs = EXCLUDED.allowed_tabs, updated_at = CURRENT_TIMESTAMP`,
+          [targetId, r.role, after]
+        );
+        await centralDb.run(
+          `INSERT INTO permission_audit_log
+             (restaurant_id, role, allowed_tabs_before, allowed_tabs_after,
+              changed_by_id, changed_by_email, changed_by_role)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [targetId, r.role, before, after,
+           req.user?.id || null, req.user?.email || null, `${req.user?.role || ''}-copy-from:${sourceId}`]
+        );
+        copied++;
+      }
+      invalidateTabCacheForTenant(targetId);
+      res.json({ success: true, copied, source: sourceId });
+    } catch (err) {
+      console.error("role-permissions copy error:", err);
+      res.status(500).json({ error: "Failed to copy permissions" });
     }
   });
 
@@ -22399,7 +22571,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rbac-restaurant-server-side-and-tab-aware',
+    commit_marker: 'rbac-5-audit-preview-tooltips-copy',
     code_features: [
       'subscription-billing',
       'read-only-mode',

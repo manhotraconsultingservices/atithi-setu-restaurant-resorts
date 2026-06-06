@@ -7083,6 +7083,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [staffAccess, setStaffAccess] = useState<Record<string, string[]>>({});
   const [staffAccessSaving, setStaffAccessSaving] = useState(false);
   const [staffAccessSaved, setStaffAccessSaved] = useState(false);
+  // RBAC-5a — audit log (recent permission changes)
+  const [permAuditLog, setPermAuditLog] = useState<any[]>([]);
+  // RBAC-5b — preview-as-role. When set, the app filters navigation as
+  // if the user had this role (using staffAccess[previewRole] as their
+  // allowedTabs). Does NOT grant access — purely visual simulation so
+  // the owner can verify the matrix without logging out/in as a staff
+  // member.
+  const [previewRole, setPreviewRole] = useState<string | null>(null);
+  // RBAC-5d — list of tenants the owner can copy permissions from
+  const [manageableTenants, setManageableTenants] = useState<any[]>([]);
+  const [copyFromTenant, setCopyFromTenant] = useState<string>('');
   const [hotelSettingsSaving, setHotelSettingsSaving] = useState(false);
   // Sprint P2-H — Yield rules CRUD state.
   const [yieldRules, setYieldRules] = useState<any[]>([]);
@@ -9090,6 +9101,48 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       return { ...prev, [role]: next };
     });
   };
+
+  // RBAC-5a — audit log fetcher
+  const fetchPermAuditLog = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/role-permissions/audit`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setPermAuditLog(await res.json() || []);
+    } catch {/* swallow */}
+  };
+
+  // RBAC-5d — list tenants owner can copy permissions FROM
+  const fetchManageableTenants = async () => {
+    try {
+      const res = await fetch(`/api/restaurant/role-permissions/my-tenants`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setManageableTenants(await res.json() || []);
+    } catch {/* swallow */}
+  };
+
+  // RBAC-5d — execute the copy
+  const copyPermissionsFrom = async (sourceTenantId: string) => {
+    if (!restaurantId || !sourceTenantId || sourceTenantId === restaurantId) return;
+    const sourceName = manageableTenants.find(t => t.id === sourceTenantId)?.name || sourceTenantId;
+    if (!confirm(`Copy ALL staff access permissions from "${sourceName}" to this property? This overwrites existing settings (except OWNER + admin roles).`)) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/role-permissions/copy-from/${sourceTenantId}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Copy failed');
+      alert(`✓ Copied ${data.copied || 0} role permission rows from "${sourceName}".`);
+      await fetchStaffAccess();
+      await fetchPermAuditLog();
+      setCopyFromTenant('');
+    } catch (err: any) {
+      alert(err?.message || 'Failed to copy permissions');
+    }
+  };
   const fetchHotelServices = async () => {
     if (!isHotelEnabled) return;
     try { setHotelServices(await hotelApi('/services')); } catch (err: any) { setHotelError(err.message); }
@@ -9443,7 +9496,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
-    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchStaffAccess(); }
+    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchStaffAccess(); fetchPermAuditLog(); fetchManageableTenants(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
 
@@ -10067,7 +10120,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // matrix UI misleading. Now isTabVisible is consulted uniformly
         // for every tab — what the owner checks in Settings is what
         // staff actually see.
-        const isVisible = (id: string) => isTabVisible(id, allowedTabs);
+        //
+        // RBAC-5b: when previewRole is set, route visibility through the
+        // matrix entry for that role instead of the user's own allowedTabs.
+        // Lets the owner verify "what does a WAITER see?" without logging
+        // out / re-logging in. Empty array → no restriction (sees all),
+        // matching the same semantics as a real WAITER without saved
+        // permissions. Falls back to own allowedTabs when not previewing.
+        const effectiveAllowedTabs = previewRole
+          ? (staffAccess[previewRole] && staffAccess[previewRole].length > 0
+              ? staffAccess[previewRole]
+              : null)   // empty array means "no restriction" for that role
+          : allowedTabs;
+        const isVisible = (id: string) => isTabVisible(id, effectiveAllowedTabs);
 
         return (
           <>
@@ -16265,33 +16330,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {(() => {
             // Tabs the user can grant access to. Hotel tabs only show
             // when the property has the hotel module enabled.
-            const PERMISSIBLE_TABS: { id: string; label: string; hotelOnly?: boolean }[] = [
-              { id: 'MONITOR',           label: 'Monitor / Dashboard' },
-              { id: 'ORDERS',            label: 'Orders (POS)' },
-              { id: 'INVOICES',          label: 'Invoices' },
-              { id: 'MENU',              label: 'Menu Management' },
-              { id: 'INVENTORY',         label: 'Inventory' },
-              { id: 'DELIVERY',          label: 'Aggregator Delivery' },
-              { id: 'QR',                label: 'QR / Table Management' },
-              { id: 'BOOKINGS',          label: 'Table Reservations' },
-              { id: 'LOYALTY',           label: 'Loyalty' },
-              { id: 'STAFF',             label: 'Staff Directory' },
-              { id: 'ROSTER',            label: 'Roster' },
-              { id: 'TIMESHEET',         label: 'Timesheet' },
-              { id: 'ATTENDANCE',        label: 'Attendance' },
-              { id: 'REPORTS',           label: 'Reports & Analytics' },
-              { id: 'FEEDBACK',          label: 'Feedback / Reviews' },
-              { id: 'NOTIFICATIONS',     label: 'Notifications' },
-              { id: 'SUBSCRIPTION',      label: 'Subscription / Billing' },
-              { id: 'SETTINGS',          label: 'Settings' },
+            // RBAC-5c: `description` field explains what each tab does
+            // for non-technical owners (hover tooltip).
+            const PERMISSIBLE_TABS: { id: string; label: string; description: string; hotelOnly?: boolean }[] = [
+              { id: 'MONITOR',           label: 'Monitor / Dashboard',     description: 'Real-time KPIs, today\'s revenue, live order board, daily summary.' },
+              { id: 'ORDERS',            label: 'Orders (POS)',            description: 'Place dine-in / takeaway orders, view current orders, kitchen ticket status.' },
+              { id: 'INVOICES',          label: 'Invoices',                description: 'Manual invoice creation, GST invoice download, invoice list, refunds.' },
+              { id: 'MENU',              label: 'Menu Management',         description: 'Add/edit menu items, categories, prices, photos, recipe management.' },
+              { id: 'INVENTORY',         label: 'Inventory',               description: 'Ingredients, suppliers, purchase orders, wastage, stock counts, recipe cost.' },
+              { id: 'DELIVERY',          label: 'Aggregator Delivery',     description: 'Swiggy / Zomato / Dunzo channel pricing, settlement reports, sync controls.' },
+              { id: 'QR',                label: 'QR / Table Management',   description: 'Configure tables, generate QR codes for postpaid ordering.' },
+              { id: 'BOOKINGS',          label: 'Table Reservations',      description: 'Table booking calendar, walk-in queue, reservation confirmations.' },
+              { id: 'LOYALTY',           label: 'Loyalty',                 description: 'Bronze/Silver/Gold tiers, promo codes, customer enrolment, birthday rewards.' },
+              { id: 'STAFF',             label: 'Staff Directory',         description: 'Add/edit staff accounts, set passwords, role assignment.' },
+              { id: 'ROSTER',            label: 'Roster',                  description: 'Drag-and-drop weekly shift planning, slot assignment.' },
+              { id: 'TIMESHEET',         label: 'Timesheet',               description: 'Planned vs actual hours, payroll prep, overtime variance.' },
+              { id: 'ATTENDANCE',        label: 'Attendance',              description: 'Clock-in / clock-out records, daily attendance report.' },
+              { id: 'REPORTS',           label: 'Reports & Analytics',     description: 'MTD/YTD revenue, top items, peak-hour heatmap, cohort analysis.' },
+              { id: 'FEEDBACK',          label: 'Feedback / Reviews',      description: 'Customer feedback responses, NPS, public review page.' },
+              { id: 'NOTIFICATIONS',     label: 'Notifications',           description: 'WhatsApp / SMS / email template config, delivery logs.' },
+              { id: 'SUBSCRIPTION',      label: 'Subscription / Billing',  description: 'Plan tier, invoices for the AtithiSetu subscription itself, payment.' },
+              { id: 'SETTINGS',          label: 'Settings',                description: 'GST setup, business profile, hotel settings, Staff Access (this page).' },
               // Hotel tabs
-              { id: 'ROOMS',             label: 'Rooms',               hotelOnly: true },
-              { id: 'HOTEL_BOOKINGS',    label: 'Hotel Bookings',      hotelOnly: true },
-              { id: 'SERVICES',          label: 'Hotel Services',      hotelOnly: true },
-              { id: 'SERVICE_REQUESTS',  label: 'Service Requests',    hotelOnly: true },
-              { id: 'FOLIOS',            label: 'Folios / Hotel Bills',hotelOnly: true },
-              { id: 'COMPLIANCE',        label: 'Compliance (Form-C)', hotelOnly: true },
-              { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',       hotelOnly: true },
+              { id: 'ROOMS',             label: 'Rooms',                   description: 'Room inventory, types, rate plans, yield rules, holds.', hotelOnly: true },
+              { id: 'HOTEL_BOOKINGS',    label: 'Hotel Bookings',          description: 'Create/edit bookings, check-in, check-out, cancellations, calendar.', hotelOnly: true },
+              { id: 'SERVICES',          label: 'Hotel Services',          description: 'Configure room-service offerings (Extra towels, AC repair, etc.) and pricing.', hotelOnly: true },
+              { id: 'SERVICE_REQUESTS',  label: 'Service Requests',        description: 'Live queue of guest requests — housekeeping / maintenance acknowledge here.', hotelOnly: true },
+              { id: 'FOLIOS',            label: 'Folios / Hotel Bills',    description: 'View / settle folios, add F&B charges, apply promos, credit notes.', hotelOnly: true },
+              { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
+              { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
             ];
             const visibleTabs = PERMISSIBLE_TABS.filter(t => !t.hotelOnly || isHotelEnabled);
 
@@ -16330,13 +16397,72 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 </div>
 
+                {/* RBAC-5b — Preview-as-role + RBAC-5d — Copy from another location */}
+                <div className="mt-4 flex flex-wrap items-center gap-3 p-3 bg-[#faf7f2] rounded-2xl">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Preview as:</span>
+                    <select
+                      value={previewRole || ''}
+                      onChange={e => setPreviewRole(e.target.value || null)}
+                      className="bg-white border border-[#cc5a16]/20 rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    >
+                      <option value="">— None (own view) —</option>
+                      {MANAGED_ROLES.map(r => (
+                        <option key={r.id} value={r.id}>{r.label}</option>
+                      ))}
+                    </select>
+                    {previewRole && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewRole(null)}
+                        className="text-[10px] font-bold text-[#c13b3b] hover:underline uppercase tracking-widest"
+                      >Exit preview</button>
+                    )}
+                  </div>
+
+                  {manageableTenants.length > 1 && (
+                    <div className="flex items-center gap-2 ml-auto">
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Copy from:</span>
+                      <select
+                        value={copyFromTenant}
+                        onChange={e => setCopyFromTenant(e.target.value)}
+                        className="bg-white border border-[#cc5a16]/20 rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 ring-[#cc5a16]/20 max-w-[200px]"
+                      >
+                        <option value="">— Pick a location —</option>
+                        {manageableTenants
+                          .filter(t => t.id !== restaurantId)
+                          .map(t => (
+                            <option key={t.id} value={t.id}>{t.name}</option>
+                          ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={!copyFromTenant}
+                        onClick={() => copyPermissionsFrom(copyFromTenant)}
+                        className="text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white hover:bg-[#103352] disabled:opacity-40"
+                      >Copy</button>
+                    </div>
+                  )}
+                </div>
+
+                {previewRole && (
+                  <div className="mt-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-3 py-2 text-xs flex items-center gap-2">
+                    <Eye size={14} />
+                    <span>Currently previewing as <strong>{MANAGED_ROLES.find(r => r.id === previewRole)?.label || previewRole}</strong>. Nav and tabs in this session now reflect that role's matrix. Click <strong>Exit preview</strong> above to return to your own view.</span>
+                  </div>
+                )}
+
                 <div className="mt-5 overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead className="sticky top-0 bg-white">
                       <tr className="border-b border-[#cc5a16]/10">
                         <th className="text-left py-2 pr-3 sticky left-0 bg-white z-10 min-w-[140px]">Role</th>
                         {visibleTabs.map(t => (
-                          <th key={t.id} className="px-2 py-2 text-center min-w-[80px]" title={t.label}>
+                          <th
+                            key={t.id}
+                            className="px-2 py-2 text-center min-w-[80px]"
+                            title={`${t.label} — ${t.description}`}
+                          >
                             <span className="block font-bold text-[10px] uppercase tracking-widest text-[#3d3128] -rotate-12 origin-bottom-left whitespace-nowrap">
                               {t.label}
                             </span>
@@ -16395,6 +16521,53 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   Server enforces this on top of the UI: a CHEF who somehow loads a hidden tab via direct URL still gets 403 from the API.
                   Owners can adjust without contacting platform admin.
                 </p>
+
+                {/* RBAC-5a — Recent permission changes (audit log) */}
+                {permAuditLog.length > 0 && (
+                  <div className="mt-6 pt-4 border-t border-[#cc5a16]/10">
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="text-sm font-bold text-[#1a1208]">Recent permission changes</h4>
+                      <button
+                        type="button"
+                        onClick={fetchPermAuditLog}
+                        className="text-[10px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest"
+                      >Refresh</button>
+                    </div>
+                    <p className="text-[10px] text-[#9c8e85] mb-3">Last {permAuditLog.length} changes. Captured automatically every time someone clicks Save.</p>
+                    <div className="space-y-1.5 max-h-72 overflow-y-auto">
+                      {permAuditLog.slice(0, 20).map((entry: any) => {
+                        const before = Array.isArray(entry.allowed_tabs_before) ? entry.allowed_tabs_before : [];
+                        const after  = Array.isArray(entry.allowed_tabs_after)  ? entry.allowed_tabs_after  : [];
+                        const added   = after.filter((t: string) => !before.includes(t));
+                        const removed = before.filter((t: string) => !after.includes(t));
+                        const actor = entry.changed_by_email || entry.changed_by_id || entry.changed_by_role || 'unknown';
+                        return (
+                          <div key={entry.id} className="text-[11px] bg-[#faf7f2] rounded-xl px-3 py-2">
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div>
+                                <span className="font-bold text-[#1a1208]">{entry.role}</span>
+                                <span className="text-[#9c8e85]"> changed by </span>
+                                <span className="font-mono text-[10px] text-[#3d3128]">{actor}</span>
+                              </div>
+                              <span className="text-[10px] text-[#9c8e85] font-mono">{new Date(entry.changed_at).toLocaleString('en-IN')}</span>
+                            </div>
+                            <div className="mt-1 flex flex-wrap gap-1.5">
+                              {added.map((t: string) => (
+                                <span key={'a' + t} className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800">+ {t}</span>
+                              ))}
+                              {removed.map((t: string) => (
+                                <span key={'r' + t} className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-100 text-rose-800">− {t}</span>
+                              ))}
+                              {added.length === 0 && removed.length === 0 && (
+                                <span className="text-[10px] italic text-[#9c8e85]">No-op (saved with no changes)</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })()}
