@@ -40,12 +40,28 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Tag the release event
+        # CRITICAL: pass commit metadata via env, NOT via `${{ }}` shell
+        # interpolation. GitHub directly substitutes `${{ ... }}` into
+        # the script text BEFORE bash runs, so a commit message
+        # containing backticks (`...`) or $(...) gets interpreted as a
+        # bash command substitution. Real-world example: commit d93cce6
+        # had a description block with backtick-quoted code in it; bash
+        # tried to execute the code as commands and the step failed.
+        # Even though the actual VPS deploy succeeded, this workflow
+        # reported FAILED and notified the team.
+        # Env-injected variables go via the runner environment without
+        # shell parsing, so backticks/$() stay literal.
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          AUTHOR:     ${{ github.actor }}
+          BRANCH:     ${{ github.ref_name }}
+          MESSAGE:    ${{ github.event.head_commit.message }}
         run: |
           echo "════════════════════════════════════════════"
-          echo "  Commit:  ${{ github.sha }}"
-          echo "  Author:  ${{ github.actor }}"
-          echo "  Branch:  ${{ github.ref_name }}"
-          echo "  Message: ${{ github.event.head_commit.message }}"
+          echo "  Commit:  $COMMIT_SHA"
+          echo "  Author:  $AUTHOR"
+          echo "  Branch:  $BRANCH"
+          echo "  Message: $MESSAGE"
           echo "════════════════════════════════════════════"
           echo "The VPS polls origin/master every minute and will"
           echo "auto-deploy this commit. Verification follows below."

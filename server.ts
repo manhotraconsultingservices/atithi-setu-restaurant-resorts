@@ -20761,6 +20761,62 @@ async function startServer() {
     }
   });
 
+  // ────────────────────────────────────────────────────────────────────
+  // CMD-CENTER-2 (workflow audit follow-up):
+  // Centralised "free the table for this session" helper.
+  // ────────────────────────────────────────────────────────────────────
+  // Multiple close/payment endpoints write tables.status='AVAILABLE'
+  // independently — each historically had its own UPDATE with its own
+  // silent .catch(() => {}). That made it a high-frequency source of
+  // "table stuck OCCUPIED after bill paid" reports because:
+  //   1. Any transient PG failure was invisible (caught + swallowed).
+  //   2. Some payment-confirm paths (PATCH /orders/:id/payment) didn't
+  //      write tables.status AT ALL — single-order invoices left the
+  //      table forever occupied.
+  //   3. The 04:00 IST stale-session cron is the only self-heal — a
+  //      stuck table can persist for up to ~24h.
+  //
+  // This helper resolves the table from session_id OR session_token,
+  // updates tables.status, and logs failures loudly. Use it everywhere
+  // a bill is settled.
+  //
+  // Returns:
+  //   { ok: true,  table_id: 'T-...' }   — flipped (or was already AVAILABLE)
+  //   { ok: false, reason: 'no-session' | 'no-table' | 'db-error' }
+  async function freeTableForSession(
+    tenantDb: DbInterface,
+    opts: { session_id?: string | null; session_token?: string | null; reason?: string }
+  ): Promise<{ ok: boolean; table_id?: string; reason?: string }> {
+    try {
+      let sessRow: any = null;
+      if (opts.session_id) {
+        sessRow = await tenantDb.get(
+          "SELECT id, table_id FROM table_sessions WHERE id = ?",
+          [opts.session_id]
+        );
+      } else if (opts.session_token) {
+        sessRow = await tenantDb.get(
+          "SELECT id, table_id FROM table_sessions WHERE session_token = ?",
+          [opts.session_token]
+        );
+      }
+      if (!sessRow) return { ok: false, reason: 'no-session' };
+      if (!sessRow.table_id) return { ok: false, reason: 'no-table' };
+      const r: any = await tenantDb.run(
+        "UPDATE tables SET status='AVAILABLE' WHERE id = ? AND status != 'AVAILABLE'",
+        [sessRow.table_id]
+      );
+      const flipped = Number(r?.changes || 0) > 0;
+      if (flipped) {
+        console.log(`[free-table] session=${sessRow.id} table=${sessRow.table_id} -> AVAILABLE${opts.reason ? ` (reason=${opts.reason})` : ''}`);
+      }
+      return { ok: true, table_id: sessRow.table_id };
+    } catch (err) {
+      console.error(`[free-table] FAILED to free table for session ${opts.session_id || opts.session_token}:`, err);
+      return { ok: false, reason: 'db-error' };
+    }
+  }
+
   // Sessions: Close (Owner/Manager confirms payment — accepts final_amount + payment_method override)
   app.patch("/api/restaurant/:id/sessions/:token/close", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
@@ -20801,9 +20857,10 @@ async function startServer() {
           "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED' WHERE session_id = ?",
           [session.id]
         );
-        if (session.table_id) {
-          await db.run("UPDATE tables SET status = 'AVAILABLE' WHERE id = ?", [session.table_id]).catch(() => {});
-        }
+        // CMD-CENTER-2: centralised free-table helper; logs on failure instead
+        // of swallowing (the previous silent .catch hid every "stuck table"
+        // bug for months).
+        await freeTableForSession(db, { session_id: session.id, reason: 'session-close' });
       }
       res.json({ success: true });
     } catch (err) {
@@ -23807,6 +23864,63 @@ async function startServer() {
       } else {
         await db.run("UPDATE orders SET payment_status = ? WHERE id = ?", [status, req.params.id]);
       }
+
+      // ───────────────────────────────────────────────────────────────
+      // CMD-CENTER-2 (workflow audit gap): if this order belongs to a
+      // session AND we just marked it PAID, free the table.
+      // ───────────────────────────────────────────────────────────────
+      // Before this block: PATCH /orders/:id/payment was the ONLY way to
+      // settle a single-order invoice (no session) from the Invoices list.
+      // It marked the order PAID/DELIVERED but never touched tables.status,
+      // leaving the physical table OCCUPIED forever until staff manually
+      // flipped it or the 04:00 cron eventually ran. Clients reported this
+      // as "I paid the bill but the table is still red on the dashboard."
+      //
+      // Behaviour:
+      //   - order has session_id → free that session's table
+      //   - order has table_number but no session → look up table by name
+      //     and free it if no OTHER active session is on it (safety check
+      //     so we don't free a table that has a fresh second guest already)
+      //   - cloud_kitchen / Online / external_platform orders → skip
+      //     (no physical table involved)
+      if (isPaid && order
+          && order.checkout_mode !== 'cloud_kitchen'
+          && !order.external_platform
+          && order.table_number !== 'Online') {
+        try {
+          if (order.session_id) {
+            await freeTableForSession(db, { session_id: order.session_id, reason: 'order-paid' });
+          } else if (order.table_number && order.table_number !== 'Online') {
+            const tableRow: any = await db.get(
+              "SELECT id FROM tables WHERE id = ? OR name = ? LIMIT 1",
+              [order.table_number, order.table_number]
+            );
+            if (tableRow?.id) {
+              // Safety: don't free if another open session exists on this table
+              const otherActive: any = await db.get(
+                `SELECT 1 FROM table_sessions
+                  WHERE table_id = ?
+                    AND status IN ('open', 'bill_requested')
+                    AND deleted_at IS NULL
+                  LIMIT 1`,
+                [tableRow.id]
+              );
+              if (!otherActive) {
+                const r: any = await db.run(
+                  "UPDATE tables SET status='AVAILABLE' WHERE id = ? AND status != 'AVAILABLE'",
+                  [tableRow.id]
+                );
+                if (Number(r?.changes || 0) > 0) {
+                  console.log(`[order-payment] table ${tableRow.id} -> AVAILABLE (order ${order.id} paid, no session)`);
+                }
+              }
+            }
+          }
+        } catch (freeErr) {
+          console.error(`[order-payment] FAILED to free table after paying order ${order.id}:`, freeErr);
+        }
+      }
+
       res.json({ success: true });
 
       // Notify owner on payment received (non-blocking)
@@ -24446,7 +24560,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'cmd-center-fix-table-occupied-end-to-end',
+    commit_marker: 'cmd-center-2-free-table-on-pay-plus-reconciler',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -24810,6 +24924,84 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[stale-close] Stale-session auto-close cron started — daily at 04:00 IST');
+
+  // ────────────────────────────────────────────────────────────────────
+  // CMD-CENTER-2: 10-minute table-status reconciler cron
+  // ────────────────────────────────────────────────────────────────────
+  // Self-heals two classes of drift between table_sessions and
+  // tables.status. The daily 04:00 IST sweep above closes stale sessions
+  // but only runs once a day — a stuck table can stay OCCUPIED for ~24h.
+  // This cron runs every 10 min and corrects:
+  //
+  //   Drift type A: table marked OCCUPIED but no active session.
+  //                 Cause: a /sessions/:token/close UPDATE failed silently
+  //                 (now logged, but legacy data still exists), or a session
+  //                 was hard-deleted, or staff manually closed it via SQL.
+  //                 Heal: flip table back to AVAILABLE.
+  //
+  //   Drift type B: table marked AVAILABLE (or NOT_AVAILABLE) but an
+  //                 active 'open'/'bill_requested' session points at it.
+  //                 Cause: a staff member manually flipped via the /status
+  //                 endpoint while a guest was still at the table.
+  //                 Heal: flip table back to OCCUPIED.
+  //
+  // We do NOT touch tables in 'NOT_AVAILABLE' that have no session — those
+  // are intentionally blocked by staff (e.g. broken table, reserved for VIP)
+  // and only the manual /status endpoint should change them.
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      const restaurants: any[] = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND id <> 'SYSTEM'"
+      );
+      let driftA = 0, driftB = 0;
+      for (const r of restaurants) {
+        try {
+          const db = await getTenantDb(r.id);
+          // Drift A: OCCUPIED tables with no live session
+          const a: any[] = await db.query(
+            `SELECT t.id FROM tables t
+              WHERE t.status = 'OCCUPIED'
+                AND NOT EXISTS (
+                  SELECT 1 FROM table_sessions s
+                  WHERE s.table_id = t.id
+                    AND s.status IN ('open', 'bill_requested')
+                    AND s.deleted_at IS NULL
+                )`
+          ).catch(() => [] as any[]);
+          for (const t of a) {
+            await db.run(
+              "UPDATE tables SET status='AVAILABLE' WHERE id = ? AND status = 'OCCUPIED'",
+              [t.id]
+            ).catch(() => {});
+            driftA++;
+          }
+          // Drift B: AVAILABLE tables with a live session attached
+          const b: any[] = await db.query(
+            `SELECT t.id FROM tables t
+              JOIN table_sessions s ON s.table_id = t.id
+              WHERE t.status = 'AVAILABLE'
+                AND s.status IN ('open', 'bill_requested')
+                AND s.deleted_at IS NULL`
+          ).catch(() => [] as any[]);
+          for (const t of b) {
+            await db.run(
+              "UPDATE tables SET status='OCCUPIED' WHERE id = ? AND status = 'AVAILABLE'",
+              [t.id]
+            ).catch(() => {});
+            driftB++;
+          }
+        } catch (tErr) {
+          console.warn(`[table-reconcile] tenant ${r.id} error:`, tErr);
+        }
+      }
+      if (driftA > 0 || driftB > 0) {
+        console.log(`[table-reconcile] healed ${driftA} stuck-OCCUPIED + ${driftB} missed-OCCUPY tables`);
+      }
+    } catch (err) {
+      console.error('[table-reconcile] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[table-reconcile] Reconciler cron started — every 10 min');
 
   // ─── Inventory: nightly forecast recompute (03:00 IST) ──────────────────
   // Walks every active tenant and refreshes their consumption_forecasts
