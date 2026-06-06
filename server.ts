@@ -7,6 +7,7 @@ import bcrypt from "bcryptjs";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import cookieParser from "cookie-parser";
 import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
@@ -61,6 +62,44 @@ function extractDriveId(url: string) {
   return match ? match[0] : null;
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// T1-S7 — Multer MIME whitelists (BCG audit, Tier 1 follow-up)
+// ──────────────────────────────────────────────────────────────────────────
+// Pre-S7, multer accepted ANY MIME type. A malicious actor could upload
+// .exe / .sh / .html with arbitrary content, and the server happily wrote
+// it to /uploads/ where it was statically served. Routes most at risk:
+//   • /logo, /watermark, /upi-qr — owner can upload anything
+//   • /menu/:id/upload — image-only intent, no validation
+//   • /hotel/.../id-docs — guest ID proof (KYC), should be image/PDF only
+//   • /grn/:id/upload-bill — supplier bill, image/PDF only
+//   • /inventory/receipt-ocr — same
+// All routes now reject anything outside the relevant whitelist with 415.
+const IMAGE_MIMES = new Set([
+  'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif',
+  'image/heic', 'image/heif',
+]);
+const DOC_MIMES = new Set([
+  'application/pdf',
+]);
+// "General" uploads (logos, ID docs, bills, watermarks) — image or PDF.
+const GENERAL_ALLOWED_MIMES = new Set([...IMAGE_MIMES, ...DOC_MIMES]);
+
+function _makeMimeFilter(allowed: Set<string>) {
+  return (_req: Request, file: any, cb: any) => {
+    const mime = String(file?.mimetype || '').toLowerCase();
+    if (!allowed.has(mime)) {
+      // multer treats a thrown error as a rejection; we propagate via
+      // cb(null, false) and stash a marker so the error handler returns
+      // a proper 415. The route handler can also inspect req.file for null.
+      const err: any = new Error(`Unsupported file type: ${mime || 'unknown'}. Allowed: ${[...allowed].join(', ')}`);
+      err.code = 'UNSUPPORTED_MIME';
+      err.statusCode = 415;
+      return cb(err);
+    }
+    cb(null, true);
+  };
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadDir = path.join(process.cwd(), "public", "uploads");
@@ -70,10 +109,18 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
+    // T1-S7 — also sanitise the filename. Original code embedded raw
+    // user-supplied bytes which is fine for the filesystem but ugly when
+    // browsers later download "weird name.exe.jpg" via Content-Disposition.
+    const safe = String(file.originalname || 'upload').replace(/[^\w.\-]+/g, '_').slice(0, 120);
+    cb(null, `${Date.now()}-${safe}`);
   }
 });
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 },           // 10 MB cap
+  fileFilter: _makeMimeFilter(GENERAL_ALLOWED_MIMES),
+});
 
 // Menu image uploads use in-memory multer so the buffer can go either to
 // Cloudflare R2 (when UPLOAD_BACKEND=r2) or fall back to local disk. The
@@ -81,7 +128,9 @@ const upload = multer({ storage });
 // above — they're low-volume and stay on the VPS filesystem.
 const menuImageUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB cap (modern phone photos often exceed 5 MB)
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB cap (modern phone photos often exceed 5 MB)
+  // T1-S7 — image-only filter. Menus never need PDF uploads.
+  fileFilter: _makeMimeFilter(IMAGE_MIMES),
 });
 
 // ── Cloudflare R2 client (lazy-initialised on first use) ─────────────────────
@@ -2103,12 +2152,48 @@ function daysPastDue(row: { subscription_due_date?: any } | null | undefined): n
   return Math.max(0, Math.round((today.getTime() - due.getTime()) / 86400000));
 }
 
+// T1-S8 — cookie name used for the HttpOnly JWT. Underscored prefix `as_`
+// (atithi-setu) avoids colliding with any tenant-defined cookie.
+const JWT_COOKIE_NAME = 'as_jwt';
+
+// T1-S8 — set the HttpOnly JWT cookie after login. Idempotent + safe to
+// call regardless of whether the response will also include jwt_token
+// in the JSON body (which we keep, for backward compat with the current
+// SPA). Use a 7-day cookie matching the JWT expiresIn from the sign sites.
+function _setJwtCookie(res: Response, token: string) {
+  const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
+  res.cookie(JWT_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: 'lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000,   // 7 days
+    path: '/',
+    domain: isProd ? '.atithi-setu.com' : undefined,
+  });
+}
+function _clearJwtCookie(res: Response) {
+  const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
+  res.clearCookie(JWT_COOKIE_NAME, {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: 'lax',
+    path: '/',
+    domain: isProd ? '.atithi-setu.com' : undefined,
+  });
+}
+
 // Middleware
 const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  // T1-S8 — accept the JWT from EITHER the Authorization header (legacy
+  // SPA, mobile clients, integrations) OR the HttpOnly cookie issued at
+  // login (new XSS-resistant path). Header wins if both are present so
+  // an in-flight "Authorization: Bearer …" override still works.
   const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: "No token provided" });
+  const headerToken = authHeader ? authHeader.split(" ")[1] : null;
+  const cookieToken = (req as any).cookies?.[JWT_COOKIE_NAME] || null;
+  const token = headerToken || cookieToken;
+  if (!token) return res.status(401).json({ error: "No token provided" });
 
-  const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }) as any;
     req.user = decoded;
@@ -2982,6 +3067,35 @@ async function startServer() {
   // attacker could DOS the parser with multi-GB JSON bombs.
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
+  // ─────────────────────────────────────────────────────────────────────
+  // T1-S8 — JWT cookie support (BCG audit, Tier 1 follow-up)
+  // ─────────────────────────────────────────────────────────────────────
+  // Adds cookie parsing so the authenticate middleware can read the JWT
+  // from `as_jwt` cookie OR the Authorization header. Existing clients
+  // (mobile, SPA via localStorage) keep working unchanged via the header
+  // path. New sessions ALSO get an HttpOnly Secure SameSite=Lax cookie
+  // that is NOT readable by JavaScript — XSS can no longer steal it.
+  //
+  // SameSite=Lax (not Strict) is required because tenant subdomains
+  // (manhotra-kitchen.atithi-setu.com → api.atithi-setu.com) make some
+  // requests count as cross-site under SameSite=Strict and would silently
+  // drop the cookie.
+  app.use(cookieParser());
+
+  // T1-S7 — multer error handler. Without this, a rejected upload causes
+  // express to default-render with status 500, which is misleading; the
+  // request didn't fail server-side, it was blocked by policy. Return 415
+  // with the descriptive message we stashed in fileFilter.
+  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+    if (err?.code === 'UNSUPPORTED_MIME') {
+      return res.status(415).json({ error: err.message, code: 'UNSUPPORTED_MIME' });
+    }
+    if (err?.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'File too large. Maximum size is 10 MB.', code: 'FILE_TOO_LARGE' });
+    }
+    next(err);
+  });
 
   // ─────────────────────────────────────────────────────────────────────
   // MARKETING-DOMAIN REDIRECT (atithi-setu.com / www.atithi-setu.com)
@@ -4932,6 +5046,20 @@ async function startServer() {
     }
   });
 
+  // T1-S8 — logout endpoint clears the HttpOnly JWT cookie. The SPA
+  // also clears localStorage, but for cookie-backed sessions this is
+  // the only place the cookie can be killed. Whitelisted from the
+  // access-revocation guard above so revoked tenants can still sign out
+  // cleanly.
+  app.post("/api/auth/logout", (_req: Request, res: Response) => {
+    _clearJwtCookie(res);
+    res.json({ success: true });
+  });
+  app.post("/api/logout", (_req: Request, res: Response) => {
+    _clearJwtCookie(res);
+    res.json({ success: true });
+  });
+
   app.post("/api/owner/test-notification", authenticate, async (req: AuthRequest, res: Response) => {
     const { eventName, data } = req.body;
     try {
@@ -5184,6 +5312,7 @@ async function startServer() {
           JWT_SECRET,
           { expiresIn: '7d' }
         );
+        _setJwtCookie(res, token);  // T1-S8 — XSS-resistant HttpOnly cookie
         return res.json({
           success: true,
           requires_setup: false,
@@ -5349,6 +5478,7 @@ async function startServer() {
       );
 
       console.log(`✅ New user created: ${maskPhone(phone)} with restaurant ${restaurantId}`);  // T1-S5
+      _setJwtCookie(res, token);  // T1-S8
       res.json({
         success: true,
         jwt_token: token,
@@ -5409,6 +5539,7 @@ async function startServer() {
         { expiresIn: '7d' }
       );
 
+      _setJwtCookie(res, token);  // T1-S8
       res.json({
         success: true,
         jwt_token: token,
@@ -5599,6 +5730,7 @@ async function startServer() {
           JWT_SECRET,
           { expiresIn: '7d' }
         );
+        _setJwtCookie(res, jwtToken);  // T1-S8
         return res.json({
           success: true,
           jwt_token: jwtToken,
@@ -5649,6 +5781,7 @@ async function startServer() {
           JWT_SECRET,
           { expiresIn: '7d' }
         );
+        _setJwtCookie(res, jwtToken);  // T1-S8
         return res.json({
           success: true,
           jwt_token: jwtToken,
@@ -6054,6 +6187,7 @@ async function startServer() {
         { expiresIn: '7d' }
       );
 
+      _setJwtCookie(res, jwtToken);  // T1-S8
       res.json({
         success: true,
         jwt_token: jwtToken,
@@ -12387,6 +12521,62 @@ async function startServer() {
       }
     }
   }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // L-2 — Min-margin guard (BCG audit, Tier 1 follow-up)
+  // ─────────────────────────────────────────────────────────────────────
+  // Reuses the same recipes+ingredients lookup that deductIngredientsForOrder
+  // uses, but sums up the COGS into a single rupee figure instead of
+  // mutating stock. Caller compares (sell_price - cogs) / sell_price to
+  // restaurants.min_margin_percent.
+  //
+  // Returns { cogs, hasRecipes }. hasRecipes=false when zero items had
+  // any recipe rows at all — in that case the caller MUST skip the
+  // check (we can't enforce margin on items with unknown cost). This
+  // matters in early-onboarding tenants who haven't loaded recipes yet.
+  async function computeOrderCogs(
+    db: DbInterface, items: any[]
+  ): Promise<{ cogs: number; hasRecipes: boolean }> {
+    if (!Array.isArray(items) || items.length === 0) return { cogs: 0, hasRecipes: false };
+    let total = 0;
+    let anyRecipe = false;
+    for (const it of items) {
+      const menuItemId = it?.id || it?.menu_item_id;
+      if (!menuItemId) continue;
+      const qty = Number(it?.quantity || 1);
+      if (!Number.isFinite(qty) || qty <= 0) continue;
+      const sizeKey = String(it?.size || 'FULL').toUpperCase();
+      const recipeRows: any[] = await db.query(
+        `SELECT DISTINCT ON (r.ingredient_id, r.size_variant)
+                r.qty_per_serving, r.unit AS recipe_unit,
+                i.unit AS ingredient_unit, i.unit_cost
+           FROM recipes r
+           JOIN ingredients i ON i.id = r.ingredient_id
+          WHERE r.menu_item_id = ?
+            AND (r.size_variant = 'BOTH' OR r.size_variant = ?)
+            AND (r.effective_from IS NULL OR r.effective_from <= NOW())
+            AND (r.effective_to   IS NULL OR r.effective_to   >  NOW())
+          ORDER BY r.ingredient_id, r.size_variant,
+                   COALESCE(r.effective_from, r.created_at) DESC`,
+        [menuItemId, sizeKey === 'HALF' ? 'HALF' : 'FULL']
+      ).catch(() => [] as any[]);
+      if (recipeRows.length === 0) continue;
+      anyRecipe = true;
+      for (const r of recipeRows) {
+        const raw = Number(r.qty_per_serving) * qty;
+        if (!Number.isFinite(raw) || raw <= 0) continue;
+        const converted = convertQty(raw, r.recipe_unit, r.ingredient_unit);
+        if (converted == null) continue;
+        total += converted * Number(r.unit_cost || 0);
+      }
+    }
+    return {
+      cogs: Math.round(total * 100) / 100,
+      hasRecipes: anyRecipe,
+    };
+  }
+  // Expose for the order POST handler (closure scope is needed).
+  (globalThis as any).__computeOrderCogs = computeOrderCogs;
 
   // Reverse a previously-deducted order. Idempotent via orders.inventory_reverted
   // flag — re-cancelling does nothing. Walks stock_movements (the source of
@@ -19952,7 +20142,18 @@ async function startServer() {
         invoice_numbering_mode, invoice_number_prefix, invoice_yearly_reset,
         // R-2 — FSSAI mandatory food-safety identifier
         fssai_license_number, fssai_license_valid_until,
+        // L-2 — min-margin floor (0 disables; otherwise % min gross margin)
+        min_margin_percent,
       } = req.body;
+      // L-2 — coerce to [0, 100]. Null/undefined = leave unchanged.
+      let safeMinMargin: number | null = null;
+      if (min_margin_percent !== undefined && min_margin_percent !== null) {
+        const m = Number(min_margin_percent);
+        if (!Number.isFinite(m) || m < 0 || m > 100) {
+          return res.status(400).json({ error: "min_margin_percent must be between 0 and 100" });
+        }
+        safeMinMargin = m;
+      }
       // R-2 — FSSAI sanity check. Real licences are 14 digits all-numeric.
       // We accept any 8-20 char alphanumeric string to avoid blocking
       // edge cases (provisional / state-issued numbers occasionally
@@ -20025,7 +20226,8 @@ async function startServer() {
           invoice_number_prefix = COALESCE(?, invoice_number_prefix),
           invoice_yearly_reset = COALESCE(?, invoice_yearly_reset),
           fssai_license_number = COALESCE(?, fssai_license_number),
-          fssai_license_valid_until = COALESCE(?, fssai_license_valid_until)
+          fssai_license_valid_until = COALESCE(?, fssai_license_valid_until),
+          min_margin_percent = COALESCE(?, min_margin_percent)
         WHERE id = ?
       `, [
         name,
@@ -20044,6 +20246,7 @@ async function startServer() {
         safeYearlyReset,
         safeFssai,
         safeFssaiValid,
+        safeMinMargin,
         req.params.id
       ]);
 
@@ -21554,6 +21757,62 @@ async function startServer() {
       const finalRoomId = room_id || roomId || null;
       const finalBookingId = booking_id || bookingId || null;
       const isChargeToRoom = String(finalPaymentMethod || '').toUpperCase() === 'CHARGE_TO_ROOM';
+
+      // ─────────────────────────────────────────────────────────────
+      // L-2 — Min-margin guard (BCG audit, Tier 1 follow-up)
+      // ─────────────────────────────────────────────────────────────
+      // Block the sale when the configured margin floor is breached
+      // (typically the cashier over-discounted, or someone hit the API
+      // with a manual sell price below the recipe cost). Owners can
+      // override per-order via body.override_min_margin=true; we log
+      // the override so the audit trail captures who waived it.
+      //
+      // We tolerate two real-world conditions silently:
+      //   1. min_margin_percent = 0 → guard disabled (default)
+      //   2. items have no recipes → COGS unknown → can't check
+      // Both fall through to the existing INSERT.
+      try {
+        const restMargin: any = await centralDb.get(
+          "SELECT min_margin_percent FROM restaurants WHERE id = ?",
+          [req.params.id]
+        );
+        const minMarginPct = Number(restMargin?.min_margin_percent || 0);
+        if (minMarginPct > 0) {
+          const override = !!req.body?.override_min_margin;
+          const cogsHelper = (globalThis as any).__computeOrderCogs;
+          if (cogsHelper) {
+            const { cogs, hasRecipes } = await cogsHelper(db, items);
+            if (hasRecipes && cogs > 0 && Number(finalTotalAmount) > 0) {
+              const sell = Number(finalTotalAmount);
+              const marginPct = ((sell - cogs) / sell) * 100;
+              if (marginPct < minMarginPct) {
+                if (!override) {
+                  return res.status(409).json({
+                    error: `Sale rejected — margin guard. ` +
+                           `Estimated COGS ₹${cogs.toFixed(2)} on a sell price of ₹${sell.toFixed(2)} ` +
+                           `yields ${marginPct.toFixed(1)}% margin, below the configured floor of ${minMarginPct}%. ` +
+                           `Confirm by re-submitting with override_min_margin=true (this will be logged).`,
+                    code: 'MIN_MARGIN_BREACH',
+                    margin_percent: Math.round(marginPct * 100) / 100,
+                    min_margin_percent: minMarginPct,
+                    cogs,
+                    sell_price: sell,
+                  });
+                }
+                const _actor = (req as any).user || {};
+                console.warn(
+                  `[L-2-override] tenant=${req.params.id} actor=${_actor.id || 'anon'} ` +
+                  `role=${_actor.role || '-'} sell=${sell.toFixed(2)} cogs=${cogs.toFixed(2)} ` +
+                  `margin=${marginPct.toFixed(1)}% floor=${minMarginPct}%`
+                );
+              }
+            }
+          }
+        }
+      } catch (mgErr) {
+        // Don't block the sale on a guard malfunction — log and continue.
+        console.warn(`[L-2] margin guard failed for ${req.params.id}:`, mgErr);
+      }
 
       // M-1 — snapshot currency + tax labels at insert. Reprint stability
       // even if the tenant changes their currency or tax template later.
@@ -24006,7 +24265,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tier3-regulations-dpdp-fssai-irn',
+    commit_marker: 'tier4-mime-cookies-margin-final-wrap',
     code_features: [
       'subscription-billing',
       'read-only-mode',

@@ -189,6 +189,16 @@ export async function initDb() {
     -- default; tenant opts in via Settings → Tax & Currency.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS round_invoice_to_rupee INT DEFAULT 0;
 
+    -- L-2 (BCG follow-up) — Min-margin guard. When > 0, the order POST
+    -- and /invoices/manual POST handlers compute the line-level COGS via
+    -- the existing recipes + ingredients.unit_cost data and reject the
+    -- sale if the resulting margin falls below this threshold. The
+    -- expected use-case: catch a cashier who applies a 90% discount on
+    -- an item that only carries a 30% gross margin. Set to 0 (default)
+    -- to disable. Caller can override per-order by passing
+    -- override_min_margin=true in the body — the override is logged.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS min_margin_percent DOUBLE PRECISION DEFAULT 0;
+
     -- R-2 (BCG follow-up) — FSSAI license. Mandatory for every food
     -- business in India per Sec 31 of the FSS Act, 2006. Restaurants
     -- must display the 14-digit licence number on every invoice/bill.
