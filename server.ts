@@ -20542,6 +20542,22 @@ async function startServer() {
       const { payment_method } = req.body;
       const db = await getTenantDb(req.params.id);
 
+      // BILL-FIX (BCG follow-up): defensive idempotent ALTERs for every
+      // table_sessions column the UPDATE below references. If a previous
+      // _initTenantDb call partially aborted before these legacy columns
+      // were added (lines 913-921 in db.ts), the UPDATE here would 500
+      // and the customer's bill request silently fails. This block
+      // belts-and-braces the gap. Same pattern as /orders POST handler-head.
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS discount_amount DOUBLE PRECISION DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS service_charge_percent DOUBLE PRECISION DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS gst_percent DOUBLE PRECISION DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1").catch(() => {});
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS final_amount DOUBLE PRECISION DEFAULT 0").catch(() => {});
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'").catch(() => {});
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT").catch(() => {});
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS bill_requested_at TIMESTAMP").catch(() => {});
+      await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS bill_amount DOUBLE PRECISION DEFAULT 0").catch(() => {});
+
       // Idempotent: accept sessions already in 'bill_requested' too. This
       // handles double-taps, customer adds-more-items-then-re-requests, and
       // network retries — any of which used to silently fail with 404 and
@@ -24277,7 +24293,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'qr-fix-orders-defensive-snapshot-migration',
+    commit_marker: 'bill-fix-defensive-migrations-end-to-end',
     code_features: [
       'subscription-billing',
       'read-only-mode',

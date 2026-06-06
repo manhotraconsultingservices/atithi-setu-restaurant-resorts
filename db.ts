@@ -889,15 +889,25 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // and forensics had to fish JSON out of the audit table to answer "what
   // was billed?". Soft-delete keeps the row intact, sets the marker columns,
   // and the list/aggregate queries filter `deleted_at IS NULL`.
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_by_user_id TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_by_role TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_reason TEXT");
+  // QR/BILL-FIX (BCG follow-up): wrap every ALTER in .catch(() => {}) so a
+  // transient failure on one migration step (e.g. PG concurrency lock, brief
+  // search_path glitch) doesn't abort the rest of _initTenantDb. Without
+  // these guards, a single throw here aborted the whole function — which
+  // meant ALL downstream ALTERs (lines 913+ legacy columns, line 1706 M-1
+  // snapshots, line 1717 M-4 ECO, line 1733 R-3 IRN, the entire DPDP table
+  // block) never ran. Production symptom: /menu worked because the menu
+  // table was created in the upstream CREATE TABLE block, but /orders POST
+  // and /request-bill UPDATE failed because their referenced columns were
+  // never added.
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_by_user_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_by_role TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_reason TEXT").catch(() => {});
   await db.exec("CREATE INDEX IF NOT EXISTS idx_orders_active ON orders (created_at DESC) WHERE deleted_at IS NULL").catch(() => {});
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP");
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_by_user_id TEXT");
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_by_role TEXT");
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_reason TEXT");
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_by_user_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_by_role TEXT").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_reason TEXT").catch(() => {});
 
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS default_hours DOUBLE PRECISION DEFAULT 8");
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS login_id TEXT");
