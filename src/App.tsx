@@ -10059,10 +10059,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
         // Per-tab visibility — keep the grandfathering hacks that the
         // old flat list used, just in one place now.
-        const isVisible = (id: string) => {
-          if (['ROOMS', 'SERVICES', 'SERVICE_REQUESTS'].includes(id)) return true;
-          return isTabVisible(id, allowedTabs);
-        };
+        //
+        // RBAC-3: removed the previous short-circuit that ALWAYS returned
+        // true for ROOMS / SERVICES / SERVICE_REQUESTS regardless of the
+        // Staff Access matrix. That short-circuit silently overrode the
+        // owner's intent ("hide this tab from MAINTENANCE") and made the
+        // matrix UI misleading. Now isTabVisible is consulted uniformly
+        // for every tab — what the owner checks in Settings is what
+        // staff actually see.
+        const isVisible = (id: string) => isTabVisible(id, allowedTabs);
 
         return (
           <>
