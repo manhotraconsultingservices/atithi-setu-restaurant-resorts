@@ -21634,6 +21634,18 @@ async function startServer() {
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1");
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'");
 
+      // QR-FIX (BCG follow-up): defensive idempotent ALTERs for snapshot
+      // columns the M-1 INSERT below references. The tenant-init migration in
+      // db.ts ships these too — but the in-memory cache means that if
+      // _initTenantDb partially ran (e.g. an upstream statement transiently
+      // failed before reaching the M-1 block) the cached DbInterface is
+      // returned anyway and the missing columns surface here as
+      // "Failed to create order". This block belts-and-braces the gap.
+      // Same pattern as the gst_percent / apply_gst / invoice_status block
+      // above (Phase H tenants who never hit /invoices/manual).
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS currency_snapshot TEXT").catch(() => {});
+      await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_label_snapshot TEXT").catch(() => {});
+
       // Resolve restaurant checkout_mode (body overrides, then DB, then default)
       let checkoutMode = bodyCheckoutMode;
       if (!checkoutMode) {
@@ -24265,7 +24277,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tier4-mime-cookies-margin-final-wrap',
+    commit_marker: 'qr-fix-orders-defensive-snapshot-migration',
     code_features: [
       'subscription-billing',
       'read-only-mode',
