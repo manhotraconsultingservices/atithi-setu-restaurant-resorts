@@ -844,10 +844,21 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
 
     const cfg = await loadHotelTaxConfig(restaurantId);
     const folioId = `F-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    // M-1 — snapshot currency + tax labels on folio creation. Same
+    // reprint-stability guarantee as orders. Stored once on insert; the
+    // recompute path (recomputeFolioTotals) never overwrites these.
+    let _folioCurrency: string | null = null;
+    let _folioTaxLabel: string | null = null;
+    try {
+      const _fsnap = await (globalThis as any).__loadSnapshotCtx?.(restaurantId);
+      _folioCurrency = _fsnap?.currency_snapshot || null;
+      _folioTaxLabel = _fsnap?.tax_label_snapshot || null;
+    } catch { /* non-fatal */ }
     await tenantDb.run(
-      `INSERT INTO folios (id, booking_id, room_id, status, subtotal, gst_amount, grand_total)
-       VALUES (?, ?, ?, 'open', 0, 0, 0)`,
-      [folioId, booking.id, booking.room_id]
+      `INSERT INTO folios (id, booking_id, room_id, status, subtotal, gst_amount, grand_total,
+                           currency_snapshot, tax_label_snapshot)
+       VALUES (?, ?, ?, 'open', 0, 0, 0, ?, ?)`,
+      [folioId, booking.id, booking.room_id, _folioCurrency, _folioTaxLabel]
     );
     // Sprint C-RP — per-night rate lookup. Each night may have a
     // different effective rate (season override / weekend rate / type-
@@ -928,8 +939,24 @@ async function postServiceChargeToFolio(restaurantId: string, sr: any): Promise<
   const qty = Number(sr.quantity) || 1;
   const amount = Number(sr.charge_amount) || 0;
   const unitPrice = qty > 0 ? amount / qty : amount;
-  // Services typically 18% GST in India
-  const gstPct = 18;
+  // M-3 (BCG follow-up) — slab-aware GST for hotel ancillary services.
+  // Old code hard-coded 18%. That's correct only for "specified premises"
+  // (any room over the slab-2 cap, typically ₹7,500/night). For
+  // non-specified premises (no high-tariff rooms), ancillary services
+  // follow the same 5% rule as F&B per the GST Council clarification.
+  // We use the existing hotel_gst_slab2_max threshold + a probe query
+  // identical to postOrderToFolio above to stay consistent across the
+  // module — when this tenant has any room over the cap, services are
+  // taxed at 18%; otherwise 5%.
+  let gstPct = 5;
+  try {
+    const cfg = await loadHotelTaxConfig(restaurantId);
+    const high: any = await tenantDb.get(
+      "SELECT 1 AS specified FROM rooms WHERE base_rate > ? LIMIT 1",
+      [cfg.slab2Max]
+    );
+    if (high?.specified) gstPct = 18;
+  } catch { /* fall back to 5% */ }
   const gstAmt = amount * gstPct / 100;
   await tenantDb.run(
     `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, source_id)
@@ -9241,6 +9268,65 @@ async function startServer() {
     };
   }
 
+  // ─── M-1 — snapshot context helper (BCG follow-up) ───────────────────
+  // Lifts the tenant's currency_code + active tax labels into a small
+  // bundle that callers stamp onto orders / folios at INSERT time. Once
+  // populated, reprints use the snapshot instead of the tenant's CURRENT
+  // settings — so an order placed in INR continues to render in INR even
+  // if the tenant later switches to USD, and an invoice issued under
+  // "GST" doesn't suddenly say "VAT" because of a template change.
+  //
+  // Cached per request would be nice but per-call is fine — both columns
+  // are <100B and the lookup is O(1) on tenant id. Cost: ~2 ms per write.
+  type SnapshotCtx = {
+    currency_snapshot: string | null;
+    tax_label_snapshot: string | null;
+  };
+  async function _loadSnapshotCtx(tenantId: string): Promise<SnapshotCtx> {
+    try {
+      const row: any = await centralDb.get(
+        "SELECT currency_code, tax_template_id FROM restaurants WHERE id = ?",
+        [tenantId]
+      );
+      const currency = String(row?.currency_code || 'INR');
+      const configs = await _loadTaxConfig(tenantId, row?.tax_template_id || 'IN_GST');
+      const active = (configs || []).filter(c =>
+        Number(c.enabled || 1) === 1 &&
+        Number(c.rate_percent || 0) > 0 &&
+        !isServiceChargeTaxRow(c)
+      );
+      // Snapshot format mirrors what _taxLabelSnapshot emits for invoice
+      // line keys: "<id>:<rate>:0" (amount unknown at insert time → 0).
+      // The downstream reprint uses ONLY the labels — amounts are reread
+      // from the source columns (gst_amount, etc.).
+      const labelPart = active.map(c =>
+        `${(c as any).id || (c as any).label || 'TAX'}:${Number((c as any).rate_percent || 0).toFixed(2)}`
+      ).join('|') || null;
+      return { currency_snapshot: currency, tax_label_snapshot: labelPart };
+    } catch (err) {
+      console.warn(`[snapshot-ctx] failed for ${tenantId}:`, err);
+      return { currency_snapshot: null, tax_label_snapshot: null };
+    }
+  }
+
+  // ─── M-4 — Sec 9(5) ECO classification (BCG follow-up) ───────────────
+  // Channels where GST liability is on the ECO (e-commerce operator), not
+  // the restaurant, per CGST Sec 9(5) — Swiggy, Zomato, ONDC seller-app,
+  // UrbanPiper aggregator marketplace mode. Direct-rate contracts (where
+  // the restaurant collects payment themselves) are NOT sec-9(5); those
+  // still go through normal output liability.
+  //
+  // Source of truth: the channel id from external_platform. Keep this
+  // list in sync with integrations/types.ts ALL_CHANNEL_IDS — currently
+  // SWIGGY, ZOMATO, ONDC are all marketplace-mode aggregators by default.
+  const SEC_9_5_ECO_PLATFORMS = new Set(['SWIGGY', 'ZOMATO', 'ONDC']);
+  function _isEcoSec95(externalPlatform: string | null | undefined): { is_eco: 0 | 1; eco_platform: string | null } {
+    const p = String(externalPlatform || '').toUpperCase();
+    if (!p) return { is_eco: 0, eco_platform: null };
+    if (SEC_9_5_ECO_PLATFORMS.has(p)) return { is_eco: 1, eco_platform: p };
+    return { is_eco: 0, eco_platform: null };
+  }
+
   // Expose to closures defined later in this file (order creation,
   // folio recompute). Wrapping them in module-level refs avoids circular
   // typing — the helpers are referenced via these inside other handlers.
@@ -9249,6 +9335,8 @@ async function startServer() {
   (globalThis as any).__taxLabelSnapshot = _taxLabelSnapshot;
   (globalThis as any).__TAX_PRESETS = TAX_PRESETS;
   (globalThis as any).__COUNTRY_DEFAULTS = COUNTRY_DEFAULTS;
+  (globalThis as any).__loadSnapshotCtx = _loadSnapshotCtx;
+  (globalThis as any).__isEcoSec95 = _isEcoSec95;
 
   // Preview endpoint — frontend can call this to get the exact same totals
   // the server would compute when creating the invoice. Mirrors what
@@ -10948,6 +11036,9 @@ async function startServer() {
             }
           } catch {}
 
+          // M-1 + M-4 — snapshot currency/tax labels and classify Sec 9(5) ECO.
+          const _seedSnap = await _loadSnapshotCtx(req.params.id);
+          const _seedEco = _isEcoSec95(channel);
           try {
             await db.run(`
               INSERT INTO orders
@@ -10957,12 +11048,16 @@ async function startServer() {
                  customer_address_line1, customer_address_line2, customer_city, customer_pincode, customer_landmark,
                  external_platform, external_order_id, external_id_hash, external_payload,
                  commission_amount, net_payout_amount, gst_collected_by,
+                 currency_snapshot, tax_label_snapshot,
+                 is_eco_paid, eco_platform,
                  created_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'cloud_kitchen', 1, ?, ?,
                       ?, ?, 'PRINTED',
                       ?, ?, ?, ?, ?,
                       ?, ?, ?, ?,
                       ?, ?, ?,
+                      ?, ?,
+                      ?, ?,
                       ?)
             `, [
               orderId,
@@ -10990,7 +11085,11 @@ async function startServer() {
               JSON.stringify({ mock: true, generated_by: 'seed-mock-orders', generated_at: new Date().toISOString() }),
               commission,
               netPayout,
-              'PLATFORM',
+              _seedEco.is_eco ? 'PLATFORM' : 'PLATFORM',
+              _seedSnap.currency_snapshot,
+              _seedSnap.tax_label_snapshot,
+              _seedEco.is_eco,
+              _seedEco.eco_platform,
               placedAt.toISOString(),
             ]);
             inserted.push({ id: orderId, external_order_id: externalOrderId, channel, status, total });
@@ -12715,6 +12814,82 @@ async function startServer() {
     } catch (err) {
       console.error('Period summary error:', err);
       res.status(500).json({ error: 'Failed to compute period summary' });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // M-4 — Sec 9(5) ECO GST report (BCG follow-up)
+  // ─────────────────────────────────────────────────────────────────────
+  // Restaurants supplying through e-commerce operators (Swiggy / Zomato /
+  // ONDC marketplace seller-apps) have GST liability shifted to the ECO
+  // per CGST Sec 9(5). For their own GSTR-1 filing, the restaurant must
+  // EXCLUDE this output liability — otherwise they double-pay. This
+  // endpoint splits revenue + GST into:
+  //   • Restaurant-side (regular output liability — goes on GSTR-1)
+  //   • ECO-paid (sec 9(5) — declared separately, not added to liability)
+  // Owner downloads this monthly and hands it to their CA.
+  app.get("/api/restaurant/:id/analytics/eco-gst-report", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      if (!start || !end) return res.status(400).json({ error: 'start and end (YYYY-MM-DD) required' });
+      const db = await getTenantDb(req.params.id);
+      const restaurantSide: any = await db.get(
+        `SELECT COUNT(*) AS orders,
+                COALESCE(SUM(total_amount), 0) AS revenue,
+                COALESCE(SUM(gst_amount), 0) AS gst
+           FROM orders
+          WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
+            AND COALESCE(is_eco_paid, 0) = 0
+            AND deleted_at IS NULL
+            AND status NOT IN ('CANCELLED')`,
+        [start, end]
+      ).catch(() => null);
+      // Per-ECO breakdown so the owner can reconcile platform-by-platform
+      // against the monthly statements Swiggy / Zomato send.
+      const ecoBreakdown: any[] = await db.query(
+        `SELECT eco_platform AS platform,
+                COUNT(*) AS orders,
+                COALESCE(SUM(total_amount), 0) AS revenue,
+                COALESCE(SUM(gst_amount), 0) AS gst
+           FROM orders
+          WHERE DATE(created_at) >= ? AND DATE(created_at) <= ?
+            AND is_eco_paid = 1
+            AND deleted_at IS NULL
+            AND status NOT IN ('CANCELLED')
+          GROUP BY eco_platform
+          ORDER BY revenue DESC`,
+        [start, end]
+      ).catch(() => []);
+      const ecoTotals = ecoBreakdown.reduce((acc: any, r: any) => ({
+        orders: acc.orders + Number(r.orders || 0),
+        revenue: acc.revenue + Number(r.revenue || 0),
+        gst: acc.gst + Number(r.gst || 0),
+      }), { orders: 0, revenue: 0, gst: 0 });
+      res.json({
+        period: { start, end },
+        restaurant_side: {
+          orders: Number(restaurantSide?.orders || 0),
+          revenue: Math.round(Number(restaurantSide?.revenue || 0) * 100) / 100,
+          gst: Math.round(Number(restaurantSide?.gst || 0) * 100) / 100,
+          note: 'Goes on the restaurant GSTR-1 as normal output liability',
+        },
+        eco_sec_9_5: {
+          orders: ecoTotals.orders,
+          revenue: Math.round(ecoTotals.revenue * 100) / 100,
+          gst: Math.round(ecoTotals.gst * 100) / 100,
+          per_platform: ecoBreakdown.map((r: any) => ({
+            platform: r.platform,
+            orders: Number(r.orders || 0),
+            revenue: Math.round(Number(r.revenue || 0) * 100) / 100,
+            gst: Math.round(Number(r.gst || 0) * 100) / 100,
+          })),
+          note: 'GST paid by the e-commerce operator under Sec 9(5). Declared separately — do NOT add to output liability.',
+        },
+      });
+    } catch (err: any) {
+      console.error('ECO GST report error:', err);
+      res.status(500).json({ error: 'Failed to compute ECO GST report' });
     }
   });
 
@@ -18105,7 +18280,8 @@ async function startServer() {
                 hotel_gst_slab2_max, hotel_gst_slab2_rate,
                 hotel_gst_slab3_rate,
                 hotel_service_charge_percent,
-                hotel_require_id_at_checkin
+                hotel_require_id_at_checkin,
+                round_invoice_to_rupee
            FROM restaurants WHERE id = ?`,
         [req.params.id]
       );
@@ -18124,6 +18300,8 @@ async function startServer() {
         service_charge_percent: r?.hotel_service_charge_percent ?? 0,
         // Req 1b — pre-check-in ID gate (default ON)
         require_id_at_checkin:  Number(r?.hotel_require_id_at_checkin ?? 1) === 1,
+        // M-6 — round-off opt-in (default OFF)
+        round_invoice_to_rupee: Number(r?.round_invoice_to_rupee ?? 0) === 1,
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch hotel settings" });
@@ -18172,6 +18350,10 @@ async function startServer() {
       const requireIdAtCheckin = b.require_id_at_checkin == null
         ? null
         : (b.require_id_at_checkin ? 1 : 0);
+      // M-6 — round-to-rupee opt-in. Same null-means-unchanged semantics.
+      const roundToRupee = b.round_invoice_to_rupee == null
+        ? null
+        : (b.round_invoice_to_rupee ? 1 : 0);
 
       await centralDb.run(
         `UPDATE restaurants
@@ -18186,11 +18368,13 @@ async function startServer() {
                 hotel_gst_slab2_rate         = COALESCE(?, hotel_gst_slab2_rate),
                 hotel_gst_slab3_rate         = COALESCE(?, hotel_gst_slab3_rate),
                 hotel_service_charge_percent = COALESCE(?, hotel_service_charge_percent),
-                hotel_require_id_at_checkin  = COALESCE(?, hotel_require_id_at_checkin)
+                hotel_require_id_at_checkin  = COALESCE(?, hotel_require_id_at_checkin),
+                round_invoice_to_rupee       = COALESCE(?, round_invoice_to_rupee)
           WHERE id = ?`,
         [minStay ?? 1, maxStay, refundFullDays, refundPartial, lateTime,
          slab1Max, slab1Rate, slab2Max, slab2Rate, slab3Rate, svcPct,
          requireIdAtCheckin,
+         roundToRupee,
          req.params.id]
       );
       res.json({ success: true });
@@ -18356,6 +18540,9 @@ async function startServer() {
           currency_symbol: hotel.currency_symbol || '₹',
           locale:          hotel.locale || 'en-IN',
         },
+        // M-6 — opt-in round-off line. Off by default (preserves byte-identical
+        // PDFs for tenants who haven't migrated their accountant workflow).
+        roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
       });
       const safeName = (group?.name || 'group').replace(/[^a-z0-9_-]+/gi, '-');
       res.setHeader('Content-Type', 'application/pdf');
@@ -18468,6 +18655,9 @@ async function startServer() {
           currency_symbol: hotel.currency_symbol || '₹',
           locale:          hotel.locale || 'en-IN',
         },
+        // M-6 — opt-in round-off line. Off by default (preserves byte-identical
+        // PDFs for tenants who haven't migrated their accountant workflow).
+        roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
       });
 
       const safeName = String(folio.guest_name || 'guest').replace(/[^a-z0-9_-]+/gi, '-');
@@ -18557,6 +18747,9 @@ async function startServer() {
           currency_symbol: hotel.currency_symbol || '₹',
           locale:          hotel.locale || 'en-IN',
         },
+        // M-6 — opt-in round-off line. Off by default (preserves byte-identical
+        // PDFs for tenants who haven't migrated their accountant workflow).
+        roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
       });
 
       const safeName = String(folio.guest_name || 'guest').replace(/[^a-z0-9_-]+/gi, '-');
@@ -18622,13 +18815,18 @@ async function startServer() {
       }
 
       const cnId = `CN-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      // M-1 — credit notes inherit the PARENT folio's snapshot so the
+      // reversal renders in the same currency and tax labels as the
+      // original sale, even if the tenant later switched currency.
       await tenantDb.run(
         `INSERT INTO folios
-         (id, booking_id, room_id, status, subtotal, gst_amount, service_charge, discount, grand_total, payment_method, settled_at, doc_type, parent_folio_id, reason)
-         VALUES (?, ?, ?, 'settled', ?, ?, ?, ?, ?, ?, NOW(), 'CREDIT_NOTE', ?, ?)`,
+         (id, booking_id, room_id, status, subtotal, gst_amount, service_charge, discount, grand_total, payment_method, settled_at, doc_type, parent_folio_id, reason,
+          currency_snapshot, tax_label_snapshot)
+         VALUES (?, ?, ?, 'settled', ?, ?, ?, ?, ?, ?, NOW(), 'CREDIT_NOTE', ?, ?, ?, ?)`,
         [cnId, parent.booking_id, parent.room_id,
          parent.subtotal, parent.gst_amount, parent.service_charge || 0, parent.discount || 0, parent.grand_total,
-         parent.payment_method || null, parent.id, reason || 'Refund / cancellation']
+         parent.payment_method || null, parent.id, reason || 'Refund / cancellation',
+         parent.currency_snapshot || null, parent.tax_label_snapshot || null]
       );
       // Copy entries (they'll be rendered with a minus sign on the PDF via isCreditNote)
       const parentEntries: any[] = await tenantDb.query("SELECT * FROM folio_entries WHERE folio_id = ?", [parent.id]);
@@ -19950,14 +20148,17 @@ async function startServer() {
       // invoice prints the right amount on reprint. Legacy gst_percent /
       // apply_gst stay as written for backward-compat readers, but the
       // canonical tax breakdown lives in tax_label_snapshot.
+      // M-1 — capture currency snapshot alongside the existing tax label snapshot.
+      const _manSnap = await _loadSnapshotCtx(req.params.id);
       await db.run(
         `INSERT INTO orders (id, table_number, customer_name, customer_phone, items,
                              total_amount, discount_amount, service_charge_percent,
                              gst_percent, apply_gst, invoice_number,
-                             tax_label_snapshot, loyalty_redemption_amount,
+                             tax_label_snapshot, currency_snapshot,
+                             loyalty_redemption_amount,
                              loyalty_tier_name, loyalty_discount_percent,
                              status, payment_status, invoice_status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', 'PENDING', 'DRAFT', NOW())`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', 'PENDING', 'DRAFT', NOW())`,
         [id, reference || 'Manual', customer_name || '', customer_phone || '',
          JSON.stringify(items || []),
          totals.grandTotal,
@@ -19972,6 +20173,7 @@ async function startServer() {
          totals.taxLines.length > 0 ? 1 : (apply_gst ? 1 : 0),
          invoiceNumber,
          totals.taxLabelSnapshot,
+         _manSnap.currency_snapshot,
          totals.loyaltyDiscount,
          totals.loyalty?.tier_name || null,
          totals.loyalty?.discount_percent || null,
@@ -20560,14 +20762,20 @@ async function startServer() {
       const finalBookingId = booking_id || bookingId || null;
       const isChargeToRoom = String(finalPaymentMethod || '').toUpperCase() === 'CHARGE_TO_ROOM';
 
+      // M-1 — snapshot currency + tax labels at insert. Reprint stability
+      // even if the tenant changes their currency or tax template later.
+      const _snap = await ((globalThis as any).__loadSnapshotCtx
+        ? (globalThis as any).__loadSnapshotCtx(req.params.id)
+        : Promise.resolve({ currency_snapshot: null, tax_label_snapshot: null }));
       await db.run(`
         INSERT INTO orders
           (id, table_number, items, total_amount, gst_amount, status, customer_name, customer_phone,
            customer_email, payment_method, session_id, checkout_mode, round_number, kitchen_status, invoice_number,
            gst_percent, apply_gst, invoice_status,
            customer_address_line1, customer_address_line2, customer_city, customer_pincode, customer_landmark,
-           room_id, booking_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           room_id, booking_id,
+           currency_snapshot, tax_label_snapshot)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         id,
         finalTableNumber || null,
@@ -20594,6 +20802,8 @@ async function startServer() {
         finalLandmark,
         finalRoomId,
         finalBookingId,
+        _snap.currency_snapshot,
+        _snap.tax_label_snapshot,
       ]);
 
       // Sprint RS — post to hotel folio if this is a room-service charge.
@@ -20936,6 +21146,13 @@ async function startServer() {
       }
     } catch { /* defaults remain 0 */ }
 
+    // M-1 + M-4 — snapshot currency/tax + classify Sec 9(5) ECO. The
+    // gst_collected_by hint from the adapter already tells us PLATFORM
+    // vs RESTAURANT, but is_eco_paid is the canonical column that GST
+    // analytics consults — adapters can change names without breaking
+    // analytics if we store the platform code here too.
+    const _ciSnap = await _loadSnapshotCtx(restaurantId);
+    const _ciEco = _isEcoSec95(opts.external_platform);
     await db.run(`
       INSERT INTO orders
         (id, table_number, items, total_amount, gst_amount, status, customer_name, customer_phone,
@@ -20943,12 +21160,14 @@ async function startServer() {
          gst_percent, apply_gst, invoice_status,
          customer_address_line1, customer_address_line2, customer_city, customer_pincode, customer_landmark,
          external_platform, external_order_id, external_id_hash, external_payload,
-         commission_amount, net_payout_amount, gst_collected_by, rider_name, rider_phone)
+         commission_amount, net_payout_amount, gst_collected_by, rider_name, rider_phone,
+         currency_snapshot, tax_label_snapshot, is_eco_paid, eco_platform)
       VALUES (?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, NULL, 'cloud_kitchen', 1, 'queued', ?,
               ?, ?, 'PRINTED',
               ?, ?, ?, ?, ?,
               ?, ?, ?, ?,
-              ?, ?, ?, ?, ?)
+              ?, ?, ?, ?, ?,
+              ?, ?, ?, ?)
     `, [
       id,
       `Online (${opts.external_platform})`,
@@ -20976,6 +21195,10 @@ async function startServer() {
       opts.gst_collected_by,
       opts.rider_name,
       opts.rider_phone,
+      _ciSnap.currency_snapshot,
+      _ciSnap.tax_label_snapshot,
+      _ciEco.is_eco,
+      _ciEco.eco_platform,
     ]);
 
     // Fire-and-forget inventory deduction (matches public POST behaviour)
@@ -22990,7 +23213,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tier1-security-and-revenue-hardening',
+    commit_marker: 'tier2-medium-severity-followups',
     code_features: [
       'subscription-billing',
       'read-only-mode',

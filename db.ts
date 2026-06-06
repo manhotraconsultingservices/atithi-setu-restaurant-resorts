@@ -181,6 +181,13 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS currency_symbol TEXT DEFAULT '₹';
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS locale TEXT DEFAULT 'en-IN';
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS tax_template_id TEXT DEFAULT 'IN_GST';
+
+    -- M-6 — Optional round-off line on invoices (BCG follow-up). When
+    -- enabled, the invoice PDF emits an explicit "Round-off (±0.XX)"
+    -- row so the grand total ends in .00 — Indian accountants expect
+    -- this convention and reconcile their ledgers against it. Off by
+    -- default; tenant opts in via Settings → Tax & Currency.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS round_invoice_to_rupee INT DEFAULT 0;
     -- Phase F2 (Customer Experience v2) — feedback settings.
     --   auto_feedback_request_enabled    0 (default) = no auto-send. Owner
     --                                    must opt in via Settings.
@@ -1642,6 +1649,18 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // existing rows have NULL, code falls back to the live tenant settings.
   await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS currency_snapshot TEXT`).catch(() => {});
   await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_label_snapshot TEXT`).catch(() => {});
+
+  // M-4 — Sec 9(5) ECO GST tracking. When an order arrives via an
+  // e-commerce operator (Swiggy / Zomato / ONDC / UrbanPiper marketplace
+  // mode), GST liability shifts to the ECO per CGST Sec 9(5). The
+  // restaurant must EXCLUDE these from output liability — so we mark the
+  // row at insert time and surface a separate analytics line. eco_platform
+  // duplicates external_platform but lives independently so a future
+  // platform that ISN'T sec-9(5) (e.g. direct-rate Swiggy aggregator
+  // contract) can be exempted without renaming the channel.
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_eco_paid INT DEFAULT 0`).catch(() => {});
+  await db.exec(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS eco_platform TEXT`).catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_eco ON orders (eco_platform, created_at DESC) WHERE is_eco_paid = 1`).catch(() => {});
 
   // ─────────────────────────────────────────────────────────────────────
   // STAFF ROSTER + TIMESHEET (Phase 3)

@@ -33628,6 +33628,55 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
     return sum + items.reduce((s: number, it: any) => s + Number(it.price || 0) * Number(it.quantity || 1), 0);
   }, 0);
 
+  // ── M-2 (BCG follow-up) — tax_config-aware totals via server preview ──
+  // Before M-2: this modal computed `gstAmt = taxable × gstPct / 100` with
+  // a SINGLE rate. Tenants on multi-tax (GST + Cess, or US Sales + Local
+  // Tax) saw a different number here than what the server actually wrote
+  // on Generate Invoice. Now we mirror the canonical /invoices/preview-
+  // totals endpoint — the SAME helper /invoices/manual uses — so Flow C
+  // matches Flow A and Flow B to the rupee for every tenant.
+  //
+  // Falls back to local single-rate math if the network call fails (offline,
+  // slow link) so the modal stays usable. Debounced 200ms — the owner can
+  // type "12.5" into discount without firing 5 requests.
+  const [previewTaxLines, setPreviewTaxLines] = useState<Array<{ id?: string; label: string; rate: number; amount: number }>>([]);
+  const [previewTotal, setPreviewTotal]       = useState<number | null>(null);
+  const [previewLoading, setPreviewLoading]   = useState(false);
+  useEffect(() => {
+    if (rawSubtotal <= 0) {
+      setPreviewTaxLines([]); setPreviewTotal(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      setPreviewLoading(true);
+      try {
+        const params = new URLSearchParams({
+          subtotal: String(rawSubtotal),
+          discount: String(discount || 0),
+          service_charge_percent: String(svcPct || 0),
+          gst_percent: String(gstPct || 0),
+          apply_gst: applyGst ? '1' : '0',
+        });
+        if (session?.customer_phone) params.set('customer_phone', session.customer_phone);
+        const r = await fetch(
+          `/api/restaurant/${restaurantId}/invoices/preview-totals?${params.toString()}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (cancelled) return;
+        setPreviewTaxLines(Array.isArray(data?.taxLines) ? data.taxLines : []);
+        setPreviewTotal(Number(data?.grandTotal || 0));
+      } catch {
+        if (!cancelled) { setPreviewTaxLines([]); setPreviewTotal(null); }  // fall back to local
+      } finally {
+        if (!cancelled) setPreviewLoading(false);
+      }
+    }, 200);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [restaurantId, token, rawSubtotal, discount, svcPct, gstPct, applyGst, session?.customer_phone]);
+
   // Loyalty auto-apply — runs once after the session loads, only if the
   // owner hasn't already saved a discount on the session. The customer's
   // tier discount is computed against the live subtotal and dropped into
@@ -33676,8 +33725,20 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   const afterDiscount = Math.max(0, rawSubtotal - discount);
   const svcAmt        = Number((afterDiscount * svcPct / 100).toFixed(2));
   const taxable       = afterDiscount + svcAmt;
-  const gstAmt        = applyGst ? Number((taxable * gstPct / 100).toFixed(2)) : 0;
-  const grandTotal    = Number((taxable + gstAmt).toFixed(2));
+  // M-2 — prefer the server's multi-tax-aware preview when available
+  // (covers tenants on GST + Cess, US Sales + Local, etc). Falls back to
+  // the legacy single-rate math when the preview hasn't arrived or the
+  // fetch failed (offline / slow). Both flows produce identical numbers
+  // for single-rate Indian tenants — verified by the multi-flow agreement
+  // suite (verify-invoice-math-comprehensive.cjs §G).
+  const previewGstAmt = previewTaxLines.reduce((s, l) => s + Number(l.amount || 0), 0);
+  const usedServerPreview = previewTotal != null && previewTaxLines.length > 0;
+  const gstAmt        = usedServerPreview
+    ? Number(previewGstAmt.toFixed(2))
+    : (applyGst ? Number((taxable * gstPct / 100).toFixed(2)) : 0);
+  const grandTotal    = usedServerPreview
+    ? Number((previewTotal as number).toFixed(2))
+    : Number((taxable + gstAmt).toFixed(2));
   const totalRounds   = activeOrders.length;
   const totalItems    = activeOrders.reduce((n: number, o: any) => n + (Array.isArray(o.items) ? o.items.reduce((s: number, it: any) => s + Number(it.quantity || 1), 0) : 0), 0);
 
@@ -34128,15 +34189,36 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
                       className="w-32 text-right bg-[#faf7f2] border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#cc5a16]/20 disabled:opacity-30 disabled:cursor-not-allowed"
                     />
                   </div>
-                  {applyGst && gstAmt > 0 && (
-                    <div className="flex justify-between items-center text-sm text-[#9c8e85]">
-                      <span>GST @ {gstPct}%
-                        {restaurant?.gst_number && (
-                          <span className="ml-1 text-[11px]">· GSTIN: {restaurant.gst_number}</span>
-                        )}
-                      </span>
-                      <span className="font-mono">₹{gstAmt.toFixed(2)}</span>
-                    </div>
+                  {/* M-2 — when the server preview returned multiple tax lines (e.g. GST + Cess),
+                       render each as its own row so the customer sees the real breakdown
+                       instead of a single averaged "GST @ X%". Single-rate tenants
+                       continue to see the existing single-line GST display. */}
+                  {usedServerPreview && previewTaxLines.length > 1 ? (
+                    previewTaxLines.map((line, idx) => (
+                      <div key={`tax-${idx}`} className="flex justify-between items-center text-sm text-[#9c8e85]">
+                        <span>{line.label} @ {Number(line.rate || 0).toFixed(1)}%
+                          {idx === 0 && restaurant?.gst_number && (
+                            <span className="ml-1 text-[11px]">· GSTIN: {restaurant.gst_number}</span>
+                          )}
+                        </span>
+                        <span className="font-mono">₹{Number(line.amount || 0).toFixed(2)}</span>
+                      </div>
+                    ))
+                  ) : (
+                    (applyGst || usedServerPreview) && gstAmt > 0 && (
+                      <div className="flex justify-between items-center text-sm text-[#9c8e85]">
+                        <span>
+                          {usedServerPreview && previewTaxLines[0]?.label
+                            ? `${previewTaxLines[0].label} @ ${Number(previewTaxLines[0].rate || gstPct).toFixed(1)}%`
+                            : `GST @ ${gstPct}%`}
+                          {restaurant?.gst_number && (
+                            <span className="ml-1 text-[11px]">· GSTIN: {restaurant.gst_number}</span>
+                          )}
+                          {previewLoading && <span className="ml-1 text-[10px] opacity-60">…</span>}
+                        </span>
+                        <span className="font-mono">₹{gstAmt.toFixed(2)}</span>
+                      </div>
+                    )
                   )}
 
                   {/* Grand total */}

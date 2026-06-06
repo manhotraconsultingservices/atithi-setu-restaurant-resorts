@@ -52,6 +52,7 @@ const L = {
   SUBTOTAL:    { en: 'Subtotal',                 hi: 'उप-योग' },
   DISCOUNT:    { en: 'Discount',                 hi: 'छूट' },
   GRAND_TOTAL: { en: 'GRAND TOTAL',              hi: 'कुल राशि' },
+  ROUND_OFF:   { en: 'Round-off',                hi: 'राशि समायोजन' },
   AMT_WORDS:   { en: 'AMOUNT IN WORDS',          hi: 'राशि शब्दों में' },
   PAY_STATUS:  { en: 'PAYMENT STATUS',           hi: 'भुगतान स्थिति' },
   METHOD:      { en: 'Method',                   hi: 'माध्यम' },
@@ -138,6 +139,11 @@ export interface InvoiceData {
   // rely on the CGST/SGST split derived from gstAmount; international
   // tenants populate it with e.g. [{label:'Sales Tax', rate:8.875, amount:...}].
   taxLines?: Array<{ label: string; rate: number; amount: number }>;
+  // M-6 (BCG follow-up) — round-off mode. When true, the PDF emits an
+  // explicit "Round-off (±0.XX)" line and the grand total snaps to the
+  // nearest whole rupee. Off by default — preserves current byte-for-byte
+  // output for tenants who haven't opted in.
+  roundToRupee?: boolean;
 }
 
 /**
@@ -422,6 +428,38 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       else if (data.guest.state && data.hotel.state) {
         sameState = normaliseState(data.guest.state) === normaliseState(data.hotel.state);
       } else sameState = true; // default conservative
+
+      // ─── M-5 (BCG follow-up) — per-rate GST rendering ────────────────
+      // Hotel stays that cross slab boundaries (night 1 at ₹6,000 → 12%,
+      // night 2 at ₹8,000 → 18%) used to render with a single averaged
+      // rate — numerically the totals were right, but reading the PDF
+      // looked wrong ("GST @ 14.4%" is not a real slab). Now we group
+      // billable entries by their actual gst_rate and emit one CGST/SGST
+      // (or IGST) pair per distinct rate. Single-rate stays render
+      // byte-identically to before.
+      type RateGroup = { rate: number; taxable: number; gst: number };
+      const rateGroups: RateGroup[] = (() => {
+        // Pull only entries that carry a gst_rate. If every entry shares
+        // the same rate (or rate metadata is missing), fall back to the
+        // legacy folio-level rate so we don't change output for the 90%
+        // of stays that don't cross a boundary.
+        const groups = new Map<number, { taxable: number; gst: number }>();
+        let withRate = 0;
+        for (const e of billableEntries) {
+          if (e.gstRate == null) continue;
+          withRate++;
+          const r = Math.round(Number(e.gstRate) * 100) / 100;
+          const g = groups.get(r) || { taxable: 0, gst: 0 };
+          g.taxable += Number(e.amount || 0);
+          g.gst     += Number(e.gstAmount || 0);
+          groups.set(r, g);
+        }
+        if (withRate === 0 || groups.size <= 1) return [];
+        return [...groups.entries()].map(([rate, v]) => ({ rate, taxable: v.taxable, gst: v.gst }))
+          .sort((a, b) => a.rate - b.rate);
+      })();
+      const useMultiRate = rateGroups.length > 1;
+
       const gstPct = data.folio.subtotal > 0 ? (data.folio.gstAmount / data.folio.subtotal) * 100 : 0;
       const cgst = (isIndia && sameState) ? data.folio.gstAmount / 2 : 0;
       const sgst = (isIndia && sameState) ? data.folio.gstAmount / 2 : 0;
@@ -450,9 +488,26 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
         drawTotalRow(label('DISCOUNT').en, `− ${m(data.folio.discount * sign)}`, false, true);
       }
       if (isIndia) {
-        if (cgst > 0) drawTotalRow(`CGST @ ${(gstPct / 2).toFixed(1)}%`, m(cgst * sign));
-        if (sgst > 0) drawTotalRow(`SGST @ ${(gstPct / 2).toFixed(1)}%`, m(sgst * sign));
-        if (igst > 0) drawTotalRow(`IGST @ ${gstPct.toFixed(1)}%`,       m(igst * sign));
+        if (useMultiRate) {
+          // M-5 — emit one CGST+SGST (or IGST) pair per distinct slab,
+          // so readers see e.g. "CGST @ 6% ₹360 · SGST @ 6% ₹360 ·
+          // CGST @ 9% ₹720 · SGST @ 9% ₹720" instead of a fictional
+          // averaged rate.
+          for (const g of rateGroups) {
+            const r = g.rate;
+            if (sameState) {
+              const half = Math.round((g.gst / 2) * 100) / 100;
+              if (half > 0) drawTotalRow(`CGST @ ${(r / 2).toFixed(1)}%`, m(half * sign));
+              if (half > 0) drawTotalRow(`SGST @ ${(r / 2).toFixed(1)}%`, m(half * sign));
+            } else {
+              if (g.gst > 0) drawTotalRow(`IGST @ ${r.toFixed(1)}%`, m(g.gst * sign));
+            }
+          }
+        } else {
+          if (cgst > 0) drawTotalRow(`CGST @ ${(gstPct / 2).toFixed(1)}%`, m(cgst * sign));
+          if (sgst > 0) drawTotalRow(`SGST @ ${(gstPct / 2).toFixed(1)}%`, m(sgst * sign));
+          if (igst > 0) drawTotalRow(`IGST @ ${gstPct.toFixed(1)}%`,       m(igst * sign));
+        }
       } else if (data.taxLines && data.taxLines.length > 0) {
         for (const line of data.taxLines) {
           drawTotalRow(`${line.label} @ ${Number(line.rate || 0).toFixed(1)}%`, m(line.amount * sign));
@@ -466,7 +521,23 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
         drawTotalRow(`${fallbackLabel} @ ${gstPct.toFixed(1)}%`, m(data.folio.gstAmount * sign));
       }
       y += 3;
-      drawTotalRow(label('GRAND_TOTAL').en, m(data.folio.grandTotal * sign), true);
+      // M-6 — optional round-off line. Tenant opts in via
+      // `restaurants.round_invoice_to_rupee`. When enabled, the grand
+      // total snaps to the nearest whole rupee and the delta is shown
+      // explicitly so accountants can reconcile. Default off — preserves
+      // existing byte-identical output for tenants who haven't opted in.
+      const rawGrand = Number(data.folio.grandTotal || 0);
+      let displayedGrand = rawGrand;
+      if (data.roundToRupee) {
+        const rounded = Math.round(rawGrand);
+        const roundOff = Math.round((rounded - rawGrand) * 100) / 100;
+        if (Math.abs(roundOff) >= 0.01) {
+          const prefix = roundOff >= 0 ? '+ ' : '− ';
+          drawTotalRow(label('ROUND_OFF').en, `${prefix}${m(Math.abs(roundOff) * sign)}`, false, true);
+        }
+        displayedGrand = rounded;
+      }
+      drawTotalRow(label('GRAND_TOTAL').en, m(displayedGrand * sign), true);
 
       y += 10;
 
@@ -479,8 +550,10 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
         doc.font('Hindi-Bold').fontSize(6.5)
            .text(amtLbl.hi, M + 12, y + 13);
       }
+      // M-6 — when round-to-rupee was applied above, the amount-in-words
+      // must reflect the displayed (rounded) grand, not the raw value.
       doc.fillColor(INK).font('Helvetica-BoldOblique').fontSize(10)
-         .text(amountInWords(Math.abs(data.folio.grandTotal), data.tenant), M + 12, y + (amtLbl.hi ? 20 : 14), { width: INNER_W - 24 });
+         .text(amountInWords(Math.abs(displayedGrand), data.tenant), M + 12, y + (amtLbl.hi ? 20 : 14), { width: INNER_W - 24 });
       y += (drawBilingual ? 44 : 36);
 
       // ────────────── PAYMENT STATUS ──────────────
