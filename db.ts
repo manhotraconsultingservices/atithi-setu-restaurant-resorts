@@ -867,20 +867,30 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     )
   `);
 
+  // CMD-CENTER-FIX (2026-06-06): every ALTER below MUST end with
+  // `.catch(() => {})`. The init flow is one big chain of awaits — a single
+  // throw aborts the rest and the in-memory cache stores a partially-
+  // migrated DbInterface that subsequent requests reuse forever. Symptom
+  // observed: tables.status never flipped OCCUPIED because the
+  // assigned_waiter_id ALTER on line 871 transiently failed on first init
+  // after a deploy, aborting every downstream ALTER (table_sessions
+  // discount_amount, gst_percent, invoice_number, snapshot cols, …),
+  // and the broken DbInterface was cached.
+  //
   // Migrations for existing tenant schemas — table monitoring
-  await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_waiter_id TEXT");
+  await db.exec("ALTER TABLE tables ADD COLUMN IF NOT EXISTS assigned_waiter_id TEXT").catch(() => {});
 
   // Migrations for existing tenant schemas — orders (prepaid/postpaid/cloud_kitchen)
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS session_id TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_mode TEXT DEFAULT 'postpaid'");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS kitchen_status TEXT DEFAULT 'queued'");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS session_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_mode TEXT DEFAULT 'postpaid'").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS round_number INTEGER DEFAULT 1").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS kitchen_status TEXT DEFAULT 'queued'").catch(() => {});
   // Cloud-kitchen / online-delivery: structured customer delivery address
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line1 TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line2 TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_city TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_pincode TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_landmark TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line1 TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_address_line2 TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_city TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_pincode TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_landmark TEXT").catch(() => {});
 
   // T1-L1: Soft-delete columns on orders + table_sessions (BCG audit, Tier 1)
   // Pre-T1, /invoice/order and /invoice/session endpoints physically DELETEd
@@ -909,26 +919,26 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_by_role TEXT").catch(() => {});
   await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_reason TEXT").catch(() => {});
 
-  await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS default_hours DOUBLE PRECISION DEFAULT 8");
-  await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS login_id TEXT");
-  await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS password TEXT");
+  await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS default_hours DOUBLE PRECISION DEFAULT 8").catch(() => {});
+  await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS login_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS password TEXT").catch(() => {});
   // Add unique index on login_id (CREATE UNIQUE INDEX IF NOT EXISTS is safe to run multiple times)
   await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_staff_login_id ON attendance_staff (login_id) WHERE login_id IS NOT NULL`).catch(() => {});
   // Bookings migrations
-  await db.exec("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_email TEXT");
-  await db.exec("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booked_by TEXT");
-  await db.exec("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT");
+  await db.exec("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_email TEXT").catch(() => {});
+  await db.exec("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booked_by TEXT").catch(() => {});
+  await db.exec("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT").catch(() => {});
 
   // Postpaid invoice adjustments on table_sessions
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS discount_amount DOUBLE PRECISION DEFAULT 0");
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS service_charge_percent DOUBLE PRECISION DEFAULT 0");
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS gst_percent DOUBLE PRECISION DEFAULT 0");
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1");
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS final_amount DOUBLE PRECISION DEFAULT 0");
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS discount_amount DOUBLE PRECISION DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS service_charge_percent DOUBLE PRECISION DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS gst_percent DOUBLE PRECISION DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS final_amount DOUBLE PRECISION DEFAULT 0").catch(() => {});
 
   // Invoice status tracking
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'");
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_status TEXT DEFAULT 'DRAFT'").catch(() => {});
 
   // GST persistence on the ORDER row (separate from table_sessions which has
   // its own gst_percent/apply_gst). Older tenants only got these via the
@@ -936,15 +946,15 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // first traffic was a customer order would 500 because /orders POST
   // INSERTs into these columns. Migrating them here means every tenant has
   // them from the first request, regardless of which endpoint hit first.
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_percent FLOAT DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS apply_gst INTEGER DEFAULT 1").catch(() => {});
 
   // Telegram notification support
-  await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS telegram_enabled INT DEFAULT 0");
-  await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT DEFAULT ''");
+  await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS telegram_enabled INT DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT DEFAULT ''").catch(() => {});
 
   // Scheduler support — HH:MM time for auto-fire (e.g. "22:00" = 10 PM daily)
-  await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS schedule_time TEXT DEFAULT ''")
+  await db.exec("ALTER TABLE notification_settings ADD COLUMN IF NOT EXISTS schedule_time TEXT DEFAULT ''").catch(() => {});
 
   // ── Invoice numbering (per-tenant counters) ───────────────────────────────
   // Owner-configurable RANDOM/SEQUENTIAL invoice numbers (see plan). Each
@@ -956,8 +966,8 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
       current_value INTEGER NOT NULL DEFAULT 0
     )
   `);
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT");
-  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS invoice_number TEXT").catch(() => {});
 
   // ── Inventory Management (Phase 1 — 2026-05) ──────────────────────────────
   // 11 tables for the holistic inventory module. All inside the tenant schema.
@@ -1193,7 +1203,7 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
 
   // Idempotency guard for cancellation reversal — prevents double-credit if
   // the same order is cancelled twice (network retry / owner clicks twice).
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_reverted INT DEFAULT 0");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_reverted INT DEFAULT 0").catch(() => {});
 
   // ───────────────────────────────────────────────────────────────────────
   // Tier-2 / Tier-3 inventory enhancements (2026-05 cycle)
@@ -1203,8 +1213,8 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // order-time looks up the row whose [effective_from, effective_to) bracket
   // contains order.created_at. NULL effective_from = "since beginning of time",
   // NULL effective_to = "still active". Owner-edits supersede the prior row.
-  await db.exec("ALTER TABLE recipes ADD COLUMN IF NOT EXISTS effective_from TIMESTAMP");
-  await db.exec("ALTER TABLE recipes ADD COLUMN IF NOT EXISTS effective_to TIMESTAMP");
+  await db.exec("ALTER TABLE recipes ADD COLUMN IF NOT EXISTS effective_from TIMESTAMP").catch(() => {});
+  await db.exec("ALTER TABLE recipes ADD COLUMN IF NOT EXISTS effective_to TIMESTAMP").catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_recipes_effective ON recipes (menu_item_id, effective_from, effective_to)`);
 
   // Migrate the old hard unique index to a partial one that only enforces
@@ -1355,9 +1365,9 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
 
   // Drag-to-reorder support — display_order is honoured by the Ingredients
   // and Suppliers list endpoints when set; ties broken by name.
-  await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS display_order INTEGER");
-  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS display_order INTEGER");
-  await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_display_order ON ingredients (display_order)`);
+  await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_display_order ON ingredients (display_order)`).catch(() => {});
 
   // ───────────────────────────────────────────────────────────────────────
   // Multi-platform delivery integration (Swiggy / Zomato / Dunzo / Magicpin
@@ -1368,16 +1378,16 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   // Per-order channel facet — orders.checkout_mode stays unchanged, but
   // platform orders also carry external_platform + external_order_id so
   // we can dedup, route status updates back, and reconcile settlements.
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_platform TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_order_id TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_id_hash TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_payload JSONB");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS commission_amount DOUBLE PRECISION DEFAULT 0");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS net_payout_amount DOUBLE PRECISION DEFAULT 0");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_collected_by TEXT DEFAULT 'RESTAURANT'");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_name TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_phone TEXT");
-  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_arrived_at TIMESTAMP");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_platform TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_order_id TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_id_hash TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_payload JSONB").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS commission_amount DOUBLE PRECISION DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS net_payout_amount DOUBLE PRECISION DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS gst_collected_by TEXT DEFAULT 'RESTAURANT'").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_name TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_phone TEXT").catch(() => {});
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS rider_arrived_at TIMESTAMP").catch(() => {});
   // Partial UNIQUE index — only enforces uniqueness when external_id_hash IS NOT NULL,
   // so the existing in-house orders (without an external id) aren't subject to it.
   await db.exec(`
@@ -1391,9 +1401,9 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
 
   // Per-menu-item channel facet — owner can override visibility & list ids
   // per channel without bloating the menu row beyond JSONB blobs.
-  await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS external_visibility JSONB DEFAULT '{}'::jsonb");
-  await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS external_ids JSONB DEFAULT '{}'::jsonb");
-  await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS sync_dirty INT DEFAULT 0");
+  await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS external_visibility JSONB DEFAULT '{}'::jsonb").catch(() => {});
+  await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS external_ids JSONB DEFAULT '{}'::jsonb").catch(() => {});
+  await db.exec("ALTER TABLE menu ADD COLUMN IF NOT EXISTS sync_dirty INT DEFAULT 0").catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_menu_sync_dirty ON menu (sync_dirty) WHERE sync_dirty = 1`);
 
   // (a) Per-channel pricing.  exactly one of (price_override, markup_percent)

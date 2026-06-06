@@ -20314,6 +20314,22 @@ async function startServer() {
         orders.forEach((o: any) => {
           if (typeof o.items === 'string') { try { o.items = JSON.parse(o.items); } catch { o.items = []; } }
         });
+        // CMD-CENTER-FIX: re-mark the physical table OCCUPIED on resume.
+        // Previously this was only done on the brand-new-session branch;
+        // a resumed session left the table in whatever status staff had
+        // last set it to (e.g. someone manually flipped it to AVAILABLE
+        // while a stale session still existed, then a fresh scan resumed
+        // that session — the table stayed AVAILABLE). Idempotent.
+        if (sess.table_id) {
+          try {
+            await db.run(
+              "UPDATE tables SET status = 'OCCUPIED' WHERE id = ? AND status != 'OCCUPIED'",
+              [sess.table_id]
+            );
+          } catch (occErr) {
+            console.error(`[sessions-resume] FAILED to flip table ${sess.table_id} OCCUPIED:`, occErr);
+          }
+        }
         return res.json({ ...sess, orders });
       };
 
@@ -20389,9 +20405,17 @@ async function startServer() {
          VALUES (?, ?, ?, ?, ?, ?, 'open', 0, 0)`,
         [newId, newToken, table_id || null, table_name || null, customer_name || null, customer_phone || null]
       );
-      // Mark the physical table as OCCUPIED
+      // Mark the physical table as OCCUPIED.
+      // CMD-CENTER-FIX: removed the blanket .catch(() => {}) — a failed
+      // UPDATE here was the silent root cause of "tables don't flip
+      // occupied" reports. Now logged, still non-fatal (the session row
+      // was inserted successfully; staff can refresh).
       if (table_id) {
-        await db.run("UPDATE tables SET status = 'OCCUPIED' WHERE id = ?", [table_id]).catch(() => {});
+        try {
+          await db.run("UPDATE tables SET status = 'OCCUPIED' WHERE id = ?", [table_id]);
+        } catch (occErr) {
+          console.error(`[sessions-create] FAILED to flip table ${table_id} OCCUPIED:`, occErr);
+        }
       }
       res.json({ id: newId, session_token: newToken, table_id, table_name, status: 'open', round_count: 0, bill_amount: 0, orders: [] });
     } catch (err) {
@@ -20527,8 +20551,9 @@ async function startServer() {
   app.get("/api/restaurant/:id/sessions", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
+      // CMD-CENTER-FIX: hide soft-deleted sessions from the staff list by default
       const sessions = await db.query(
-        "SELECT * FROM table_sessions ORDER BY opened_at DESC LIMIT 100"
+        "SELECT * FROM table_sessions WHERE deleted_at IS NULL ORDER BY opened_at DESC LIMIT 100"
       );
       res.json(sessions);
     } catch (err) {
@@ -21599,6 +21624,7 @@ async function startServer() {
     try {
       const {
         table_number, tableNumber,
+        table_id, tableId,
         items,
         total_amount, totalAmount,
         gst_amount, gstAmount,
@@ -21703,17 +21729,85 @@ async function startServer() {
       const finalLandmark     = customer_landmark || customerLandmark || null;
 
       // ── Resolve session for postpaid ──────────────────────────────────────
+      // CMD-CENTER-FIX (multiple-client incident report, 2026-06-06):
+      // Previously this block was POSTPAID-ONLY. For non-postpaid modes the
+      // customer SPA skipped /sessions POST entirely — so the Command Center
+      // never saw `tables.status = 'OCCUPIED'` and the table grid stayed
+      // green even after a guest scanned the QR. Even on postpaid, the SPA
+      // fired /sessions as fire-and-forget in a useEffect, racing the order
+      // POST; if the race was lost the order INSERTed with session_id=NULL
+      // and again the table never flipped occupied.
+      //
+      // Fix has three parts:
+      //   (1) Always TRY to resolve a session_id (postpaid or not) when a
+      //       token is supplied — sessions are useful for cloud-kitchen too.
+      //   (2) If postpaid AND we still couldn't resolve a session AND we
+      //       have a table identifier, AUTO-CREATE a session here so the
+      //       order belongs to one and the table flips occupied on the
+      //       command center.
+      //   (3) Regardless of mode, AFTER the INSERT below, defensively
+      //       UPDATE tables SET status='OCCUPIED' when we can identify the
+      //       physical table from finalTableNumber or table_id.
       let finalSessionId: string | null = session_id || null;
       let roundNumber = 1;
+      // Resolve table_id from body or by looking up via name. Used both for
+      // the auto-create-session path and for the OCCUPY-on-INSERT path.
+      let resolvedTableId: string | null = table_id || tableId || null;
+      if (!resolvedTableId && finalTableNumber && finalTableNumber !== 'Online') {
+        try {
+          const tableRow: any = await db.get(
+            "SELECT id FROM tables WHERE id = ? OR name = ? LIMIT 1",
+            [finalTableNumber, finalTableNumber]
+          );
+          if (tableRow?.id) resolvedTableId = tableRow.id;
+        } catch { /* non-fatal */ }
+      }
 
       if (checkoutMode === 'postpaid') {
         // Resolve session by token if provided
         if (session_token && !finalSessionId) {
           const sess = await db.get(
-            "SELECT id FROM table_sessions WHERE session_token = ? AND status = 'open'",
+            "SELECT id FROM table_sessions WHERE session_token = ? AND status = 'open' AND deleted_at IS NULL",
             [session_token]
           );
           if (sess) finalSessionId = sess.id;
+        }
+        // CMD-CENTER-FIX: auto-create when missing. Only when we have a
+        // physical table — Online / cloud-kitchen orders don't get auto
+        // sessions (they have their own dedicated flow).
+        if (!finalSessionId && resolvedTableId) {
+          try {
+            // Resume an existing fresh open session for this table before
+            // creating a brand-new one (e.g. two orders within seconds
+            // shouldn't open two sessions).
+            const existing: any = await db.get(
+              `SELECT id FROM table_sessions
+                WHERE table_id = ?
+                  AND status = 'open'
+                  AND deleted_at IS NULL
+                  AND opened_at > NOW() - INTERVAL '4 hours'
+                ORDER BY opened_at DESC LIMIT 1`,
+              [resolvedTableId]
+            );
+            if (existing?.id) {
+              finalSessionId = existing.id;
+            } else {
+              const newSid = `SES-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+              const newTok = randomUUID().replace(/-/g, '');
+              await db.run(
+                `INSERT INTO table_sessions
+                   (id, session_token, table_id, table_name, customer_name, customer_phone, status, round_count, bill_amount)
+                 VALUES (?, ?, ?, ?, ?, ?, 'open', 0, 0)`,
+                [newSid, newTok, resolvedTableId, finalTableNumber || null,
+                 finalCustomerName || null, finalCustomerPhone || null]
+              );
+              finalSessionId = newSid;
+              console.log(`[orders-post] AUTO-CREATED session ${newSid} for table ${resolvedTableId} (orders POST had no session_id)`);
+            }
+          } catch (sessErr) {
+            console.error(`[orders-post] Auto-session creation failed for table ${resolvedTableId}:`, sessErr);
+            // Continue without session — order still gets recorded.
+          }
         }
         // Count existing rounds in the session
         if (finalSessionId) {
@@ -21898,6 +21992,50 @@ async function startServer() {
         _snap.currency_snapshot,
         _snap.tax_label_snapshot,
       ]);
+
+      // ──────────────────────────────────────────────────────────────────
+      // CMD-CENTER-FIX — flip the physical table to OCCUPIED.
+      // ──────────────────────────────────────────────────────────────────
+      // The Command Center's table grid reads `tables.status`. Pre-fix,
+      // this was ONLY written by /sessions POST and only on the brand-new
+      // create branch. Customers on cloud_kitchen / prepaid modes never
+      // hit /sessions; the postpaid SPA fired it as fire-and-forget and
+      // could race the order POST; and the resume branches of /sessions
+      // never re-applied OCCUPIED. End result: clients reported that
+      // tables stayed green even after guests had clearly scanned and
+      // ordered.
+      //
+      // The /orders POST is the most reliable signal that the table is in
+      // use — by the time an order INSERT succeeds, the guest is at the
+      // table and has purchased. Flip the status here, always. Failures
+      // are LOGGED (not swallowed) so the next instability investigation
+      // doesn't have to guess.
+      //
+      // Skipped for: rows without a resolvable table_id (online / cloud-
+      // kitchen / room-service paths where the "table" concept doesn't
+      // apply), and for CHARGE_TO_ROOM (hotel folio path uses rooms.status
+      // not tables.status).
+      const shouldMarkOccupied =
+        resolvedTableId &&
+        !isChargeToRoom &&
+        finalTableNumber !== 'Online' &&
+        checkoutMode !== 'cloud_kitchen';
+      if (shouldMarkOccupied) {
+        try {
+          const r: any = await db.run(
+            "UPDATE tables SET status = 'OCCUPIED' WHERE id = ? AND status != 'OCCUPIED'",
+            [resolvedTableId]
+          );
+          if (Number(r?.changes || 0) > 0) {
+            console.log(`[orders-post] flipped table ${resolvedTableId} -> OCCUPIED (order ${id})`);
+          }
+        } catch (occErr) {
+          console.error(`[orders-post] FAILED to flip table ${resolvedTableId} occupied:`, occErr);
+          // Non-fatal — the order is already saved. The owner can refresh
+          // the C&C and see the table via session presence even if the
+          // status column is stale.
+        }
+      }
 
       // Sprint RS — post to hotel folio if this is a room-service charge.
       // SYNCHRONOUS (before responding) so the customer-side UI can show
@@ -23454,9 +23592,11 @@ async function startServer() {
          ORDER BY t.name`
       );
 
-      // All currently open or bill-requested sessions (one per table)
+      // All currently open or bill-requested sessions (one per table).
+      // CMD-CENTER-FIX: exclude soft-deleted sessions — a deleted-but-still-
+      // 'open' row would mask a fresh session for the same table.
       const activeSessions = await db.query(
-        "SELECT * FROM table_sessions WHERE status IN ('open', 'bill_requested')"
+        "SELECT * FROM table_sessions WHERE status IN ('open', 'bill_requested') AND deleted_at IS NULL"
       );
       const sessionByTable: Record<string, any> = {};
       for (const sess of activeSessions) {
@@ -24306,7 +24446,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'qr-fix-2-room-booking-cols-for-resto-only-tenants',
+    commit_marker: 'cmd-center-fix-table-occupied-end-to-end',
     code_features: [
       'subscription-billing',
       'read-only-mode',
