@@ -819,6 +819,23 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_pincode TEXT");
   await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_landmark TEXT");
 
+  // T1-L1: Soft-delete columns on orders + table_sessions (BCG audit, Tier 1)
+  // Pre-T1, /invoice/order and /invoice/session endpoints physically DELETEd
+  // rows after copying a snapshot to invoice_deletion_audit. That broke
+  // reconciliation (a row referencing an order id couldn't be JOINed back)
+  // and forensics had to fish JSON out of the audit table to answer "what
+  // was billed?". Soft-delete keeps the row intact, sets the marker columns,
+  // and the list/aggregate queries filter `deleted_at IS NULL`.
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_by_user_id TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_by_role TEXT");
+  await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_reason TEXT");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_orders_active ON orders (created_at DESC) WHERE deleted_at IS NULL").catch(() => {});
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP");
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_by_user_id TEXT");
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_by_role TEXT");
+  await db.exec("ALTER TABLE table_sessions ADD COLUMN IF NOT EXISTS deleted_reason TEXT");
+
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS default_hours DOUBLE PRECISION DEFAULT 8");
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS login_id TEXT");
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS password TEXT");

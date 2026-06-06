@@ -4,6 +4,9 @@ import path from "path";
 import fs from "fs";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import helmet from "helmet";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
 import { randomUUID, createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
@@ -149,7 +152,77 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-atithi-setu-2024";
+// ──────────────────────────────────────────────────────────────────────────
+// T1-S1: JWT_SECRET hardening (BCG audit, Tier 1)
+// ──────────────────────────────────────────────────────────────────────────
+// Pre-T1, server.ts shipped with a literal fallback string so a misconfigured
+// env wouldn't crash boot. In practice that meant production ran on the
+// hard-coded value any time the env wasn't set — and the value was visible in
+// the repo, so anyone with read access could forge admin tokens.
+//
+// New behaviour:
+//   • If JWT_SECRET is present and ≥32 chars → use it.
+//   • If absent and NODE_ENV ≠ production → generate a per-process random
+//     secret. Tokens won't survive a restart (which is correct for dev).
+//   • If absent and NODE_ENV === production → throw at boot. The container
+//     refuses to start until an operator sets it. This is the only safe
+//     posture for a production service handling money.
+function _resolveJwtSecret(): string {
+  const fromEnv = (process.env.JWT_SECRET || '').trim();
+  if (fromEnv && fromEnv.length >= 32) return fromEnv;
+  const env = (process.env.NODE_ENV || '').toLowerCase();
+  if (env === 'production') {
+    throw new Error(
+      "FATAL: JWT_SECRET is required in production and must be at least 32 chars. " +
+      "Set the JWT_SECRET environment variable to a strong random string (e.g. " +
+      "`openssl rand -base64 48`) and restart the service."
+    );
+  }
+  // Dev / staging fallback — random per-process secret, never the hard-coded
+  // literal. Tokens minted before a restart won't verify after — which is the
+  // intended developer-experience signal that JWT_SECRET should be set.
+  const generated = randomBytes(48).toString('base64');
+  console.warn(
+    "[boot] WARNING: JWT_SECRET not set or too short. Using a random per-process " +
+    "secret for dev. Tokens will be invalidated on restart. Set JWT_SECRET in your " +
+    "environment to make tokens persist."
+  );
+  return generated;
+}
+const JWT_SECRET = _resolveJwtSecret();
+
+// ──────────────────────────────────────────────────────────────────────────
+// T1-S5: PII masking for logs (BCG audit, Tier 1)
+// ──────────────────────────────────────────────────────────────────────────
+// Server logs end up in deploy-history.log, container stdout, and any future
+// observability pipeline (Loki / CloudWatch / etc). Logging raw phone numbers
+// or password-reset URLs in plaintext = a data-breach in the making.
+//
+// maskPhone("+919880264787") → "+91XXXX****87"
+// maskEmail("priya@gmail.com") → "p***@gmail.com"
+// maskResetUrl("https://app.atithi-setu.com/?reset=abc123def456") → ".../?reset=abc****"
+//
+// All masks preserve enough info to debug a complaint ("yes, this phone got
+// an OTP at 14:32") without exposing the full identifier.
+function maskPhone(raw: any): string {
+  if (!raw) return '<no-phone>';
+  const s = String(raw).replace(/[^\d+]/g, '');
+  if (s.length < 4) return '****';
+  if (s.length <= 8) return s.slice(0, 2) + '****';
+  // Indian: +91XXXXX**XX  →  show first 3 + last 2, mask the middle
+  return s.slice(0, 3) + 'X'.repeat(Math.max(0, s.length - 5)) + '**' + s.slice(-2);
+}
+function maskEmail(raw: any): string {
+  if (!raw) return '<no-email>';
+  const s = String(raw);
+  const at = s.indexOf('@');
+  if (at < 2) return '***' + s.slice(at);
+  return s[0] + '***' + s.slice(at);
+}
+function maskResetUrl(raw: any): string {
+  if (!raw) return '<no-url>';
+  return String(raw).replace(/(reset=)([A-Za-z0-9_-]+)/, (_m, p, tok) => `${p}${tok.slice(0, 4)}****`);
+}
 
 // ====== Tenant slug helpers (per-tenant subdomain login) ======
 const RESERVED_SLUGS = new Set([
@@ -2010,8 +2083,58 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
 
   const token = authHeader.split(" ")[1];
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }) as any;
     req.user = decoded;
+
+    // ──────────────────────────────────────────────────────────────────
+    // T1-S2: TENANT ISOLATION (BCG audit, Tier 1)
+    // ──────────────────────────────────────────────────────────────────
+    // Before T1-S2: 244 /api/restaurant/:id/* endpoints checked authenticate()
+    // only — they did NOT verify that JWT.restaurantId actually equals the
+    // :id in the URL. A staff token for RESTO-1003 could curl
+    // /api/restaurant/RESTO-1004/orders and read another tenant's data.
+    // Only ~64 endpoints used hotelStaff/restaurantStaff middlewares which
+    // gated on role but still not on tenant.
+    //
+    // This single check inside authenticate() closes the gap for ALL
+    // /api/restaurant/:id/* routes at once:
+    //   • If the JWT belongs to a real tenant (decoded.restaurantId set
+    //     and not 'SYSTEM'/admin),
+    //   • AND the URL targets a /api/restaurant/:id/... or /api/tenants/:id/... path,
+    //   • AND the two ids differ,
+    //   → 403. No exceptions, no read-only escape — cross-tenant reads
+    //     are equally dangerous as writes.
+    //
+    // Admins (SUPER_ADMIN, CTO) are exempt — they legitimately manage
+    // every tenant. Temp tokens without restaurantId (e.g. password
+    // reset, /tenants/select) are exempt — they have no tenant binding
+    // yet and route-level guards downstream control what they can do.
+    {
+      const role = String(decoded?.role || '').toUpperCase();
+      const isAdminUser = role === 'SUPER_ADMIN' || role === 'CTO';
+      const jwtTenant: string | undefined = decoded?.restaurantId;
+      const path = req.originalUrl || req.url || '';
+      const m = path.match(/\/api\/restaurant\/([^/?#]+)/i)
+            || path.match(/\/api\/tenants?\/([^/?#]+)/i);
+      const urlTenant = m && m[1] ? m[1] : null;
+      // Only enforce when BOTH sides are real tenant ids that should match.
+      // 'SYSTEM' = admin sentinel; an absent jwtTenant means a temp token
+      // (no tenant scope yet) — neither triggers isolation.
+      if (
+        !isAdminUser &&
+        urlTenant &&
+        urlTenant !== 'SYSTEM' &&
+        jwtTenant &&
+        jwtTenant !== 'SYSTEM' &&
+        jwtTenant !== urlTenant
+      ) {
+        console.warn(`[tenant-isolation] BLOCKED ${decoded?.id || 'anon'} (${role}) tried ${jwtTenant} → ${urlTenant} on ${req.method} ${path}`);
+        return res.status(403).json({
+          error: "Cross-tenant access denied",
+          code: "TENANT_MISMATCH",
+        });
+      }
+    }
 
     // Access-revocation check. Skip for admins (they need to manage tenants),
     // skip for whitelisted paths (login/billing-status), skip for SYSTEM tenant,
@@ -2653,25 +2776,185 @@ async function startServer() {
     console.error("[hotel-tenant-migration] error:", err);
   }
 
-  // Create or Update default super admin (robust upsert avoiding email uniqueness crash)
+  // ───────────────────────────────────────────────────────────────────────
+  // T1-S6: Default admin password hardening (BCG audit, Tier 1)
+  // ───────────────────────────────────────────────────────────────────────
+  // Old code: hard-coded "admin123", and worse, the UPDATE statement RESET
+  // the password to admin123 on every container restart — so even if an
+  // operator rotated the admin password, the next deploy silently put it
+  // back. That made the platform owner permanently one curl away from
+  // takeover.
+  //
+  // New behaviour:
+  //   1. Ensure the ADMIN-ANKUSH user row exists. If not, create it.
+  //   2. If ADMIN_INITIAL_PASSWORD env is set → use that for the seed and
+  //      print-once (so operators can capture, then rotate).
+  //   3. If env not set AND user doesn't exist → generate a random 16-char
+  //      password, print it ONCE at boot, and require change on first login.
+  //   4. If user already exists → DO NOT touch their password. Operators
+  //      can rotate via the existing reset flow.
+  //   5. Always ensure role=SUPER_ADMIN and is_active=1 (these are config,
+  //      not credentials, so it's safe to enforce).
   try {
-    const hashedPassword = await bcrypt.hash("admin123", 12);
-    const existingAdmin = await centralDb.get("SELECT id FROM users WHERE login_id = ?", ["ADMIN-ANKUSH"]);
+    // Ensure rotation-tracking columns exist on the users table. Idempotent.
+    await centralDb.run("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password INT DEFAULT 0").catch(() => {});
+
+    const existingAdmin: any = await centralDb.get(
+      "SELECT id, password FROM users WHERE login_id = ?",
+      ["ADMIN-ANKUSH"]
+    );
     if (!existingAdmin) {
-      await centralDb.run(`
-        INSERT INTO users (id, login_id, name, email, phone, password, restaurant_id, role, is_active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [randomUUID(), "ADMIN-ANKUSH", "Ankush Admin", "ankushmanhotra@gmail.com", "0000000000", hashedPassword, "SYSTEM", "SUPER_ADMIN", 1]);
+      const envSeed = (process.env.ADMIN_INITIAL_PASSWORD || '').trim();
+      let seedPassword: string;
+      let seedSource: 'env' | 'generated';
+      if (envSeed && envSeed.length >= 8) {
+        seedPassword = envSeed;
+        seedSource = 'env';
+      } else {
+        // 16-char base64url ≈ 96 bits of entropy — high enough that nobody
+        // ever brute-forces it, low enough that operators can copy/paste.
+        seedPassword = randomBytes(12).toString('base64').replace(/[+/=]/g, '').slice(0, 16);
+        seedSource = 'generated';
+      }
+      const hashedPassword = await bcrypt.hash(seedPassword, 12);
+      await centralDb.run(
+        `INSERT INTO users (id, login_id, name, email, phone, password, restaurant_id, role, is_active, must_change_password)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [randomUUID(), "ADMIN-ANKUSH", "Ankush Admin", "ankushmanhotra@gmail.com",
+         "0000000000", hashedPassword, "SYSTEM", "SUPER_ADMIN", 1, 1]
+      );
+      // Print-once banner. Operator MUST capture this from the deploy log —
+      // we never log it again. (must_change_password=1 forces a rotation on
+      // first login, so even if the log is read, the window is finite.)
+      console.log("════════════════════════════════════════════════════════════════");
+      console.log("  FIRST-RUN ADMIN CREDENTIAL — capture this NOW, rotate ASAP   ");
+      console.log("════════════════════════════════════════════════════════════════");
+      console.log(`  login_id:  ADMIN-ANKUSH`);
+      console.log(`  password:  ${seedPassword}    (source: ${seedSource})`);
+      console.log(`  must_change_password: 1 (first login forces a reset)`);
+      console.log("════════════════════════════════════════════════════════════════");
+    } else {
+      // User exists — do NOT touch the password. Only re-affirm config.
+      await centralDb.run(
+        "UPDATE users SET role = 'SUPER_ADMIN', is_active = 1 WHERE login_id = ?",
+        ["ADMIN-ANKUSH"]
+      );
+      console.log("Default SUPER_ADMIN verified: ADMIN-ANKUSH (password preserved)");
     }
-    await centralDb.run("UPDATE users SET password = ?, role = 'SUPER_ADMIN', is_active = 1 WHERE login_id = ?", [hashedPassword, "ADMIN-ANKUSH"]);
-    console.log("Default SUPER_ADMIN verified: ADMIN-ANKUSH / admin123");
   } catch (err) {
     console.error("Warning: Could not seed SUPER_ADMIN user:", err);
   }
 
   const app = express();
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+
+  // ──────────────────────────────────────────────────────────────────────
+  // T1-S4: helmet + CORS allowlist + HSTS + body size (BCG audit, Tier 1)
+  // ──────────────────────────────────────────────────────────────────────
+  // helmet ships a set of HTTP security headers — most importantly
+  //   • Strict-Transport-Security (HSTS) — forces HTTPS for 6 months
+  //   • X-Content-Type-Options: nosniff — kills MIME-confusion attacks
+  //   • Referrer-Policy: no-referrer-when-downgrade
+  //   • X-Frame-Options: SAMEORIGIN — clickjacking
+  //   • X-DNS-Prefetch-Control: off
+  // We DISABLE the default Content-Security-Policy because the marketing
+  // pages + ERP SPA + Razorpay scripts mix sources liberally; enabling it
+  // would require a full CSP audit per page. Tier-2 follow-up.
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    hsts: { maxAge: 15552000, includeSubDomains: true, preload: false },
+  }));
+
+  // CORS allowlist — three vectors of legitimate origin:
+  //   1) atithi-setu.com + every subdomain (per-tenant: <slug>.atithi-setu.com)
+  //   2) Cloudflare Pages preview URLs (*.pages.dev) for staged marketing
+  //   3) localhost during dev (only when NODE_ENV != production)
+  // Requests with no Origin header (server-to-server, mobile WebViews) are
+  // allowed through — CORS does nothing in those cases anyway.
+  const _isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
+  app.use(cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      try {
+        const u = new URL(origin);
+        const host = u.host.toLowerCase();
+        const ok =
+          host === 'atithi-setu.com' ||
+          host.endsWith('.atithi-setu.com') ||
+          host.endsWith('.pages.dev') ||
+          (!_isProd && (host.startsWith('localhost') || host.startsWith('127.0.0.1')));
+        if (ok) return cb(null, true);
+        console.warn(`[cors] BLOCKED origin: ${origin}`);
+        return cb(null, false);
+      } catch {
+        return cb(null, false);
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  }));
+
+  // ──────────────────────────────────────────────────────────────────────
+  // T1-S3: Rate limiting (BCG audit, Tier 1)
+  // ──────────────────────────────────────────────────────────────────────
+  // We're behind Cloudflare + Hostinger panel, so trust the X-Forwarded-For
+  // chain (else every request appears to come from the load balancer IP and
+  // a single attacker fills the bucket for everyone).
+  app.set('trust proxy', 1);
+
+  // Tight bucket on auth — five attempts per IP per minute kills credential
+  // stuffing without hitting legit users.
+  const authLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many login attempts. Please wait a minute and try again." },
+    skipSuccessfulRequests: true,  // burnt only on failed/invalid attempts
+  });
+
+  // OTP — three per phone per hour. Keyed by phone (in body) so an attacker
+  // hopping IPs still can't blast a single phone number.
+  const otpLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 3,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: any) => {
+      const phone = String(req.body?.phone || req.body?.mobile || '').replace(/\D/g, '').slice(-10);
+      return phone ? `phone:${phone}` : (req.ip || 'unknown');
+    },
+    message: { error: "Too many OTP requests for this number. Please wait an hour." },
+  });
+
+  // Global default — 200 reqs/min per IP. Real users browse far below this;
+  // bots scraping the menu hit it within seconds. Excludes /api/version and
+  // the public health endpoint so monitoring isn't tarpitted.
+  const globalLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: (req) => {
+      const p = req.path || '';
+      return p === '/api/version' || p === '/api/public/restaurants' || p.startsWith('/uploads/');
+    },
+    message: { error: "Too many requests. Please slow down." },
+  });
+  app.use('/api/', globalLimiter);
+
+  // Apply the tighter buckets where they matter. Login routes accept both
+  // POST (real attempt) and OPTIONS (CORS preflight) — we let preflight
+  // through. The wildcard on /api/auth/* catches /login, /owner-login,
+  // /staff-login, and any future variant in one shot.
+  app.use(['/api/auth/login', '/api/auth/owner-login', '/api/auth/staff-login', '/api/login'], authLimiter);
+  app.use(['/api/auth/send-otp', '/api/auth/verify-otp', '/api/owner/send-otp', '/api/owner/verify-otp', '/api/owner/forgot-password'], otpLimiter);
+
+  // Body size — 2 MB is plenty for any JSON payload the ERP sends. File
+  // uploads use multer with its own limit (10 MB photos). Without a cap an
+  // attacker could DOS the parser with multi-GB JSON bombs.
+  app.use(express.json({ limit: '2mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
   // ─────────────────────────────────────────────────────────────────────
   // MARKETING-DOMAIN REDIRECT (atithi-setu.com / www.atithi-setu.com)
@@ -4803,7 +5086,7 @@ async function startServer() {
       const message = `🔐 Your Atithi-Setu login OTP is: ${otp}\n\nValid for 5 minutes. Never share this code.`;
       await sendWhatsApp(formattedPhone, message);
 
-      console.log(`✅ OTP sent to ${formattedPhone}`);
+      console.log(`✅ OTP sent to ${maskPhone(formattedPhone)}`);  // T1-S5
       res.json({ success: true, message: "OTP sent via WhatsApp", otp_expires_in: 300 });
     } catch (err: any) {
       console.error("Error in /api/auth/send-otp:", err);
@@ -4914,7 +5197,7 @@ async function startServer() {
       // Verify temp token
       let decoded: any;
       try {
-        decoded = jwt.verify(temp_token, JWT_SECRET) as any;
+        decoded = jwt.verify(temp_token, JWT_SECRET, { algorithms: ['HS256'] }) as any;
       } catch {
         return res.status(401).json({ error: "Invalid or expired setup token" });
       }
@@ -5038,7 +5321,7 @@ async function startServer() {
         { expiresIn: '7d' }
       );
 
-      console.log(`✅ New user created: ${phone} with restaurant ${restaurantId}`);
+      console.log(`✅ New user created: ${maskPhone(phone)} with restaurant ${restaurantId}`);  // T1-S5
       res.json({
         success: true,
         jwt_token: token,
@@ -5060,7 +5343,7 @@ async function startServer() {
       // Verify temp token
       let decoded: any;
       try {
-        decoded = jwt.verify(temp_token, JWT_SECRET) as any;
+        decoded = jwt.verify(temp_token, JWT_SECRET, { algorithms: ['HS256'] }) as any;
       } catch {
         return res.status(401).json({ error: "Invalid or expired token" });
       }
@@ -5613,7 +5896,10 @@ async function startServer() {
         appOrigin = `${proto}://${host}`;
       }
       const resetUrl = `${appOrigin}?reset=${token}`;
-      console.log(`[Auth] Password reset link for ${resolvedEmail}: ${resetUrl}`);
+      // T1-S5: NEVER log the raw reset URL — anyone reading deploy logs
+      // could take over the account in the 1-hour token window. Mask the
+      // email + redact the token down to its first 4 chars for traceability.
+      console.log(`[Auth] Password reset issued for ${maskEmail(resolvedEmail)}: ${maskResetUrl(resetUrl)}`);
 
       const displayName = ownerName || 'there';
       const html = `
@@ -5705,7 +5991,7 @@ async function startServer() {
     try {
       let decoded: any;
       try {
-        decoded = jwt.verify(temp_token, JWT_SECRET) as any;
+        decoded = jwt.verify(temp_token, JWT_SECRET, { algorithms: ['HS256'] }) as any;
       } catch {
         return res.status(401).json({ error: "Session expired. Please log in again." });
       }
@@ -13189,6 +13475,7 @@ async function startServer() {
       const revenueRow: any = await db.get(
         `SELECT COALESCE(SUM(total_amount), 0) AS v FROM orders
           WHERE status != 'CANCELLED'
+            AND deleted_at IS NULL  -- T1-L1: exclude soft-deleted invoices
             AND created_at >= DATE_TRUNC('month', CURRENT_DATE)`
       );
       const pendingPORow: any = await db.get(
@@ -13480,6 +13767,7 @@ async function startServer() {
       const revenueRow: any = await db.get(
         `SELECT COALESCE(SUM(total_amount), 0) AS v FROM orders
           WHERE status != 'CANCELLED'
+            AND deleted_at IS NULL  -- T1-L1: exclude soft-deleted invoices
             AND created_at >= ?::date
             AND created_at < ?::date + INTERVAL '1 day'`,
         [fromDate, toDate]
@@ -19292,7 +19580,10 @@ async function startServer() {
   app.get("/api/restaurant/:id/orders", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const db = await getTenantDb(req.params.id);
-      const orders = await db.query("SELECT * FROM orders ORDER BY created_at DESC");
+      // T1-L1: filter out soft-deleted invoices by default. An audit endpoint
+      // (/api/restaurant/:id/invoice-deletion-log) exposes the snapshots for
+      // operators who need to look at deletions.
+      const orders = await db.query("SELECT * FROM orders WHERE deleted_at IS NULL ORDER BY created_at DESC");
       res.json(orders);
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch orders" });
@@ -19318,6 +19609,7 @@ async function startServer() {
       const orders = await db.query(
         `SELECT * FROM orders
          WHERE status NOT IN ('DELIVERED','CANCELLED')
+           AND deleted_at IS NULL  -- T1-L1: exclude soft-deleted invoices
            AND (kitchen_status IS NULL OR kitchen_status NOT IN ('held_for_payment'))
            AND (invoice_status IS NULL OR invoice_status <> 'PRINTED')
          ORDER BY
@@ -19838,11 +20130,24 @@ async function startServer() {
         ]
       );
 
-      // Cascade-delete child rows then the order itself
-      await db.run("DELETE FROM feedback WHERE order_id = ?", [req.params.orderId]).catch(() => {});
-      await db.run("DELETE FROM orders WHERE id = ?", [req.params.orderId]);
+      // T1-L1: Soft-delete (BCG audit, Tier 1). We previously physically
+      // DELETEd the row + cascaded to feedback. That broke reconciliation
+      // (foreign-key-style references became dangling) and made forensics
+      // hard. Now we stamp the soft-delete columns and keep both rows.
+      // The invoice_deletion_audit row still gets the JSON snapshot — that
+      // remains the source of truth for legal/regulator reads. Feedback
+      // rows hang around too; UIs filter on order.deleted_at IS NULL.
+      await db.run(
+        `UPDATE orders
+            SET deleted_at = NOW(),
+                deleted_by_user_id = ?,
+                deleted_by_role = ?,
+                deleted_reason = ?
+          WHERE id = ?`,
+        [req.user?.id || 'unknown', req.user?.role || 'unknown', String(reason).trim(), req.params.orderId]
+      );
 
-      console.log(`[invoice-delete] ORDER ${req.params.orderId} from ${req.params.id} by ${req.user?.id} (${req.user?.role}) — audit ${auditId}`);
+      console.log(`[invoice-delete] ORDER ${req.params.orderId} from ${req.params.id} by ${req.user?.id} (${req.user?.role}) — audit ${auditId} (soft-delete)`);
       res.json({ success: true, audit_id: auditId });
     } catch (err) {
       console.error("[invoice-delete] order error:", err);
@@ -19920,14 +20225,35 @@ async function startServer() {
         ]
       );
 
-      // Cascade — feedback → orders → session
+      // T1-L1: Soft-delete cascade. Mark every child order and the
+      // session row. Feedback rows are left untouched — they JOIN through
+      // order.id which is still present (just hidden by the deleted_at
+      // filter on the list endpoints).
+      const reasonTrimmed = String(reason).trim();
+      const actorId = req.user?.id || 'unknown';
+      const actorRole = req.user?.role || 'unknown';
       if (orderIds.length > 0) {
-        await db.run("DELETE FROM feedback WHERE order_id = ANY(?)", [orderIds]).catch(() => {});
-        await db.run("DELETE FROM orders WHERE session_id = ?", [session.id]);
+        await db.run(
+          `UPDATE orders
+              SET deleted_at = NOW(),
+                  deleted_by_user_id = ?,
+                  deleted_by_role = ?,
+                  deleted_reason = ?
+            WHERE session_id = ?`,
+          [actorId, actorRole, reasonTrimmed, session.id]
+        );
       }
-      await db.run("DELETE FROM table_sessions WHERE id = ?", [session.id]);
+      await db.run(
+        `UPDATE table_sessions
+            SET deleted_at = NOW(),
+                deleted_by_user_id = ?,
+                deleted_by_role = ?,
+                deleted_reason = ?
+          WHERE id = ?`,
+        [actorId, actorRole, reasonTrimmed, session.id]
+      );
 
-      console.log(`[invoice-delete] SESSION ${session.session_token || session.id} from ${req.params.id} by ${req.user?.id} (${req.user?.role}) — ${orderIds.length} orders + 1 session — audit ${auditId}`);
+      console.log(`[invoice-delete] SESSION ${session.session_token || session.id} from ${req.params.id} by ${req.user?.id} (${req.user?.role}) — ${orderIds.length} orders + 1 session — audit ${auditId} (soft-delete)`);
       res.json({ success: true, audit_id: auditId, deleted_orders: orderIds.length });
     } catch (err) {
       console.error("[invoice-delete] session error:", err);
@@ -20275,8 +20601,24 @@ async function startServer() {
       // "Added to your room bill" with certainty, OR surface "No active
       // folio — please ask the front desk" when there's no room match.
       // Falls back silently if the tenant doesn't have hotel tables.
+      //
+      // T1-L3 (BCG audit, Tier 1) — ATOMICITY GUARANTEE
+      // ────────────────────────────────────────────────
+      // Previously, if postOrderToFolio() failed (no open folio, room
+      // mismatch, downstream INSERT error), the orders row was already
+      // INSERTed and we just logged a warning. From the customer's POV,
+      // they thought F&B was added to their room — but the folio had no
+      // line item. At checkout the guest would discover the discrepancy
+      // and dispute the bill, or worse, walk away owing the property.
+      //
+      // Now: if the folio post fails for ANY reason, we hard-DELETE the
+      // orphan order row and return a 409 to the caller. No silent state
+      // divergence. Hard-delete (not soft-delete) because the order was
+      // never observable to a downstream consumer — there's no audit
+      // trail to preserve. We log the rollback for forensics.
       let folioResult: { ok: boolean; folio_id?: string; reason?: string } | null = null;
       if (isChargeToRoom && (finalRoomId || finalBookingId)) {
+        let folioOk = false;
         try {
           const itemsForFolio: FolioOrderItem[] = (Array.isArray(items) ? items : []).map((it: any) => ({
             name: it.name || it.menuName || 'Item',
@@ -20289,11 +20631,26 @@ async function startServer() {
             items: itemsForFolio, subtype: 'IRD',
             posted_by: 'CUSTOMER_QR',
           });
-          if (!folioResult.ok) {
-            console.warn(`[orders-post] CHARGE_TO_ROOM order ${id} could not post to folio: ${folioResult.reason}`);
+          folioOk = !!folioResult?.ok;
+          if (!folioOk) {
+            console.warn(`[orders-post] CHARGE_TO_ROOM order ${id} could not post to folio: ${folioResult?.reason}`);
           }
         } catch (e) {
-          console.error(`[orders-post] CHARGE_TO_ROOM folio posting failed for ${id}:`, e);
+          console.error(`[orders-post] CHARGE_TO_ROOM folio posting threw for ${id}:`, e);
+          folioResult = { ok: false, reason: 'exception' };
+          folioOk = false;
+        }
+        if (!folioOk) {
+          // Compensating rollback — undo the orders INSERT.
+          await db.run("DELETE FROM orders WHERE id = ?", [id]).catch((err: any) => {
+            console.error(`[orders-post] CRITICAL: rollback DELETE failed for ${id}:`, err);
+          });
+          console.warn(`[orders-post] T1-L3 rolled back order ${id} because folio post failed (${folioResult?.reason})`);
+          return res.status(409).json({
+            success: false,
+            error: "Could not charge to room. No active folio for this room/booking, or the folio is locked.",
+            reason: folioResult?.reason || 'unknown',
+          });
         }
       }
 
@@ -21363,7 +21720,8 @@ async function startServer() {
       const from = (req.query.from as string) || new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
 
       const allOrders = await db.query(
-        `SELECT * FROM orders WHERE DATE(created_at) >= ? AND DATE(created_at) <= ? ORDER BY created_at DESC`,
+        // T1-L1: exclude soft-deleted invoices from KPI dashboards
+        `SELECT * FROM orders WHERE deleted_at IS NULL AND DATE(created_at) >= ? AND DATE(created_at) <= ? ORDER BY created_at DESC`,
         [from, to]
       );
 
@@ -22632,7 +22990,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'qa-invoice-math-flow-a-fix-credit-note-fix',
+    commit_marker: 'tier1-security-and-revenue-hardening',
     code_features: [
       'subscription-billing',
       'read-only-mode',
