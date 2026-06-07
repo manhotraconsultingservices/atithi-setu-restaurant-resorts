@@ -20566,26 +20566,97 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Room *</label>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Room category *</label>
                     {availableRooms.length === 0 ? (
                       <p className="text-[11px] text-[#c13b3b] italic px-1 py-2">No vacant rooms right now.</p>
-                    ) : (
-                      <select
-                        required
-                        value={draft.room_id}
-                        onChange={e => {
-                          const r = hotelRooms.find(x => x.id === e.target.value);
-                          setDraft({ room_id: e.target.value, room_rate: Number(r?.base_rate || draft.room_rate) });
-                        }}
-                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
-                      >
-                        {availableRooms.map((r: any) => (
-                          <option key={r.id} value={r.id}>
-                            {r.name}{r.room_number ? ` · #${r.room_number}` : ''} · ₹{Number(r.base_rate || 0).toLocaleString('en-IN')}
-                          </option>
-                        ))}
-                      </select>
-                    )}
+                    ) : (() => {
+                      // BCG Tariff Phase 4.3 — same category-first picker
+                      // logic as the booking modal. Walk-in dates are
+                      // always "today → today + nights" so we use those.
+                      const co = new Date(Date.now() + draft.nights * 86400000).toISOString().slice(0, 10);
+                      const roomTypes = (tariffData.room_types || [])
+                        .filter((rt: any) => rt.is_active !== 0)
+                        .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
+                      const categoryStats = roomTypes.map((rt: any) => {
+                        const roomsInCat = availableRooms.filter(r => r.type_id === rt.id);
+                        const preview = roomsInCat[0] ? previewMatrixPrice({
+                          room_id: roomsInCat[0].id,
+                          check_in_date: today,
+                          check_out_date: co,
+                          booking_type: 'OVERNIGHT',
+                          meal_plan_id: draft.meal_plan_id,
+                          extra_adults: draft.extra_adults,
+                        }) : null;
+                        return {
+                          type_id: rt.id,
+                          type_name: rt.name,
+                          base_rate: Number(rt.base_rate || 0),
+                          available_count: roomsInCat.length,
+                          room_ids: roomsInCat.map((r: any) => r.id),
+                          preview,
+                        };
+                      }).filter((s: any) => s.available_count > 0);
+                      // Uncategorised bucket
+                      const uncategorisedRooms = availableRooms.filter(r => !r.type_id);
+                      if (uncategorisedRooms.length > 0) {
+                        categoryStats.push({
+                          type_id: '__UNCATEGORISED__',
+                          type_name: roomTypes.length > 0 ? 'Uncategorised' : 'All Rooms',
+                          base_rate: 0, available_count: uncategorisedRooms.length,
+                          room_ids: uncategorisedRooms.map((r: any) => r.id),
+                          preview: null,
+                        });
+                      }
+                      const selectedRoom = hotelRooms.find(r => r.id === draft.room_id);
+                      const selectedTypeId = selectedRoom?.type_id || (selectedRoom ? '__UNCATEGORISED__' : '');
+                      const selectedStats = categoryStats.find((s: any) => s.type_id === selectedTypeId);
+                      const drillRooms = selectedStats
+                        ? availableRooms.filter(r =>
+                            selectedStats.type_id === '__UNCATEGORISED__' ? !r.type_id : r.type_id === selectedStats.type_id
+                          )
+                        : [];
+                      const selectCategory = (typeId: string) => {
+                        const stats = categoryStats.find((s: any) => s.type_id === typeId);
+                        if (!stats) { setDraft({ room_id: '' }); return; }
+                        setDraft({ room_id: stats.room_ids[0] });
+                      };
+                      const fmtRupee = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+                      return (
+                        <>
+                          <select
+                            required
+                            value={selectedTypeId}
+                            onChange={e => selectCategory(e.target.value)}
+                            className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                          >
+                            <option value="">Select category…</option>
+                            {categoryStats.map((s: any) => {
+                              const rate = s.preview?.matrix_used ? s.preview.per_night[0]?.base_rate : s.base_rate;
+                              const rateLabel = rate > 0 ? ` · ${fmtRupee(rate)}/n${s.preview?.matrix_used ? '' : ' (base)'}` : '';
+                              return (
+                                <option key={s.type_id} value={s.type_id}>
+                                  {s.type_name}{rateLabel} · {s.available_count} avl
+                                </option>
+                              );
+                            })}
+                          </select>
+                          {selectedRoom && drillRooms.length > 1 && (
+                            <div className="mt-1.5 flex items-center gap-1.5">
+                              <span className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Room:</span>
+                              <select
+                                value={draft.room_id}
+                                onChange={e => setDraft({ room_id: e.target.value })}
+                                className="flex-1 bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[10px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
+                              >
+                                {drillRooms.map((r: any) => (
+                                  <option key={r.id} value={r.id}>{r.name}{r.room_number ? ` #${r.room_number}` : ''}</option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                   <div>
                     <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Nights</label>
@@ -22295,50 +22366,183 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       if (overlap || dayUseSameDate) conflictRoomIds.add(b.room_id);
                     }
                   }
-                  // Visible rooms = not in conflict. MAINTENANCE / BLOCKED
-                  // stay visible-but-disabled so staff can see the room
-                  // exists and understands why it can't be booked.
-                  const availableRooms = hotelRooms.filter(r => !conflictRoomIds.has(r.id));
-                  const allBlocked = availableRooms.length > 0 &&
-                    availableRooms.every(r => r.status === 'MAINTENANCE' || r.status === 'BLOCKED');
+                  // Visible rooms = not in conflict AND not in maintenance/blocked.
+                  // MAINTENANCE / BLOCKED rooms are filtered out entirely from
+                  // the category counts so staff don't pick a category that
+                  // has "5 available" but they're all locked.
+                  const visibleRooms = hotelRooms.filter(r =>
+                    !conflictRoomIds.has(r.id)
+                    && r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED'
+                  );
+
+                  // ── BCG Tariff Phase 4.3 (client report 7 Jun 2026): the
+                  //    room dropdown was showing individual rooms with stale
+                  //    base_rate, which is misleading when MATRIX pricing is
+                  //    on. New UX: list ROOM CATEGORIES with the live MATRIX
+                  //    rate + available count for the selected dates. Auto-
+                  //    assigns a room from the chosen category; an optional
+                  //    "Change room" drill-down lets advanced users pick a
+                  //    specific room within the category. ──────────────────
+                  const roomTypes = (tariffData.room_types || [])
+                    .filter((rt: any) => rt.is_active !== 0)
+                    .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
+                  const hasCategories = roomTypes.length > 0;
+                  const hasMatrixData = tariffData.tariff_model === 'MATRIX'
+                    && (tariffData.room_tariffs || []).length > 0;
+
+                  // For each category, compute (count of available rooms, matrix rate
+                  // for night 1 if meal plan selected, list of room ids in it).
+                  const categoryStats = roomTypes.map((rt: any) => {
+                    const roomsInCat = visibleRooms.filter(r => r.type_id === rt.id);
+                    let preview: any = null;
+                    if (roomsInCat[0] && ciStr && coStr) {
+                      preview = previewMatrixPrice({
+                        room_id: roomsInCat[0].id,
+                        check_in_date: ciStr,
+                        check_out_date: coStr,
+                        booking_type: bt,
+                        meal_plan_id: editingBooking.meal_plan_id,
+                        extra_adults: editingBooking.extra_adults,
+                        extra_children_with_mattress: editingBooking.extra_children_with_mattress,
+                        extra_children_no_mattress: editingBooking.extra_children_no_mattress,
+                      });
+                    }
+                    return {
+                      type_id: rt.id,
+                      type_name: rt.name,
+                      base_rate: Number(rt.base_rate || 0),
+                      available_count: roomsInCat.length,
+                      room_ids: roomsInCat.map((r: any) => r.id),
+                      preview,
+                    };
+                  }).filter((s: any) => s.available_count > 0);
+
+                  // "Other" bucket — rooms with no category (legacy).
+                  const uncategorisedRooms = visibleRooms.filter(r => !r.type_id);
+                  if (uncategorisedRooms.length > 0) {
+                    categoryStats.push({
+                      type_id: '__UNCATEGORISED__',
+                      type_name: hasCategories ? 'Uncategorised' : 'All Rooms',
+                      base_rate: 0,
+                      available_count: uncategorisedRooms.length,
+                      room_ids: uncategorisedRooms.map((r: any) => r.id),
+                      preview: null,
+                    });
+                  }
+
+                  // Which category is currently selected (derived from room_id)?
+                  const selectedRoom = hotelRooms.find(r => r.id === editingBooking.room_id);
+                  const selectedTypeId = selectedRoom?.type_id || (selectedRoom ? '__UNCATEGORISED__' : '');
+                  const selectedStats = categoryStats.find((s: any) => s.type_id === selectedTypeId);
+
+                  // Rooms in the currently-selected category (for the drill-down).
+                  const drillRooms = selectedStats
+                    ? hotelRooms.filter(r =>
+                        selectedStats.type_id === '__UNCATEGORISED__'
+                          ? !r.type_id
+                          : r.type_id === selectedStats.type_id
+                      ).filter(r =>
+                        !conflictRoomIds.has(r.id)
+                          && r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED'
+                      )
+                    : [];
+
+                  // Auto-pick the first room of a category when the staff
+                  // picks the category.
+                  const selectCategory = (typeId: string) => {
+                    const stats = categoryStats.find((s: any) => s.type_id === typeId);
+                    if (!stats) {
+                      setEditingBooking({ ...editingBooking, room_id: '' });
+                      return;
+                    }
+                    const pickRoomId = stats.room_ids[0];
+                    setEditingBooking({ ...editingBooking, room_id: pickRoomId });
+                  };
+
+                  const fmtRupee = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+
+                  // No categories AND no rooms — show only the existing empty
+                  // states (preserves prior UX).
                   return (
                     <>
+                      {/* ─── Primary: Category picker ──────────────────── */}
                       <select
                         required
-                        value={editingBooking.room_id || ''}
-                        onChange={e => {
-                          const room = hotelRooms.find(r => r.id === e.target.value);
-                          // BCG Tariff Phase 4.2 — don't snap to room.base_rate;
-                          // that would override staff's blank-rate intent and
-                          // bypass the matrix path. Keep whatever they typed
-                          // (including 0, which signals "let the matrix resolve").
-                          setEditingBooking({...editingBooking, room_id: e.target.value });
-                        }}
+                        value={selectedTypeId}
+                        onChange={e => selectCategory(e.target.value)}
                         className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
                       >
-                        <option value="">Select a room…</option>
-                        {availableRooms.map(r => {
-                          const blocked = r.status === 'MAINTENANCE' || r.status === 'BLOCKED';
+                        <option value="">Select a room category…</option>
+                        {categoryStats.map((s: any) => {
+                          const rate = s.preview?.matrix_used
+                            ? s.preview.per_night[0]?.base_rate
+                            : s.base_rate;
+                          const rateLabel = rate > 0
+                            ? ` · ${fmtRupee(rate)}/night${s.preview?.matrix_used ? '' : ' (base)'}`
+                            : '';
+                          const extras = s.preview?.matrix_used && s.preview.per_night[0]?.extras > 0
+                            ? ` + ${fmtRupee(s.preview.per_night[0].extras)} ext.`
+                            : '';
                           return (
-                            <option key={r.id} value={r.id} disabled={blocked}>
-                              {r.name} · ₹{r.base_rate}/night{r.status !== 'VACANT' ? ` · ${r.status}${blocked ? ' (unavailable)' : ''}` : ''}
+                            <option key={s.type_id} value={s.type_id}>
+                              {s.type_name}{rateLabel}{extras} · {s.available_count} available
                             </option>
                           );
                         })}
                       </select>
-                      {ciStr && coStr && availableRooms.length === 0 && (
-                        <p className="text-[11px] text-[#c13b3b] mt-1">
-                          No rooms available for {ciStr} → {coStr}. Try a different date range.
+
+                      {/* ─── Helper / status lines ────────────────────── */}
+                      {(!ciStr || !coStr) && (
+                        <p className="text-[11px] text-amber-700 mt-1">
+                          Pick check-in and check-out dates first to see availability.
                         </p>
                       )}
-                      {ciStr && coStr && availableRooms.length > 0 && conflictRoomIds.size > 0 && (
+                      {ciStr && coStr && categoryStats.length === 0 && (
+                        <p className="text-[11px] text-[#c13b3b] mt-1">
+                          No rooms available for {ciStr} → {coStr}. Try a different date range or clear MAINTENANCE/BLOCKED holds.
+                        </p>
+                      )}
+                      {hasCategories && tariffData.tariff_model === 'MATRIX' && !hasMatrixData && (
+                        <p className="text-[10px] text-amber-700 mt-1">
+                          Matrix pricing is on but no rates configured yet — categories show base rates. Configure rates in Settings → Tariff Configuration.
+                        </p>
+                      )}
+                      {hasCategories && tariffData.tariff_model === 'MATRIX' && hasMatrixData && !editingBooking.meal_plan_id && (
+                        <p className="text-[10px] text-[#9c8e85] mt-1">
+                          Select a meal plan below to see the exact rate per category. Otherwise the booking will use the room's base rate.
+                        </p>
+                      )}
+
+                      {/* ─── Auto-assigned room + drill-down ──────────── */}
+                      {selectedStats && selectedRoom && (
+                        <div className="mt-2 p-2.5 bg-[#cc5a16]/5 rounded-xl border border-[#cc5a16]/10 flex items-center justify-between gap-2 flex-wrap">
+                          <div className="text-[11px] text-[#3d3128]">
+                            <span className="text-[#9c8e85]">Assigned room:</span>{' '}
+                            <span className="font-bold text-[#1a1208]">{selectedRoom.name}</span>{' '}
+                            <span className="text-[#9c8e85]">(Room #{selectedRoom.room_number || '—'}{selectedRoom.floor ? `, Floor ${selectedRoom.floor}` : ''})</span>
+                          </div>
+                          {drillRooms.length > 1 && (
+                            <div className="flex items-center gap-1.5">
+                              <label className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Change:</label>
+                              <select
+                                value={editingBooking.room_id || ''}
+                                onChange={e => setEditingBooking({ ...editingBooking, room_id: e.target.value })}
+                                className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[10px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
+                              >
+                                {drillRooms.map(r => (
+                                  <option key={r.id} value={r.id}>
+                                    {r.name}{r.room_number ? ` #${r.room_number}` : ''}{r.floor ? ` · F${r.floor}` : ''}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {ciStr && coStr && categoryStats.length > 0 && conflictRoomIds.size > 0 && (
                         <p className="text-[10px] text-[#9c8e85] mt-1">
                           {conflictRoomIds.size} room{conflictRoomIds.size > 1 ? 's' : ''} hidden — already booked for these dates.
-                        </p>
-                      )}
-                      {ciStr && coStr && allBlocked && (
-                        <p className="text-[11px] text-amber-700 mt-1">
-                          All available rooms are in maintenance or blocked. Clear room status first.
                         </p>
                       )}
                     </>
