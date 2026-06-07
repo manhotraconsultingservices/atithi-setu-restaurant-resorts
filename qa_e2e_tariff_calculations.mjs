@@ -183,14 +183,21 @@ function gstRateForTariff(tariff, cfg = TAX_CFG) {
   return cfg.slab3Rate;
 }
 
-// Mirror of createFolioWithRoomCharges after the BCG Tariff Phase 3.1 fix
-// (server.ts:1077+). Now matrix-aware: when meal_plan_id is set, uses
-// computeBookingTotalWithExtras for per-night base + extras and applies
-// the GST slab to the FULL per-night line (base + extras) so stays that
-// cross ₹7,500 via extras get the correct 18% slab.
+// Mirror of createFolioWithRoomCharges after the BCG Tariff Phase 3.1 +
+// 4.1 fixes (server.ts:1077+). Now matrix-aware: when meal_plan_id is
+// set, uses computeBookingTotalWithExtras for per-night base + extras
+// and applies the GST slab to the FULL per-night line (base + extras)
+// so stays that cross ₹7,500 via extras get the correct 18% slab.
+//
+// Phase 4.1 also honours manual room_rate overrides in MATRIX mode: if
+// the booking carries a room_rate that disagrees with the matrix's
+// night-1 rate, the folio uses the manual rate for every night and
+// drops extras (matches the booking POST manual-rate branch which also
+// skips extras).
 function createFolioWithRoomCharges_PROD(roomId, booking) {
   const useMatrix = !!booking.meal_plan_id; // tariff_model='MATRIX' is set by BCG seed
   let perNight;
+  const explicitRate = Number(booking.room_rate) || 0;
   if (useMatrix) {
     const breakdown = computeBookingTotalWithExtras(roomId, booking.check_in_date, booking.check_out_date, {
       mealPlanId:                booking.meal_plan_id,
@@ -199,7 +206,13 @@ function createFolioWithRoomCharges_PROD(roomId, booking) {
       extraChildrenNoMattress:   booking.extra_children_no_mattress,
       bookingType:               booking.booking_type,
     });
-    perNight = breakdown.per_night.map(n => ({ date: n.date, base_rate: n.base_rate, extras: n.extras }));
+    const matrixNight1 = breakdown.per_night[0]?.base_rate || 0;
+    const useExplicitInMatrix = explicitRate > 0 && Math.abs(explicitRate - matrixNight1) > 0.01;
+    perNight = breakdown.per_night.map(n => ({
+      date: n.date,
+      base_rate: useExplicitInMatrix ? explicitRate : n.base_rate,
+      extras:    useExplicitInMatrix ? 0 : n.extras,
+    }));
   } else {
     // Legacy fallback: room_types.base_rate per night, no extras.
     const dates = [];
@@ -274,219 +287,353 @@ function createFolioWithRoomCharges_CORRECT(roomId, booking) {
 
 const C = { reset: '\x1b[0m', red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', cyan: '\x1b[36m', gray: '\x1b[90m', bold: '\x1b[1m' };
 const fmt = n => `Rs ${n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+const VERBOSE = process.env.VERBOSE === '1';
 
 let passed = 0, failed = 0, warned = 0;
 const failures = [];
 const warnings = [];
 
 function runCase(c) {
-  console.log(`\n${C.bold}${C.cyan}━━━ Case ${c.id}: ${c.title} ━━━${C.reset}`);
-  console.log(`${C.gray}  Room: ${ROOMS[c.room_id].room_number} (${ROOM_TYPES[ROOMS[c.room_id].type_id].name})`);
-  console.log(`  Dates: ${c.check_in_date} → ${c.check_out_date}  (booking_type=${c.booking_type || 'OVERNIGHT'})`);
-  console.log(`  Meal plan: ${c.meal_plan_id || '—'}, Extra adults: ${c.extra_adults || 0}, Child(mat): ${c.extra_children_with_mattress || 0}, Child(no-mat): ${c.extra_children_no_mattress || 0}${C.reset}`);
-
-  // ── STAGE 1: Booking total ────────────────────────────────────────
   const breakdown = computeBookingTotalWithExtras(c.room_id, c.check_in_date, c.check_out_date, {
     mealPlanId: c.meal_plan_id, extraAdults: c.extra_adults,
     extraChildrenWithMattress: c.extra_children_with_mattress,
     extraChildrenNoMattress: c.extra_children_no_mattress,
     bookingType: c.booking_type,
   });
-  console.log(`${C.gray}  Per-night:${C.reset}`);
-  for (const n of breakdown.per_night) {
-    const seasonId = getSeasonForDate(n.date);
-    console.log(`${C.gray}    ${n.date} [${(seasonId || 'NO-SEASON').padEnd(4)} ${n.source.padEnd(18)}] base=${fmt(n.base_rate).padStart(12)}  extras=${fmt(n.extras).padStart(10)}${C.reset}`);
-  }
-  const stage1OK = Math.abs(breakdown.total - c.expected_booking_total) < 0.01;
-  if (stage1OK) {
-    console.log(`  ${C.green}✓${C.reset} Booking total = ${fmt(breakdown.total)}  (matches expected)`);
-    passed++;
-  } else {
-    console.log(`  ${C.red}✗${C.reset} Booking total = ${fmt(breakdown.total)}  ${C.red}EXPECTED ${fmt(c.expected_booking_total)}${C.reset}`);
-    failed++;
-    failures.push(`Case ${c.id}: booking total mismatch (got ${breakdown.total}, expected ${c.expected_booking_total})`);
-  }
-
-  // The booking row simulator — what gets saved to the DB.
   const booking = {
-    room_id: c.room_id,
-    check_in_date: c.check_in_date,
-    check_out_date: c.check_out_date,
-    booking_type: c.booking_type,
-    meal_plan_id: c.meal_plan_id,
+    room_id: c.room_id, check_in_date: c.check_in_date, check_out_date: c.check_out_date,
+    booking_type: c.booking_type, meal_plan_id: c.meal_plan_id,
     extra_adults: c.extra_adults,
     extra_children_with_mattress: c.extra_children_with_mattress,
     extra_children_no_mattress: c.extra_children_no_mattress,
-    // Per server.ts:17884 — room_rate stores per_night[0].base_rate ONLY
-    // (not extras, not avg).
     room_rate: breakdown.per_night[0]?.base_rate || 0,
     total_amount: breakdown.total,
   };
+  const folio = createFolioWithRoomCharges_PROD(c.room_id, booking);
 
-  // ── STAGE 2: Folio creation (current PRODUCTION behaviour) ──────
-  const folioProd = createFolioWithRoomCharges_PROD(c.room_id, booking);
-  console.log(`  ${C.gray}Folio (PROD path — legacy resolver):${C.reset}`);
-  console.log(`    subtotal=${fmt(folioProd.subtotal)}  gst=${fmt(folioProd.gst)}  grand_total=${fmt(folioProd.grand_total)}`);
-
-  // ── STAGE 2b: Folio creation (CORRECT behaviour) ─────────────────
-  const folioCorrect = createFolioWithRoomCharges_CORRECT(c.room_id, booking);
-  console.log(`  ${C.gray}Folio (CORRECT — matrix-aware):${C.reset}`);
-  console.log(`    subtotal=${fmt(folioCorrect.subtotal)}  gst=${fmt(folioCorrect.gst)}  grand_total=${fmt(folioCorrect.grand_total)}`);
-
-  // ── ASSERT: booking total should equal folio subtotal ──────────
-  const drift = Math.round((booking.total_amount - folioProd.subtotal) * 100) / 100;
-  if (Math.abs(drift) < 0.01) {
-    console.log(`  ${C.green}✓${C.reset} Booking total == folio subtotal (no drift)`);
-    passed++;
-  } else {
-    const direction = drift > 0 ? 'UNDER-BILLED' : 'OVER-BILLED';
-    console.log(`  ${C.red}✗ ${direction}: booking ${fmt(booking.total_amount)} vs folio subtotal ${fmt(folioProd.subtotal)} (Δ ${fmt(Math.abs(drift))})${C.reset}`);
-    failed++;
-    failures.push(`Case ${c.id}: revenue drift ${drift} (${direction})`);
+  const checks = [];
+  // 1. Booking total matches expected (the hand-computed value)
+  if (c.expected_booking_total != null) {
+    const ok = Math.abs(breakdown.total - c.expected_booking_total) < 0.01;
+    checks.push({ ok, label: 'booking total', got: breakdown.total, want: c.expected_booking_total });
+    ok ? passed++ : (failed++, failures.push(`${c.id}: booking total ${breakdown.total} ≠ ${c.expected_booking_total}`));
   }
+  // 2. Folio subtotal equals booking total (no revenue drift)
+  const drift = Math.round((booking.total_amount - folio.subtotal) * 100) / 100;
+  const driftOK = Math.abs(drift) < 0.01;
+  checks.push({ ok: driftOK, label: 'no drift', got: folio.subtotal, want: booking.total_amount });
+  driftOK ? passed++ : (failed++, failures.push(`${c.id}: revenue drift ${drift} (${drift > 0 ? 'UNDER' : 'OVER'}-billed)`));
 
-  // ── ASSERT: invoice grand_total matches expected ────────────────
+  // 3. Invoice grand_total matches expected
   if (c.expected_invoice_grand != null) {
-    const grandOK = Math.abs(folioProd.grand_total - c.expected_invoice_grand) < 0.01;
-    if (grandOK) {
-      console.log(`  ${C.green}✓${C.reset} Invoice grand_total = ${fmt(folioProd.grand_total)} (matches expected)`);
-      passed++;
-    } else {
-      console.log(`  ${C.red}✗${C.reset} Invoice grand_total = ${fmt(folioProd.grand_total)}  ${C.red}EXPECTED ${fmt(c.expected_invoice_grand)}${C.reset}`);
-      failed++;
-      failures.push(`Case ${c.id}: invoice grand_total mismatch (got ${folioProd.grand_total}, expected ${c.expected_invoice_grand})`);
-    }
+    const ok = Math.abs(folio.grand_total - c.expected_invoice_grand) < 0.01;
+    checks.push({ ok, label: 'invoice grand', got: folio.grand_total, want: c.expected_invoice_grand });
+    ok ? passed++ : (failed++, failures.push(`${c.id}: invoice grand ${folio.grand_total} ≠ ${c.expected_invoice_grand}`));
+  }
+  // 4. GST slab is correct (when caller specified)
+  if (c.expected_gst_slab != null && folio.entries.length > 0) {
+    const firstRoomEntry = folio.entries.find(e => e.type === 'ROOM_CHARGE');
+    const actualSlab = firstRoomEntry?.gst_pct;
+    const ok = actualSlab === c.expected_gst_slab;
+    checks.push({ ok, label: 'GST slab', got: `${actualSlab}%`, want: `${c.expected_gst_slab}%` });
+    ok ? passed++ : (failed++, failures.push(`${c.id}: GST slab ${actualSlab}% ≠ ${c.expected_gst_slab}%`));
   }
 
-  // Surface any case where prod path differs from correct path.
-  const grandDelta = Math.round((folioCorrect.grand_total - folioProd.grand_total) * 100) / 100;
-  if (Math.abs(grandDelta) >= 0.01) {
-    warnings.push({ id: c.id, title: c.title, prod: folioProd.grand_total, correct: folioCorrect.grand_total, delta: grandDelta });
-    warned++;
-    console.log(`  ${C.yellow}⚠${C.reset}  Prod grand ${fmt(folioProd.grand_total)} vs correct grand ${fmt(folioCorrect.grand_total)} → invoice short by ${C.yellow}${fmt(Math.abs(grandDelta))}${C.reset}`);
+  const allOK = checks.every(c => c.ok);
+  const statusGlyph = allOK ? `${C.green}✓${C.reset}` : `${C.red}✗${C.reset}`;
+  const oneline = `  ${statusGlyph} ${c.id.padEnd(7)} ${c.title.padEnd(60)} booking=${fmt(breakdown.total).padStart(13)} grand=${fmt(folio.grand_total).padStart(13)}`;
+  console.log(oneline);
+
+  if (!allOK || VERBOSE) {
+    for (const ck of checks.filter(c => !c.ok)) {
+      console.log(`      ${C.red}└─ ${ck.label}: got ${ck.got} expected ${ck.want}${C.reset}`);
+    }
+    if (VERBOSE) {
+      for (const n of breakdown.per_night) {
+        console.log(`      ${C.gray}${n.date} [${(getSeasonForDate(n.date) || 'NO-SEASON').padEnd(4)} ${n.source.padEnd(20)}] base=${fmt(n.base_rate).padStart(11)}  extras=${fmt(n.extras).padStart(10)}${C.reset}`);
+      }
+    }
   }
 }
 
+function section(title) {
+  console.log(`\n${C.bold}${C.cyan}━━━ ${title} ━━━${C.reset}`);
+}
+
 // ─────────────────────────────────────────────────────────────────────
-// CASES
+// CASE BUILDERS
 // ─────────────────────────────────────────────────────────────────────
 
-// expected_invoice_grand reflects the CORRECT (matrix-aware) value —
-// the value the customer was quoted at booking time, plus GST. A
-// failure here means the production folio path under/over-bills relative
-// to the price the guest was promised.
-const CASES = [
-  {
-    id: 'C1',
-    title: 'SUPERIOR · PEAK · 2 nights · EP · no extras',
-    room_id: 'ROOM-103',
-    check_in_date: '2026-05-10', check_out_date: '2026-05-12',
-    meal_plan_id: 'EP',
-    // 2 nights × ₹3200 = ₹6400. GST per night: 3200 ≤ 7500 → 12%.
-    // Per-night GST = 3200 × 0.12 = ₹384. Total GST = ₹768. Grand = ₹7168.
-    expected_booking_total: 6400,
-    expected_invoice_grand: 7168,
-  },
-  {
-    id: 'C2',
-    title: 'SUPERIOR · OFF · 2 nights · EP · no extras',
-    room_id: 'ROOM-103',
-    check_in_date: '2026-08-10', check_out_date: '2026-08-12',
-    meal_plan_id: 'EP',
-    // Matrix OFF/EP = ₹2000 — happens to match base_rate (no drift visible).
-    expected_booking_total: 4000,
-    expected_invoice_grand: 4480,  // 4000 + 12% = 4480
-  },
-  {
-    id: 'C3',
-    title: 'PREMIUM · PEAK · 3 nights · CP · no extras',
-    room_id: 'ROOM-204',
-    check_in_date: '2026-05-15', check_out_date: '2026-05-18',
-    meal_plan_id: 'CP',
-    // Matrix ₹4200/night × 3 = ₹12,600.
-    // booking.room_rate = 4200 (matrix per_night[0]) → folio useExplicit
-    // path keeps 4200. Subtotal 12600, 12% = 1512. Grand = ₹14,112.
-    expected_booking_total: 12600,
-    expected_invoice_grand: 14112,
-  },
-  {
-    id: 'C4',
-    title: 'RIVER · PEAK · 2 nights · MAP · +1 ADULT',
+// Hand-compute what the test SHOULD see for an OVERNIGHT MATRIX booking.
+// Mirrors production math step-by-step so a wrong production result
+// can't accidentally produce a wrong expected (independence by construction).
+function expectedFor(roomTypeId, seasonId, mealPlanId, nights, opts = {}) {
+  const baseRate = ROOM_TARIFFS[`${roomTypeId}|${seasonId}|${mealPlanId}`];
+  const adults = opts.extra_adults || 0;
+  const cMat   = opts.extra_children_with_mattress || 0;
+  const cNoMat = opts.extra_children_no_mattress || 0;
+  const extrasPerNight =
+    adults * (EXTRA_PERSON_CHARGES[`ADULT|${seasonId}|${mealPlanId}`] || 0) +
+    cMat   * (EXTRA_PERSON_CHARGES[`CHILD_WITH_MATTRESS|${seasonId}|${mealPlanId}`] || 0) +
+    cNoMat * (EXTRA_PERSON_CHARGES[`CHILD_NO_MATTRESS|${seasonId}|${mealPlanId}`] || 0);
+  const lineAmount = Math.round((baseRate + extrasPerNight) * 100) / 100;
+  // GST slab on the FULL per-night line (base + extras), per server.ts:1140.
+  const slab = lineAmount <= 1000 ? 0 : lineAmount <= 7500 ? 12 : 18;
+  const lineGst = Math.round((lineAmount * slab / 100) * 100) / 100;
+  const booking = Math.round(lineAmount * nights * 100) / 100;
+  const grand   = Math.round((lineAmount + lineGst) * nights * 100) / 100;
+  return { booking, grand, slab };
+}
+
+const ROOM_BY_TYPE = { SUPERIOR_VIEW: 'ROOM-103', PREMIUM_BALC: 'ROOM-204', RIVER_VIEW: 'ROOM-101' };
+const SHORT_CAT = { SUPERIOR_VIEW: 'SUP', PREMIUM_BALC: 'PRM', RIVER_VIEW: 'RVR' };
+
+// Cluster of date windows safely inside each season (so a stay never
+// accidentally crosses a season boundary unless we want it to).
+const PEAK_CI = '2026-05-10';   // PEAK window: 2026-04-15 → 2026-06-30
+const OFF_CI  = '2026-08-10';   // OFF window:  2026-07-01 → 2026-12-19
+
+function addDays(iso, n) {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CASES — comprehensive coverage
+// ─────────────────────────────────────────────────────────────────────
+
+const CASES = [];
+
+// BLOCK 1 — Full matrix coverage. Every (category × season × meal plan)
+// triple gets a 2-night stay with no extras. 3 × 2 × 4 = 24 cases.
+// This catches any single-cell tariff mismatch.
+for (const cat of ['SUPERIOR_VIEW', 'PREMIUM_BALC', 'RIVER_VIEW']) {
+  for (const season of ['PEAK', 'OFF']) {
+    const ci = season === 'PEAK' ? PEAK_CI : OFF_CI;
+    const co = addDays(ci, 2);
+    for (const meal of ['EP', 'CP', 'MAP', 'API']) {
+      const exp = expectedFor(cat, season, meal, 2);
+      CASES.push({
+        id: `M-${SHORT_CAT[cat]}-${season}-${meal}`,
+        block: 'matrix',
+        title: `${cat.replace('_', ' ')} · ${season} · 2N · ${meal}`,
+        room_id: ROOM_BY_TYPE[cat],
+        check_in_date: ci, check_out_date: co,
+        meal_plan_id: meal,
+        expected_booking_total: exp.booking,
+        expected_invoice_grand: exp.grand,
+        expected_gst_slab: exp.slab,
+      });
+    }
+  }
+}
+
+// BLOCK 2 — Extras coverage. For each category + meal plan, test the
+// common Indian-resort extras configs: +1A, +1A+1C(mat), full combo.
+// PEAK season only (we already validated OFF rates above).
+const EXTRA_SCENARIOS = [
+  { name: '+1A',          extra_adults: 1 },
+  { name: '+1A+1C(mat)',  extra_adults: 1, extra_children_with_mattress: 1 },
+  { name: '+1A+2C',       extra_adults: 1, extra_children_with_mattress: 1, extra_children_no_mattress: 1 },
+];
+for (const cat of ['SUPERIOR_VIEW', 'PREMIUM_BALC', 'RIVER_VIEW']) {
+  for (const meal of ['EP', 'CP', 'MAP', 'API']) {
+    for (const ex of EXTRA_SCENARIOS) {
+      const exp = expectedFor(cat, 'PEAK', meal, 2, ex);
+      const exLabel = ex.name;
+      CASES.push({
+        id: `X-${SHORT_CAT[cat]}-${meal}-${exLabel.replace(/[+()]/g, '')}`,
+        block: 'extras',
+        title: `${cat.replace('_', ' ')} · PEAK · 2N · ${meal} · ${exLabel}`,
+        room_id: ROOM_BY_TYPE[cat],
+        check_in_date: PEAK_CI, check_out_date: addDays(PEAK_CI, 2),
+        meal_plan_id: meal,
+        ...ex,
+        expected_booking_total: exp.booking,
+        expected_invoice_grand: exp.grand,
+        expected_gst_slab: exp.slab,
+      });
+    }
+  }
+}
+
+// BLOCK 3 — Stay-length coverage. 1N / 3N / 7N for a representative
+// (River · PEAK · MAP) combination.
+for (const nights of [1, 3, 7]) {
+  const ci = PEAK_CI;
+  const co = addDays(ci, nights);
+  const exp = expectedFor('RIVER_VIEW', 'PEAK', 'MAP', nights);
+  CASES.push({
+    id: `L-RVR-MAP-${nights}N`,
+    block: 'stay-length',
+    title: `RIVER VIEW · PEAK · ${nights}N · MAP · no extras`,
     room_id: 'ROOM-101',
-    check_in_date: '2026-05-20', check_out_date: '2026-05-22',
-    meal_plan_id: 'MAP', extra_adults: 1,
-    // Matrix ₹5500/night + ₹1800 extra adult = ₹7300/night × 2 = ₹14,600.
-    // Per-night line 7300 ≤ 7500 → 12%. GST = 876/night × 2 = ₹1752.
-    // CORRECT grand = 14600 + 1752 = ₹16,352.
-    expected_booking_total: 14600,
-    expected_invoice_grand: 16352,
-  },
+    check_in_date: ci, check_out_date: co,
+    meal_plan_id: 'MAP',
+    expected_booking_total: exp.booking,
+    expected_invoice_grand: exp.grand,
+    expected_gst_slab: exp.slab,
+  });
+}
+
+// BLOCK 4 — Edge cases — algorithm-level correctness.
+CASES.push(
   {
-    id: 'C5',
-    title: 'RIVER · OFF · 4 nights · API · +1 ADULT +1 CHILD(mat) +1 CHILD(no-mat)',
-    room_id: 'ROOM-101',
-    check_in_date: '2026-09-10', check_out_date: '2026-09-14',
-    meal_plan_id: 'API', extra_adults: 1, extra_children_with_mattress: 1, extra_children_no_mattress: 1,
-    // Matrix base 4800/night. Extras: ADULT 2000 + CHILD_MAT 1500 + CHILD_NO_MAT 1100 = 4600.
-    // Per-night 9400. 4 nights → ₹37,600.
-    // Per-night line 9400 > 7500 → 18%. GST = 1692/night × 4 = ₹6768. Grand = ₹44,368.
-    expected_booking_total: 37600,
-    expected_invoice_grand: 44368,
-  },
-  {
-    id: 'C6',
-    title: 'SUPERIOR · PEAK→OFF crossover · 2 nights · MAP',
+    // PEAK ends 2026-06-30 inclusive → 2026-07-01 starts OFF. A stay
+    // 2026-06-30 → 2026-07-02 spans BOTH seasons. The math must use
+    // night-1's PEAK rate for the first folio entry and night-2's OFF
+    // rate for the second.
+    id: 'E-PEAK-OFF-CROSS',
+    block: 'edge',
+    title: 'SUP · cross-season PEAK→OFF · 2N · MAP',
     room_id: 'ROOM-103',
-    // 2026-06-30 = last day of PEAK, 2026-07-01 = first day of OFF.
     check_in_date: '2026-06-30', check_out_date: '2026-07-02',
     meal_plan_id: 'MAP',
-    // Night 1 PEAK MAP = 4500. Night 2 OFF MAP = 3300. Total ₹7,800.
-    // Per night GST 12% (both ≤ 7500). GST 540 + 396 = 936. Grand = ₹8,736.
+    // PEAK MAP SUP = 4500 (night 1). OFF MAP SUP = 3300 (night 2). Total = 7800.
+    // Per-night GST: 4500 × 12% = 540, 3300 × 12% = 396. Grand = 4500 + 540 + 3300 + 396 = 8736.
     expected_booking_total: 7800,
     expected_invoice_grand: 8736,
   },
   {
-    id: 'C7',
-    title: 'SUPERIOR · no-season date · EP · matrix fall-through',
+    // Date outside ANY season period → matrix returns null → fall through
+    // to legacy base_rate (₹2000 for SUPERIOR).
+    id: 'E-NO-SEASON',
+    block: 'edge',
+    title: 'SUP · 2028 (no season) · 2N · EP · legacy fallback',
     room_id: 'ROOM-103',
-    // 2028 has no season period → matrix returns null → legacy fallback.
     check_in_date: '2028-03-10', check_out_date: '2028-03-12',
     meal_plan_id: 'EP',
-    expected_booking_total: 4000,
-    expected_invoice_grand: 4480,
+    expected_booking_total: 4000, // 2000 × 2
+    expected_invoice_grand: 4480, // 4000 × 1.12
+    expected_gst_slab: 12,
   },
   {
-    id: 'C8',
-    title: 'SUPERIOR · PEAK · DAY-USE · CP',
+    id: 'E-DAY-USE-SUP-CP',
+    block: 'edge',
+    title: 'SUP · PEAK · DAY-USE · CP',
     room_id: 'ROOM-103',
-    check_in_date: '2026-05-10', check_out_date: '2026-05-10',
+    check_in_date: PEAK_CI, check_out_date: PEAK_CI,
     booking_type: 'DAY_USE', meal_plan_id: 'CP',
-    // Single "night" at PEAK SUPERIOR CP = ₹3700. 12% GST = 444. Grand = ₹4,144.
     expected_booking_total: 3700,
     expected_invoice_grand: 4144,
+    expected_gst_slab: 12,
   },
   {
-    id: 'C9',
-    title: 'RIVER · PEAK · 1 night · API · no extras',
+    id: 'E-DAY-USE-RVR-API',
+    block: 'edge',
+    title: 'RVR · PEAK · DAY-USE · API · +1A (slab crosses to 18%)',
     room_id: 'ROOM-101',
-    check_in_date: '2026-05-25', check_out_date: '2026-05-26',
-    meal_plan_id: 'API',
-    // Matrix ₹6200, 12%. GST 744. Grand ₹6,944.
-    expected_booking_total: 6200,
-    expected_invoice_grand: 6944,
+    check_in_date: PEAK_CI, check_out_date: PEAK_CI,
+    booking_type: 'DAY_USE', meal_plan_id: 'API', extra_adults: 1,
+    // 6200 + 2200 = 8400 > 7500 → 18%
+    expected_booking_total: 8400,
+    expected_invoice_grand: 8400 + 8400 * 0.18,
+    expected_gst_slab: 18,
   },
   {
-    id: 'C10',
-    title: 'RIVER · PEAK · API · 2 ADULTs (matrix line > ₹7500 → 18% slab)',
+    id: 'E-SLAB-EDGE-LOW',
+    block: 'edge',
+    title: 'SUP · OFF · 1N · EP (₹2000 → 12% slab)',
+    room_id: 'ROOM-103',
+    check_in_date: OFF_CI, check_out_date: addDays(OFF_CI, 1),
+    meal_plan_id: 'EP',
+    expected_booking_total: 2000,
+    expected_invoice_grand: 2240,
+    expected_gst_slab: 12,
+  },
+  {
+    id: 'E-SLAB-EDGE-HIGH',
+    block: 'edge',
+    title: 'RVR · PEAK · 1N · API · +2A (line > ₹7500 → 18% slab)',
     room_id: 'ROOM-101',
-    check_in_date: '2026-05-25', check_out_date: '2026-05-26',
+    check_in_date: PEAK_CI, check_out_date: addDays(PEAK_CI, 1),
     meal_plan_id: 'API', extra_adults: 2,
-    // Matrix base 6200 + 2 × extra adult 2200 = 10600. > 7500 → 18%.
-    // GST = 1908. Grand = ₹12,508.
+    // 6200 + 2×2200 = 10600 > 7500 → 18%
     expected_booking_total: 10600,
-    expected_invoice_grand: 12508,
+    expected_invoice_grand: 10600 + 10600 * 0.18,
+    expected_gst_slab: 18,
   },
-];
+  {
+    id: 'E-SLAB-EDGE-EXTRAS-PUSH',
+    block: 'edge',
+    title: 'RVR · OFF · 1N · MAP · +1A (extras push line over ₹7500 → 18%)',
+    room_id: 'ROOM-101',
+    check_in_date: OFF_CI, check_out_date: addDays(OFF_CI, 1),
+    meal_plan_id: 'MAP', extra_adults: 3,
+    // RVR OFF MAP = 4100. +3 adults at 1600 = 4800. Total/night = 8900.
+    // 8900 > 7500 → 18%.
+    expected_booking_total: 8900,
+    expected_invoice_grand: Math.round((8900 + 8900 * 0.18) * 100) / 100,
+    expected_gst_slab: 18,
+  },
+  {
+    // The "client booked, then added extras at check-in" path — the
+    // booking total + folio subtotal must include the extras both times.
+    id: 'E-FULL-COMBO-LONG',
+    block: 'edge',
+    title: 'RVR · OFF · 4N · API · +1A +1C(m) +1C(nm) (the BCG flagship case)',
+    room_id: 'ROOM-101',
+    check_in_date: OFF_CI, check_out_date: addDays(OFF_CI, 4),
+    meal_plan_id: 'API', extra_adults: 1, extra_children_with_mattress: 1, extra_children_no_mattress: 1,
+    expected_booking_total: 37600,
+    expected_invoice_grand: 44368,
+    expected_gst_slab: 18,
+  },
+);
+
+// BLOCK 5 — Tariff configuration scenarios
+CASES.push(
+  {
+    // Booking with NO meal plan → MATRIX path skipped, falls back to
+    // legacy base_rate. Validates the "tenant onboarded but no meal
+    // plans configured yet" UX.
+    id: 'T-NO-MEAL-PLAN',
+    block: 'tariff-config',
+    title: 'SUP · OFF · 2N · NO meal plan (matrix bypass → base_rate)',
+    room_id: 'ROOM-103',
+    check_in_date: OFF_CI, check_out_date: addDays(OFF_CI, 2),
+    meal_plan_id: null,
+    expected_booking_total: 4000, // 2000 base × 2 nights
+    expected_invoice_grand: 4480,
+    expected_gst_slab: 12,
+  },
+  {
+    // Custom meal plan ID that doesn't exist in ROOM_TARIFFS → matrix
+    // returns null per cell → falls back to legacy base_rate.
+    id: 'T-CUSTOM-PLAN-NO-MATRIX',
+    block: 'tariff-config',
+    title: 'SUP · PEAK · 2N · "HERITAGE" (custom plan, no matrix cell)',
+    room_id: 'ROOM-103',
+    check_in_date: PEAK_CI, check_out_date: addDays(PEAK_CI, 2),
+    meal_plan_id: 'HERITAGE',
+    expected_booking_total: 4000, // 2000 base × 2 (no matrix → legacy)
+    expected_invoice_grand: 4480,
+    expected_gst_slab: 12,
+  },
+  {
+    // Manual rate override path: caller passed room_rate > 0 with a
+    // non-matching matrix rate. Folio honours the manual override for
+    // every night. (Tests the useExplicit branch.)
+    id: 'T-MANUAL-RATE',
+    block: 'tariff-config',
+    title: 'PRM · PEAK · 2N · CP · manual room_rate=5000 (overrides matrix)',
+    room_id: 'ROOM-204',
+    check_in_date: PEAK_CI, check_out_date: addDays(PEAK_CI, 2),
+    meal_plan_id: 'CP',
+    // Real booking POST flow: when staff passes room_rate > 0, booking
+    // POST stores total = rate × nights (no matrix, no extras computed).
+    // The folio (post-fix Phase 4.1) honours the override per-night
+    // and drops matrix-derived extras → invoice matches the quote.
+    manual_room_rate: 5000,
+    // Booking POST manual-rate branch: total = 5000 × 2 = 10000.
+    expected_booking_total: 10000,
+    // Folio after Phase 4.1 fix: useExplicitInMatrix=true → 5000 × 2 =
+    // 10000 subtotal. 12% GST = 1200. Grand = 11200.
+    expected_invoice_grand: 11200,
+    expected_gst_slab: 12,
+  },
+);
 
 // ─────────────────────────────────────────────────────────────────────
 // RUN
@@ -494,10 +641,61 @@ const CASES = [
 
 console.log(`${C.bold}╔════════════════════════════════════════════════════════════════════╗`);
 console.log(`║       E2E TARIFF CALCULATION VALIDATOR — Atithi-Setu Hotel         ║`);
-console.log(`║         Room Category × Season × Meal Plan × Extra Person         ║`);
+console.log(`║      Room × Season × Meal Plan × Extras · Full Coverage Run       ║`);
 console.log(`╚════════════════════════════════════════════════════════════════════╝${C.reset}`);
+console.log(`${C.gray}Running ${CASES.length} cases. Set VERBOSE=1 to see per-night breakdown.${C.reset}`);
 
-for (const c of CASES) runCase(c);
+// Section: Full matrix
+section(`BLOCK 1 — Full matrix coverage (Room × Season × Meal Plan, 2 nights, no extras)`);
+for (const c of CASES.filter(c => c.block === 'matrix')) runCase(c);
+
+section(`BLOCK 2 — Extras coverage (PEAK, every category × meal plan × 3 extras configs)`);
+for (const c of CASES.filter(c => c.block === 'extras')) runCase(c);
+
+section(`BLOCK 3 — Stay-length coverage (1/3/7 nights)`);
+for (const c of CASES.filter(c => c.block === 'stay-length')) runCase(c);
+
+section(`BLOCK 4 — Edge cases (cross-season, slab boundaries, day-use, no-season fallback)`);
+for (const c of CASES.filter(c => c.block === 'edge')) runCase(c);
+
+section(`BLOCK 5 — Tariff configuration scenarios (no plan, custom plan, manual rate)`);
+for (const c of CASES.filter(c => c.block === 'tariff-config')) {
+  // Apply the manual_room_rate override into the booking simulation.
+  // Real booking POST manual-rate branch: total = rate × nights (no
+  // matrix, no extras). Then folio creation runs with that room_rate.
+  if (c.manual_room_rate) {
+    // Compute nights for the total-amount calc.
+    let nights = 1;
+    if (c.check_in_date !== c.check_out_date) {
+      nights = Math.max(1, Math.ceil(
+        (new Date(c.check_out_date).getTime() - new Date(c.check_in_date).getTime()) / 86400000
+      ));
+    }
+    const bookingTotal = c.manual_room_rate * nights;
+    const booking = {
+      room_id: c.room_id, check_in_date: c.check_in_date, check_out_date: c.check_out_date,
+      booking_type: c.booking_type, meal_plan_id: c.meal_plan_id,
+      extra_adults: c.extra_adults,
+      extra_children_with_mattress: c.extra_children_with_mattress,
+      extra_children_no_mattress: c.extra_children_no_mattress,
+      room_rate: c.manual_room_rate,
+      total_amount: bookingTotal,
+    };
+    const folio = createFolioWithRoomCharges_PROD(c.room_id, booking);
+    const bookingOK = Math.abs(bookingTotal - c.expected_booking_total) < 0.01;
+    const grandOK   = Math.abs(folio.grand_total - c.expected_invoice_grand) < 0.01;
+    const driftOK   = Math.abs(bookingTotal - folio.subtotal) < 0.01;
+    const slabOK = c.expected_gst_slab == null || folio.entries.find(e => e.type === 'ROOM_CHARGE')?.gst_pct === c.expected_gst_slab;
+    const allOK = bookingOK && grandOK && driftOK && slabOK;
+    bookingOK ? passed++ : (failed++, failures.push(`${c.id}: booking ${bookingTotal} ≠ ${c.expected_booking_total}`));
+    driftOK   ? passed++ : (failed++, failures.push(`${c.id}: drift booking=${bookingTotal} folio_subtotal=${folio.subtotal}`));
+    grandOK   ? passed++ : (failed++, failures.push(`${c.id}: invoice grand ${folio.grand_total} ≠ ${c.expected_invoice_grand}`));
+    if (c.expected_gst_slab != null) slabOK ? passed++ : (failed++, failures.push(`${c.id}: slab mismatch`));
+    console.log(`  ${allOK ? C.green+'✓'+C.reset : C.red+'✗'+C.reset} ${c.id.padEnd(7)} ${c.title.padEnd(60)} booking=${fmt(bookingTotal).padStart(13)} grand=${fmt(folio.grand_total).padStart(13)}`);
+  } else {
+    runCase(c);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // REPORT

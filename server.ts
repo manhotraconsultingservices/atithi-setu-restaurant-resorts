@@ -1119,11 +1119,25 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
           bookingType: booking.booking_type || 'OVERNIGHT',
         }
       );
+      // BCG Tariff Phase 4.1 — manual-rate override in MATRIX mode.
+      // When the booking POST stored a room_rate that disagrees with what
+      // the matrix would compute for night 1, the staff explicitly set the
+      // per-night rate (negotiated corporate rate, special promo, etc.).
+      // Honour their override for every night, drop matrix-derived extras
+      // (the booking POST also skipped extras in that branch — total =
+      // rate × nights — so the folio matches the original quote). This
+      // mirrors the LEGACY useExplicit logic at parity.
+      const matrixNight1 = breakdown.per_night[0]?.base_rate || 0;
+      const useExplicitInMatrix = explicitRate > 0 && Math.abs(explicitRate - matrixNight1) > 0.01;
       perNight = breakdown.per_night.map(n => ({
-        date: n.date, base_rate: n.base_rate, extras: n.extras,
+        date: n.date,
+        base_rate: useExplicitInMatrix ? explicitRate : n.base_rate,
+        extras: useExplicitInMatrix ? 0 : n.extras,
         // Append the meal-plan code so the line audits cleanly on the
         // invoice ("Room charge · 2026-05-20 · MAP · incl. 1 extra adult").
-        label: booking.meal_plan_snapshot || booking.meal_plan_id || null,
+        // Manual override drops the meal-plan label too — it's no longer
+        // accurate when the rate isn't the matrix's plan rate.
+        label: useExplicitInMatrix ? null : (booking.meal_plan_snapshot || booking.meal_plan_id || null),
       }));
     } else {
       const ratePlan = await computeRoomTotal(restaurantId, booking.room_id, ci, co);
@@ -26017,7 +26031,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tariff-matrix-default-plus-meal-plan-editor',
+    commit_marker: 'tariff-manual-rate-matrix-plus-full-e2e-coverage',
     code_features: [
       'subscription-billing',
       'read-only-mode',
