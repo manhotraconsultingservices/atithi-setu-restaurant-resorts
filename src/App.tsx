@@ -6727,7 +6727,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       guest_phone: '',
       nights: 1,
       room_id: pick?.id || '',
-      room_rate: Number(pick?.base_rate || 0),
+      // BCG Tariff Phase 4.2 — default room_rate=0 so the server's matrix
+      // resolver picks the meal-plan-aware rate. Previously this defaulted
+      // to room.base_rate which silently defeated the matrix path (server
+      // saw a manual override and dropped meal-plan rates + extras from
+      // the invoice). Staff can still type a custom rate to override.
+      room_rate: 0,
       saving: false,
       id_doc: null,
       id_doc_type: 'AADHAAR',
@@ -7267,6 +7272,135 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     finally { setTariffLoading(false); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restaurantId, token]);
+
+  // ════════════════════════════════════════════════════════════════════
+  // BCG Tariff Phase 4.2 — Client-side matrix price PREVIEW.
+  //
+  // Mirrors the server's computeBookingTotalWithExtras so the booking
+  // and walk-in modals can show staff exactly what the server WILL
+  // invoice — live, as they pick rooms, meal plans, and extras. The
+  // backend is still the source of truth; this preview just answers the
+  // ground-truth question "what will my invoice look like?"
+  //
+  // Returns null when the tenant isn't in MATRIX mode or when the
+  // matrix lacks the needed cells (the form's existing Rate-per-night
+  // field is the source of truth in those cases).
+  // ════════════════════════════════════════════════════════════════════
+  const previewMatrixPrice = useCallback((opts: {
+    room_id: string;
+    check_in_date: string;
+    check_out_date: string;
+    booking_type?: string;
+    meal_plan_id?: string | null;
+    extra_adults?: number;
+    extra_children_with_mattress?: number;
+    extra_children_no_mattress?: number;
+  }): {
+    per_night: Array<{ date: string; base_rate: number; extras: number; season_id: string | null; source: string }>;
+    base_total: number;
+    extras_total: number;
+    total: number;
+    matrix_used: boolean;
+  } | null => {
+    if (tariffData.tariff_model !== 'MATRIX') return null;
+    if (!opts.meal_plan_id) return null;
+    const room = hotelRooms.find(r => r.id === opts.room_id);
+    if (!room?.type_id) return null;
+    const ci = String(opts.check_in_date || '').slice(0, 10);
+    const co = String(opts.check_out_date || '').slice(0, 10);
+    if (!ci || !co) return null;
+
+    const dates: string[] = [];
+    if ((opts.booking_type || 'OVERNIGHT').toUpperCase() === 'DAY_USE' || ci === co) {
+      dates.push(ci);
+    } else {
+      let cursor = new Date(ci + 'T12:00:00Z');
+      const end = new Date(co + 'T12:00:00Z');
+      while (cursor < end) {
+        dates.push(cursor.toISOString().slice(0, 10));
+        cursor = new Date(cursor.getTime() + 86400000);
+      }
+    }
+
+    // Mirror getSeasonForDate(): match the period that includes the date,
+    // sort by season.display_order (PEAK before OFF on ties).
+    const seasonForDate = (d: string): string | null => {
+      const matches = (tariffData.season_periods || []).filter((p: any) => {
+        const s = String(p.start_date || '').slice(0, 10);
+        const e = String(p.end_date || '').slice(0, 10);
+        return d >= s && d <= e;
+      });
+      if (!matches.length) return null;
+      const ordered = matches
+        .map((p: any) => ({ id: p.season_id, order: (tariffData.seasons.find((s: any) => s.id === p.season_id)?.display_order) ?? 99 }))
+        .sort((a: any, b: any) => a.order - b.order);
+      return ordered[0]?.id || null;
+    };
+
+    const extras = {
+      ADULT:               Math.max(0, Number(opts.extra_adults || 0)),
+      CHILD_WITH_MATTRESS: Math.max(0, Number(opts.extra_children_with_mattress || 0)),
+      CHILD_NO_MATTRESS:   Math.max(0, Number(opts.extra_children_no_mattress || 0)),
+    };
+    const perNight: Array<{ date: string; base_rate: number; extras: number; season_id: string | null; source: string }> = [];
+    let anyMatrix = false;
+    for (const d of dates) {
+      const seasonId = seasonForDate(d);
+      let baseRate = 0;
+      let source = 'BASE_RATE';
+      if (seasonId) {
+        // Room-level override beats type default.
+        const roomOverride = (tariffData.room_tariffs || []).find((r: any) =>
+          r.room_type_id === room.type_id && r.season_id === seasonId
+          && r.meal_plan_id === opts.meal_plan_id && r.room_id_override === room.id
+        );
+        if (roomOverride && roomOverride.rate != null) {
+          baseRate = Number(roomOverride.rate);
+          source = 'MATRIX_ROOM';
+          anyMatrix = true;
+        } else {
+          const typeRow = (tariffData.room_tariffs || []).find((r: any) =>
+            r.room_type_id === room.type_id && r.season_id === seasonId
+            && r.meal_plan_id === opts.meal_plan_id && !r.room_id_override
+          );
+          if (typeRow && typeRow.rate != null) {
+            baseRate = Number(typeRow.rate);
+            source = 'MATRIX_TYPE';
+            anyMatrix = true;
+          }
+        }
+      }
+      // Per-cell fallback to room.base_rate when matrix has no entry.
+      if (baseRate === 0) {
+        baseRate = Number(room.base_rate || 0);
+        source = 'BASE_RATE_FALLBACK';
+      }
+      let extrasForNight = 0;
+      if (seasonId) {
+        for (const [pt, count] of Object.entries(extras)) {
+          if (count > 0) {
+            const row = (tariffData.extra_person_charges || []).find((r: any) =>
+              r.person_type === pt && r.season_id === seasonId && r.meal_plan_id === opts.meal_plan_id
+            );
+            if (row) {
+              extrasForNight += Number(row.charge || 0) * count;
+              anyMatrix = true;
+            }
+          }
+        }
+      }
+      perNight.push({ date: d, base_rate: baseRate, extras: extrasForNight, season_id: seasonId, source });
+    }
+    const baseTotal   = Math.round(perNight.reduce((s, n) => s + n.base_rate, 0) * 100) / 100;
+    const extrasTotal = Math.round(perNight.reduce((s, n) => s + n.extras,    0) * 100) / 100;
+    return {
+      per_night: perNight,
+      base_total: baseTotal,
+      extras_total: extrasTotal,
+      total: Math.round((baseTotal + extrasTotal) * 100) / 100,
+      matrix_used: anyMatrix,
+    };
+  }, [tariffData, hotelRooms]);
 
   // Req 1b — pre-check-in checklist modal target. Holds the booking
   // row when the staff clicks "Check In" but phone or ID documents
@@ -20378,7 +20512,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const availableRooms = hotelRooms.filter(r =>
           r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED' && !todayBooked.has(r.id)
         );
-        const total = draft.room_rate * draft.nights;
+        // BCG Phase 4.2 — total is computed inside the Stay-summary
+        // block (live MATRIX preview vs manual rate). The old `total`
+        // ref is no longer needed here.
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
             {/* MODAL-WIDTH-FIX (client report 7 Jun 2026 "fields fall on each
@@ -20463,14 +20599,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Rate per night (₹)</label>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    Rate per night (₹) <span className="text-[9px] font-normal normal-case text-[#9c8e85]">— optional</span>
+                  </label>
                   <input
                     type="number" min={0}
-                    value={draft.room_rate}
+                    value={draft.room_rate || ''}
+                    placeholder="0 = use matrix"
                     onChange={e => setDraft({ room_rate: Math.max(0, Number(e.target.value) || 0) })}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
                   />
-                  <p className="text-[10px] text-[#9c8e85] mt-1">Leave 0 to auto-apply matrix tariff / rate plan (season / weekend overrides).</p>
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Leave blank to use the matrix tariff (recommended). Type a value only to override (e.g. negotiated corporate rate).</p>
                 </div>
 
                 {/* BCG Tariff Phase 3 — matrix-mode meal plan + extra-adult.
@@ -20559,17 +20698,57 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   );
                 })()}
 
-                {/* Stay summary */}
-                <div className="bg-[#faf7f2] rounded-2xl p-3 text-[11px] text-[#6b5d52]">
-                  <div className="flex justify-between"><span>Check-in</span><span className="text-[#1a1208] font-semibold">Today · {new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</span></div>
-                  <div className="flex justify-between"><span>Check-out</span><span className="text-[#1a1208] font-semibold">{new Date(Date.now() + draft.nights * 86400000).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</span></div>
-                  {draft.room_rate > 0 && (
-                    <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
-                      <span>Estimated total</span>
-                      <span className="font-bold font-mono text-[#cc5a16] text-sm">₹{total.toLocaleString('en-IN')}</span>
+                {/* Stay summary with live MATRIX preview (BCG Phase 4.2).
+                    Shows staff the EXACT rate the server will use, including
+                    meal-plan resolution and extra-person charges, before they
+                    submit. If they typed a manual rate (room_rate > 0), that
+                    wins; otherwise the matrix-resolved total appears. */}
+                {(() => {
+                  const today = new Date().toISOString().slice(0, 10);
+                  const co    = new Date(Date.now() + draft.nights * 86400000).toISOString().slice(0, 10);
+                  const preview = previewMatrixPrice({
+                    room_id: draft.room_id, check_in_date: today, check_out_date: co,
+                    booking_type: 'OVERNIGHT',
+                    meal_plan_id: draft.meal_plan_id,
+                    extra_adults: draft.extra_adults,
+                  });
+                  const manualTotal = draft.room_rate > 0 ? draft.room_rate * draft.nights : 0;
+                  const showMatrix = preview && preview.matrix_used && draft.room_rate === 0;
+                  return (
+                    <div className="bg-[#faf7f2] rounded-2xl p-3 text-[11px] text-[#6b5d52]">
+                      <div className="flex justify-between"><span>Check-in</span><span className="text-[#1a1208] font-semibold">Today · {new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</span></div>
+                      <div className="flex justify-between"><span>Check-out</span><span className="text-[#1a1208] font-semibold">{new Date(Date.now() + draft.nights * 86400000).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</span></div>
+                      {showMatrix && (
+                        <>
+                          <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
+                            <span>Per-night base ({preview.per_night[0].season_id || 'no season'})</span>
+                            <span className="font-mono text-[#1a1208]">₹{preview.per_night[0].base_rate.toLocaleString('en-IN')}</span>
+                          </div>
+                          {preview.per_night[0].extras > 0 && (
+                            <div className="flex justify-between text-[#9c8e85]">
+                              <span>Extras / night</span>
+                              <span className="font-mono">₹{preview.per_night[0].extras.toLocaleString('en-IN')}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
+                            <span>Matrix total ({draft.nights} night{draft.nights === 1 ? '' : 's'})</span>
+                            <span className="font-bold font-mono text-[#cc5a16] text-sm">₹{preview.total.toLocaleString('en-IN')}</span>
+                          </div>
+                          <p className="text-[9px] italic text-[#9c8e85] mt-1">Per-night rate resolved from category × {preview.per_night[0].season_id || 'season'} × meal plan. GST added at invoice.</p>
+                        </>
+                      )}
+                      {!showMatrix && manualTotal > 0 && (
+                        <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
+                          <span>Manual total ({draft.nights} night{draft.nights === 1 ? '' : 's'})</span>
+                          <span className="font-bold font-mono text-[#cc5a16] text-sm">₹{manualTotal.toLocaleString('en-IN')}</span>
+                        </div>
+                      )}
+                      {!showMatrix && manualTotal === 0 && draft.meal_plan_id && (
+                        <p className="text-[10px] italic text-amber-700 mt-1">Matrix has no rate for this room × season × meal-plan combo. Server will fall back to base rate (₹{hotelRooms.find(r => r.id === draft.room_id)?.base_rate || 0}/night).</p>
+                      )}
                     </div>
-                  )}
-                </div>
+                  );
+                })()}
 
                 <div className="flex gap-2 pt-3">
                   <button
@@ -21239,7 +21418,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 setEditingBooking({
                                   ...editingBooking,
                                   room_id: r.id,
-                                  room_rate: r.base_rate || editingBooking.room_rate || 0,
+                                  // BCG Tariff Phase 4.2 — don't backfill base_rate.
+                                  // Let room_rate stay 0 / explicit so the server's
+                                  // matrix resolver handles meal-plan + extras. Only
+                                  // honour a rate the staff already typed.
+                                  room_rate: editingBooking.room_rate || 0,
                                   check_in_date: findRoomsParams.start,
                                   check_out_date: findRoomsParams.end,
                                   num_guests: findRoomsParams.guests,
@@ -21994,13 +22177,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 e.preventDefault();
                 setHotelError('');   // clear any prior error before retry
                 try {
-                  // Fill rate from selected room if blank
-                  const patched = {...editingBooking};
-                  if (!patched.room_rate && patched.room_id) {
-                    const r = hotelRooms.find(x => x.id === patched.room_id);
-                    if (r) patched.room_rate = r.base_rate;
-                  }
-                  await saveBooking(patched);
+                  // BCG Tariff Phase 4.2 (7 Jun 2026) — DO NOT backfill
+                  // room_rate from room.base_rate. Previously this line
+                  // silently defeated the matrix path: when staff left
+                  // rate=0 to use matrix pricing, the form filled in
+                  // base_rate before POSTing, the server saw a non-zero
+                  // explicit rate that didn't match the matrix → Phase
+                  // 4.1 manual-override path triggered → meal plan and
+                  // extras silently dropped from the invoice. Now we let
+                  // 0 reach the server so the matrix resolver runs and
+                  // the meal-plan + extras combo is honoured. Staff who
+                  // really want to override can type a non-zero value.
+                  await saveBooking(editingBooking);
                   setShowBookingModal(false); setEditingBooking(null);
                 } catch (err: any) { setHotelError(err.message || 'Save failed'); }
               }}
@@ -22120,7 +22308,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         value={editingBooking.room_id || ''}
                         onChange={e => {
                           const room = hotelRooms.find(r => r.id === e.target.value);
-                          setEditingBooking({...editingBooking, room_id: e.target.value, room_rate: room?.base_rate || editingBooking.room_rate });
+                          // BCG Tariff Phase 4.2 — don't snap to room.base_rate;
+                          // that would override staff's blank-rate intent and
+                          // bypass the matrix path. Keep whatever they typed
+                          // (including 0, which signals "let the matrix resolve").
+                          setEditingBooking({...editingBooking, room_id: e.target.value });
                         }}
                         className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
                       >
@@ -22213,6 +22405,66 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <p className="text-[10px] text-[#9c8e85] leading-snug">
                     Server resolves the per-night rate from the room-category × season × meal-plan matrix. Extra-person charges are added per night. Leave Rate-per-night = 0 below to auto-compute; enter a value to override.
                   </p>
+
+                  {/* BCG Phase 4.2 — live MATRIX preview. Shows the actual
+                      per-night rate + extras + total so staff can verify the
+                      meal-plan choice before saving. */}
+                  {(() => {
+                    if (!editingBooking.room_id || !editingBooking.check_in_date || !editingBooking.check_out_date) return null;
+                    const preview = previewMatrixPrice({
+                      room_id: editingBooking.room_id,
+                      check_in_date: editingBooking.check_in_date,
+                      check_out_date: editingBooking.check_out_date,
+                      booking_type: editingBooking.booking_type,
+                      meal_plan_id: editingBooking.meal_plan_id,
+                      extra_adults: editingBooking.extra_adults,
+                      extra_children_with_mattress: editingBooking.extra_children_with_mattress,
+                      extra_children_no_mattress: editingBooking.extra_children_no_mattress,
+                    });
+                    if (!preview) return null;
+                    const nightCount = preview.per_night.length;
+                    const seasonsInStay = Array.from(new Set(preview.per_night.map(n => n.season_id || 'no-season')));
+                    return (
+                      <div className="bg-white rounded-xl border border-[#cc5a16]/20 p-3 space-y-2">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="font-bold uppercase tracking-widest text-[#cc5a16]">Live Preview</span>
+                          <span className="text-[10px] text-[#9c8e85]">{nightCount} night{nightCount === 1 ? '' : 's'} · {seasonsInStay.join(' + ')}</span>
+                        </div>
+                        {/* Per-night detail — collapsed to first 3 nights to avoid wall-of-text on long stays */}
+                        <div className="text-[10px] font-mono text-[#3d3128] space-y-0.5">
+                          {preview.per_night.slice(0, 3).map((n) => (
+                            <div key={n.date} className="flex justify-between">
+                              <span>{n.date} <span className="text-[#9c8e85]">[{n.season_id || 'no season'}]</span></span>
+                              <span>₹{n.base_rate.toLocaleString('en-IN')}{n.extras > 0 ? ` + ₹${n.extras.toLocaleString('en-IN')} ext.` : ''}</span>
+                            </div>
+                          ))}
+                          {preview.per_night.length > 3 && (
+                            <div className="text-[#9c8e85] italic">… +{preview.per_night.length - 3} more night{preview.per_night.length - 3 === 1 ? '' : 's'}</div>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-[10px] pt-2 border-t border-[#cc5a16]/10">
+                          <div>
+                            <p className="text-[#9c8e85] uppercase tracking-widest">Base</p>
+                            <p className="font-mono font-semibold text-[#1a1208]">₹{preview.base_total.toLocaleString('en-IN')}</p>
+                          </div>
+                          <div>
+                            <p className="text-[#9c8e85] uppercase tracking-widest">Extras</p>
+                            <p className="font-mono font-semibold text-[#1a1208]">₹{preview.extras_total.toLocaleString('en-IN')}</p>
+                          </div>
+                          <div>
+                            <p className="text-[#9c8e85] uppercase tracking-widest">Total</p>
+                            <p className="font-mono font-bold text-[#cc5a16]">₹{preview.total.toLocaleString('en-IN')}</p>
+                          </div>
+                        </div>
+                        {!preview.matrix_used && (
+                          <p className="text-[9px] italic text-amber-700">No matrix entry for this combination — falling back to room base rate. Configure the tariff matrix in Settings to use meal-plan pricing.</p>
+                        )}
+                        {Number(editingBooking.room_rate) > 0 && (
+                          <p className="text-[9px] italic text-amber-700">Manual room_rate is set ({editingBooking.room_rate}/night). The server will use THAT rate × nights and ignore this matrix preview. Clear the rate field to use the matrix.</p>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -22344,8 +22596,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Room Rate (₹/night)</label>
-                  <input type="number" min={0} value={editingBooking.room_rate || 0} onChange={e => setEditingBooking({...editingBooking, room_rate: Number(e.target.value)||0})} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    Room Rate (₹/night) <span className="text-[9px] font-normal normal-case text-[#9c8e85]">— optional</span>
+                  </label>
+                  <input
+                    type="number" min={0}
+                    value={editingBooking.room_rate || ''}
+                    placeholder="0 = use matrix tariff"
+                    onChange={e => setEditingBooking({...editingBooking, room_rate: Number(e.target.value)||0})}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                  <p className="text-[9px] text-[#9c8e85] mt-1">Blank → matrix tariff is used. Type a value only to override.</p>
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
