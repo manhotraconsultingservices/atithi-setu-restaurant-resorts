@@ -1080,40 +1080,102 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
     // ONLY as the manual-override fallback; if the staff set it
     // explicitly to a value different from the base/override, we
     // honour that value across all nights (existing behaviour).
+    //
+    // BCG Tariff Phase 3.1 (E2E fix, 7 Jun 2026) — when the tenant is in
+    // MATRIX mode AND the booking carries a meal_plan_id, route through
+    // computeBookingTotalWithExtras so the folio honours the same per-
+    // night base + extra-person charges that were quoted at booking
+    // time. Without this, the legacy resolver below would seed
+    // folio_entries with room_types.base_rate × N nights — dropping
+    // meal-plan rates AND extra-person line items entirely.
+    //
+    // Discovered by the E2E tariff validator (qa_e2e_tariff_calculations.mjs):
+    // a River-View · PEAK · MAP · +1 adult · 2 nights stay was quoted
+    // at ₹14,600 but invoiced at ₹11,000 — under-billing ₹4,032 incl.
+    // GST. Multi-extra OFF-season stays drifted ~₹22k. A cross-season
+    // stay went the other way (over-billed by using night-1's PEAK rate
+    // for night-2's OFF date). All gone after this fix.
     const ci = normaliseDateIso(booking.check_in_date);
     const co = normaliseDateIso(booking.check_out_date);
     const explicitRate = Number(booking.room_rate) || 0;
-    const ratePlan = await computeRoomTotal(restaurantId, booking.room_id, ci, co);
-    // Detect whether the staff manually overrode the rate. Compare the
-    // explicit rate against the rate the rate plan would compute for the
-    // FIRST night. If they match → use per-night rates from the plan.
-    // If they differ → respect the explicit rate (used for every night).
-    const firstNightPlanRate = ratePlan.nights[0]?.rate || 0;
-    const useExplicit = explicitRate > 0 && Math.abs(explicitRate - firstNightPlanRate) > 0.01;
-    const nights = ratePlan.nights.length;
+    const tariffModel = await getTariffModel(restaurantId);
+    const useMatrix = tariffModel === 'MATRIX' && !!booking.meal_plan_id;
+    const xpAdults  = Math.max(0, Number(booking.extra_adults || 0));
+    const xpChildM  = Math.max(0, Number(booking.extra_children_with_mattress || 0));
+    const xpChildN  = Math.max(0, Number(booking.extra_children_no_mattress || 0));
+    const totalExtraHeads = xpAdults + xpChildM + xpChildN;
+
+    // ─── MATRIX path: matrix-resolved per-night base + extras ───
+    // ─── LEGACY path: existing rate_overrides → base_rate flow ─
+    let perNight: Array<{ date: string; base_rate: number; extras: number; label: string | null }> = [];
+    if (useMatrix) {
+      const breakdown = await computeBookingTotalWithExtras(
+        restaurantId, booking.room_id, ci, co,
+        {
+          mealPlanId: booking.meal_plan_id,
+          extraAdults: xpAdults,
+          extraChildrenWithMattress: xpChildM,
+          extraChildrenNoMattress: xpChildN,
+          bookingType: booking.booking_type || 'OVERNIGHT',
+        }
+      );
+      perNight = breakdown.per_night.map(n => ({
+        date: n.date, base_rate: n.base_rate, extras: n.extras,
+        // Append the meal-plan code so the line audits cleanly on the
+        // invoice ("Room charge · 2026-05-20 · MAP · incl. 1 extra adult").
+        label: booking.meal_plan_snapshot || booking.meal_plan_id || null,
+      }));
+    } else {
+      const ratePlan = await computeRoomTotal(restaurantId, booking.room_id, ci, co);
+      // Detect whether the staff manually overrode the rate (legacy
+      // behaviour preserved exactly). Compare against the FIRST night's
+      // plan rate; match → use per-night rates; differ → use explicit
+      // for every night.
+      const firstNightPlanRate = ratePlan.nights[0]?.rate || 0;
+      const useExplicit = explicitRate > 0 && Math.abs(explicitRate - firstNightPlanRate) > 0.01;
+      perNight = ratePlan.nights.map(n => ({
+        date: n.date,
+        base_rate: useExplicit ? explicitRate : n.rate,
+        extras: 0,
+        label: !useExplicit ? n.label : null,
+      }));
+    }
+
+    const nights = perNight.length;
     const svcPct = cfg.serviceChargePct;
 
     for (let i = 0; i < nights; i++) {
-      const planNight = ratePlan.nights[i];
-      const dateStr = planNight.date;
-      const rate = useExplicit ? explicitRate : planNight.rate;
-      const gstPct = gstRateForTariff(rate, cfg);
+      const n = perNight[i];
+      const dateStr = n.date;
+      // GST slab on the PER-NIGHT LINE (base + extras) so a stay that
+      // crosses the ₹7,500 cutoff via extras gets the correct 18% slab.
+      // This matches GST Council guidance — the slab applies to the
+      // declared room tariff INCLUDING all mandatory add-ons.
+      const lineAmount = Math.round((n.base_rate + n.extras) * 100) / 100;
+      const gstPct = gstRateForTariff(lineAmount, cfg);
       const tag = Math.random().toString(36).slice(2, 5).toUpperCase();
-      // Room night line — GST computed on the room rate only.
-      const roomGst = Math.round((rate * gstPct / 100) * 100) / 100;
+
+      // Build a descriptive line label: "Room charge · DATE [· PLAN] [· incl. extras]"
+      const labelSuffix = n.label ? ` · ${n.label}` : '';
+      const extrasDesc = (useMatrix && totalExtraHeads > 0)
+        ? ` · incl. ${[
+            xpAdults  > 0 ? `${xpAdults} adult${xpAdults > 1 ? 's' : ''}` : null,
+            xpChildM  > 0 ? `${xpChildM} child${xpChildM > 1 ? 'ren' : ''} w/mat` : null,
+            xpChildN  > 0 ? `${xpChildN} child${xpChildN > 1 ? 'ren' : ''} no-mat` : null,
+          ].filter(Boolean).join(', ')}`
+        : '';
+      const lineGst = Math.round((lineAmount * gstPct / 100) * 100) / 100;
       const roomEntryId = `FE-${Date.now()}-${i}-${tag}`;
-      // Append the rate plan label when it's an override, so the invoice
-      // PDF says "Room charge · 2026-11-02 · Diwali Week" — useful audit.
-      const labelSuffix = !useExplicit && planNight.label ? ` · ${planNight.label}` : '';
       await tenantDb.run(
         `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
          VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
-        [roomEntryId, folioId, `Room charge · ${dateStr}${labelSuffix}`, rate, rate, gstPct, roomGst]
+        [roomEntryId, folioId, `Room charge · ${dateStr}${labelSuffix}${extrasDesc}`, lineAmount, lineAmount, gstPct, lineGst]
       );
-      // Service charge line — % of THIS night's rate (so weekend rate
-      // → weekend service charge, etc.). 0% service charge skips the row.
+      // Service charge line — % of THIS night's full line (base + extras)
+      // so the percent matches real-world hotel billing on the full room
+      // package. 0% service charge skips the row.
       if (svcPct > 0) {
-        const svcAmount = Math.round((rate * svcPct / 100) * 100) / 100;
+        const svcAmount = Math.round((lineAmount * svcPct / 100) * 100) / 100;
         if (svcAmount > 0) {
           const svcGst = Math.round((svcAmount * gstPct / 100) * 100) / 100;
           const svcEntryId = `FE-${Date.now()}-${i}-S-${tag}`;
@@ -25949,7 +26011,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'reports-onscreen-table-plus-column-fix',
+    commit_marker: 'tariff-folio-matrix-fix-plus-e2e-test',
     code_features: [
       'subscription-billing',
       'read-only-mode',

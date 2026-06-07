@@ -15245,7 +15245,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 space-y-5">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
                     <div>
-                      <h3 className="text-base font-bold font-serif text-[#1a1208]">Tariff Configuration <span className="text-[10px] font-mono uppercase text-[#cc5a16] ml-2">BCG Phase 2</span></h3>
+                      <h3 className="text-base font-bold font-serif text-[#1a1208]">Tariff Configuration</h3>
                       <p className="text-[11px] text-[#6b5d52] mt-0.5">
                         Room × Season × Meal-Plan matrix pricing for hotels that price by category (Superior / Premium / River View) and meal inclusion (EP / CP / MAP / API).
                       </p>
