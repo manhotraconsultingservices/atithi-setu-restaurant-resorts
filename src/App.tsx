@@ -24433,6 +24433,11 @@ const HotelCommandCenter: React.FC<{
   const [bookings, setBookings] = useState<any[]>([]);
   const [srs, setSrs]           = useState<any[]>([]);
   const [folios, setFolios]     = useState<any[]>([]);
+  // CMD-CENTER (client request 7 Jun 2026): fetch room_types so the
+  // rooms grid can be grouped by category (Superior / Premium / River
+  // View) instead of one long undifferentiated list. Also enables
+  // showing per-category occupancy + rate next to each section header.
+  const [roomTypes, setRoomTypes] = useState<any[]>([]);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [loading, setLoading]   = useState(true);
   // Slide-over drawer: when a room tile is clicked we open the
@@ -24443,16 +24448,18 @@ const HotelCommandCenter: React.FC<{
   const fetchAll = useCallback(async () => {
     try {
       const headers = { Authorization: `Bearer ${token}` };
-      const [r1, r2, r3, r4] = await Promise.all([
+      const [r1, r2, r3, r4, r5] = await Promise.all([
         fetch(`/api/restaurant/${restaurantId}/hotel/rooms`,            { headers }),
         fetch(`/api/restaurant/${restaurantId}/hotel/bookings`,         { headers }),
         fetch(`/api/restaurant/${restaurantId}/hotel/service-requests?status=PENDING,ACKNOWLEDGED,IN_PROGRESS,DELIVERED`, { headers }),
         fetch(`/api/restaurant/${restaurantId}/hotel/folios?status=open`, { headers }),
+        fetch(`/api/restaurant/${restaurantId}/hotel/room-types`,       { headers }),
       ]);
       if (r1.ok) setRooms(await r1.json());
       if (r2.ok) setBookings(await r2.json());
       if (r3.ok) setSrs(await r3.json());
       if (r4.ok) setFolios(await r4.json());
+      if (r5.ok) setRoomTypes(await r5.json());
       setLastRefresh(new Date());
     } catch (err) {
       console.error('[hotel-cc] fetch failed:', err);
@@ -24598,33 +24605,125 @@ const HotelCommandCenter: React.FC<{
       )}
 
       {/* Rooms grid + today's movement */}
-      {rooms.length > 0 && (
+      {rooms.length > 0 && (() => {
+        // CMD-CENTER-GROUPING (client request 7 Jun 2026): group rooms
+        // by category (room_type) so a 27-room property shows three
+        // clean sections instead of one wall of 27 tiles. Each section
+        // header surfaces:
+        //   • Category name
+        //   • Base rate (₹X /night) — pulled from room_types.base_rate
+        //   • Live occupancy bar (X / Y occupied, % filled)
+        // Tiles inside each section show room number, base rate,
+        // status, and guest name when occupied.
+        type Group = { id: string; name: string; base_rate: number; rooms: any[] };
+        const byType = new Map<string, Group>();
+        for (const r of rooms) {
+          const tid = r.type_id || '__untagged__';
+          const meta = roomTypes.find((t: any) => t.id === r.type_id);
+          if (!byType.has(tid)) {
+            byType.set(tid, {
+              id: tid,
+              name: meta?.name || (tid === '__untagged__' ? 'Other Rooms' : (r.type || 'Standard')),
+              base_rate: Number(meta?.base_rate ?? r.base_rate ?? 0),
+              rooms: [],
+            });
+          }
+          byType.get(tid)!.rooms.push(r);
+        }
+        // Stable ordering: room_types.display_order first; untagged last.
+        const groups: Group[] = Array.from(byType.values()).sort((a, b) => {
+          if (a.id === '__untagged__') return 1;
+          if (b.id === '__untagged__') return -1;
+          const oa = roomTypes.find((t: any) => t.id === a.id)?.display_order ?? 99;
+          const ob = roomTypes.find((t: any) => t.id === b.id)?.display_order ?? 99;
+          return oa - ob;
+        });
+        for (const g of groups) {
+          g.rooms.sort((a, b) => String(a.room_number || a.name || '').localeCompare(String(b.room_number || b.name || ''), undefined, { numeric: true }));
+        }
+        // Category-level accent gradients (subtle, dark-theme friendly)
+        const catAccent = (i: number) => {
+          const palette = [
+            { from: 'rgba(56, 189, 248, 0.18)',  to: 'rgba(56, 189, 248, 0.04)',  label: '#7dd3fc' },
+            { from: 'rgba(168, 85, 247, 0.18)',  to: 'rgba(168, 85, 247, 0.04)',  label: '#d8b4fe' },
+            { from: 'rgba(16, 185, 129, 0.18)',  to: 'rgba(16, 185, 129, 0.04)',  label: '#6ee7b7' },
+            { from: 'rgba(251, 146, 60, 0.18)',  to: 'rgba(251, 146, 60, 0.04)',  label: '#fdba74' },
+            { from: 'rgba(244, 63, 94, 0.18)',   to: 'rgba(244, 63, 94, 0.04)',   label: '#fda4af' },
+          ];
+          return palette[i % palette.length];
+        };
+        return (
         <div className="grid lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2 rounded-2xl backdrop-blur-md bg-white/5 border border-white/10 p-4">
-            <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60 mb-3">Rooms</h3>
-            <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-2">
-              {rooms.map(r => {
-                const c = roomColor(r.status);
-                const booking = bookings.find(b => b.room_id === r.id && b.status === 'CHECKED_IN');
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-[#f0ede8]/60">Rooms by Category</h3>
+              <span className="text-[10px] text-[#f0ede8]/40">
+                {groups.length} categor{groups.length === 1 ? 'y' : 'ies'} · {rooms.length} rooms total
+              </span>
+            </div>
+            <div className="space-y-3">
+              {groups.map((g, gi) => {
+                const accent = catAccent(gi);
+                const catOcc = g.rooms.filter(r => r.status === 'OCCUPIED').length;
+                const catTotal = g.rooms.length;
+                const catPct = catTotal > 0 ? Math.round((catOcc * 100) / catTotal) : 0;
                 return (
-                  <button
-                    key={r.id}
-                    type="button"
-                    onClick={() => setSelectedRoomId(r.id)}
-                    className="rounded-xl p-3 border text-center flex flex-col justify-between transition-all hover:brightness-110 hover:scale-[1.02] active:scale-95"
-                    style={{ background: c.bg, borderColor: c.border, minHeight: 88 }}
-                    title={`Open ${r.room_number || r.name} details`}
-                  >
-                    <div>
-                      <p className="text-xs font-bold text-[#f0ede8]">{r.room_number || r.name}</p>
-                      <p className="text-[9px] uppercase tracking-widest mt-1" style={{ color: c.label }}>{r.status}</p>
+                  <div key={g.id} className="rounded-2xl border border-white/10 overflow-hidden"
+                       style={{ background: `linear-gradient(135deg, ${accent.from}, ${accent.to})` }}>
+                    {/* Category header */}
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="w-1.5 h-6 rounded-full" style={{ background: accent.label }} />
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-[#f0ede8] truncate">{g.name}</p>
+                          <p className="text-[10px] text-[#f0ede8]/60">
+                            {g.base_rate > 0 && <>From <span className="font-mono text-[#f0ede8]/90">₹{g.base_rate.toLocaleString('en-IN')}</span>/night · </>}
+                            {catOcc}/{catTotal} occupied
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <div className="w-20 h-1.5 rounded-full bg-white/10 overflow-hidden">
+                          <div className="h-full transition-all"
+                               style={{ width: `${catPct}%`, background: accent.label }} />
+                        </div>
+                        <span className="text-[10px] font-mono font-bold" style={{ color: accent.label }}>{catPct}%</span>
+                      </div>
                     </div>
-                    {booking && (
-                      <p className="text-[10px] mt-1 truncate" style={{ color: c.label }}>
-                        {booking.guest_name}
-                      </p>
-                    )}
-                  </button>
+                    {/* Tiles */}
+                    <div className="p-2 grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+                      {g.rooms.map(r => {
+                        const c = roomColor(r.status);
+                        const booking = bookings.find(b => b.room_id === r.id && b.status === 'CHECKED_IN');
+                        const rent = Number(r.base_rate ?? g.base_rate ?? 0);
+                        return (
+                          <button
+                            key={r.id}
+                            type="button"
+                            onClick={() => setSelectedRoomId(r.id)}
+                            className="rounded-xl p-2.5 border text-center flex flex-col justify-between transition-all hover:brightness-125 hover:scale-[1.03] active:scale-95"
+                            style={{ background: c.bg, borderColor: c.border, minHeight: 96 }}
+                            title={`${r.name}${rent > 0 ? ' · ₹' + rent.toLocaleString('en-IN') + '/night' : ''} — open details`}
+                          >
+                            <div>
+                              <p className="text-sm font-bold text-[#f0ede8]">{r.room_number || r.name}</p>
+                              {rent > 0 && (
+                                <p className="text-[10px] font-mono text-[#f0ede8]/70 mt-0.5">
+                                  ₹{rent.toLocaleString('en-IN')}
+                                </p>
+                              )}
+                              <p className="text-[9px] uppercase tracking-widest mt-1" style={{ color: c.label }}>{r.status}</p>
+                            </div>
+                            {booking && (
+                              <p className="text-[10px] mt-1 truncate" style={{ color: c.label }} title={booking.guest_name}>
+                                {booking.guest_name}
+                              </p>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 );
               })}
             </div>
@@ -24672,7 +24771,8 @@ const HotelCommandCenter: React.FC<{
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Active SRs + open folios */}
       {rooms.length > 0 && (
