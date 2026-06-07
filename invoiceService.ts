@@ -426,26 +426,47 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       // (where the locale formatter handles font fallback gracefully)
       // and in the formatted amount-in-words line.
       const currencyCode = data.tenant?.currency_code || 'INR';
+      // ROW-HEIGHT-FIX (client report: Accommodation subtitle bleeds into
+      // next row): each data row paints a 22-px highlight band but the
+      // description body (rowY+6 at 9pt) PLUS the entry-type subtitle
+      // (rowY+16 at 8pt with ~9px line height) reaches rowY+25 — well past
+      // the band's bottom at rowY+20. Visually the subtitle clips into the
+      // next zebra band ("Accommodation" half-eaten by the row 2 fill).
+      // Raise both the header and data row heights from 22 → 28 and push
+      // the subtitle baseline from +16 → +17 for slightly tighter coupling.
+      const ROW_H = 28;
+      // COL-FIT (client report: Description overflows / column proportions
+      // wrong): HSN is always a 6-digit SAC code (e.g. 996311 ≈ 32 px), QTY
+      // is always 1-2 digits (≈ 12 px), TAX% is always 1-3 chars + "%"
+      // (≈ 20 px). Previous layout reserved 55/45/40 px for them, starving
+      // Description (≈ 209 px) on hotel rows like "[Deluxe Room 401] Room
+      // charge · 2026-06-07" (≈ 230 px at 9pt bold) — which then ellipsised.
+      // New widths: HSN 42, QTY 28, TAX 30 → frees 40 px back to Description
+      // (now ≈ 249 px), enough for the longest realistic hotel/F&B row
+      // before ellipsis kicks in.
       const colPositions = {
         num:  M,
         desc: M + 28,
-        hsn:  M + INNER_W - 270,   // was -280 (5 px more for desc)
-        qty:  M + INNER_W - 215,   // was -220
-        rate: M + INNER_W - 170,   // unchanged
-        tax:  M + INNER_W - 100,   // was -110
-        amt:  M + INNER_W - 60,    // unchanged
+        hsn:  M + INNER_W - 230,   // was -270; +40 px to Description
+        qty:  M + INNER_W - 188,   // was -215; HSN now 42 px wide
+        rate: M + INNER_W - 160,   // was -170; QTY now 28 px wide
+        tax:  M + INNER_W - 90,    // was -100; RATE stays 70 px wide
+        amt:  M + INNER_W - 60,    // unchanged (right edge anchored)
       };
 
-      doc.rect(M, y, INNER_W, 22).fill(INK);
+      doc.rect(M, y, INNER_W, ROW_H).fill(INK);
       doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(8);
-      doc.text('#',                          colPositions.num  + 4, y + 8);
-      doc.text(label('DESC').en,             colPositions.desc + 4, y + 8);
-      doc.text(label('HSN').en,              colPositions.hsn,      y + 8);
-      doc.text(label('QTY').en,              colPositions.qty,      y + 8, { width: 40, align: 'right' });
-      doc.text(`${label('RATE').en} (${currencyCode})`,   colPositions.rate, y + 8, { width: 65, align: 'right' });
-      doc.text(label('TAX_PCT').en,          colPositions.tax,      y + 8, { width: 40, align: 'right' });
-      doc.text(`${label('AMOUNT').en} (${currencyCode})`, colPositions.amt - 20, y + 8, { width: 80, align: 'right' });
-      y += 22;
+      // Header text vertically centred at row mid-height (was y+8 in a 22px
+      // band ≈ 36 % from top; (ROW_H-9)/2 keeps the same visual centring).
+      const headerTextY = y + (ROW_H - 9) / 2;
+      doc.text('#',                          colPositions.num  + 4, headerTextY);
+      doc.text(label('DESC').en,             colPositions.desc + 4, headerTextY);
+      doc.text(label('HSN').en,              colPositions.hsn,      headerTextY);
+      doc.text(label('QTY').en,              colPositions.qty,      headerTextY, { width: 28, align: 'right' });
+      doc.text(`${label('RATE').en} (${currencyCode})`,   colPositions.rate, headerTextY, { width: 65, align: 'right' });
+      doc.text(label('TAX_PCT').en,          colPositions.tax,      headerTextY, { width: 30, align: 'right' });
+      doc.text(`${label('AMOUNT').en} (${currencyCode})`, colPositions.amt - 20, headerTextY, { width: 80, align: 'right' });
+      y += ROW_H;
 
       const sign = data.isCreditNote ? -1 : 1;
       const billableEntries = data.entries.filter(e => !['TAX', 'DISCOUNT', 'PAYMENT'].includes(e.entryType));
@@ -454,41 +475,52 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
         // PDF-FIX: paginate if this row + a sensible-sized totals/IRN/payment
         // tail wouldn't fit. We reserve ~280px for the post-items section
         // (totals + amount-in-words + IRN + payment + terms/signature). If
-        // the next 22px row would breach the bottom budget, break here so
+        // the next ROW_H row would breach the bottom budget, break here so
         // the totals always land on a page with enough room.
-        ensureSpace(22);
+        ensureSpace(ROW_H);
         const rowY = y;
         const hsn = e.hsnCode || hsnForEntry(e.entryType);
         if (i % 2 === 1) {
-          doc.rect(M, y - 2, INNER_W, 22).fill(HIGHLIGHT);
+          doc.rect(M, y - 2, INNER_W, ROW_H).fill(HIGHLIGHT);
         }
         doc.fillColor(INK_SOFT).font('Helvetica').fontSize(9);
-        doc.text(String(i + 1), colPositions.num + 4, rowY + 6, { width: 20 });
+        doc.text(String(i + 1), colPositions.num + 4, rowY + 7, { width: 20 });
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
            .text(e.description, colPositions.desc + 4, rowY + 6, { width: colPositions.hsn - colPositions.desc - 8, ellipsis: true });
         doc.fillColor(INK_SOFT).font('Helvetica').fontSize(8)
-           .text(entryTypeLabel(e.entryType), colPositions.desc + 4, rowY + 16);
+           .text(entryTypeLabel(e.entryType), colPositions.desc + 4, rowY + 17);
         doc.fillColor(INK_SOFT).font('Helvetica').fontSize(9);
-        doc.text(hsn,                      colPositions.hsn,      rowY + 6);
-        doc.text(String(e.quantity),       colPositions.qty,      rowY + 6, { width: 40, align: 'right' });
+        doc.text(hsn,                      colPositions.hsn,      rowY + 7);
+        doc.text(String(e.quantity),       colPositions.qty,      rowY + 7, { width: 28, align: 'right' });
         // COLUMN-FIT: numeric-only (no currency prefix) — fits cleanly
         // in the 65/80 px columns. Currency is shown in the header label
-        // "(₹)" and again on every TOTALS row, so no info is lost.
-        doc.text(moneyNumeric(data.tenant, e.unitPrice * sign), colPositions.rate, rowY + 6, { width: 65, align: 'right' });
-        doc.text(`${e.gstRate ?? 0}%`,                          colPositions.tax,  rowY + 6, { width: 40, align: 'right' });
+        // "(INR)" and again on every TOTALS row, so no info is lost.
+        doc.text(moneyNumeric(data.tenant, e.unitPrice * sign), colPositions.rate, rowY + 7, { width: 65, align: 'right' });
+        doc.text(`${e.gstRate ?? 0}%`,                          colPositions.tax,  rowY + 7, { width: 30, align: 'right' });
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
-           .text(moneyNumeric(data.tenant, e.amount * sign),    colPositions.amt - 20, rowY + 6, { width: 80, align: 'right' });
-        y += 22;
+           .text(moneyNumeric(data.tenant, e.amount * sign),    colPositions.amt - 20, rowY + 7, { width: 80, align: 'right' });
+        y += ROW_H;
       });
 
       doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.5).strokeColor(HAIR).stroke();
       y += 14;
 
       // ────────────── TOTALS ──────────────
-      const totalsX = M + INNER_W - 240;
-      const totalsW = 240;
-      const labelW = 140;
-      const valueW = 90;
+      // GRAND-TOTAL-FIX (client report: Grand Total trimmed): the bold 11pt
+      // GRAND TOTAL row renders "INR 8,000.00" (≈ 88 px at 11pt bold) in a
+      // value slot that was effectively 70 px wide (valueW=90 minus the
+      // 20 px right-edge padding). The number was being soft-clipped at the
+      // hundreds digit — readers saw "8,0" then a cliff.
+      //
+      // Two-part fix:
+      //   1. Widen the totals box to 270 (was 240) — fits the longest
+      //      realistic Indian grand-total ("INR 99,99,999.00", 17 chars).
+      //   2. Rebalance: labelW 140 → 130 (still fits "GRAND TOTAL"), valueW
+      //      90 → 140 → effective text width grows from 70 px to 120 px.
+      const totalsX = M + INNER_W - 270;
+      const totalsW = 270;
+      const labelW = 130;
+      const valueW = 140;
 
       // Phase 2: country-aware tax rendering. India keeps the existing
       // CGST/SGST/IGST split exactly — every Indian tenant sees identical
