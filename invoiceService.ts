@@ -411,10 +411,21 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       //   2) Slightly redistribute columns so RATE + AMOUNT both have
       //      breathing room for 5-digit Indian numbers like
       //      "1,24,500.00" and DESCRIPTION gets a bit more space too.
-      // Currency-symbol-aware header labels make it crystal-clear
-      // what currency the numbers are in even when staff scan only
-      // the table.
-      const currencySym = data.tenant?.currency_symbol || '₹';
+      // CURRENCY-FIX (client report: "₹" rendering as superscript "¹"
+      // and clipping the closing paren): the standard PDFKit Helvetica
+      // font does NOT include the Unicode rupee glyph ₹ (U+20B9) — it
+      // falls back to a stubby Latin-1 char that visually looks like a
+      // superscript 1, and the missing-glyph width math then pushes the
+      // closing ")" past the column edge. Same hazard for any non-ASCII
+      // currency symbol on any tenant.
+      //
+      // Fix: use the ISO 4217 currency CODE (INR / USD / EUR / GBP …)
+      // in the header parenthetical instead of the symbol. Codes are
+      // pure ASCII — render in any font, on any locale, without
+      // glyph-fallback or width drift. Symbols still appear on TOTALS
+      // (where the locale formatter handles font fallback gracefully)
+      // and in the formatted amount-in-words line.
+      const currencyCode = data.tenant?.currency_code || 'INR';
       const colPositions = {
         num:  M,
         desc: M + 28,
@@ -431,9 +442,9 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       doc.text(label('DESC').en,             colPositions.desc + 4, y + 8);
       doc.text(label('HSN').en,              colPositions.hsn,      y + 8);
       doc.text(label('QTY').en,              colPositions.qty,      y + 8, { width: 40, align: 'right' });
-      doc.text(`${label('RATE').en} (${currencySym})`,   colPositions.rate, y + 8, { width: 65, align: 'right' });
+      doc.text(`${label('RATE').en} (${currencyCode})`,   colPositions.rate, y + 8, { width: 65, align: 'right' });
       doc.text(label('TAX_PCT').en,          colPositions.tax,      y + 8, { width: 40, align: 'right' });
-      doc.text(`${label('AMOUNT').en} (${currencySym})`, colPositions.amt - 20, y + 8, { width: 80, align: 'right' });
+      doc.text(`${label('AMOUNT').en} (${currencyCode})`, colPositions.amt - 20, y + 8, { width: 80, align: 'right' });
       y += 22;
 
       const sign = data.isCreditNote ? -1 : 1;
