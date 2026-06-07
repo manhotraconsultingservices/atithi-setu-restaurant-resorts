@@ -18541,7 +18541,8 @@ async function startServer() {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const { payment_method, waive } = req.body || {};
+      const { payment_method, waive, discount: groupDiscountRaw } = req.body || {};
+      const groupDiscount = Math.max(0, Number(groupDiscountRaw || 0));
       const tenantDb = await getTenantDb(req.params.id);
       const group: any = await tenantDb.get(
         "SELECT * FROM room_booking_groups WHERE id = ?", [req.params.groupId]
@@ -18582,6 +18583,51 @@ async function startServer() {
       let totalGrand = 0;
       const now = new Date().toISOString();
 
+      // ─── P2-B-FIX-2: discount allocation across child folios ────────
+      // When the request includes a group-level `discount` (₹), distribute
+      // it proportionally across the eligible (CHECKED_IN) children by
+      // their CURRENT open-folio subtotal. The last child takes the
+      // residual so the sum of allocations is EXACTLY the requested
+      // total (no paisa drift from rounding).
+      //
+      // Behaviour:
+      //   discount=0 → all child allocations 0 (legacy behaviour preserved)
+      //   discount > sum-of-subtotals → cap each at the child's subtotal
+      //   no open folios → can't allocate, skip silently (settle still runs)
+      //
+      // This runs PER CHILD inside the loop via the allocations map. We
+      // pre-compute it once so the math is auditable in a single block.
+      const eligibleChildren = children.filter((b: any) => b.status === 'CHECKED_IN');
+      const childAllocations: Record<string, number> = {};
+      if (groupDiscount > 0 && eligibleChildren.length > 0) {
+        const subtotals: Array<{ id: string; subtotal: number }> = [];
+        for (const b of eligibleChildren) {
+          const folio: any = await tenantDb.get(
+            `SELECT subtotal FROM folios
+              WHERE booking_id = ? AND status = 'open'
+                AND (doc_type IS NULL OR doc_type = 'INVOICE')
+            ORDER BY created_at DESC LIMIT 1`,
+            [b.id]
+          ).catch(() => null);
+          subtotals.push({ id: b.id, subtotal: Number(folio?.subtotal || 0) });
+        }
+        const totalSubtotal = subtotals.reduce((s, x) => s + x.subtotal, 0);
+        if (totalSubtotal > 0) {
+          let allocated = 0;
+          subtotals.forEach((x, i) => {
+            const isLast = i === subtotals.length - 1;
+            // Per-child cap: never discount more than that folio's subtotal.
+            let share = isLast
+              ? Math.max(0, groupDiscount - allocated)
+              : Math.round((groupDiscount * x.subtotal / totalSubtotal) * 100) / 100;
+            share = Math.min(share, x.subtotal);
+            childAllocations[x.id] = share;
+            allocated += share;
+          });
+          console.log(`[group-checkout] discount ₹${groupDiscount.toFixed(2)} allocated across ${subtotals.length} child folio(s)`);
+        }
+      }
+
       for (const b of children) {
         if (b.status !== 'CHECKED_IN') {
           skipped.push({ id: b.id, room_id: b.room_id, reason: `status=${b.status}` });
@@ -18591,7 +18637,7 @@ async function startServer() {
           const settled = await settleFolioForBooking(
             req.params.id, b.id,
             payment_method || 'CASH',
-            0,            // group flow: no discount override; staff adjusts per-folio first
+            childAllocations[b.id] || 0,   // P2-B-FIX-2: proportional discount share
             !!waive,
             loyaltyResolver
           );
@@ -19528,6 +19574,174 @@ async function startServer() {
 
   // ─── FOLIO INVOICE PDF (Phase 4) ─────────────────────────────────────────
   // Industry-standard Tax Invoice PDF with Indian GST compliance.
+  // ─── P2-B helper — build the consolidated group invoice PDF ────────────
+  // Pulled out of the inline endpoint handler so the same builder can
+  // serve both /invoice-pdf (download) and /email-invoice (attachment).
+  // Returns the PDF bytes + every piece of metadata both surfaces need
+  // (invoice number, recipient, totals, etc) — single source of truth
+  // for group invoice rendering.
+  async function buildGroupInvoicePdf(
+    tenantId: string, groupId: string, hotel: any
+  ): Promise<{
+    ok: boolean;
+    status?: number;
+    error?: string;
+    pdf?: Buffer;
+    invoiceNumber?: string;
+    settledAt?: string;
+    aggSubtotal?: number;
+    aggGst?: number;
+    aggDiscount?: number;
+    aggGrand?: number;
+    recipientName?: string;
+    recipientEmail?: string | null;
+    safeName?: string;
+    bookingCount?: number;
+  }> {
+    const tenantDb = await getTenantDb(tenantId);
+    const group: any = await tenantDb.get(
+      "SELECT * FROM room_booking_groups WHERE id = ?", [groupId]
+    );
+    const bookings: any[] = await tenantDb.query(
+      `SELECT b.*, r.name AS room_name
+         FROM room_bookings b
+    LEFT JOIN rooms r ON r.id = b.room_id
+        WHERE b.group_id = ?
+     ORDER BY r.name, b.id`,
+      [groupId]
+    );
+    if (bookings.length === 0) return { ok: false, status: 404, error: 'Group has no bookings.' };
+
+    let aggSubtotal = 0, aggGst = 0, aggDiscount = 0, aggGrand = 0;
+    const aggEntries: any[] = [];
+    for (const b of bookings) {
+      // P2-B-FIX (B2): exclude CREDIT_NOTE rows.
+      const folio: any = await tenantDb.get(
+        `SELECT * FROM folios
+          WHERE booking_id = ?
+            AND (doc_type IS NULL OR doc_type = 'INVOICE')
+        ORDER BY created_at DESC LIMIT 1`,
+        [b.id]
+      );
+      if (folio) {
+        aggSubtotal += Number(folio.subtotal || 0);
+        aggGst      += Number(folio.gst_amount || 0);
+        aggDiscount += Number(folio.discount || 0);
+        aggGrand    += Number(folio.grand_total || 0);
+        const entries: any[] = await tenantDb.query(
+          "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
+          [folio.id]
+        );
+        for (const e of entries) {
+          aggEntries.push({
+            description: `[${b.room_name || b.room_id}] ${e.description}`,
+            entryType:   e.entry_type,
+            quantity:    Number(e.quantity || 1),
+            unitPrice:   Number(e.unit_price || 0),
+            amount:      Number(e.amount || 0),
+            gstRate:     Number(e.gst_rate || 0),
+            gstAmount:   Number(e.gst_amount || 0),
+          });
+        }
+      }
+    }
+    if (aggEntries.length === 0) {
+      return { ok: false, status: 404, error: 'No settled folios in this group yet — nothing to invoice.' };
+    }
+
+    const first = bookings[0];
+    // P2-B-FIX (B3): persist + reuse invoice number.
+    let invNum: string = group?.invoice_number || '';
+    let settledAt: string = group?.settled_at
+      ? new Date(group.settled_at).toISOString()
+      : new Date().toISOString();
+    if (!invNum) {
+      invNum = `INV-GRP-${new Date(settledAt).getFullYear()}-${String(groupId).slice(-6).toUpperCase()}`;
+      try {
+        await tenantDb.run(
+          "UPDATE room_booking_groups SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?",
+          [invNum, groupId]
+        );
+      } catch { /* non-fatal */ }
+    }
+
+    const recipientName  = (group?.contact_name) || first.guest_name || 'Group Guest';
+    const recipientEmail: string | null = (group?.contact_email) || first.guest_email || null;
+    const safeName       = (group?.name || 'group').replace(/[^a-z0-9_-]+/gi, '-');
+
+    // R-3 — group invoices don't have a single folio; IRN block suppressed.
+    const _irnRow: any = null;
+    const pdf = await generateInvoicePdf({
+      hotel: {
+        name:     hotel.name,
+        city:     hotel.city,
+        state:    hotel.state,
+        gstin:    hotel.gst_number,
+        phone:    hotel.phone,
+        email:    hotel.admin_id,
+        logoPath: hotel.logo_url || undefined,
+        fssai:           hotel.fssai_license_number || null,
+        fssaiValidUntil: hotel.fssai_license_valid_until || null,
+      },
+      guest: {
+        name:        recipientName,
+        phone:       (group?.contact_phone) || first.guest_phone,
+        email:       recipientEmail || undefined,
+        nationality: first.guest_nationality,
+        state:       first.guest_state,
+      },
+      stay: {
+        roomName:         `Group · ${bookings.length} rooms` + (group?.name ? ` · ${group.name}` : ''),
+        bookingId:        groupId,
+        checkInDate:      first.check_in_date,
+        checkOutDate:     first.check_out_date,
+        actualCheckInAt:  first.actual_checkin_at,
+        actualCheckOutAt: first.actual_checkout_at,
+        numGuests:        bookings.reduce((s, b) => s + Number(b.num_guests || 1), 0),
+      },
+      folio: {
+        id:            groupId,
+        invoiceNumber: invNum,
+        invoiceDate:   settledAt,
+        subtotal:      aggSubtotal,
+        discount:      aggDiscount,
+        gstAmount:     aggGst,
+        grandTotal:    aggGrand,
+        paymentMethod: null,
+        settledAt,
+        status:        'settled',
+      },
+      entries:       aggEntries,
+      placeOfSupply: hotel.state,
+      isCreditNote:  false,
+      bilingual:     true,
+      tenant: {
+        country:         hotel.country || 'IN',
+        currency_code:   hotel.currency_code || 'INR',
+        currency_symbol: hotel.currency_symbol || '₹',
+        locale:          hotel.locale || 'en-IN',
+      },
+      roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
+      irn: {
+        irn:               _irnRow?.irn || null,
+        ackNo:             _irnRow?.ack_no || null,
+        ackDate:           _irnRow?.ack_date || null,
+        signedQrCode:      _irnRow?.signed_qr_code || null,
+        status:            _irnRow?.irn_status || 'PENDING',
+        eInvoiceMandatory: Number(hotel.e_invoicing_enabled || 0) === 1
+                        && Number(hotel.e_invoicing_turnover_threshold_met || 0) === 1,
+      },
+    });
+
+    return {
+      ok: true, pdf,
+      invoiceNumber: invNum, settledAt,
+      aggSubtotal, aggGst, aggDiscount, aggGrand,
+      recipientName, recipientEmail, safeName,
+      bookingCount: bookings.length,
+    };
+  }
+
   // Sprint P2-B — Group consolidated invoice. One PDF summarising
   // every child folio in a group with a grand-total. Reuses the same
   // generateInvoicePdf renderer as single-folio invoices by building
@@ -19537,170 +19751,73 @@ async function startServer() {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
-      const tenantDb = await getTenantDb(req.params.id);
-      const group: any = await tenantDb.get(
-        "SELECT * FROM room_booking_groups WHERE id = ?", [req.params.groupId]
-      );
-      const bookings: any[] = await tenantDb.query(
-        `SELECT b.*, r.name AS room_name
-           FROM room_bookings b
-      LEFT JOIN rooms r ON r.id = b.room_id
-          WHERE b.group_id = ?
-       ORDER BY r.name, b.id`,
-        [req.params.groupId]
-      );
-      if (bookings.length === 0) return res.status(404).json({ error: 'Group has no bookings.' });
-
-      // Find folios per booking + aggregate entries.
-      let aggSubtotal = 0;
-      let aggGst = 0;
-      let aggDiscount = 0;
-      let aggGrand = 0;
-      const aggEntries: any[] = [];
-      for (const b of bookings) {
-        // P2-B-FIX (B2): exclude CREDIT_NOTE rows. The original query
-        // picked the latest folio per booking — if a credit note had
-        // been issued AFTER the original folio (e.g. a partial refund),
-        // it would silently get aggregated, double-charging or zeroing
-        // the group total. Folios with a NULL doc_type are the original
-        // INVOICE folios; credit notes carry doc_type='CREDIT_NOTE'.
-        const folio: any = await tenantDb.get(
-          `SELECT * FROM folios
-            WHERE booking_id = ?
-              AND (doc_type IS NULL OR doc_type = 'INVOICE')
-          ORDER BY created_at DESC LIMIT 1`,
-          [b.id]
-        );
-        if (folio) {
-          aggSubtotal += Number(folio.subtotal || 0);
-          aggGst      += Number(folio.gst_amount || 0);
-          aggDiscount += Number(folio.discount || 0);
-          aggGrand    += Number(folio.grand_total || 0);
-          const entries: any[] = await tenantDb.query(
-            "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
-            [folio.id]
-          );
-          for (const e of entries) {
-            aggEntries.push({
-              description: `[${b.room_name || b.room_id}] ${e.description}`,
-              entryType:   e.entry_type,
-              quantity:    Number(e.quantity || 1),
-              unitPrice:   Number(e.unit_price || 0),
-              amount:      Number(e.amount || 0),
-              gstRate:     Number(e.gst_rate || 0),
-              gstAmount:   Number(e.gst_amount || 0),
-            });
-          }
-        }
-      }
-      if (aggEntries.length === 0) {
-        return res.status(404).json({ error: 'No settled folios in this group yet — nothing to invoice.' });
-      }
-      const first = bookings[0];
-      const hotel = checkRes.restaurant;
-      // P2-B-FIX (B3): if the group has been formally settled (via the
-      // new /booking-groups/:groupId/checkout endpoint OR a prior
-      // download stamped one), reuse the persisted invoice_number +
-      // settled_at so every reprint shows the SAME audit-stable number.
-      // For groups that haven't been settled yet, persist a freshly-
-      // generated number NOW so the next download is consistent too.
-      let invNum: string = group?.invoice_number || '';
-      let settledAt: string = group?.settled_at
-        ? new Date(group.settled_at).toISOString()
-        : new Date().toISOString();
-      if (!invNum) {
-        invNum = `INV-GRP-${new Date(settledAt).getFullYear()}-${String(req.params.groupId).slice(-6).toUpperCase()}`;
-        try {
-          await tenantDb.run(
-            "UPDATE room_booking_groups SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?",
-            [invNum, req.params.groupId]
-          );
-        } catch { /* non-fatal — PDF still renders with this number */ }
-      }
-
-      // R-3 — group invoices don't have a single folio; we don't surface
-      // IRN on the consolidated PDF (a group has N child folios, each
-      // would carry its own IRN). _irnRow stays null so the IRN block
-      // is suppressed.
-      const _irnRow: any = null;
-      const pdf = await generateInvoicePdf({
-        hotel: {
-          name:     hotel.name,
-          city:     hotel.city,
-          state:    hotel.state,
-          gstin:    hotel.gst_number,
-          phone:    hotel.phone,
-          email:    hotel.admin_id,
-          logoPath: hotel.logo_url || undefined,
-          fssai:           hotel.fssai_license_number || null,
-          fssaiValidUntil: hotel.fssai_license_valid_until || null,
-        },
-        guest: {
-          name:        (group?.contact_name) || first.guest_name || 'Group Guest',
-          phone:       (group?.contact_phone) || first.guest_phone,
-          email:       (group?.contact_email) || first.guest_email,
-          nationality: first.guest_nationality,
-          state:       first.guest_state,
-        },
-        stay: {
-          roomName:         `Group · ${bookings.length} rooms` + (group?.name ? ` · ${group.name}` : ''),
-          bookingId:        req.params.groupId,
-          checkInDate:      first.check_in_date,
-          checkOutDate:     first.check_out_date,
-          actualCheckInAt:  first.actual_checkin_at,
-          actualCheckOutAt: first.actual_checkout_at,
-          numGuests:        bookings.reduce((s, b) => s + Number(b.num_guests || 1), 0),
-        },
-        folio: {
-          id:            req.params.groupId,
-          invoiceNumber: invNum,
-          invoiceDate:   settledAt,
-          subtotal:      aggSubtotal,
-          discount:      aggDiscount,
-          gstAmount:     aggGst,
-          grandTotal:    aggGrand,
-          paymentMethod: null,
-          settledAt,
-          status:        'settled',
-        },
-        entries:       aggEntries,
-        placeOfSupply: hotel.state,
-        isCreditNote:  false,
-        bilingual:     true,
-        tenant: {
-          country:         hotel.country || 'IN',
-          currency_code:   hotel.currency_code || 'INR',
-          currency_symbol: hotel.currency_symbol || '₹',
-          locale:          hotel.locale || 'en-IN',
-        },
-        // M-6 — opt-in round-off line. Off by default (preserves byte-identical
-        // PDFs for tenants who haven't migrated their accountant workflow).
-        roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
-        // R-3 — pass IRN data when this row has been registered. The
-        // per-site `_irnRow` variable is declared just before each
-        // generateInvoicePdf call (different scopes: group aggregate
-        // has no single folio; single-folio download + email both bind
-        // to `folio`). eInvoiceMandatory tells the renderer whether to
-        // show "PENDING" loudly or stay silent.
-        irn: {
-          irn:               _irnRow?.irn || null,
-          ackNo:             _irnRow?.ack_no || null,
-          ackDate:           _irnRow?.ack_date || null,
-          signedQrCode:      _irnRow?.signed_qr_code || null,
-          status:            _irnRow?.irn_status || 'PENDING',
-          eInvoiceMandatory: Number(hotel.e_invoicing_enabled || 0) === 1
-                          && Number(hotel.e_invoicing_turnover_threshold_met || 0) === 1,
-        },
-      });
-      const safeName = (group?.name || 'group').replace(/[^a-z0-9_-]+/gi, '-');
+      const built = await buildGroupInvoicePdf(req.params.id, req.params.groupId, checkRes.restaurant);
+      if (!built.ok) return res.status(built.status || 500).json({ error: built.error });
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="${invNum}-${safeName}.pdf"`);
-      res.send(pdf);
+      res.setHeader('Content-Disposition', `attachment; filename="${built.invoiceNumber}-${built.safeName}.pdf"`);
+      res.send(built.pdf);
     } catch (err: any) {
       console.error("Group invoice PDF error:", err);
       res.status(500).json({ error: "Failed to generate group invoice" });
     }
   });
+
+  // ─── P2-B-FIX: Email the consolidated group invoice ────────────────────
+  // POST /hotel/booking-groups/:groupId/email-invoice
+  // body: { to?: string }
+  // Mirrors the per-folio email endpoint. Recipient resolution order:
+  //   1. body.to override
+  //   2. group.contact_email
+  //   3. first child booking's guest_email
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/email-invoice", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const checkRes = await ensureHotelEnabled(req.params.id);
+    if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
+    try {
+      const built = await buildGroupInvoicePdf(req.params.id, req.params.groupId, checkRes.restaurant);
+      if (!built.ok) return res.status(built.status || 500).json({ error: built.error });
+      const toEmail = (req.body?.to as string)?.trim() || built.recipientEmail;
+      if (!toEmail) {
+        return res.status(400).json({
+          error: "No email address available — set the group's contact_email or pass 'to' in the request body.",
+        });
+      }
+      const hotel = checkRes.restaurant;
+      const subject = `Tax Invoice ${built.invoiceNumber} — ${hotel.name} (Group of ${built.bookingCount} rooms)`;
+      const textBody =
+        `Dear ${built.recipientName},\n\n` +
+        `Thank you for your group stay at ${hotel.name}. ` +
+        `Please find attached your consolidated tax invoice ${built.invoiceNumber} covering all ${built.bookingCount} rooms.\n\n` +
+        `For any queries, reply to this email.\n\n${hotel.name} Team`;
+      const htmlBody =
+        `<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:auto;padding:24px;background:#faf7f2">
+           <div style="background:#7c3aed;color:#fff;padding:24px;border-radius:24px 24px 0 0">
+             <h1 style="font-family:Georgia,serif;margin:0;font-size:22px">Group Tax Invoice</h1>
+             <p style="margin:6px 0 0;opacity:0.85">${hotel.name}</p>
+           </div>
+           <div style="background:#fff;padding:24px;border-radius:0 0 24px 24px">
+             <p>Dear ${built.recipientName},</p>
+             <p>Thank you for your group stay at <strong>${hotel.name}</strong>. Please find your consolidated tax invoice <strong>${built.invoiceNumber}</strong> attached, covering all <strong>${built.bookingCount}</strong> rooms in this group.</p>
+             <p style="color:#6b5d52;font-size:13px">Amount: <strong>${(hotel.currency_code || 'INR')} ${Number(built.aggGrand || 0).toLocaleString(hotel.locale || 'en-IN')}</strong></p>
+             <p style="margin-top:24px">For any queries, reply to this email.<br/><strong>${hotel.name} Team</strong></p>
+           </div>
+         </div>`;
+      const { sendEmail: _send } = await import('./notificationService.ts');
+      const sent = await _send(toEmail, subject, textBody, htmlBody, [
+        { filename: `${built.invoiceNumber}-${built.safeName}.pdf`, content: built.pdf, contentType: 'application/pdf' },
+      ] as any);
+      if (!sent) return res.status(500).json({ error: "Email delivery failed — check SMTP configuration" });
+      res.json({
+        success: true,
+        sent_to: toEmail,
+        invoice_number: built.invoiceNumber,
+        total_amount: Math.round((built.aggGrand || 0) * 100) / 100,
+      });
+    } catch (err: any) {
+      console.error("Group email-invoice error:", err);
+      res.status(500).json({ error: err?.message || "Failed to email group invoice" });
+    }
+  });
+
 
   app.get("/api/restaurant/:id/hotel/folios/:folioId/invoice-pdf", authenticate, async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
@@ -24791,7 +24908,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'p2b-fix-group-settle-plus-persisted-invoice-num',
+    commit_marker: 'p2b-fix-2-discount-alloc-email-grouplist',
     code_features: [
       'subscription-billing',
       'read-only-mode',

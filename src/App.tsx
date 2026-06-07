@@ -6607,6 +6607,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Sprint A1 — Availability calendar view toggle for the Bookings tab
   // (DASHBOARD added in C3 — quick-glance receptionist/GM view)
   const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR' | 'DASHBOARD'>('LIST');
+  // P2-B-FIX-2: cache + UI state for the collapsible Groups panel above the
+  // bookings list. Lazy-fetched on first expand so non-group-using tenants
+  // pay zero network cost.
+  const [groupsList, setGroupsList] = useState<any[] | null>(null);
+  const [groupsPanelOpen, setGroupsPanelOpen] = useState(false);
+  const [groupsLoading, setGroupsLoading] = useState(false);
   // REQ 5: booking-history search/filter state. Receptionists need to
   // look up a returning guest by phone/name (mid-call) or pull a past
   // booking by invoice number for an enquiry.
@@ -15345,6 +15351,156 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
           {bookingsView === 'LIST' && (<>
 
+          {/* ────────────────────────────────────────────────────────────────
+              P2-B-FIX-2 — Groups panel (collapsible). Lists every booking
+              group with at-a-glance status + room counts. Click a group to
+              see its rooms / settle status, with one-click actions:
+                • 📑 Download consolidated invoice
+                • 📧 Email consolidated invoice
+                • Settle Group (if any CHECKED_IN children remain)
+              Collapsed by default; lazy-fetches on first expand so tenants
+              that don't use groups pay zero network cost. */}
+          <details
+            className="bg-white rounded-2xl border border-violet-200 shadow-sm overflow-hidden"
+            open={groupsPanelOpen}
+            onToggle={async (e) => {
+              const isOpen = (e.currentTarget as HTMLDetailsElement).open;
+              setGroupsPanelOpen(isOpen);
+              if (isOpen && groupsList === null) {
+                setGroupsLoading(true);
+                try {
+                  const res = await fetch(
+                    `/api/restaurant/${restaurantId}/hotel/booking-groups`,
+                    { headers: { Authorization: `Bearer ${token}` } }
+                  );
+                  if (res.ok) setGroupsList(await res.json());
+                  else setGroupsList([]);
+                } catch { setGroupsList([]); }
+                finally { setGroupsLoading(false); }
+              }
+            }}
+          >
+            <summary className="px-4 py-3 cursor-pointer select-none font-bold text-sm text-violet-800 hover:bg-violet-50 flex items-center justify-between">
+              <span className="flex items-center gap-2">
+                📁 Booking Groups
+                {groupsList !== null && (
+                  <span className="text-[10px] font-bold uppercase tracking-widest bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">
+                    {groupsList.length} group{groupsList.length === 1 ? '' : 's'}
+                  </span>
+                )}
+              </span>
+              <span className="text-[10px] font-normal text-violet-500">
+                {groupsPanelOpen ? '▾ Click to collapse' : '▸ Click to expand'}
+              </span>
+            </summary>
+            {groupsPanelOpen && (
+              <div className="px-4 py-3 border-t border-violet-100">
+                {groupsLoading && <p className="text-xs text-[#6b5d52] italic">Loading groups…</p>}
+                {!groupsLoading && groupsList !== null && groupsList.length === 0 && (
+                  <p className="text-xs text-[#6b5d52] italic">No booking groups yet. Use the "Group" button above to create one.</p>
+                )}
+                {!groupsLoading && groupsList && groupsList.length > 0 && (
+                  <table className="w-full text-xs">
+                    <thead className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] border-b border-violet-100">
+                      <tr>
+                        <th className="text-left py-2 pr-3">Name</th>
+                        <th className="text-left py-2 pr-3">Contact</th>
+                        <th className="text-left py-2 pr-3">Dates</th>
+                        <th className="text-right py-2 pr-3">Rooms</th>
+                        <th className="text-right py-2 pr-3">Total</th>
+                        <th className="text-left py-2 pr-3">Status</th>
+                        <th className="text-right py-2">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groupsList.map((g: any) => {
+                        const settled = !!g.invoice_number;
+                        const hasCheckedIn = Number(g.checked_in_count || 0) > 0;
+                        return (
+                          <tr key={g.id} className="border-b border-violet-50 hover:bg-violet-50/30">
+                            <td className="py-2 pr-3 font-bold text-[#1a1208]">{g.name || '(unnamed)'}</td>
+                            <td className="py-2 pr-3 text-[#3d3128]">{g.contact_name || '—'}<br/><span className="text-[10px] text-[#9c8e85]">{g.contact_phone || g.contact_email || ''}</span></td>
+                            <td className="py-2 pr-3 text-[#3d3128] text-[11px]">
+                              {g.check_in_date ? new Date(g.check_in_date).toLocaleDateString('en-IN') : '—'} →<br/>
+                              {g.check_out_date ? new Date(g.check_out_date).toLocaleDateString('en-IN') : '—'}
+                            </td>
+                            <td className="py-2 pr-3 text-right font-mono">{g.booking_count || 0}<br/><span className="text-[10px] text-emerald-700">{g.checked_in_count || 0} in</span> · <span className="text-[10px] text-[#9c8e85]">{g.checked_out_count || 0} out</span></td>
+                            <td className="py-2 pr-3 text-right font-mono">₹{Number(g.total_amount || 0).toLocaleString('en-IN')}</td>
+                            <td className="py-2 pr-3">
+                              {settled
+                                ? <span className="text-[10px] font-bold uppercase tracking-widest bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded">Settled · {g.invoice_number}</span>
+                                : <span className="text-[10px] font-bold uppercase tracking-widest bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">Open</span>}
+                            </td>
+                            <td className="py-2 text-right">
+                              <div className="flex gap-1 justify-end flex-wrap">
+                                {hasCheckedIn && (
+                                  <button
+                                    onClick={async () => {
+                                      const method = prompt(`Settle "${g.name}" (${g.checked_in_count} CHECKED_IN room${g.checked_in_count === 1 ? '' : 's'}). Payment method?`, 'CASH');
+                                      if (!method) return;
+                                      const discountStr = prompt('Group discount in ₹ (split proportionally)?', '0');
+                                      if (discountStr === null) return;
+                                      try {
+                                        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkout`, {
+                                          method: 'POST',
+                                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                          body: JSON.stringify({ payment_method: method.toUpperCase(), discount: Math.max(0, Number(discountStr) || 0) }),
+                                        });
+                                        const data = await res.json();
+                                        if (!res.ok) throw new Error(data?.error || 'Settle failed');
+                                        alert(`Settled. Invoice: ${data.invoice_number}\nTotal: ₹${Number(data.total_grand_total || 0).toLocaleString('en-IN')}`);
+                                        setGroupsList(null);   // refetch on next expand
+                                        setGroupsPanelOpen(false); setTimeout(() => setGroupsPanelOpen(true), 50);
+                                        fetchHotelBookings();
+                                      } catch (err: any) { alert(err.message); }
+                                    }}
+                                    className="px-2 py-1 rounded-lg bg-violet-600 text-white text-[10px] font-bold hover:bg-violet-700"
+                                  >Settle</button>
+                                )}
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
+                                      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); }
+                                      const blob = await res.blob();
+                                      const url = URL.createObjectURL(blob);
+                                      const a = document.createElement('a');
+                                      a.href = url; a.download = `GroupInvoice-${g.id}-${(g.name || 'group').replace(/[^a-z0-9_-]+/gi, '-')}.pdf`;
+                                      document.body.appendChild(a); a.click();
+                                      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+                                    } catch (err: any) { alert(err.message); }
+                                  }}
+                                  className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50"
+                                >📑 PDF</button>
+                                <button
+                                  onClick={async () => {
+                                    const to = prompt(`Email invoice for "${g.name}" to:`, g.contact_email || '');
+                                    if (!to || !to.trim()) return;
+                                    try {
+                                      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/email-invoice`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        body: JSON.stringify({ to: to.trim() }),
+                                      });
+                                      const data = await res.json();
+                                      if (!res.ok) throw new Error(data?.error || 'Email failed');
+                                      alert(`Invoice ${data.invoice_number} sent to ${data.sent_to}`);
+                                    } catch (err: any) { alert(err.message); }
+                                  }}
+                                  className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50"
+                                >📧 Email</button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+          </details>
+
           {/* Today's Arrivals & Departures.
               Bug 5 fix — normaliseBookingDate handles both ISO strings
               and JS Date objects (the API may return either depending
@@ -15643,19 +15799,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             {b.group_id && b.status === 'CHECKED_IN' && (
                               <button
                                 onClick={async () => {
-                                  if (!confirm(`Settle ALL rooms in this group as a single invoice?\n\nEvery CHECKED_IN room in "${b.group_name || 'this group'}" will be marked CHECKED_OUT and billed under one consolidated invoice number.\n\nPayment method: CASH (adjust each folio's discount BEFORE clicking this).`)) return;
+                                  // P2-B-FIX-2: prompt for payment method + optional
+                                  // group-level discount, distribute proportionally
+                                  // across child folios on the server side.
+                                  const method = prompt(
+                                    `Settle ALL rooms in group "${b.group_name || 'this group'}" as a single invoice.\n\nEvery CHECKED_IN room will be marked CHECKED_OUT and billed under one consolidated invoice number.\n\nPayment method? (CASH / CARD / UPI / BANK_TRANSFER)`,
+                                    'CASH'
+                                  );
+                                  if (!method) return;
+                                  const discountStr = prompt(
+                                    `Optional group-level discount in ₹ (split proportionally across rooms by subtotal).\n\nLeave 0 if no group discount.`,
+                                    '0'
+                                  );
+                                  if (discountStr === null) return;
+                                  const groupDiscount = Math.max(0, Number(discountStr) || 0);
                                   try {
                                     const res = await fetch(
                                       `/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/checkout`,
                                       {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                        body: JSON.stringify({ payment_method: 'CASH' }),
+                                        body: JSON.stringify({ payment_method: method.toUpperCase(), discount: groupDiscount }),
                                       }
                                     );
                                     const data = await res.json();
                                     if (!res.ok) throw new Error(data?.error || `Settle failed (${res.status})`);
-                                    alert(`Group settled.\nInvoice: ${data.invoice_number}\nRooms settled: ${data.settled?.length || 0}\nSkipped: ${data.skipped?.length || 0}\nTotal: ₹${Number(data.total_grand_total || 0).toLocaleString('en-IN')}`);
+                                    alert(`Group settled.\nInvoice: ${data.invoice_number}\nRooms settled: ${data.settled?.length || 0}\nSkipped: ${data.skipped?.length || 0}\nTotal: ₹${Number(data.total_grand_total || 0).toLocaleString('en-IN')}${groupDiscount > 0 ? `\n(₹${groupDiscount.toFixed(2)} discount allocated across rooms)` : ''}`);
                                     fetchHotelBookings();
                                   } catch (err: any) { alert(err.message); }
                                 }}
@@ -15687,6 +15856,36 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 title="Download one consolidated PDF for the whole group"
                                 className="px-3 py-1.5 rounded-lg border border-violet-300 text-violet-700 text-[11px] font-bold hover:bg-violet-50"
                               >📑 Group Inv</button>
+                            )}
+                            {b.group_id && (
+                              <button
+                                onClick={async () => {
+                                  // P2-B-FIX-2: email the consolidated group invoice.
+                                  // Recipient defaults to group.contact_email; staff
+                                  // can override with prompt to send to any address.
+                                  const fallback = b.guest_email || '';
+                                  const to = prompt(
+                                    `Email the consolidated group invoice for "${b.group_name || 'this group'}" to:`,
+                                    fallback
+                                  );
+                                  if (!to || !to.trim()) return;
+                                  try {
+                                    const res = await fetch(
+                                      `/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/email-invoice`,
+                                      {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        body: JSON.stringify({ to: to.trim() }),
+                                      }
+                                    );
+                                    const data = await res.json();
+                                    if (!res.ok) throw new Error(data?.error || `Email failed (${res.status})`);
+                                    alert(`Group invoice ${data.invoice_number} emailed to ${data.sent_to}.\nTotal: ₹${Number(data.total_amount || 0).toLocaleString('en-IN')}`);
+                                  } catch (err: any) { alert(err.message); }
+                                }}
+                                title="Email the consolidated group invoice"
+                                className="px-3 py-1.5 rounded-lg border border-violet-300 text-violet-700 text-[11px] font-bold hover:bg-violet-50"
+                              >📧 Email Group Inv</button>
                             )}
                             {/* Phase H1 — channel re-sync. Only shown for OTA-sourced bookings */}
                             {b.booking_source && !['DIRECT','WALKIN',''].includes(String(b.booking_source).toUpperCase()) && (
