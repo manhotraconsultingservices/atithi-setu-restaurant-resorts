@@ -20630,15 +20630,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
                           >
                             <option value="">Select category…</option>
-                            {categoryStats.map((s: any) => {
-                              const rate = s.preview?.matrix_used ? s.preview.per_night[0]?.base_rate : s.base_rate;
-                              const rateLabel = rate > 0 ? ` · ${fmtRupee(rate)}/n${s.preview?.matrix_used ? '' : ' (base)'}` : '';
-                              return (
-                                <option key={s.type_id} value={s.type_id}>
-                                  {s.type_name}{rateLabel} · {s.available_count} avl
-                                </option>
-                              );
-                            })}
+                            {categoryStats.map((s: any) => (
+                              // Phase 4.4 — no rate shown; rate is meal-plan dependent
+                              <option key={s.type_id} value={s.type_id}>
+                                {s.type_name} · {s.available_count} avl
+                              </option>
+                            ))}
                           </select>
                           {selectedRoom && drillRooms.length > 1 && (
                             <div className="mt-1.5 flex items-center gap-1.5">
@@ -22473,22 +22470,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
                       >
                         <option value="">Select a room category…</option>
-                        {categoryStats.map((s: any) => {
-                          const rate = s.preview?.matrix_used
-                            ? s.preview.per_night[0]?.base_rate
-                            : s.base_rate;
-                          const rateLabel = rate > 0
-                            ? ` · ${fmtRupee(rate)}/night${s.preview?.matrix_used ? '' : ' (base)'}`
-                            : '';
-                          const extras = s.preview?.matrix_used && s.preview.per_night[0]?.extras > 0
-                            ? ` + ${fmtRupee(s.preview.per_night[0].extras)} ext.`
-                            : '';
-                          return (
-                            <option key={s.type_id} value={s.type_id}>
-                              {s.type_name}{rateLabel}{extras} · {s.available_count} available
-                            </option>
-                          );
-                        })}
+                        {categoryStats.map((s: any) => (
+                          // BCG Tariff Phase 4.4 (7 Jun 2026) — only show
+                          // available-count in the category dropdown. Rate is
+                          // intentionally OMITTED here because the per-night
+                          // price depends on meal-plan selection. Showing
+                          // base_rate confuses staff into thinking that IS
+                          // the rate they'll charge. The Live Preview block
+                          // below the meal-plan dropdown shows the actual
+                          // per-night rate once meal plan is picked.
+                          <option key={s.type_id} value={s.type_id}>
+                            {s.type_name} · {s.available_count} available
+                          </option>
+                        ))}
                       </select>
 
                       {/* ─── Helper / status lines ────────────────────── */}

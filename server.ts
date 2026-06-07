@@ -26031,7 +26031,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tariff-category-first-room-picker-with-live-rate',
+    commit_marker: 'tariff-category-no-base-price-plus-live-e2e-test',
     code_features: [
       'subscription-billing',
       'read-only-mode',
