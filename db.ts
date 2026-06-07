@@ -207,11 +207,19 @@ export async function initDb() {
     -- room_tariffs, extra_person_charges). The rate resolver branches
     -- per-tenant on this flag. See docs/HOTEL_TARIFF_MODEL_GAPS.md.
     --
-    -- Default 'LEGACY' so existing tenants are byte-identical until
-    -- they deliberately switch via Settings → Tariff Configuration
-    -- (Phase 2). The new client (27-room boutique resort) flips to
-    -- MATRIX at onboarding.
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS tariff_model TEXT DEFAULT 'LEGACY';
+    -- BCG Tariff Phase 4 (7 Jun 2026) — MATRIX is now the DEFAULT mode
+    -- for all hotel tenants. The rate resolver
+    -- (computeBookingTotalWithExtras) falls back per-cell to the legacy
+    -- rate_overrides + base_rate path whenever the matrix has no entry,
+    -- so a tenant with an empty matrix gets byte-identical behaviour to
+    -- LEGACY mode — but they can populate meal-plan + extras at any time
+    -- without flipping a global switch.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS tariff_model TEXT DEFAULT 'MATRIX';
+    -- Backfill: every existing tenant whose tariff_model was the old
+    -- 'LEGACY' default (set when the column was first added) is upgraded
+    -- to 'MATRIX'. Safe because the rate resolver falls back per-cell
+    -- — tenants with no matrix data see the same prices as before.
+    UPDATE restaurants SET tariff_model = 'MATRIX' WHERE tariff_model IS NULL OR tariff_model = 'LEGACY';
 
     -- L-2 (BCG follow-up) — Min-margin guard. When > 0, the order POST
     -- and /invoices/manual POST handlers compute the line-level COGS via

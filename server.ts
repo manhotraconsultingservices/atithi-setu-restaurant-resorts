@@ -2088,14 +2088,20 @@ async function getMatrixRateForRoomDate(
 
 // Check whether the tenant is in MATRIX mode. Cheap query; called once
 // per booking POST/PATCH, not per-night.
+//
+// BCG Tariff Phase 4 (7 Jun 2026) — MATRIX is now the default. A tenant
+// only falls into the LEGACY branch when their tariff_model is EXACTLY
+// 'LEGACY' (they explicitly opted back). Unknown / NULL / 'MATRIX' →
+// MATRIX. Safe because the per-cell fallback in computeBookingTotalWith-
+// Extras degrades to base_rate when the matrix has no row.
 async function getTariffModel(restaurantId: string): Promise<'LEGACY' | 'MATRIX'> {
   try {
     const row: any = await centralDb.get(
       "SELECT tariff_model FROM restaurants WHERE id = ?", [restaurantId]
     );
-    return row?.tariff_model === 'MATRIX' ? 'MATRIX' : 'LEGACY';
+    return row?.tariff_model === 'LEGACY' ? 'LEGACY' : 'MATRIX';
   } catch {
-    return 'LEGACY';
+    return 'MATRIX';
   }
 }
 
@@ -20138,7 +20144,7 @@ async function startServer() {
         tenantDb.query("SELECT id, name, base_rate, display_order FROM room_types WHERE is_active = 1 ORDER BY display_order, name").catch(() => []),
       ]);
       res.json({
-        tariff_model: (meta as any)?.tariff_model || 'LEGACY',
+        tariff_model: (meta as any)?.tariff_model === 'LEGACY' ? 'LEGACY' : 'MATRIX',
         seasons, season_periods: periods, meal_plans: meals,
         room_tariffs: tariffs, extra_person_charges: extras,
         room_types: roomTypes,
@@ -26011,7 +26017,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tariff-folio-matrix-fix-plus-e2e-test',
+    commit_marker: 'tariff-matrix-default-plus-meal-plan-editor',
     code_features: [
       'subscription-billing',
       'read-only-mode',

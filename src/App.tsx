@@ -7243,7 +7243,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     extra_person_charges: any[];
     room_types: any[];
   }>({
-    tariff_model: 'LEGACY', seasons: [], season_periods: [],
+    // BCG Tariff Phase 4 (7 Jun 2026) — MATRIX is the default mode now.
+    // Tenants can still flip to LEGACY via the toggle if they prefer the
+    // simpler date-range overrides flow.
+    tariff_model: 'MATRIX', seasons: [], season_periods: [],
     meal_plans: [], room_tariffs: [], extra_person_charges: [], room_types: [],
   });
   const [tariffLoading, setTariffLoading] = useState(false);
@@ -7252,7 +7255,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     try {
       const data = await hotelApi('/tariff');
       setTariffData({
-        tariff_model: data.tariff_model || 'LEGACY',
+        tariff_model: data.tariff_model === 'LEGACY' ? 'LEGACY' : 'MATRIX',
         seasons: Array.isArray(data.seasons) ? data.seasons : [],
         season_periods: Array.isArray(data.season_periods) ? data.season_periods : [],
         meal_plans: Array.isArray(data.meal_plans) ? data.meal_plans : [],
@@ -15155,6 +15158,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               const tariff = tariffData;
               const mealPlans = (tariff.meal_plans || []).filter((m: any) => m.is_active !== 0)
                 .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
+              // Includes inactive — used by the editor only so deactivated
+              // plans stay visible (and re-activatable) until the owner
+              // explicitly removes them via the X button on unsaved rows.
+              const allMealPlans = (tariff.meal_plans || [])
+                .slice()
+                .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
               const seasons = (tariff.seasons || []).filter((s: any) => s.is_active !== 0)
                 .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
               const roomTypes = (tariff.room_types || [])
@@ -15234,6 +15243,79 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   alert('Save failed: ' + (err?.message || 'unknown error'));
                 }
               };
+              // BCG Tariff Phase 4 (7 Jun 2026) — owner-editable meal plans.
+              // Before this, EP/CP/MAP/API were seeded once + read-only in
+              // the UI. Now the owner can define any meal plan they offer:
+              // "Heritage Breakfast", "Half-Board Veg", "All-Inclusive Spa",
+              // whatever. The tariff matrix + extras grids regenerate
+              // automatically from the active meal-plan list.
+              const saveMealPlans = async () => {
+                // Inline validation — code + name are required.
+                const bad = (tariff.meal_plans || []).find((m: any) =>
+                  !String(m.code || '').trim() || !String(m.name || '').trim()
+                );
+                if (bad) {
+                  alert('Every meal plan needs a code (e.g. EP) and a name (e.g. European Plan). Please fill the blank rows or remove them.');
+                  return;
+                }
+                // Duplicate-code guard. Codes are user-facing on the
+                // tariff matrix header so they need to be distinct.
+                const codes = (tariff.meal_plans || []).map((m: any) => String(m.code || '').trim().toUpperCase());
+                const dup = codes.find((c: string, i: number) => codes.indexOf(c) !== i);
+                if (dup) {
+                  alert(`Meal plan code "${dup}" appears more than once. Codes must be unique.`);
+                  return;
+                }
+                try {
+                  await hotelApi('/tariff/meal-plans', {
+                    method: 'PUT',
+                    body: JSON.stringify({ meal_plans: tariff.meal_plans }),
+                  });
+                  await fetchTariff();
+                  alert('Meal plans saved.');
+                } catch (err: any) {
+                  alert('Save failed: ' + (err?.message || 'unknown error'));
+                }
+              };
+              const addMealPlan = () => {
+                const newId = `MP-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+                setTariffData(prev => ({
+                  ...prev,
+                  meal_plans: [
+                    ...prev.meal_plans,
+                    {
+                      id: newId, code: '', name: '', description: '',
+                      includes_breakfast: 0, includes_lunch: 0, includes_dinner: 0,
+                      display_order: (prev.meal_plans?.length || 0) + 1,
+                      is_active: 1,
+                      _new: true, // client-only marker — lets the UI show a "delete" X for unsaved rows
+                    },
+                  ],
+                }));
+              };
+              const updateMealPlan = (id: string, patch: any) => {
+                setTariffData(prev => ({
+                  ...prev,
+                  meal_plans: prev.meal_plans.map((m: any) => m.id === id ? { ...m, ...patch } : m),
+                }));
+              };
+              const removeMealPlan = (id: string) => {
+                // For unsaved rows just drop them. For saved rows, set
+                // is_active=0 (soft delete) so historical bookings that
+                // reference this meal_plan_id stay readable.
+                setTariffData(prev => {
+                  const target = prev.meal_plans.find((m: any) => m.id === id);
+                  if (target?._new) {
+                    return { ...prev, meal_plans: prev.meal_plans.filter((m: any) => m.id !== id) };
+                  }
+                  return {
+                    ...prev,
+                    meal_plans: prev.meal_plans.map((m: any) =>
+                      m.id === id ? { ...m, is_active: 0 } : m
+                    ),
+                  };
+                });
+              };
 
               const PERSON_TYPES = [
                 { id: 'ADULT',                label: 'Extra Adult (w/ mattress)' },
@@ -15247,7 +15329,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <div>
                       <h3 className="text-base font-bold font-serif text-[#1a1208]">Tariff Configuration</h3>
                       <p className="text-[11px] text-[#6b5d52] mt-0.5">
-                        Room × Season × Meal-Plan matrix pricing for hotels that price by category (Superior / Premium / River View) and meal inclusion (EP / CP / MAP / API).
+                        Room × Season × Meal-Plan matrix pricing. Define your own meal plans below — the matrix and extra-person charges grids regenerate automatically.
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
@@ -15272,19 +15354,152 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
                   {tariff.tariff_model === 'MATRIX' && (
                     <>
-                      {/* Meal plans (read-only chip list — edit via API for now) */}
-                      <div>
-                        <h4 className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1.5">Meal Plans ({mealPlans.length})</h4>
-                        <div className="flex flex-wrap gap-1.5">
-                          {mealPlans.map((m: any) => {
-                            const tag = [m.includes_breakfast && 'B', m.includes_lunch && 'L', m.includes_dinner && 'D'].filter(Boolean).join('+') || 'room only';
-                            return (
-                              <span key={m.id} className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-[#cc5a16]/10 text-[#cc5a16]">
-                                {m.code} · {m.name} <span className="opacity-60">({tag})</span>
-                              </span>
-                            );
-                          })}
+                      {/* ── Editable meal plans (BCG Tariff Phase 4) ──
+                          Owner defines their own plans (Heritage Bkfst,
+                          Half-Board, All-Inclusive — anything). Code is
+                          short header for matrix columns; name is the
+                          dropdown label on bookings. B/L/D flags drive
+                          the inclusion tag.                              */}
+                      <div className="bg-[#faf7f2] rounded-2xl border border-[#cc5a16]/10 p-4">
+                        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                          <div>
+                            <h4 className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Meal Plans ({mealPlans.length} active{allMealPlans.length > mealPlans.length ? ` · ${allMealPlans.length - mealPlans.length} archived` : ''})</h4>
+                            <p className="text-[10px] text-[#9c8e85] mt-0.5">Add the meal plans your property offers. Each plan becomes a column in the tariff matrix below.</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={addMealPlan}
+                              className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1.5 rounded-lg bg-white border border-[#cc5a16]/20 hover:border-[#cc5a16]/40 text-[#cc5a16]"
+                            >+ Add Meal Plan</button>
+                            <button
+                              type="button"
+                              onClick={saveMealPlans}
+                              className="text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg bg-[#cc5a16] text-white hover:bg-[#a8460f]"
+                            >Save Meal Plans</button>
+                          </div>
                         </div>
+
+                        {allMealPlans.length === 0 ? (
+                          <div className="text-center py-6">
+                            <p className="text-[12px] text-[#6b5d52] mb-2">No meal plans defined yet.</p>
+                            <p className="text-[10px] text-[#9c8e85] mb-3">Common examples: EP (room only) · CP (with breakfast) · MAP (with breakfast + dinner) · API (all meals). You can name them anything — "Heritage Breakfast", "Half-Board Veg", "All-Inclusive Spa".</p>
+                            <button
+                              type="button"
+                              onClick={addMealPlan}
+                              className="text-[11px] font-bold uppercase tracking-widest px-4 py-2 rounded-xl bg-[#cc5a16] text-white hover:bg-[#a8460f]"
+                            >+ Add First Meal Plan</button>
+                          </div>
+                        ) : (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                                  <th className="text-left px-2 py-1.5 w-[80px]">Code</th>
+                                  <th className="text-left px-2 py-1.5">Name</th>
+                                  <th className="text-center px-2 py-1.5 w-[50px]" title="Includes breakfast">B</th>
+                                  <th className="text-center px-2 py-1.5 w-[50px]" title="Includes lunch">L</th>
+                                  <th className="text-center px-2 py-1.5 w-[50px]" title="Includes dinner">D</th>
+                                  <th className="text-center px-2 py-1.5 w-[80px]">Order</th>
+                                  <th className="text-center px-2 py-1.5 w-[90px]">Status</th>
+                                  <th className="px-2 py-1.5 w-[80px]"></th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {allMealPlans.map((m: any) => {
+                                  const isInactive = m.is_active === 0 || m.is_active === false;
+                                  return (
+                                    <tr key={m.id} className={cn("border-t border-[#cc5a16]/10", isInactive && "opacity-50")}>
+                                      <td className="px-2 py-1.5">
+                                        <input
+                                          type="text"
+                                          value={m.code || ''}
+                                          maxLength={8}
+                                          placeholder="EP"
+                                          onChange={e => updateMealPlan(m.id, { code: e.target.value.toUpperCase().slice(0, 8) })}
+                                          className="w-full bg-white border border-[#cc5a16]/20 rounded-md px-2 py-1 text-xs font-mono font-bold uppercase focus:outline-none focus:border-[#cc5a16]"
+                                        />
+                                      </td>
+                                      <td className="px-2 py-1.5">
+                                        <input
+                                          type="text"
+                                          value={m.name || ''}
+                                          placeholder="European Plan (room only)"
+                                          onChange={e => updateMealPlan(m.id, { name: e.target.value })}
+                                          className="w-full bg-white border border-[#cc5a16]/20 rounded-md px-2 py-1 text-xs focus:outline-none focus:border-[#cc5a16]"
+                                        />
+                                      </td>
+                                      <td className="px-2 py-1.5 text-center">
+                                        <input
+                                          type="checkbox"
+                                          checked={!!m.includes_breakfast}
+                                          onChange={e => updateMealPlan(m.id, { includes_breakfast: e.target.checked ? 1 : 0 })}
+                                          className="w-4 h-4 accent-[#cc5a16] cursor-pointer"
+                                        />
+                                      </td>
+                                      <td className="px-2 py-1.5 text-center">
+                                        <input
+                                          type="checkbox"
+                                          checked={!!m.includes_lunch}
+                                          onChange={e => updateMealPlan(m.id, { includes_lunch: e.target.checked ? 1 : 0 })}
+                                          className="w-4 h-4 accent-[#cc5a16] cursor-pointer"
+                                        />
+                                      </td>
+                                      <td className="px-2 py-1.5 text-center">
+                                        <input
+                                          type="checkbox"
+                                          checked={!!m.includes_dinner}
+                                          onChange={e => updateMealPlan(m.id, { includes_dinner: e.target.checked ? 1 : 0 })}
+                                          className="w-4 h-4 accent-[#cc5a16] cursor-pointer"
+                                        />
+                                      </td>
+                                      <td className="px-2 py-1.5">
+                                        <input
+                                          type="number"
+                                          value={m.display_order ?? 0}
+                                          onChange={e => updateMealPlan(m.id, { display_order: Number(e.target.value) || 0 })}
+                                          className="w-full bg-white border border-[#cc5a16]/20 rounded-md px-2 py-1 text-xs text-center focus:outline-none focus:border-[#cc5a16]"
+                                        />
+                                      </td>
+                                      <td className="px-2 py-1.5 text-center">
+                                        {isInactive ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => updateMealPlan(m.id, { is_active: 1 })}
+                                            className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 hover:underline"
+                                          >Reactivate</button>
+                                        ) : (
+                                          <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-700">Active</span>
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-center">
+                                        {m._new ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => removeMealPlan(m.id)}
+                                            title="Discard"
+                                            className="text-[#c13b3b] hover:text-red-700 font-bold text-sm"
+                                          >×</button>
+                                        ) : !isInactive ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              if (confirm(`Deactivate "${m.code} · ${m.name}"?\n\nHistorical bookings with this plan stay readable. The plan no longer appears in new booking forms or the tariff matrix until you reactivate.`)) {
+                                                removeMealPlan(m.id);
+                                              }
+                                            }}
+                                            className="text-[10px] font-bold uppercase tracking-widest text-[#c13b3b] hover:underline"
+                                          >Deactivate</button>
+                                        ) : null}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                            <p className="text-[10px] text-[#9c8e85] italic mt-2">B/L/D = includes Breakfast / Lunch / Dinner. Code is the short header (3-4 chars) used in the matrix; name is the full label shown in booking forms.</p>
+                          </div>
+                        )}
                       </div>
 
                       {/* Seasons + periods editor */}
