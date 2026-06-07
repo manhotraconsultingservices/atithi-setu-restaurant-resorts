@@ -1944,6 +1944,210 @@ async function computeRoomTotal(restaurantId: string, roomId: string, checkIn: s
 }
 
 // ════════════════════════════════════════════════════════════════════════
+//  BCG Tariff Phase 3 — Matrix-aware rate resolution
+//
+//  When the tenant has flipped `restaurants.tariff_model` to 'MATRIX'
+//  (default 'LEGACY' for every tenant currently in production), the
+//  rate resolver consults the new room_tariffs table keyed on
+//  (room_type, season, meal_plan) BEFORE falling back to the legacy
+//  rate_overrides path.
+//
+//  Resolution order (MATRIX mode + meal_plan_id provided):
+//    1. room_tariffs WHERE room_type_id + season_id + meal_plan_id +
+//       room_id_override = roomId  (per-room override beats type default)
+//    2. room_tariffs WHERE room_type_id + season_id + meal_plan_id +
+//       room_id_override IS NULL  (the type default)
+//    3. Fall through to legacy getRateForRoomDate
+//
+//  If tenant is LEGACY mode, or no meal_plan_id was provided, OR no
+//  matrix row exists for the (room_type × season × meal_plan) triple,
+//  we fall back to the legacy resolver — guaranteeing a price for
+//  every booking even mid-onboarding when the matrix is half-filled.
+// ════════════════════════════════════════════════════════════════════════
+
+// Find the season_id that covers a given date for a tenant. Returns null
+// if no season period matches (in which case the matrix lookup is skipped
+// and the legacy path takes over).
+async function getSeasonForDate(restaurantId: string, isoDate: string): Promise<string | null> {
+  try {
+    const tenantDb = await getTenantDb(restaurantId);
+    const row: any = await tenantDb.get(
+      `SELECT sp.season_id
+         FROM season_periods sp
+         JOIN seasons s ON s.id = sp.season_id AND s.is_active = 1
+        WHERE ? BETWEEN sp.start_date AND sp.end_date
+        ORDER BY s.display_order ASC
+        LIMIT 1`,
+      [isoDate]
+    );
+    return row?.season_id || null;
+  } catch {
+    // Table may not exist for non-hotel tenants — that's OK.
+    return null;
+  }
+}
+
+interface MatrixRateLookup { rate: number; season_id: string; source: 'MATRIX_ROOM' | 'MATRIX_TYPE'; }
+
+async function getMatrixRateForRoomDate(
+  restaurantId: string, roomId: string, isoDate: string, mealPlanId: string
+): Promise<MatrixRateLookup | null> {
+  try {
+    const tenantDb = await getTenantDb(restaurantId);
+    const room: any = await tenantDb.get("SELECT id, type_id FROM rooms WHERE id = ?", [roomId]);
+    if (!room?.type_id) return null;
+    const seasonId = await getSeasonForDate(restaurantId, isoDate);
+    if (!seasonId) return null;
+    // Try room-level override first.
+    const roomRow: any = await tenantDb.get(
+      `SELECT rate FROM room_tariffs
+        WHERE room_type_id = ? AND season_id = ? AND meal_plan_id = ?
+          AND room_id_override = ?`,
+      [room.type_id, seasonId, mealPlanId, roomId]
+    );
+    if (roomRow && roomRow.rate != null) {
+      return { rate: Number(roomRow.rate), season_id: seasonId, source: 'MATRIX_ROOM' };
+    }
+    // Fall back to type-level default.
+    const typeRow: any = await tenantDb.get(
+      `SELECT rate FROM room_tariffs
+        WHERE room_type_id = ? AND season_id = ? AND meal_plan_id = ?
+          AND room_id_override IS NULL`,
+      [room.type_id, seasonId, mealPlanId]
+    );
+    if (typeRow && typeRow.rate != null) {
+      return { rate: Number(typeRow.rate), season_id: seasonId, source: 'MATRIX_TYPE' };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Check whether the tenant is in MATRIX mode. Cheap query; called once
+// per booking POST/PATCH, not per-night.
+async function getTariffModel(restaurantId: string): Promise<'LEGACY' | 'MATRIX'> {
+  try {
+    const row: any = await centralDb.get(
+      "SELECT tariff_model FROM restaurants WHERE id = ?", [restaurantId]
+    );
+    return row?.tariff_model === 'MATRIX' ? 'MATRIX' : 'LEGACY';
+  } catch {
+    return 'LEGACY';
+  }
+}
+
+// Look up per-night extra-person charge for a given person type, date
+// (which determines season), and meal plan. Returns 0 if no row exists
+// (treat missing config as free — better than blocking the booking).
+async function getExtraPersonChargeForDate(
+  restaurantId: string, isoDate: string, mealPlanId: string, personType: string
+): Promise<number> {
+  try {
+    const tenantDb = await getTenantDb(restaurantId);
+    const seasonId = await getSeasonForDate(restaurantId, isoDate);
+    if (!seasonId) return 0;
+    const row: any = await tenantDb.get(
+      `SELECT charge FROM extra_person_charges
+        WHERE person_type = ? AND season_id = ? AND meal_plan_id = ?`,
+      [personType, seasonId, mealPlanId]
+    );
+    return Number(row?.charge || 0);
+  } catch {
+    return 0;
+  }
+}
+
+interface BookingTotalBreakdown {
+  base_total: number;
+  extras_total: number;
+  total: number;
+  per_night: Array<{
+    date: string;
+    base_rate: number;
+    extras: number;
+    source: string;
+  }>;
+}
+
+// Top-level total computer. Handles both LEGACY (existing rate_overrides
+// path) and MATRIX (new room_tariffs + extras) modes. Falls back gracefully
+// per-night when matrix lookup misses — so a half-populated matrix never
+// blocks a booking, just degrades to base_rate for the missing cells.
+async function computeBookingTotalWithExtras(
+  restaurantId: string, roomId: string, checkIn: string, checkOut: string,
+  opts: {
+    mealPlanId?: string | null;
+    extraAdults?: number;
+    extraChildrenWithMattress?: number;
+    extraChildrenNoMattress?: number;
+    bookingType?: string;
+  } = {}
+): Promise<BookingTotalBreakdown> {
+  const ci = normaliseDateIso(checkIn);
+  const co = normaliseDateIso(checkOut);
+  const bookingType = String(opts.bookingType || 'OVERNIGHT').toUpperCase();
+  const extras = {
+    ADULT: Math.max(0, Number(opts.extraAdults || 0)),
+    CHILD_WITH_MATTRESS: Math.max(0, Number(opts.extraChildrenWithMattress || 0)),
+    CHILD_NO_MATTRESS: Math.max(0, Number(opts.extraChildrenNoMattress || 0)),
+  };
+  const tariffModel = await getTariffModel(restaurantId);
+  const useMatrix = tariffModel === 'MATRIX' && !!opts.mealPlanId;
+
+  const perNight: BookingTotalBreakdown['per_night'] = [];
+  if (!ci || !co) return { base_total: 0, extras_total: 0, total: 0, per_night: [] };
+
+  // Build the per-night list. Day-use bookings are one "night" at the
+  // check-in date's rate.
+  const dates: string[] = [];
+  if (bookingType === 'DAY_USE' || ci === co) {
+    dates.push(ci);
+  } else {
+    let cursor = new Date(ci + 'T12:00:00Z');
+    const end = new Date(co + 'T12:00:00Z');
+    while (cursor < end) {
+      dates.push(cursor.toISOString().slice(0, 10));
+      cursor = new Date(cursor.getTime() + 86400000);
+    }
+  }
+
+  for (const d of dates) {
+    let baseRate = 0;
+    let source = 'BASE_RATE';
+    if (useMatrix) {
+      const m = await getMatrixRateForRoomDate(restaurantId, roomId, d, opts.mealPlanId!);
+      if (m) { baseRate = m.rate; source = m.source; }
+    }
+    if (baseRate === 0) {
+      // Fall back to legacy resolution (rate_overrides → base_rate).
+      const legacy = await getRateForRoomDate(restaurantId, roomId, d);
+      baseRate = legacy.rate;
+      source = legacy.source;
+    }
+    let extrasForNight = 0;
+    if (useMatrix) {
+      for (const [pt, count] of Object.entries(extras)) {
+        if (count > 0) {
+          const charge = await getExtraPersonChargeForDate(restaurantId, d, opts.mealPlanId!, pt);
+          extrasForNight += charge * count;
+        }
+      }
+    }
+    perNight.push({ date: d, base_rate: baseRate, extras: extrasForNight, source });
+  }
+
+  const baseTotal = Math.round(perNight.reduce((s, n) => s + n.base_rate, 0) * 100) / 100;
+  const extrasTotal = Math.round(perNight.reduce((s, n) => s + n.extras, 0) * 100) / 100;
+  return {
+    base_total: baseTotal,
+    extras_total: extrasTotal,
+    total: Math.round((baseTotal + extrasTotal) * 100) / 100,
+    per_night: perNight,
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════
 //  computeLateCheckoutFee — Phase H1
 //
 //  Determines whether a late-checkout penalty applies and how much.
@@ -17375,7 +17579,11 @@ async function startServer() {
       const {
         room_id, guest_name, guest_phone, guest_email, guest_id_proof,
         guest_nationality, guest_state, num_guests, check_in_date, check_out_date,
-        booking_source, room_rate, special_requests, booking_type
+        booking_source, room_rate, special_requests, booking_type,
+        // BCG Tariff Phase 3 — meal plan + extra-person counts. All optional;
+        // when meal_plan_id is null/undefined the booking renders identically
+        // to the LEGACY path (no matrix lookup, no extra-person line).
+        meal_plan_id, extra_adults, extra_children_with_mattress, extra_children_no_mattress,
       } = req.body || {};
       if (!guest_name || String(guest_name).trim().length === 0) {
         return res.status(400).json({ error: "Guest name is required." });
@@ -17391,24 +17599,53 @@ async function startServer() {
       const bookingType = String(booking_type || 'OVERNIGHT').toUpperCase();
       const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const tenantDb = await getTenantDb(req.params.id);
-      // Sprint C-RP — rate-plan-aware total. If the caller provided an
-      // explicit room_rate we honour it (manual override). Otherwise we
-      // resolve per-night rates from rate_overrides and sum them.
+      // BCG Tariff Phase 3 — if caller passes an explicit room_rate we still
+      // honour it (manual override path stays unchanged). When the rate is
+      // 0/unset, we route through computeBookingTotalWithExtras which:
+      //   • In MATRIX mode + meal_plan_id present → consults room_tariffs +
+      //     extra_person_charges, falls back to legacy per-night if a
+      //     specific matrix cell is missing.
+      //   • In LEGACY mode OR no meal_plan_id → uses the existing
+      //     rate_overrides + base_rate path. Output is byte-identical
+      //     to before Phase 3.
       let rate = Number(room_rate) || 0;
       let total: number;
       let nights = 1;
+      let mealPlanSnapshot: string | null = null;
+      const xpAdults = Math.max(0, Number(extra_adults || 0));
+      const xpChildMat = Math.max(0, Number(extra_children_with_mattress || 0));
+      const xpChildNoMat = Math.max(0, Number(extra_children_no_mattress || 0));
+      // Snapshot the human-readable meal-plan label so historical reprint
+      // is stable even if the owner later renames or deactivates the plan
+      // (mirrors currency_snapshot / tax_label_snapshot pattern).
+      if (meal_plan_id) {
+        const mp: any = await tenantDb.get(
+          "SELECT code, name FROM meal_plans WHERE id = ?", [meal_plan_id]
+        ).catch(() => null);
+        if (mp) mealPlanSnapshot = `${mp.code} · ${mp.name}`;
+      }
       if (bookingType === 'DAY_USE') {
         if (rate <= 0) {
-          const r = await getRateForRoomDate(req.params.id, room_id, check_in_date);
-          rate = r.rate;
+          const breakdown = await computeBookingTotalWithExtras(req.params.id, room_id, check_in_date, check_in_date, {
+            mealPlanId: meal_plan_id || null, extraAdults: xpAdults,
+            extraChildrenWithMattress: xpChildMat, extraChildrenNoMattress: xpChildNoMat,
+            bookingType: 'DAY_USE',
+          });
+          rate = breakdown.per_night[0]?.base_rate || 0;
+          total = breakdown.total;
+        } else {
+          total = rate;
         }
-        total = rate;
       } else {
         nights = Math.max(1, Math.ceil((new Date(check_out_date).getTime() - new Date(check_in_date).getTime()) / 86400000));
         if (rate <= 0) {
-          const plan = await computeRoomTotal(req.params.id, room_id, check_in_date, check_out_date);
-          rate = plan.nights[0]?.rate || 0;
-          total = plan.total;
+          const breakdown = await computeBookingTotalWithExtras(req.params.id, room_id, check_in_date, check_out_date, {
+            mealPlanId: meal_plan_id || null, extraAdults: xpAdults,
+            extraChildrenWithMattress: xpChildMat, extraChildrenNoMattress: xpChildNoMat,
+            bookingType: 'OVERNIGHT',
+          });
+          rate = breakdown.per_night[0]?.base_rate || 0;
+          total = breakdown.total;
         } else {
           total = rate * nights;
         }
@@ -17416,12 +17653,14 @@ async function startServer() {
       await tenantDb.run(
         `INSERT INTO room_bookings
          (id, room_id, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
-          num_guests, check_in_date, check_out_date, status, booking_source, room_rate, total_amount, special_requests, booking_type)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?)`,
+          num_guests, check_in_date, check_out_date, status, booking_source, room_rate, total_amount, special_requests, booking_type,
+          meal_plan_id, meal_plan_snapshot, extra_adults, extra_children_with_mattress, extra_children_no_mattress)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [bid, room_id, guest_name, guest_phone || null, guest_email || null,
          guest_id_proof || null, guest_nationality || null, guest_state || null,
          num_guests || 1, check_in_date, check_out_date, booking_source || 'DIRECT', rate, total,
-         special_requests || null, bookingType]
+         special_requests || null, bookingType,
+         meal_plan_id || null, mealPlanSnapshot, xpAdults, xpChildMat, xpChildNoMat]
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
@@ -18917,11 +19156,16 @@ async function startServer() {
       // issue a credit-note (server.ts:17106) — that path preserves the
       // audit trail.
       const isFinalized = b.status === 'CHECKED_IN' || b.status === 'CHECKED_OUT' || b.status === 'CANCELLED';
+      // BCG Tariff Phase 3 — meal_plan_id + extra-person counts are also
+      // locked after check-in (they affect the rate and would invalidate
+      // the folio). Pre-check-in they're freely editable along with rate.
       const LOCKED_AFTER_CHECKIN = [
         'room_rate','check_in_date','check_out_date','room_id','booking_type','num_guests','status',
-        'guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin'
+        'guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin',
+        'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress',
       ];
-      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','check_in_date','check_out_date','room_rate','special_requests','status','booking_type'];
+      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','check_in_date','check_out_date','room_rate','special_requests','status','booking_type',
+        'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress'];
       const patch: any = {};
       for (const k of allow) if (k in (req.body || {})) patch[k] = req.body[k];
       if (Object.keys(patch).length === 0) return res.json(b);
@@ -19565,6 +19809,210 @@ async function startServer() {
   });
 
   // ─── HOTEL SETTINGS — owner-configurable business rules ──────────────────
+  // ════════════════════════════════════════════════════════════════════
+  // BCG Tariff Phase 2 (7 Jun 2026) — Tariff matrix endpoints
+  //
+  // GET  /tariff               → full snapshot for the Settings UI
+  // PATCH /tariff/model        → flip tariff_model (LEGACY ↔ MATRIX)
+  // PUT   /tariff/seasons      → bulk upsert seasons
+  // PUT   /tariff/season-periods → bulk REPLACE periods (delete + insert)
+  // PUT   /tariff/meal-plans   → bulk upsert meal plans
+  // PUT   /tariff/room-tariffs → bulk upsert (room_type × season × meal)
+  // PUT   /tariff/extra-person-charges → bulk upsert
+  //
+  // All write endpoints are owner / SUPER_ADMIN / CTO only — the same
+  // gate as hotel/settings. Reads require an authenticated session.
+  // ════════════════════════════════════════════════════════════════════
+
+  app.get("/api/restaurant/:id/hotel/tariff", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const [meta, seasons, periods, meals, tariffs, extras, roomTypes] = await Promise.all([
+        centralDb.get("SELECT tariff_model FROM restaurants WHERE id = ?", [req.params.id]),
+        tenantDb.query("SELECT * FROM seasons ORDER BY display_order, name").catch(() => []),
+        tenantDb.query("SELECT * FROM season_periods ORDER BY start_date").catch(() => []),
+        tenantDb.query("SELECT * FROM meal_plans ORDER BY display_order, name").catch(() => []),
+        tenantDb.query("SELECT * FROM room_tariffs").catch(() => []),
+        tenantDb.query("SELECT * FROM extra_person_charges").catch(() => []),
+        tenantDb.query("SELECT id, name, base_rate, display_order FROM room_types WHERE is_active = 1 ORDER BY display_order, name").catch(() => []),
+      ]);
+      res.json({
+        tariff_model: (meta as any)?.tariff_model || 'LEGACY',
+        seasons, season_periods: periods, meal_plans: meals,
+        room_tariffs: tariffs, extra_person_charges: extras,
+        room_types: roomTypes,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch tariff snapshot" });
+    }
+  });
+
+  // Owner-only writes for everything below. Mirrors hotel/settings RBAC.
+  const requireTariffOwner = (req: AuthRequest, res: Response, next: () => void) => {
+    if (req.user?.role !== 'OWNER' && req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+      return res.status(403).json({ error: "Owner only" });
+    }
+    if (req.user?.restaurantId !== req.params.id
+        && req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    return next();
+  };
+
+  app.patch("/api/restaurant/:id/hotel/tariff/model", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+    (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
+    async (req: AuthRequest, res: Response) => {
+      const check = await ensureHotelEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      const m = String(req.body?.tariff_model || '').toUpperCase();
+      if (m !== 'LEGACY' && m !== 'MATRIX') {
+        return res.status(400).json({ error: "tariff_model must be 'LEGACY' or 'MATRIX'" });
+      }
+      await centralDb.run("UPDATE restaurants SET tariff_model = ? WHERE id = ?", [m, req.params.id]);
+      res.json({ ok: true, tariff_model: m });
+    }
+  );
+
+  app.put("/api/restaurant/:id/hotel/tariff/seasons", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+    (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
+    async (req: AuthRequest, res: Response) => {
+      const check = await ensureHotelEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      const list: any[] = Array.isArray(req.body?.seasons) ? req.body.seasons : [];
+      const tenantDb = await getTenantDb(req.params.id);
+      for (const s of list) {
+        if (!s?.id || !s?.name) continue;
+        await tenantDb.run(
+          `INSERT INTO seasons (id, name, description, color, display_order, is_active)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             description = EXCLUDED.description,
+             color = EXCLUDED.color,
+             display_order = EXCLUDED.display_order,
+             is_active = EXCLUDED.is_active`,
+          [String(s.id), String(s.name).trim(), s.description || null,
+           s.color || null, Number(s.display_order || 0),
+           s.is_active === 0 || s.is_active === false ? 0 : 1]
+        );
+      }
+      res.json({ ok: true, count: list.length });
+    }
+  );
+
+  app.put("/api/restaurant/:id/hotel/tariff/season-periods", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+    (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
+    async (req: AuthRequest, res: Response) => {
+      const check = await ensureHotelEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      const list: any[] = Array.isArray(req.body?.periods) ? req.body.periods : [];
+      const tenantDb = await getTenantDb(req.params.id);
+      // Replace strategy: wipe all periods for the seasons in this payload,
+      // then insert the new set. Atomic-ish — if the inserts throw, the
+      // tenant ends up with the new (possibly partial) set, but a retry
+      // restores to the intended state.
+      const seasonsTouched = Array.from(new Set(list.map(p => String(p.season_id || '')).filter(Boolean)));
+      for (const sid of seasonsTouched) {
+        await tenantDb.run("DELETE FROM season_periods WHERE season_id = ?", [sid]);
+      }
+      for (const p of list) {
+        if (!p?.season_id || !p?.start_date || !p?.end_date) continue;
+        const id = String(p.id || `${p.season_id}-${p.start_date}`);
+        await tenantDb.run(
+          `INSERT INTO season_periods (id, season_id, start_date, end_date, label)
+           VALUES (?, ?, ?, ?, ?)`,
+          [id, String(p.season_id), String(p.start_date), String(p.end_date), p.label || null]
+        );
+      }
+      res.json({ ok: true, count: list.length });
+    }
+  );
+
+  app.put("/api/restaurant/:id/hotel/tariff/meal-plans", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+    (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
+    async (req: AuthRequest, res: Response) => {
+      const check = await ensureHotelEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      const list: any[] = Array.isArray(req.body?.meal_plans) ? req.body.meal_plans : [];
+      const tenantDb = await getTenantDb(req.params.id);
+      for (const m of list) {
+        if (!m?.id || !m?.name) continue;
+        await tenantDb.run(
+          `INSERT INTO meal_plans (id, code, name, description, includes_breakfast, includes_lunch, includes_dinner, display_order, is_active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET
+             code = EXCLUDED.code,
+             name = EXCLUDED.name,
+             description = EXCLUDED.description,
+             includes_breakfast = EXCLUDED.includes_breakfast,
+             includes_lunch = EXCLUDED.includes_lunch,
+             includes_dinner = EXCLUDED.includes_dinner,
+             display_order = EXCLUDED.display_order,
+             is_active = EXCLUDED.is_active`,
+          [String(m.id), String(m.code || m.id), String(m.name).trim(), m.description || null,
+           m.includes_breakfast ? 1 : 0, m.includes_lunch ? 1 : 0, m.includes_dinner ? 1 : 0,
+           Number(m.display_order || 0), m.is_active === 0 || m.is_active === false ? 0 : 1]
+        );
+      }
+      res.json({ ok: true, count: list.length });
+    }
+  );
+
+  app.put("/api/restaurant/:id/hotel/tariff/room-tariffs", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+    (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
+    async (req: AuthRequest, res: Response) => {
+      const check = await ensureHotelEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      const list: any[] = Array.isArray(req.body?.room_tariffs) ? req.body.room_tariffs : [];
+      const tenantDb = await getTenantDb(req.params.id);
+      for (const t of list) {
+        if (!t?.room_type_id || !t?.season_id || !t?.meal_plan_id) continue;
+        const rate = Number(t.rate);
+        if (!Number.isFinite(rate) || rate < 0) continue;
+        const override = t.room_id_override || null;
+        const id = String(t.id || `TARIFF-${t.room_type_id}-${t.season_id}-${t.meal_plan_id}${override ? `-${override}` : ''}`);
+        await tenantDb.run(
+          `INSERT INTO room_tariffs (id, room_type_id, season_id, meal_plan_id, rate, room_id_override)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (room_type_id, season_id, meal_plan_id, COALESCE(room_id_override, ''))
+           DO UPDATE SET rate = EXCLUDED.rate, updated_at = CURRENT_TIMESTAMP`,
+          [id, t.room_type_id, t.season_id, t.meal_plan_id, rate, override]
+        );
+      }
+      res.json({ ok: true, count: list.length });
+    }
+  );
+
+  app.put("/api/restaurant/:id/hotel/tariff/extra-person-charges", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+    (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
+    async (req: AuthRequest, res: Response) => {
+      const check = await ensureHotelEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      const list: any[] = Array.isArray(req.body?.extra_person_charges) ? req.body.extra_person_charges : [];
+      const tenantDb = await getTenantDb(req.params.id);
+      for (const e of list) {
+        if (!e?.person_type || !e?.season_id || !e?.meal_plan_id) continue;
+        const charge = Number(e.charge);
+        if (!Number.isFinite(charge) || charge < 0) continue;
+        const id = String(e.id || `XP-${e.person_type}-${e.season_id}-${e.meal_plan_id}`);
+        await tenantDb.run(
+          `INSERT INTO extra_person_charges (id, person_type, season_id, meal_plan_id, age_min, age_max, charge)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (person_type, season_id, meal_plan_id)
+           DO UPDATE SET charge = EXCLUDED.charge,
+                         age_min = EXCLUDED.age_min, age_max = EXCLUDED.age_max`,
+          [id, e.person_type, e.season_id, e.meal_plan_id,
+           e.age_min == null ? null : Number(e.age_min),
+           e.age_max == null ? null : Number(e.age_max),
+           charge]
+        );
+      }
+      res.json({ ok: true, count: list.length });
+    }
+  );
+
   // Per-tenant overrides for Phase H1 rules. All fields are optional;
   // leaving a column NULL means "use the platform default" (no constraint
   // for min/max, no auto-refund, no auto-late-checkout fee). Designed to
@@ -25094,7 +25542,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tariff-matrix-schema-phase-1',
+    commit_marker: 'tariff-matrix-phase-2-3-ui-resolver-booking',
     code_features: [
       'subscription-billing',
       'read-only-mode',

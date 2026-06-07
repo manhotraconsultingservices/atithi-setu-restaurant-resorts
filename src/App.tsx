@@ -6640,6 +6640,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     room_id: string;
     room_rate: number;
     saving: boolean;
+    // BCG Tariff Phase 3 — matrix-mode meal plan + extra-adult on walk-in.
+    // Only renders when tariffData.tariff_model === 'MATRIX'. For LEGACY
+    // tenants these stay at defaults (null + 0) and the booking flows
+    // through the legacy path with byte-identical output.
+    meal_plan_id: string | null;
+    extra_adults: number;
     // WALK-IN-FIX (client report 7 Jun 2026 "walk-in workflow not working"):
     // Task #56 (Req 1b) added a server-side block: check-in is rejected with
     // HTTP 400 if no guest_documents row exists for the booking AND the
@@ -6681,6 +6687,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       saving: false,
       id_doc: null,
       id_doc_type: 'AADHAAR',
+      // Default meal plan: first active plan (typically EP) when matrix
+      // mode is on; null otherwise. extra_adults defaults to 0.
+      meal_plan_id: tariffData.tariff_model === 'MATRIX'
+        ? (tariffData.meal_plans.filter((m: any) => m.is_active !== 0)
+            .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))[0]?.id || null)
+        : null,
+      extra_adults: 0,
     });
   };
   const submitWalkIn = async () => {
@@ -6708,7 +6721,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     try {
       const today = new Date().toISOString().slice(0, 10);
       const co = new Date(Date.now() + walkInDraft.nights * 86400000).toISOString().slice(0, 10);
-      // 1. Create booking — server applies rate plans when room_rate is 0
+      // 1. Create booking — server applies rate plans when room_rate is 0.
+      //    BCG Tariff Phase 3: also forward meal_plan_id + extra_adults so
+      //    the server's matrix resolver kicks in when MATRIX mode is on.
       const created: any = await hotelApi('/bookings', {
         method: 'POST',
         body: JSON.stringify({
@@ -6719,8 +6734,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           check_out_date: co,
           booking_type: 'OVERNIGHT',
           booking_source: 'WALKIN',
-          num_guests: 1,
+          num_guests: 1 + (walkInDraft.extra_adults || 0),
           room_rate: walkInDraft.room_rate || 0,
+          meal_plan_id: walkInDraft.meal_plan_id || null,
+          extra_adults: walkInDraft.extra_adults || 0,
         }),
       });
       createdBookingId = created.id;
@@ -7134,6 +7151,42 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     service_charge_percent: 0,
     require_id_at_checkin: true,
   });
+
+  // BCG Tariff Phase 2 — snapshot of the matrix tariff configuration.
+  // Loaded lazily when the user opens Settings → Tariff Configuration
+  // OR when a booking modal needs the meal-plan list. Empty by default
+  // for LEGACY tenants — no network calls cost.
+  const [tariffData, setTariffData] = useState<{
+    tariff_model: 'LEGACY' | 'MATRIX';
+    seasons: any[];
+    season_periods: any[];
+    meal_plans: any[];
+    room_tariffs: any[];
+    extra_person_charges: any[];
+    room_types: any[];
+  }>({
+    tariff_model: 'LEGACY', seasons: [], season_periods: [],
+    meal_plans: [], room_tariffs: [], extra_person_charges: [], room_types: [],
+  });
+  const [tariffLoading, setTariffLoading] = useState(false);
+  const fetchTariff = useCallback(async () => {
+    setTariffLoading(true);
+    try {
+      const data = await hotelApi('/tariff');
+      setTariffData({
+        tariff_model: data.tariff_model || 'LEGACY',
+        seasons: Array.isArray(data.seasons) ? data.seasons : [],
+        season_periods: Array.isArray(data.season_periods) ? data.season_periods : [],
+        meal_plans: Array.isArray(data.meal_plans) ? data.meal_plans : [],
+        room_tariffs: Array.isArray(data.room_tariffs) ? data.room_tariffs : [],
+        extra_person_charges: Array.isArray(data.extra_person_charges) ? data.extra_person_charges : [],
+        room_types: Array.isArray(data.room_types) ? data.room_types : [],
+      });
+    } catch { /* non-hotel tenant — silent */ }
+    finally { setTariffLoading(false); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restaurantId, token]);
+
   // Req 1b — pre-check-in checklist modal target. Holds the booking
   // row when the staff clicks "Check In" but phone or ID documents
   // are missing. The modal embeds the GuestDocumentsWidget so the
@@ -9591,12 +9644,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'ROOMS') { fetchHotelRooms(); fetchHotelRoomTypes(); fetchRateOverrides(); }
     if (activeTab === 'SERVICES') fetchHotelServices();
     if (activeTab === 'SERVICE_REQUESTS') fetchHotelRequests();
-    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); }
+    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); fetchTariff(); }
     if (activeTab === 'FOLIOS') fetchHotelFolios();
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
-    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); }
+    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchTariff(); }
     if (activeTab === 'STAFF_ACCESS') { fetchStaffAccess(); fetchPermAuditLog(); fetchManageableTenants(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
@@ -15012,6 +15065,348 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               )}
             </div>
 
+            {/* ════════════════════════════════════════════════════════════
+                BCG Tariff Phase 2 — Tariff Configuration matrix editor.
+                Lets the owner switch from the LEGACY date-range override
+                model to the MATRIX model (Room × Season × Meal Plan) and
+                edit the matrix in place. Hidden when the hotel module
+                isn't enabled.
+                ════════════════════════════════════════════════════════════ */}
+            {isHotelEnabled && (() => {
+              const tariff = tariffData;
+              const mealPlans = (tariff.meal_plans || []).filter((m: any) => m.is_active !== 0)
+                .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
+              const seasons = (tariff.seasons || []).filter((s: any) => s.is_active !== 0)
+                .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
+              const roomTypes = (tariff.room_types || [])
+                .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
+
+              // Build a quick lookup of existing tariff cells keyed by triple
+              const tariffCell = (roomTypeId: string, seasonId: string, mealPlanId: string): number | '' => {
+                const row = (tariff.room_tariffs || []).find((r: any) =>
+                  r.room_type_id === roomTypeId && r.season_id === seasonId
+                  && r.meal_plan_id === mealPlanId && !r.room_id_override
+                );
+                return row ? Number(row.rate) : '';
+              };
+              const extraCell = (personType: string, seasonId: string, mealPlanId: string): number | '' => {
+                const row = (tariff.extra_person_charges || []).find((r: any) =>
+                  r.person_type === personType && r.season_id === seasonId && r.meal_plan_id === mealPlanId
+                );
+                return row ? Number(row.charge) : '';
+              };
+
+              const updateTariffCell = (roomTypeId: string, seasonId: string, mealPlanId: string, rate: number) => {
+                setTariffData(prev => {
+                  const others = prev.room_tariffs.filter((r: any) =>
+                    !(r.room_type_id === roomTypeId && r.season_id === seasonId
+                      && r.meal_plan_id === mealPlanId && !r.room_id_override)
+                  );
+                  return {
+                    ...prev,
+                    room_tariffs: [
+                      ...others,
+                      { id: `TARIFF-${roomTypeId}-${seasonId}-${mealPlanId}`, room_type_id: roomTypeId, season_id: seasonId, meal_plan_id: mealPlanId, rate, room_id_override: null },
+                    ],
+                  };
+                });
+              };
+              const updateExtraCell = (personType: string, seasonId: string, mealPlanId: string, charge: number) => {
+                setTariffData(prev => {
+                  const others = prev.extra_person_charges.filter((r: any) =>
+                    !(r.person_type === personType && r.season_id === seasonId && r.meal_plan_id === mealPlanId)
+                  );
+                  const ageMin = personType.startsWith('CHILD') ? 5 : null;
+                  const ageMax = personType.startsWith('CHILD') ? 12 : null;
+                  return {
+                    ...prev,
+                    extra_person_charges: [
+                      ...others,
+                      { id: `XP-${personType}-${seasonId}-${mealPlanId}`, person_type: personType, season_id: seasonId, meal_plan_id: mealPlanId, age_min: ageMin, age_max: ageMax, charge },
+                    ],
+                  };
+                });
+              };
+
+              const saveModel = async (newModel: 'LEGACY' | 'MATRIX') => {
+                try {
+                  await hotelApi('/tariff/model', { method: 'PATCH', body: JSON.stringify({ tariff_model: newModel }) });
+                  setTariffData(prev => ({ ...prev, tariff_model: newModel }));
+                } catch (err: any) {
+                  alert('Could not change tariff model: ' + (err?.message || 'unknown error'));
+                }
+              };
+              const saveTariffs = async () => {
+                try {
+                  await hotelApi('/tariff/room-tariffs', { method: 'PUT', body: JSON.stringify({ room_tariffs: tariff.room_tariffs }) });
+                  await hotelApi('/tariff/extra-person-charges', { method: 'PUT', body: JSON.stringify({ extra_person_charges: tariff.extra_person_charges }) });
+                  await fetchTariff();
+                  alert('Tariff matrix saved.');
+                } catch (err: any) {
+                  alert('Save failed: ' + (err?.message || 'unknown error'));
+                }
+              };
+              const savePeriods = async () => {
+                try {
+                  await hotelApi('/tariff/season-periods', { method: 'PUT', body: JSON.stringify({ periods: tariff.season_periods }) });
+                  await fetchTariff();
+                  alert('Season periods saved.');
+                } catch (err: any) {
+                  alert('Save failed: ' + (err?.message || 'unknown error'));
+                }
+              };
+
+              const PERSON_TYPES = [
+                { id: 'ADULT',                label: 'Extra Adult (w/ mattress)' },
+                { id: 'CHILD_WITH_MATTRESS',  label: 'Extra Child 5-12 (w/ mattress)' },
+                { id: 'CHILD_NO_MATTRESS',    label: 'Extra Child 5-12 (no mattress)' },
+              ];
+
+              return (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 space-y-5">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <h3 className="text-base font-bold font-serif text-[#1a1208]">Tariff Configuration <span className="text-[10px] font-mono uppercase text-[#cc5a16] ml-2">BCG Phase 2</span></h3>
+                      <p className="text-[11px] text-[#6b5d52] mt-0.5">
+                        Room × Season × Meal-Plan matrix pricing for hotels that price by category (Superior / Premium / River View) and meal inclusion (EP / CP / MAP / API).
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Mode:</span>
+                      <button
+                        type="button"
+                        onClick={() => saveModel(tariff.tariff_model === 'MATRIX' ? 'LEGACY' : 'MATRIX')}
+                        className={cn(
+                          'px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-widest transition-colors',
+                          tariff.tariff_model === 'MATRIX' ? 'bg-emerald-600 text-white' : 'bg-[#faf7f2] text-[#6b5d52] border border-[#cc5a16]/15'
+                        )}
+                      >{tariff.tariff_model === 'MATRIX' ? '✓ Matrix' : 'Legacy'}</button>
+                      {tariffLoading && <span className="text-[10px] text-[#9c8e85]">Loading…</span>}
+                    </div>
+                  </div>
+
+                  {tariff.tariff_model !== 'MATRIX' && (
+                    <div className="rounded-xl bg-[#faf7f2] border border-[#cc5a16]/10 px-4 py-3 text-[12px] text-[#3d3128]">
+                      You're on the Legacy pricing model — date-range overrides via the Rate Plans section below. Switch to Matrix Mode to enable Room × Season × Meal-Plan pricing for booking forms.
+                    </div>
+                  )}
+
+                  {tariff.tariff_model === 'MATRIX' && (
+                    <>
+                      {/* Meal plans (read-only chip list — edit via API for now) */}
+                      <div>
+                        <h4 className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1.5">Meal Plans ({mealPlans.length})</h4>
+                        <div className="flex flex-wrap gap-1.5">
+                          {mealPlans.map((m: any) => {
+                            const tag = [m.includes_breakfast && 'B', m.includes_lunch && 'L', m.includes_dinner && 'D'].filter(Boolean).join('+') || 'room only';
+                            return (
+                              <span key={m.id} className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-[#cc5a16]/10 text-[#cc5a16]">
+                                {m.code} · {m.name} <span className="opacity-60">({tag})</span>
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Seasons + periods editor */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Seasons + Date Ranges</h4>
+                          <button
+                            type="button"
+                            onClick={savePeriods}
+                            className="text-[10px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest"
+                          >Save Periods</button>
+                        </div>
+                        <div className="space-y-3">
+                          {seasons.map((s: any) => {
+                            const periodsFor = tariff.season_periods.filter((p: any) => p.season_id === s.id);
+                            return (
+                              <div key={s.id} className="bg-[#faf7f2] rounded-2xl p-3">
+                                <div className="flex items-center justify-between mb-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="w-2.5 h-2.5 rounded-full" style={{ background: s.color || '#cc5a16' }}></span>
+                                    <span className="text-[12px] font-bold text-[#1a1208]">{s.name}</span>
+                                    <span className="text-[10px] text-[#9c8e85]">{periodsFor.length} date range{periodsFor.length === 1 ? '' : 's'}</span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const today = new Date().toISOString().slice(0, 10);
+                                      setTariffData(prev => ({
+                                        ...prev,
+                                        season_periods: [
+                                          ...prev.season_periods,
+                                          { id: `${s.id}-${Date.now()}`, season_id: s.id, start_date: today, end_date: today, label: '' },
+                                        ],
+                                      }));
+                                    }}
+                                    className="text-[10px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest"
+                                  >+ Add range</button>
+                                </div>
+                                <div className="space-y-1.5">
+                                  {periodsFor.length === 0 && (
+                                    <p className="text-[11px] text-[#9c8e85] italic">No date ranges yet — add one above.</p>
+                                  )}
+                                  {periodsFor.map((p: any) => (
+                                    <div key={p.id} className="flex items-center gap-2 flex-wrap">
+                                      <input
+                                        type="date"
+                                        value={String(p.start_date || '').slice(0, 10)}
+                                        onChange={e => setTariffData(prev => ({
+                                          ...prev,
+                                          season_periods: prev.season_periods.map((q: any) => q.id === p.id ? { ...q, start_date: e.target.value } : q),
+                                        }))}
+                                        className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-xs"
+                                      />
+                                      <span className="text-[10px] text-[#9c8e85]">→</span>
+                                      <input
+                                        type="date"
+                                        value={String(p.end_date || '').slice(0, 10)}
+                                        onChange={e => setTariffData(prev => ({
+                                          ...prev,
+                                          season_periods: prev.season_periods.map((q: any) => q.id === p.id ? { ...q, end_date: e.target.value } : q),
+                                        }))}
+                                        className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-xs"
+                                      />
+                                      <input
+                                        type="text"
+                                        placeholder="Label (optional)"
+                                        value={p.label || ''}
+                                        onChange={e => setTariffData(prev => ({
+                                          ...prev,
+                                          season_periods: prev.season_periods.map((q: any) => q.id === p.id ? { ...q, label: e.target.value } : q),
+                                        }))}
+                                        className="flex-1 min-w-[150px] bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-xs"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => setTariffData(prev => ({
+                                          ...prev,
+                                          season_periods: prev.season_periods.filter((q: any) => q.id !== p.id),
+                                        }))}
+                                        className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                                      >Remove</button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Room tariff matrix */}
+                      {roomTypes.length === 0 && (
+                        <p className="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                          No active room types found. Create at least one room category under Rooms → Room Types before the matrix can render.
+                        </p>
+                      )}
+                      {roomTypes.length > 0 && (
+                        <div>
+                          <h4 className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Room Tariff Matrix ({roomTypes.length * seasons.length * mealPlans.length} cells)</h4>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs border-collapse">
+                              <thead>
+                                <tr className="border-b border-[#cc5a16]/15">
+                                  <th className="text-left py-2 px-2 sticky left-0 bg-white min-w-[180px]">Room Category</th>
+                                  {seasons.map((s: any) => (
+                                    <th key={s.id} colSpan={mealPlans.length} className="text-center py-2 px-1 border-l border-[#cc5a16]/10">
+                                      <span className="font-bold text-[11px]" style={{ color: s.color || '#cc5a16' }}>{s.name}</span>
+                                    </th>
+                                  ))}
+                                </tr>
+                                <tr className="border-b border-[#cc5a16]/10">
+                                  <th className="text-left py-1 px-2 sticky left-0 bg-white"></th>
+                                  {seasons.map((s: any) => mealPlans.map((m: any) => (
+                                    <th key={`${s.id}-${m.id}`} className="py-1 px-1 text-center text-[10px] text-[#6b5d52] font-bold border-l border-[#cc5a16]/5">{m.code}</th>
+                                  )))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {roomTypes.map((rt: any, i: number) => (
+                                  <tr key={rt.id} className={cn('border-b border-[#cc5a16]/5', i % 2 === 1 && 'bg-[#faf7f2]/40')}>
+                                    <td className="py-1.5 px-2 sticky left-0 bg-inherit">
+                                      <div className="font-bold text-[11px] text-[#1a1208]">{rt.name}</div>
+                                    </td>
+                                    {seasons.map((s: any) => mealPlans.map((m: any) => (
+                                      <td key={`${rt.id}-${s.id}-${m.id}`} className="py-1 px-1 text-center border-l border-[#cc5a16]/5">
+                                        <input
+                                          type="number" min={0}
+                                          value={tariffCell(rt.id, s.id, m.id)}
+                                          onChange={e => updateTariffCell(rt.id, s.id, m.id, Math.max(0, Number(e.target.value) || 0))}
+                                          className="w-16 bg-white border border-[#cc5a16]/15 rounded-lg px-1 py-1 text-[11px] text-center font-mono focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                        />
+                                      </td>
+                                    )))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Extra person charges matrix */}
+                      <div>
+                        <h4 className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Extra Person Charges Matrix ({PERSON_TYPES.length * seasons.length * mealPlans.length} cells)</h4>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs border-collapse">
+                            <thead>
+                              <tr className="border-b border-[#cc5a16]/15">
+                                <th className="text-left py-2 px-2 sticky left-0 bg-white min-w-[200px]">Person Type</th>
+                                {seasons.map((s: any) => (
+                                  <th key={s.id} colSpan={mealPlans.length} className="text-center py-2 px-1 border-l border-[#cc5a16]/10">
+                                    <span className="font-bold text-[11px]" style={{ color: s.color || '#cc5a16' }}>{s.name}</span>
+                                  </th>
+                                ))}
+                              </tr>
+                              <tr className="border-b border-[#cc5a16]/10">
+                                <th className="text-left py-1 px-2 sticky left-0 bg-white"></th>
+                                {seasons.map((s: any) => mealPlans.map((m: any) => (
+                                  <th key={`${s.id}-${m.id}`} className="py-1 px-1 text-center text-[10px] text-[#6b5d52] font-bold border-l border-[#cc5a16]/5">{m.code}</th>
+                                )))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {PERSON_TYPES.map((pt, i) => (
+                                <tr key={pt.id} className={cn('border-b border-[#cc5a16]/5', i % 2 === 1 && 'bg-[#faf7f2]/40')}>
+                                  <td className="py-1.5 px-2 sticky left-0 bg-inherit">
+                                    <div className="font-bold text-[11px] text-[#1a1208]">{pt.label}</div>
+                                  </td>
+                                  {seasons.map((s: any) => mealPlans.map((m: any) => (
+                                    <td key={`${pt.id}-${s.id}-${m.id}`} className="py-1 px-1 text-center border-l border-[#cc5a16]/5">
+                                      <input
+                                        type="number" min={0}
+                                        value={extraCell(pt.id, s.id, m.id)}
+                                        onChange={e => updateExtraCell(pt.id, s.id, m.id, Math.max(0, Number(e.target.value) || 0))}
+                                        className="w-16 bg-white border border-[#cc5a16]/15 rounded-lg px-1 py-1 text-[11px] text-center font-mono focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                      />
+                                    </td>
+                                  )))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div className="flex justify-end pt-2">
+                        <button
+                          type="button"
+                          onClick={saveTariffs}
+                          className="px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold uppercase tracking-widest hover:bg-[#a84612]"
+                        >Save Tariff Matrix</button>
+                      </div>
+                      <p className="text-[10px] text-[#9c8e85] italic">
+                        Each cell is per-night rate or per-night per-person charge. A blank/zero cell means "not configured — fall back to base rate at booking time".
+                      </p>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Sprint C-RP — Rate Plans (weekend / season rates).
                 Per-room or per-type date-range price overrides. Booking
                 creation + folio generation both consult these. */}
@@ -19084,8 +19479,44 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     onChange={e => setDraft({ room_rate: Math.max(0, Number(e.target.value) || 0) })}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
                   />
-                  <p className="text-[10px] text-[#9c8e85] mt-1">Leave 0 to auto-apply Rate Plan (season / weekend overrides).</p>
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Leave 0 to auto-apply matrix tariff / rate plan (season / weekend overrides).</p>
                 </div>
+
+                {/* BCG Tariff Phase 3 — matrix-mode meal plan + extra-adult.
+                    Renders only when the tenant is in MATRIX mode AND has
+                    at least one active meal plan. LEGACY tenants see the
+                    walk-in modal exactly as before this commit. */}
+                {tariffData.tariff_model === 'MATRIX' && tariffData.meal_plans.filter((m: any) => m.is_active !== 0).length > 0 && (
+                  <div className="p-3 bg-[#cc5a16]/5 border border-[#cc5a16]/15 rounded-2xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Meal Plan + Extras</label>
+                      <span className="text-[9px] font-bold uppercase tracking-widest text-[#cc5a16] bg-white px-2 py-0.5 rounded-full">Matrix</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <select
+                        value={draft.meal_plan_id || ''}
+                        onChange={e => setDraft({ meal_plan_id: e.target.value || null })}
+                        className="bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                      >
+                        <option value="">— None (base rate) —</option>
+                        {tariffData.meal_plans
+                          .filter((m: any) => m.is_active !== 0)
+                          .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))
+                          .map((m: any) => (
+                            <option key={m.id} value={m.id}>{m.code} · {m.name}</option>
+                          ))}
+                      </select>
+                      <div className="flex items-center gap-2">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap">+ Adult</label>
+                        <input type="number" min={0} max={4}
+                          value={draft.extra_adults}
+                          onChange={e => setDraft({ extra_adults: Math.max(0, Number(e.target.value) || 0) })}
+                          className="flex-1 bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* WALK-IN-FIX (client report 7 Jun 2026): ID proof MUST be
                     attached here because the server-side check-in endpoint
@@ -20731,6 +21162,69 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   );
                 })()}
               </div>
+              {/* BCG Tariff Phase 3 — meal plan + extra-person counts.
+                  Only renders when tenant is in MATRIX mode AND there's at
+                  least one active meal plan. For LEGACY tenants the block
+                  is hidden entirely, so the existing UX is byte-identical. */}
+              {tariffData.tariff_model === 'MATRIX' && tariffData.meal_plans.filter((m: any) => m.is_active !== 0).length > 0 && (
+                <div className="space-y-3 p-3 bg-[#cc5a16]/5 border border-[#cc5a16]/15 rounded-2xl">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Meal Plan + Extra Persons</label>
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-[#cc5a16] bg-white px-2 py-0.5 rounded-full">Matrix Pricing</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Meal Plan</label>
+                      <select
+                        value={editingBooking.meal_plan_id || ''}
+                        onChange={e => setEditingBooking({...editingBooking, meal_plan_id: e.target.value || null})}
+                        className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                      >
+                        <option value="">— None (use base rate) —</option>
+                        {tariffData.meal_plans
+                          .filter((m: any) => m.is_active !== 0)
+                          .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))
+                          .map((m: any) => {
+                            const tag = [m.includes_breakfast && 'B', m.includes_lunch && 'L', m.includes_dinner && 'D'].filter(Boolean).join('+') || 'room only';
+                            return (
+                              <option key={m.id} value={m.id}>{m.code} · {m.name} ({tag})</option>
+                            );
+                          })}
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Extra Adult (with mattress)">+ Adult</label>
+                        <input type="number" min={0} max={6}
+                          value={editingBooking.extra_adults || 0}
+                          onChange={e => setEditingBooking({...editingBooking, extra_adults: Math.max(0, Number(e.target.value) || 0)})}
+                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Extra Child 5-12 yrs with mattress">+ Child (mat)</label>
+                        <input type="number" min={0} max={4}
+                          value={editingBooking.extra_children_with_mattress || 0}
+                          onChange={e => setEditingBooking({...editingBooking, extra_children_with_mattress: Math.max(0, Number(e.target.value) || 0)})}
+                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Extra Child 5-12 yrs without mattress">+ Child (no-mat)</label>
+                        <input type="number" min={0} max={4}
+                          value={editingBooking.extra_children_no_mattress || 0}
+                          onChange={e => setEditingBooking({...editingBooking, extra_children_no_mattress: Math.max(0, Number(e.target.value) || 0)})}
+                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-[#9c8e85] leading-snug">
+                    Server resolves the per-night rate from the room-category × season × meal-plan matrix. Extra-person charges are added per night. Leave Rate-per-night = 0 below to auto-compute; enter a value to override.
+                  </p>
+                </div>
+              )}
+
               {/* Booking type — overnight vs day-use. Default OVERNIGHT
                   for existing bookings so nothing changes for legacy rows. */}
               <div>
