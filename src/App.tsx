@@ -33,6 +33,7 @@ import {
   Smartphone,
   Hash,
   ListOrdered,
+  FileText,
   Copy,
   Check,
   Info,
@@ -17370,6 +17371,62 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 );
               })()}
+            </div>
+
+            {/* ── BCG Phase 1 (7 Jun 2026): Invoice Style selector ────────
+                Tenants opt in to the Boutique invoice template (Taj /
+                Oberoi-grade redesign — logo lock-up, paid/unpaid stamp,
+                summary band with category totals, boxed grand total) or
+                keep the long-standing Classic layout. Default is Classic;
+                every existing tenant in production stays on Classic
+                until they deliberately switch.
+
+                Server side: invoiceService.ts dispatches per-tenant via
+                restaurants.invoice_template. A bug in Boutique can NEVER
+                regress a Classic-rendered invoice — separate code paths. */}
+            <div className="p-5 bg-[#faf7f2] rounded-2xl space-y-4">
+              <div>
+                <p className="text-sm font-bold text-[#1a1a1a]">Invoice Style</p>
+                <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest mt-0.5">
+                  PDF design used for every invoice you issue (hotel + restaurant)
+                </p>
+                <p className="text-[11px] text-[#9c8e85] mt-1 leading-snug">
+                  Switching takes effect on the very next invoice you generate. Historical invoices keep their original style — no retroactive change.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setRestaurant(prev => prev ? ({ ...prev, invoice_template: 'CLASSIC' } as any) : null)}
+                  className={cn(
+                    "p-4 rounded-2xl border-2 text-left transition-all",
+                    String((restaurant as any)?.invoice_template || 'CLASSIC').toUpperCase() === 'CLASSIC'
+                      ? "border-[#cc5a16] bg-white shadow-sm"
+                      : "border-transparent bg-white/50"
+                  )}
+                >
+                  <FileText size={18} className="mb-2 text-[#1a1208]" />
+                  <p className="text-xs font-bold text-[#1a1a1a]">Classic</p>
+                  <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">The original layout — title pill, monochrome header, flat line-items table. Familiar to your existing accountants and auditors.</p>
+                  <p className="text-[10px] text-[#9c8e85] mt-1 italic">Default. Every tenant in production today.</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRestaurant(prev => prev ? ({ ...prev, invoice_template: 'BOUTIQUE' } as any) : null)}
+                  className={cn(
+                    "p-4 rounded-2xl border-2 text-left transition-all relative",
+                    String((restaurant as any)?.invoice_template || 'CLASSIC').toUpperCase() === 'BOUTIQUE'
+                      ? "border-[#cc5a16] bg-white shadow-sm"
+                      : "border-transparent bg-white/50"
+                  )}
+                >
+                  <span className="absolute top-2 right-2 text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800">New</span>
+                  <Sparkles size={18} className="mb-2 text-[#1a1208]" />
+                  <p className="text-xs font-bold text-[#1a1a1a]">Boutique</p>
+                  <p className="text-[11px] text-[#6b5d52] mt-0.5 leading-tight">Premium redesign — logo lock-up, big PAID stamp, summary band with category totals, boxed grand total. Inspired by Taj / Oberoi invoices.</p>
+                  <p className="text-[10px] text-[#9c8e85] mt-1 italic">Same legal compliance — IRN, HSN, FSSAI, CGST/SGST all preserved.</p>
+                </button>
+              </div>
             </div>
 
             <div className="space-y-4">

@@ -19716,10 +19716,12 @@ async function startServer() {
       isCreditNote:  false,
       bilingual:     true,
       tenant: {
-        country:         hotel.country || 'IN',
-        currency_code:   hotel.currency_code || 'INR',
-        currency_symbol: hotel.currency_symbol || '₹',
-        locale:          hotel.locale || 'en-IN',
+        country:          hotel.country || 'IN',
+        currency_code:    hotel.currency_code || 'INR',
+        currency_symbol:  hotel.currency_symbol || '₹',
+        locale:           hotel.locale || 'en-IN',
+        // BCG Phase 1 — invoice template selector (Boutique opt-in).
+        invoice_template: (hotel.invoice_template === 'BOUTIQUE' ? 'BOUTIQUE' : 'CLASSIC') as 'CLASSIC' | 'BOUTIQUE',
       },
       roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
       irn: {
@@ -19920,10 +19922,17 @@ async function startServer() {
         // render with the right symbol and tax labels. Defaults to IN/INR
         // when these columns are NULL (the pre-Phase-2 state).
         tenant: {
-          country:         hotel.country || 'IN',
-          currency_code:   hotel.currency_code || 'INR',
-          currency_symbol: hotel.currency_symbol || '₹',
-          locale:          hotel.locale || 'en-IN',
+          country:          hotel.country || 'IN',
+          currency_code:    hotel.currency_code || 'INR',
+          currency_symbol:  hotel.currency_symbol || '₹',
+          locale:           hotel.locale || 'en-IN',
+          // BCG Phase 1 (7 Jun 2026) — invoice template selector. Routed
+          // by the dispatcher in invoiceService.ts to either Classic
+          // (existing layout, every tenant by default) or Boutique (the
+          // premium-grade redesign — logo lock-up, paid stamp, summary
+          // band, boxed grand total). Falls back to CLASSIC when the
+          // column is NULL on older tenant rows.
+          invoice_template: (hotel.invoice_template === 'BOUTIQUE' ? 'BOUTIQUE' : 'CLASSIC') as 'CLASSIC' | 'BOUTIQUE',
         },
         // M-6 — opt-in round-off line. Off by default (preserves byte-identical
         // PDFs for tenants who haven't migrated their accountant workflow).
@@ -20030,10 +20039,17 @@ async function startServer() {
         bilingual: true,
         // Phase 2: tenant currency context (see download-invoice for rationale)
         tenant: {
-          country:         hotel.country || 'IN',
-          currency_code:   hotel.currency_code || 'INR',
-          currency_symbol: hotel.currency_symbol || '₹',
-          locale:          hotel.locale || 'en-IN',
+          country:          hotel.country || 'IN',
+          currency_code:    hotel.currency_code || 'INR',
+          currency_symbol:  hotel.currency_symbol || '₹',
+          locale:           hotel.locale || 'en-IN',
+          // BCG Phase 1 (7 Jun 2026) — invoice template selector. Routed
+          // by the dispatcher in invoiceService.ts to either Classic
+          // (existing layout, every tenant by default) or Boutique (the
+          // premium-grade redesign — logo lock-up, paid stamp, summary
+          // band, boxed grand total). Falls back to CLASSIC when the
+          // column is NULL on older tenant rows.
+          invoice_template: (hotel.invoice_template === 'BOUTIQUE' ? 'BOUTIQUE' : 'CLASSIC') as 'CLASSIC' | 'BOUTIQUE',
         },
         // M-6 — opt-in round-off line. Off by default (preserves byte-identical
         // PDFs for tenants who haven't migrated their accountant workflow).
@@ -20492,7 +20508,19 @@ async function startServer() {
         fssai_license_number, fssai_license_valid_until,
         // L-2 — min-margin floor (0 disables; otherwise % min gross margin)
         min_margin_percent,
+        // BCG Phase 1 (7 Jun 2026) — invoice template selector. 'CLASSIC'
+        // (default) or 'BOUTIQUE'. Any other value is rejected; null /
+        // undefined leaves the existing value unchanged.
+        invoice_template,
       } = req.body;
+      let safeInvoiceTemplate: string | null = null;
+      if (invoice_template !== undefined && invoice_template !== null) {
+        const t = String(invoice_template).toUpperCase();
+        if (t !== 'CLASSIC' && t !== 'BOUTIQUE') {
+          return res.status(400).json({ error: "invoice_template must be 'CLASSIC' or 'BOUTIQUE'" });
+        }
+        safeInvoiceTemplate = t;
+      }
       // L-2 — coerce to [0, 100]. Null/undefined = leave unchanged.
       let safeMinMargin: number | null = null;
       if (min_margin_percent !== undefined && min_margin_percent !== null) {
@@ -20575,7 +20603,8 @@ async function startServer() {
           invoice_yearly_reset = COALESCE(?, invoice_yearly_reset),
           fssai_license_number = COALESCE(?, fssai_license_number),
           fssai_license_valid_until = COALESCE(?, fssai_license_valid_until),
-          min_margin_percent = COALESCE(?, min_margin_percent)
+          min_margin_percent = COALESCE(?, min_margin_percent),
+          invoice_template = COALESCE(?, invoice_template)
         WHERE id = ?
       `, [
         name,
@@ -20595,6 +20624,7 @@ async function startServer() {
         safeFssai,
         safeFssaiValid,
         safeMinMargin,
+        safeInvoiceTemplate,
         req.params.id
       ]);
 
@@ -24908,7 +24938,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'staff-access-owner-gate-plus-matrix-transpose',
+    commit_marker: 'invoice-boutique-template-phase-1',
     code_features: [
       'subscription-billing',
       'read-only-mode',

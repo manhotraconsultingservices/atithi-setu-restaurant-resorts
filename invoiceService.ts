@@ -16,175 +16,51 @@
  */
 
 import PDFDocument from 'pdfkit';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+// BCG Phase 0 (7 Jun 2026): pure helpers, label dictionary, interface, page
+// constants, Hindi fonts, and logo resolver now live in invoiceServiceShared.ts
+// so the new Boutique template (invoiceServiceBoutique.ts) can reuse them.
+// This file (invoiceService.ts) keeps the historical "Classic" rendering
+// logic — output is byte-identical for every existing tenant.
+import {
+  HINDI_REG, HINDI_BOLD, HAS_HINDI_FONT, L,
+  PAGE_W, PAGE_H, M, INNER_W, CONTENT_BOTTOM,
+  INK, INK_SOFT, MUTED, HAIR, HIGHLIGHT, accentFor,
+  resolveLogoPath,
+  money, moneyNumeric,
+  fmtDate, fmtDateTime, computeNights,
+  entryTypeLabel, hsnForEntry, normaliseState,
+  amountInWords,
+} from './invoiceServiceShared.js';
+// Re-export the interface so existing `import { InvoiceData } from './invoiceService'`
+// consumers (server.ts) keep working without an edit.
+export type { InvoiceData } from './invoiceServiceShared.js';
+import type { InvoiceData } from './invoiceServiceShared.js';
 
-// Resolve TTF paths relative to this file so it works in Docker & dev
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
-const HINDI_REG  = path.join(__dirname, 'assets', 'fonts', 'NotoSansDevanagari-Regular.ttf');
-const HINDI_BOLD = path.join(__dirname, 'assets', 'fonts', 'NotoSansDevanagari-Bold.ttf');
-const HAS_HINDI_FONT = (() => { try { return fs.existsSync(HINDI_REG) && fs.existsSync(HINDI_BOLD); } catch { return false; } })();
 
-// Bilingual labels (label shown in English; sublabel in Hindi)
-const L = {
-  TAX_INVOICE: { en: 'TAX INVOICE',              hi: 'कर चालान' },
-  CREDIT_NOTE: { en: 'CREDIT NOTE',              hi: 'क्रेडिट नोट' },
-  ORIGINAL:    { en: 'Original for Recipient',   hi: 'प्राप्तकर्ता के लिए मूल' },
-  BILL_TO:     { en: 'BILL TO',                  hi: 'बिल प्राप्तकर्ता' },
-  INVOICE_NO:  { en: 'Invoice No',               hi: 'चालान क्रमांक' },
-  INVOICE_DT:  { en: 'Invoice Date',             hi: 'चालान दिनांक' },
-  BOOKING_REF: { en: 'Booking Ref',              hi: 'बुकिंग संदर्भ' },
-  FOLIO_ID:    { en: 'Folio ID',                 hi: 'फोलियो आईडी' },
-  POS:         { en: 'Place of Supply',          hi: 'आपूर्ति का स्थान' },
-  ROOM:        { en: 'ROOM',                     hi: 'कमरा' },
-  CHECK_IN:    { en: 'CHECK-IN',                 hi: 'चेक-इन' },
-  CHECK_OUT:   { en: 'CHECK-OUT',                hi: 'चेक-आउट' },
-  NIGHTS:      { en: 'NIGHTS',                   hi: 'रातें' },
-  GUESTS:      { en: 'GUESTS',                   hi: 'अतिथि' },
-  DESC:        { en: 'DESCRIPTION',              hi: 'विवरण' },
-  HSN:         { en: 'HSN/SAC',                  hi: 'HSN/SAC' },
-  QTY:         { en: 'QTY',                      hi: 'मात्रा' },
-  RATE:        { en: 'RATE',                     hi: 'दर' },
-  TAX_PCT:     { en: 'TAX %',                    hi: 'कर %' },
-  AMOUNT:      { en: 'AMOUNT',                   hi: 'राशि' },
-  SUBTOTAL:    { en: 'Subtotal',                 hi: 'उप-योग' },
-  DISCOUNT:    { en: 'Discount',                 hi: 'छूट' },
-  GRAND_TOTAL: { en: 'GRAND TOTAL',              hi: 'कुल राशि' },
-  ROUND_OFF:   { en: 'Round-off',                hi: 'राशि समायोजन' },
-  AMT_WORDS:   { en: 'AMOUNT IN WORDS',          hi: 'राशि शब्दों में' },
-  PAY_STATUS:  { en: 'PAYMENT STATUS',           hi: 'भुगतान स्थिति' },
-  METHOD:      { en: 'Method',                   hi: 'माध्यम' },
-  SETTLED_ON:  { en: 'Settled On',               hi: 'निपटाया गया' },
-  AUTH_SIG:    { en: 'Authorised Signatory',     hi: 'अधिकृत हस्ताक्षरकर्ता' },
-  TERMS:       { en: 'TERMS & CONDITIONS',       hi: 'नियम एवं शर्तें' },
-  THANK:       { en: 'Thank you for your stay.', hi: 'आपकी ठहरने के लिए धन्यवाद।' },
-  REASON:      { en: 'Reason',                   hi: 'कारण' },
-};
-
-export interface InvoiceData {
-  hotel: {
-    name: string;
-    address?: string;
-    city?: string;
-    state?: string;
-    pincode?: string;
-    gstin?: string;
-    phone?: string;
-    email?: string;
-    website?: string;
-    logoPath?: string;      // absolute path or /uploads/... path — we'll resolve
-    fssai?: string | null;        // R-2 — 14-digit FSSAI licence (food-safety mandatory in India)
-    fssaiValidUntil?: string | null;
-  };
-  guest: {
-    name: string;
-    phone?: string;
-    email?: string;
-    address?: string;
-    nationality?: string;
-    state?: string;          // Indian state for GST place-of-supply determination
-    gstin?: string;
-  };
-  stay: {
-    roomName: string;
-    bookingId: string;
-    checkInDate: string;
-    checkOutDate: string;
-    actualCheckInAt?: string;
-    actualCheckOutAt?: string;
-    numGuests?: number;
-  };
-  folio: {
-    id: string;
-    invoiceNumber: string;
-    invoiceDate: string;
-    subtotal: number;
-    discount: number;
-    gstAmount: number;
-    grandTotal: number;
-    paymentMethod?: string;
-    settledAt?: string;
-    status: string;
-  };
-  entries: Array<{
-    description: string;
-    entryType: string;
-    quantity: number;
-    unitPrice: number;
-    amount: number;
-    gstRate?: number;
-    gstAmount?: number;
-    hsnCode?: string;
-  }>;
-  placeOfSupply?: string;
-  sameStateGst?: boolean;       // optional manual override; if unset, auto-derived from guest.state vs hotel.state
-  // Phase 5: Credit note variant
-  isCreditNote?: boolean;
-  parentInvoiceNumber?: string; // shown on credit notes as "Against Invoice #..."
-  creditNoteReason?: string;
-  bilingual?: boolean;          // default true — include Hindi sub-labels
-  // Phase 2 — multi-currency + configurable tax. Optional. When absent we
-  // default to the existing INR / GST behaviour so every Indian tenant
-  // sees byte-identical output. Pass these from the server when the tenant
-  // has switched country.
-  tenant?: {
-    country?: string;            // 'IN' | 'US' | 'CA' | 'AU' | ...
-    currency_code?: string;      // 'INR' | 'USD' | ...
-    currency_symbol?: string;    // '₹' | '$' | ...
-    locale?: string;             // 'en-IN' | 'en-US' | ...
-  };
-  // If provided, replaces the auto CGST/SGST/IGST rendering with the
-  // explicit list. Each line is rendered as a single row in the totals
-  // panel. Indian intrastate tenants typically leave this undefined and
-  // rely on the CGST/SGST split derived from gstAmount; international
-  // tenants populate it with e.g. [{label:'Sales Tax', rate:8.875, amount:...}].
-  taxLines?: Array<{ label: string; rate: number; amount: number }>;
-  // M-6 (BCG follow-up) — round-off mode. When true, the PDF emits an
-  // explicit "Round-off (±0.XX)" line and the grand total snaps to the
-  // nearest whole rupee. Off by default — preserves current byte-for-byte
-  // output for tenants who haven't opted in.
-  roundToRupee?: boolean;
-  // R-3 (BCG follow-up) — GST E-Invoice. When IRN is present, the PDF
-  // renders the IRN string + the signed QR (base64-decoded into an
-  // image block). Until the GSP returns IRN we render an "IRN PENDING"
-  // marker so staff knows the invoice isn't yet a valid GST document.
-  irn?: {
-    irn?: string | null;            // 64-char hex hash from IRP
-    ackNo?: string | null;          // IRP acknowledgement number
-    ackDate?: string | null;        // ISO date
-    signedQrCode?: string | null;   // base64 PNG (preferred) or signed payload
-    status?: string | null;         // PENDING | GENERATED | CANCELLED | FAILED
-    eInvoiceMandatory?: boolean;    // tenant ≥₹5cr threshold → must show
-  };
-}
-
-/**
- * Resolves a logo path that might be "/uploads/xxx.png" (web path) to an absolute
- * filesystem path inside the container. Returns null if not readable.
- */
-function resolveLogoPath(p?: string): string | null {
-  if (!p) return null;
-  try {
-    let abs: string;
-    if (p.startsWith('/uploads/')) {
-      abs = path.join(process.cwd(), 'public', p.replace(/^\//, ''));
-    } else if (path.isAbsolute(p)) {
-      abs = p;
-    } else {
-      abs = path.join(process.cwd(), p);
-    }
-    if (fs.existsSync(abs)) {
-      const ext = path.extname(abs).toLowerCase();
-      // pdfkit.image supports PNG and JPG
-      if (['.png', '.jpg', '.jpeg'].includes(ext)) return abs;
-    }
-  } catch { /* swallow */ }
-  return null;
-}
+// BCG Phase 1 (7 Jun 2026) — template dispatcher.
+//
+// generateInvoicePdf() is the PUBLIC entry point that every caller in the
+// codebase already uses (server.ts hotel folio download, group invoice,
+// email-invoice, etc.). To preserve that contract we keep the same
+// function name + signature here and route INTERNALLY to either the
+// Classic renderer (this file's generateClassicInvoicePdf below — the
+// original code) or the Boutique renderer (invoiceServiceBoutique.ts).
+//
+// The dispatch key is tenant.invoice_template, which the server reads
+// from restaurants.invoice_template and passes through in InvoiceData.
+// Default is 'CLASSIC' so any tenant who hasn't opted in (= all tenants
+// currently in production) sees byte-identical output to before Phase 1.
+import { generateBoutiqueInvoicePdf } from './invoiceServiceBoutique.js';
 
 export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
+  const tpl = (data.tenant?.invoice_template || 'CLASSIC').toUpperCase();
+  if (tpl === 'BOUTIQUE') {
+    return generateBoutiqueInvoicePdf(data);
+  }
+  return generateClassicInvoicePdf(data);
+}
+
+async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({
@@ -824,151 +700,4 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       reject(err);
     }
   });
-}
-
-// ─────────────────────────── Helpers ────────────────────────────
-
-// Phase 2 currency formatter. Returns "<CODE> <amount>" using the tenant's
-// configured locale & code; falls back to the exact "INR <amount>" format
-// (en-IN locale) when no tenant context is supplied — preserving the
-// pre-Phase-2 byte output for every Indian invoice in production.
-function money(
-  tenant: InvoiceData['tenant'] | undefined,
-  n: number,
-): string {
-  const isNeg = n < 0;
-  const abs = Math.abs(n || 0);
-  const code   = tenant?.currency_code || 'INR';
-  const locale = tenant?.locale        || 'en-IN';
-  let formatted: string;
-  try {
-    formatted = abs.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  } catch {
-    formatted = abs.toFixed(2);
-  }
-  return `${isNeg ? '-' : ''}${code} ${formatted}`;
-}
-
-// COLUMN-FIT (client report: "Rate column overflowing"): numeric-only
-// variant of money() used inside the line-items table. The RATE column
-// is 50 px wide — "INR 1,500.00" (~62 px at Helvetica 9) wraps to two
-// lines, ribboning the row. Industry-standard invoice convention is to
-// show currency ONCE on the totals section and numeric-only values in
-// the table itself (Tally, QuickBooks, Stripe, Zoho all do this). The
-// totals section keeps using money() so the currency stays explicit.
-function moneyNumeric(
-  tenant: InvoiceData['tenant'] | undefined,
-  n: number,
-): string {
-  const isNeg = n < 0;
-  const abs = Math.abs(n || 0);
-  const locale = tenant?.locale || 'en-IN';
-  let formatted: string;
-  try {
-    formatted = abs.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  } catch {
-    formatted = abs.toFixed(2);
-  }
-  return `${isNeg ? '-' : ''}${formatted}`;
-}
-// Backwards-compatible alias retained for the few remaining call sites
-// (amount-in-words, etc.). Equivalent to money(undefined, n).
-function rupee(n: number): string { return money(undefined, n); }
-function fmtDate(val: string | undefined): string {
-  if (!val) return '—';
-  const d = new Date(val);
-  if (isNaN(d.getTime())) return val;
-  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-}
-function fmtDateTime(val: string | undefined): string {
-  if (!val) return '—';
-  const d = new Date(val);
-  if (isNaN(d.getTime())) return val;
-  return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
-function computeNights(checkIn: string, checkOut: string): number {
-  const a = new Date(checkIn).getTime();
-  const b = new Date(checkOut).getTime();
-  return Math.max(1, Math.ceil((b - a) / 86400000));
-}
-function entryTypeLabel(t: string): string {
-  switch (t) {
-    case 'ROOM_CHARGE':    return 'Accommodation';
-    case 'SERVICE':        return 'Service charge';
-    case 'SERVICE_CHARGE': return 'Service charge';   // Phase H2 — per-night charge on rooms
-    case 'F&B':            return 'Food & Beverage';
-    default:               return t.replace(/_/g, ' ');
-  }
-}
-function hsnForEntry(t: string): string {
-  switch (t) {
-    case 'ROOM_CHARGE':    return '996311';
-    case 'F&B':            return '996331';
-    case 'SERVICE':        return '999799';
-    case 'SERVICE_CHARGE': return '996311';  // Bundled with the room — same accommodation HSN
-    default:               return '996311';
-  }
-}
-// Normalise Indian state names for comparison ("Haryana", "HARYANA ", "haryana")
-function normaliseState(s: string): string {
-  return String(s || '').toLowerCase().trim().replace(/[\s\-_]+/g, '');
-}
-function rupeesInWords(amount: number): string {
-  // Kept for backwards compatibility — equivalent to the tenant-less call.
-  return amountInWords(amount, undefined);
-}
-// Phase 2: tenant-aware "amount in words" renderer. India keeps the exact
-// "Rupees ... Only" output; other currencies use a generic format. The
-// minor-unit word ("Paise" / "Cents" / "Pence") is picked per code.
-function amountInWords(amount: number, tenant: InvoiceData['tenant'] | undefined): string {
-  const code = (tenant?.currency_code || 'INR').toUpperCase();
-  const n = Math.round(amount);
-  const minor = Math.round((amount - n) * 100);
-  const words = numberToIndianWords(n);
-  if (code === 'INR') {
-    const paiseWords = minor > 0 ? ` and ${numberToIndianWords(minor)} Paise` : '';
-    return `Rupees ${words}${paiseWords} Only`;
-  }
-  const minorUnit =
-    code === 'USD' || code === 'CAD' || code === 'AUD' ? 'Cents'
-    : code === 'GBP' ? 'Pence'
-    : code === 'EUR' ? 'Cents'
-    : 'Minor';
-  const noun =
-    code === 'USD' ? 'US Dollars'
-    : code === 'CAD' ? 'Canadian Dollars'
-    : code === 'AUD' ? 'Australian Dollars'
-    : code === 'GBP' ? 'Pounds'
-    : code === 'EUR' ? 'Euros'
-    : code;
-  const minorWords = minor > 0 ? ` and ${numberToIndianWords(minor)} ${minorUnit}` : '';
-  return `${noun} ${words}${minorWords} Only`;
-}
-function numberToIndianWords(num: number): string {
-  if (num === 0) return 'Zero';
-  const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
-    'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
-  const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-  const twoDigit = (n: number): string => {
-    if (n < 20) return ones[n];
-    return tens[Math.floor(n / 10)] + (n % 10 ? ' ' + ones[n % 10] : '');
-  };
-  const threeDigit = (n: number): string => {
-    const h = Math.floor(n / 100);
-    const rem = n % 100;
-    return (h ? ones[h] + ' Hundred' + (rem ? ' ' : '') : '') + (rem ? twoDigit(rem) : '');
-  };
-  const crore = Math.floor(num / 10000000);
-  num %= 10000000;
-  const lakh = Math.floor(num / 100000);
-  num %= 100000;
-  const thousand = Math.floor(num / 1000);
-  num %= 1000;
-  const hundred = num;
-  let out = '';
-  if (crore)    out += twoDigit(crore)   + ' Crore ';
-  if (lakh)     out += twoDigit(lakh)    + ' Lakh ';
-  if (thousand) out += twoDigit(thousand) + ' Thousand ';
-  if (hundred)  out += threeDigit(hundred);
-  return out.trim();
 }

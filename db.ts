@@ -189,6 +189,17 @@ export async function initDb() {
     -- default; tenant opts in via Settings → Tax & Currency.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS round_invoice_to_rupee INT DEFAULT 0;
 
+    -- BCG Phase 1 (7 Jun 2026) — Invoice template selector. 'CLASSIC' is the
+    -- historical layout (every existing tenant); 'BOUTIQUE' is the new
+    -- opt-in design with logo lock-up, paid/unpaid stamp, summary band
+    -- with category totals, and a boxed grand total. Owner toggles via
+    -- Settings → Invoice Style. Server dispatches in invoiceService.ts:
+    --   generateInvoicePdf() → reads this column → routes to either
+    --   the Classic or the Boutique renderer.
+    -- Default 'CLASSIC' so every tenant currently in production keeps
+    -- byte-identical PDF output unless they deliberately switch.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_template TEXT DEFAULT 'CLASSIC';
+
     -- L-2 (BCG follow-up) — Min-margin guard. When > 0, the order POST
     -- and /invoices/manual POST handlers compute the line-level COGS via
     -- the existing recipes + ingredients.unit_cost data and reject the
