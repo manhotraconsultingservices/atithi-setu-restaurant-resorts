@@ -25709,6 +25709,176 @@ async function startServer() {
     }
   });
 
+  // ────────────────────────────────────────────────────────────────────
+  // BCG Demo Tariff Seed (client request 7 Jun 2026)
+  // ────────────────────────────────────────────────────────────────────
+  // One-click GUI alternative to the qa_seed_viveks_tariff.mts CLI
+  // script. SuperAdmin clicks "Seed BCG Demo Tariff" on a restaurant
+  // tile → server runs the same idempotent seed (ON CONFLICT DO UPDATE)
+  // and returns a JSON summary.
+  //
+  // Loads the exact pricing matrix from the BCG-onboarding boutique
+  // resort spreadsheet: 3 room categories × 2 seasons × 4 meal plans =
+  // 24 room tariffs + 24 extra-person charges + 4 season periods + 27
+  // sample rooms.
+  //
+  // Idempotent: re-running refreshes any drifted rates. Wipes +
+  // re-inserts season_periods (to avoid duplicate date ranges).
+  app.post("/api/admin/tenants/:id/seed-bcg-tariff", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    const tenantId = req.params.id;
+    try {
+      const tenant: any = await centralDb.get(
+        "SELECT id, name, property_type FROM restaurants WHERE id = ?",
+        [tenantId]
+      );
+      if (!tenant) return res.status(404).json({ error: `Tenant ${tenantId} not found` });
+      if (tenant.property_type !== 'HOTEL' && tenant.property_type !== 'BOTH') {
+        return res.status(400).json({
+          error: `Tenant property_type is "${tenant.property_type}". Enable the hotel module first (property_type = 'HOTEL' or 'BOTH') so the tariff tables exist on the tenant schema.`,
+        });
+      }
+
+      // Flip tariff_model so the booking flow uses the matrix path.
+      await centralDb.run(
+        "UPDATE restaurants SET tariff_model = 'MATRIX' WHERE id = ?",
+        [tenantId]
+      );
+
+      const db = await getTenantDb(tenantId);
+
+      // 1. Room types (3)
+      const ROOM_TYPES = [
+        { id: 'SUPERIOR_VIEW', name: 'Superior Room with View',     base: 2000, desc: 'Standard category with city / garden view.',          order: 1 },
+        { id: 'PREMIUM_BALC',  name: 'Premium Room with Balcony',   base: 2400, desc: 'Premium category with private balcony.',              order: 2 },
+        { id: 'RIVER_VIEW',    name: 'River View with Balcony',     base: 2800, desc: 'Top category — river-facing rooms with private balcony.', order: 3 },
+      ];
+      for (const rt of ROOM_TYPES) {
+        await db.run(
+          `INSERT INTO room_types (id, name, description, base_rate, capacity, display_order, is_active)
+           VALUES (?, ?, ?, ?, 2, ?, 1)
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name, description = EXCLUDED.description,
+             base_rate = EXCLUDED.base_rate, display_order = EXCLUDED.display_order`,
+          [rt.id, rt.name, rt.desc, rt.base, rt.order]
+        );
+      }
+
+      // 2. 27 rooms
+      const ROOMS_BY_TYPE: Record<string, string[]> = {
+        SUPERIOR_VIEW: ['103','203','206','207','209','210','303','306','307','309','310'],
+        PREMIUM_BALC:  ['204','205','211','212','304','305','311','312'],
+        RIVER_VIEW:    ['101','102','201','202','208','301','302','308'],
+      };
+      let roomCount = 0;
+      for (const [typeId, numbers] of Object.entries(ROOMS_BY_TYPE)) {
+        const baseRate = ROOM_TYPES.find(t => t.id === typeId)!.base;
+        for (const num of numbers) {
+          const id = `ROOM-${num}`;
+          const floor = parseInt(num.charAt(0), 10);
+          await db.run(
+            `INSERT INTO rooms (id, name, room_number, floor, type_id, capacity, base_rate, status, smoking_preference)
+             VALUES (?, ?, ?, ?, ?, 2, ?, 'VACANT', 'NON_SMOKING')
+             ON CONFLICT (id) DO UPDATE SET
+               type_id = EXCLUDED.type_id, base_rate = EXCLUDED.base_rate,
+               room_number = EXCLUDED.room_number, floor = EXCLUDED.floor`,
+            [id, `Room ${num}`, num, floor, typeId, baseRate]
+          );
+          roomCount++;
+        }
+      }
+
+      // 3. Seasons (PEAK + OFF) — auto-seeded by createHotelTables but
+      //    defensive upsert in case the tenant pre-dates that change.
+      for (const s of [
+        { id: 'PEAK', name: 'Peak', desc: 'High-demand months — summer + Christmas / New Year', color: '#c13b3b', order: 1 },
+        { id: 'OFF',  name: 'Off',  desc: 'Monsoon + winter shoulder',                          color: '#6b5d52', order: 2 },
+      ]) {
+        await db.run(
+          `INSERT INTO seasons (id, name, description, color, display_order, is_active)
+           VALUES (?, ?, ?, ?, ?, 1)
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name, description = EXCLUDED.description,
+             color = EXCLUDED.color, display_order = EXCLUDED.display_order`,
+          [s.id, s.name, s.desc, s.color, s.order]
+        );
+      }
+
+      // 4. Season periods — wipe + re-insert
+      const SEASON_PERIODS = [
+        { season_id: 'PEAK', start: '2026-04-15', end: '2026-06-30', label: 'Summer leg (Apr-Jun)' },
+        { season_id: 'PEAK', start: '2026-12-20', end: '2027-01-05', label: 'Christmas / New Year leg' },
+        { season_id: 'OFF',  start: '2026-07-01', end: '2026-12-19', label: 'Monsoon + post-monsoon' },
+        { season_id: 'OFF',  start: '2027-01-06', end: '2027-04-14', label: 'Winter shoulder (Jan-Apr)' },
+      ];
+      await db.run("DELETE FROM season_periods WHERE season_id IN ('PEAK', 'OFF')");
+      for (const p of SEASON_PERIODS) {
+        await db.run(
+          `INSERT INTO season_periods (id, season_id, start_date, end_date, label)
+           VALUES (?, ?, ?, ?, ?)`,
+          [`${p.season_id}-${p.start}`, p.season_id, p.start, p.end, p.label]
+        );
+      }
+
+      // 5. 24 room tariffs
+      const TARIFFS: Array<[string, string, string, number]> = [
+        ['SUPERIOR_VIEW','PEAK','EP', 3200], ['SUPERIOR_VIEW','PEAK','CP', 3700], ['SUPERIOR_VIEW','PEAK','MAP', 4500], ['SUPERIOR_VIEW','PEAK','API', 5200],
+        ['SUPERIOR_VIEW','OFF', 'EP', 2000], ['SUPERIOR_VIEW','OFF', 'CP', 2500], ['SUPERIOR_VIEW','OFF', 'MAP', 3300], ['SUPERIOR_VIEW','OFF', 'API', 4000],
+        ['PREMIUM_BALC', 'PEAK','EP', 3700], ['PREMIUM_BALC', 'PEAK','CP', 4200], ['PREMIUM_BALC', 'PEAK','MAP', 5000], ['PREMIUM_BALC', 'PEAK','API', 5700],
+        ['PREMIUM_BALC', 'OFF', 'EP', 2400], ['PREMIUM_BALC', 'OFF', 'CP', 2900], ['PREMIUM_BALC', 'OFF', 'MAP', 3700], ['PREMIUM_BALC', 'OFF', 'API', 4400],
+        ['RIVER_VIEW',   'PEAK','EP', 4200], ['RIVER_VIEW',   'PEAK','CP', 4700], ['RIVER_VIEW',   'PEAK','MAP', 5500], ['RIVER_VIEW',   'PEAK','API', 6200],
+        ['RIVER_VIEW',   'OFF', 'EP', 2800], ['RIVER_VIEW',   'OFF', 'CP', 3300], ['RIVER_VIEW',   'OFF', 'MAP', 4100], ['RIVER_VIEW',   'OFF', 'API', 4800],
+      ];
+      for (const [typeId, seasonId, mealId, rate] of TARIFFS) {
+        await db.run(
+          `INSERT INTO room_tariffs (id, room_type_id, season_id, meal_plan_id, rate, room_id_override)
+           VALUES (?, ?, ?, ?, ?, NULL)
+           ON CONFLICT (room_type_id, season_id, meal_plan_id, COALESCE(room_id_override, ''))
+           DO UPDATE SET rate = EXCLUDED.rate, updated_at = CURRENT_TIMESTAMP`,
+          [`TARIFF-${typeId}-${seasonId}-${mealId}`, typeId, seasonId, mealId, rate]
+        );
+      }
+
+      // 6. 24 extra-person charges
+      const EXTRAS: Array<[string, string, string, number]> = [
+        ['ADULT',              'PEAK','EP',1000], ['ADULT',              'PEAK','CP',1300], ['ADULT',              'PEAK','MAP',1800], ['ADULT',              'PEAK','API',2200],
+        ['ADULT',              'OFF', 'EP', 800], ['ADULT',              'OFF', 'CP',1100], ['ADULT',              'OFF', 'MAP',1600], ['ADULT',              'OFF', 'API',2000],
+        ['CHILD_WITH_MATTRESS','PEAK','EP', 700], ['CHILD_WITH_MATTRESS','PEAK','CP',1000], ['CHILD_WITH_MATTRESS','PEAK','MAP',1400], ['CHILD_WITH_MATTRESS','PEAK','API',1700],
+        ['CHILD_WITH_MATTRESS','OFF', 'EP', 500], ['CHILD_WITH_MATTRESS','OFF', 'CP', 800], ['CHILD_WITH_MATTRESS','OFF', 'MAP',1200], ['CHILD_WITH_MATTRESS','OFF', 'API',1500],
+        ['CHILD_NO_MATTRESS', 'PEAK','EP', 500], ['CHILD_NO_MATTRESS', 'PEAK','CP', 700], ['CHILD_NO_MATTRESS', 'PEAK','MAP',1000], ['CHILD_NO_MATTRESS', 'PEAK','API',1200],
+        ['CHILD_NO_MATTRESS', 'OFF', 'EP', 400], ['CHILD_NO_MATTRESS', 'OFF', 'CP', 600], ['CHILD_NO_MATTRESS', 'OFF', 'MAP', 900], ['CHILD_NO_MATTRESS', 'OFF', 'API',1100],
+      ];
+      for (const [personType, seasonId, mealId, charge] of EXTRAS) {
+        const isChild = personType.startsWith('CHILD');
+        await db.run(
+          `INSERT INTO extra_person_charges (id, person_type, season_id, meal_plan_id, age_min, age_max, charge)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (person_type, season_id, meal_plan_id)
+           DO UPDATE SET charge = EXCLUDED.charge,
+                         age_min = EXCLUDED.age_min, age_max = EXCLUDED.age_max`,
+          [`XP-${personType}-${seasonId}-${mealId}`, personType, seasonId, mealId,
+           isChild ? 5 : null, isChild ? 12 : null, charge]
+        );
+      }
+
+      res.json({
+        ok: true,
+        tenant: { id: tenant.id, name: tenant.name },
+        seeded: {
+          room_types: ROOM_TYPES.length,
+          rooms: roomCount,
+          season_periods: SEASON_PERIODS.length,
+          room_tariffs: TARIFFS.length,
+          extra_person_charges: EXTRAS.length,
+        },
+        tariff_model: 'MATRIX',
+        message: `BCG demo tariff loaded for ${tenant.name}. Visit Settings → Tariff Configuration to verify the matrix; create a test booking to confirm the rate resolver picks up the new rates.`,
+      });
+    } catch (err: any) {
+      console.error('[admin] seed-bcg-tariff failed:', err);
+      res.status(500).json({ error: err?.message || 'Seed failed' });
+    }
+  });
+
   // Tenant-facing: fetch own billing status (called hourly by the banner).
   // Returns minimal info — no admin-only fields like revoked_by.
   app.get("/api/restaurant/:id/billing-status", authenticate, async (req: AuthRequest, res: Response) => {
@@ -25779,7 +25949,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'booking-lifecycle-checking-out-state',
+    commit_marker: 'admin-one-click-bcg-tariff-seed',
     code_features: [
       'subscription-billing',
       'read-only-mode',

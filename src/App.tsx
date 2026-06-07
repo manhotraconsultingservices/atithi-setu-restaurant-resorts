@@ -33068,7 +33068,7 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
     try {
       const res = await fetch(`/api/admin/restaurants/${id}/toggle-status`, {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
@@ -33077,6 +33077,53 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
       if (res.ok) fetchMyRestaurants();
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  // BCG-SEED-BUTTON (client request 7 Jun 2026): one-click GUI seed
+  // of the BCG-onboarding boutique resort's tariff matrix (3 categories
+  // × 2 seasons × 4 meal plans + extras + 27 rooms). Idempotent —
+  // re-running just refreshes any drifted rates. Confirms before
+  // running because the seed overwrites 50+ rows on the target tenant.
+  const [seedingTariffFor, setSeedingTariffFor] = useState<string | null>(null);
+  const seedBcgTariff = async (id: string, name: string) => {
+    if (!window.confirm(
+      `Seed BCG demo tariff into ${name} (${id})?\n\n` +
+      `This will:\n` +
+      `  • Create / refresh 3 room categories (Superior / Premium / River View)\n` +
+      `  • Create / update 27 sample rooms (101-312)\n` +
+      `  • Load 4 season date ranges (Peak / Off, 2026 calendar)\n` +
+      `  • Load 24 room-rate cells + 24 extra-person cells\n` +
+      `  • Flip the tenant's tariff_model to 'MATRIX'\n\n` +
+      `Idempotent — safe to re-run.`
+    )) return;
+    setSeedingTariffFor(id);
+    try {
+      const res = await fetch(`/api/admin/tenants/${id}/seed-bcg-tariff`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert('Seed failed: ' + (data.error || `HTTP ${res.status}`));
+        return;
+      }
+      const s = data.seeded || {};
+      alert(
+        `✓ BCG demo tariff seeded for ${data.tenant?.name || id}.\n\n` +
+        `Loaded:\n` +
+        `  • ${s.room_types || 0} room types\n` +
+        `  • ${s.rooms || 0} rooms\n` +
+        `  • ${s.season_periods || 0} season periods\n` +
+        `  • ${s.room_tariffs || 0} room-tariff cells\n` +
+        `  • ${s.extra_person_charges || 0} extra-person charges\n\n` +
+        `Tariff model: ${data.tariff_model}.\n\n` +
+        `Visit Settings → Tariff Configuration on the tenant to verify.`
+      );
+    } catch (err: any) {
+      alert('Seed failed: ' + (err?.message || 'Network error'));
+    } finally {
+      setSeedingTariffFor(null);
     }
   };
 
@@ -33139,11 +33186,24 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
                   <p className="text-[11px] text-[#9c8e85] font-mono">{r.id}</p>
                 </div>
                 {r.is_active === 0 && (
-                  <button 
+                  <button
                     onClick={() => approveRestaurant(r.id)}
                     className="bg-green-600 text-white px-4 py-2 rounded-xl text-[11px] font-bold uppercase tracking-widest hover:bg-green-700 transition-all shadow-lg shadow-green-600/20"
                   >
                     Approve
+                  </button>
+                )}
+                {/* BCG demo tariff seed button — only shown for hotel /
+                    both tenants since restaurant-only tenants don't have
+                    the tariff tables. Disabled while in-flight. */}
+                {(r.property_type === 'HOTEL' || r.property_type === 'BOTH') && (
+                  <button
+                    onClick={() => seedBcgTariff(r.id, r.name || r.id)}
+                    disabled={seedingTariffFor === r.id}
+                    title="Load the BCG demo room categories + matrix tariff + sample rooms. Idempotent."
+                    className="bg-[#cc5a16] text-white px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-[#a84612] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {seedingTariffFor === r.id ? 'Seeding…' : '⚡ Seed BCG Tariff'}
                   </button>
                 )}
               </div>
