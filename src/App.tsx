@@ -15624,6 +15624,70 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             {b.status === 'BOOKED' && <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600">Check In</button>}
                             {b.status === 'CHECKED_IN' && <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608]">Check Out</button>}
                             {(b.status === 'BOOKED') && <button onClick={() => cancelBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Cancel</button>}
+                            {/* P2-B-FIX (client report "clubbed group invoice"):
+                                two group-level actions, shown on every row that
+                                belongs to a group (b.group_id set). Violet to
+                                match the Group badge. These were missing from
+                                the UI entirely — the backend endpoints existed
+                                but were unreachable.
+                                  • Settle Group — only when this row is
+                                    CHECKED_IN (implies the group has at least
+                                    one settle-eligible booking). One click
+                                    settles every CHECKED_IN child in the group
+                                    against one payment method and stamps one
+                                    consolidated invoice number.
+                                  • Group Inv — downloads the consolidated PDF
+                                    (which reuses the persisted invoice number
+                                    after settlement, or stamps + persists one
+                                    on first download for pre-settle preview). */}
+                            {b.group_id && b.status === 'CHECKED_IN' && (
+                              <button
+                                onClick={async () => {
+                                  if (!confirm(`Settle ALL rooms in this group as a single invoice?\n\nEvery CHECKED_IN room in "${b.group_name || 'this group'}" will be marked CHECKED_OUT and billed under one consolidated invoice number.\n\nPayment method: CASH (adjust each folio's discount BEFORE clicking this).`)) return;
+                                  try {
+                                    const res = await fetch(
+                                      `/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/checkout`,
+                                      {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        body: JSON.stringify({ payment_method: 'CASH' }),
+                                      }
+                                    );
+                                    const data = await res.json();
+                                    if (!res.ok) throw new Error(data?.error || `Settle failed (${res.status})`);
+                                    alert(`Group settled.\nInvoice: ${data.invoice_number}\nRooms settled: ${data.settled?.length || 0}\nSkipped: ${data.skipped?.length || 0}\nTotal: ₹${Number(data.total_grand_total || 0).toLocaleString('en-IN')}`);
+                                    fetchHotelBookings();
+                                  } catch (err: any) { alert(err.message); }
+                                }}
+                                title="Settle every CHECKED_IN room in this group under one invoice"
+                                className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-[11px] font-bold hover:bg-violet-700"
+                              >Settle Group</button>
+                            )}
+                            {b.group_id && (
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    const res = await fetch(
+                                      `/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/invoice-pdf`,
+                                      { headers: { Authorization: `Bearer ${token}` } }
+                                    );
+                                    if (!res.ok) {
+                                      const j = await res.json().catch(() => ({}));
+                                      throw new Error(j?.error || `Download failed (${res.status})`);
+                                    }
+                                    const blob = await res.blob();
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.href = url;
+                                    a.download = `GroupInvoice-${b.group_id}-${(b.group_name || 'group').replace(/[^a-z0-9_-]+/gi, '-')}.pdf`;
+                                    document.body.appendChild(a); a.click();
+                                    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+                                  } catch (err: any) { alert(err.message); }
+                                }}
+                                title="Download one consolidated PDF for the whole group"
+                                className="px-3 py-1.5 rounded-lg border border-violet-300 text-violet-700 text-[11px] font-bold hover:bg-violet-50"
+                              >📑 Group Inv</button>
+                            )}
                             {/* Phase H1 — channel re-sync. Only shown for OTA-sourced bookings */}
                             {b.booking_source && !['DIRECT','WALKIN',''].includes(String(b.booking_source).toUpperCase()) && (
                               <button onClick={() => resyncBookingToChannel(b)} title="Re-sync to channel manager" className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2]">Re-sync</button>

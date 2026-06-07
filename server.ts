@@ -461,6 +461,14 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
       created_by      TEXT,
       created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    -- P2-B-FIX (client report: "clubbed group invoice"): persist the
+    -- consolidated invoice number + settle state on the group so every
+    -- subsequent PDF download reuses the SAME number (was being regenerated
+    -- with new Date() on each request, breaking audit trail).
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS invoice_number TEXT;
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS settled_at     TIMESTAMP;
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS payment_method TEXT;
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS settled_by     TEXT;
 
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
@@ -18507,6 +18515,155 @@ async function startServer() {
     }
   });
 
+  // ────────────────────────────────────────────────────────────────────
+  // P2-B-FIX (client report: "clubbed group invoice"):
+  // POST /api/restaurant/:id/hotel/booking-groups/:groupId/checkout
+  // ────────────────────────────────────────────────────────────────────
+  // Settles EVERY CHECKED_IN child booking in a group as a single billing
+  // event under one consolidated invoice number. Without this, staff
+  // settling 5 rooms produced 5 separate per-folio invoices — the group
+  // PDF download aggregated them but each child had ALREADY been billed,
+  // emailed, and (when e-invoicing is on) IRN-stamped independently.
+  // That defeats the entire "one invoice for the group" UX.
+  //
+  // Pattern: iterate children, reuse the existing settleFolioForBooking
+  // helper per child (so loyalty + late-fee + per-folio audit still fire
+  // normally), flip each room_bookings row to CHECKED_OUT, update rooms
+  // + sessions, then stamp ONE invoice_number + settled_at on the
+  // group row. The consolidated PDF endpoint reuses that number.
+  //
+  // Discount: skipped per-call to avoid double-counting (the existing
+  // per-booking checkout's discount field would apply per-room). Staff
+  // should adjust per-folio discounts BEFORE calling this. A future
+  // enhancement can accept a group-level discount and allocate
+  // proportionally across child folios.
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/checkout", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { payment_method, waive } = req.body || {};
+      const tenantDb = await getTenantDb(req.params.id);
+      const group: any = await tenantDb.get(
+        "SELECT * FROM room_booking_groups WHERE id = ?", [req.params.groupId]
+      );
+      if (!group) return res.status(404).json({ error: 'Group not found.' });
+      const children: any[] = await tenantDb.query(
+        "SELECT * FROM room_bookings WHERE group_id = ?",
+        [req.params.groupId]
+      );
+      if (children.length === 0) return res.status(404).json({ error: 'Group has no bookings.' });
+
+      // Loyalty resolver — identical to the single-booking checkout's,
+      // duplicated here to avoid hoisting that closure out of the parent
+      // handler. Each child folio gets tier-discounted independently.
+      const loyaltyResolver = async (subtotal: number, phone: string) => {
+        try {
+          const normPhone = _normalisePhone(phone);
+          if (!normPhone) return null;
+          const customer: any = await tenantDb.get(
+            "SELECT total_spent, is_blocked FROM loyalty_customers WHERE phone = ?",
+            [normPhone]
+          );
+          if (!customer || Number(customer.is_blocked) === 1) return null;
+          const tier = await _resolveTierForSpend(tenantDb, Number(customer.total_spent || 0));
+          const pct = Number(tier?.discount_percent || 0);
+          if (!tier || pct <= 0) return null;
+          return {
+            discount: Math.round(subtotal * pct / 100 * 100) / 100,
+            tier_id: tier.id,
+            tier_name: tier.name,
+            discount_percent: pct,
+          };
+        } catch { return null; }
+      };
+
+      const settledResults: any[] = [];
+      const skipped: any[] = [];
+      let totalGrand = 0;
+      const now = new Date().toISOString();
+
+      for (const b of children) {
+        if (b.status !== 'CHECKED_IN') {
+          skipped.push({ id: b.id, room_id: b.room_id, reason: `status=${b.status}` });
+          continue;
+        }
+        try {
+          const settled = await settleFolioForBooking(
+            req.params.id, b.id,
+            payment_method || 'CASH',
+            0,            // group flow: no discount override; staff adjusts per-folio first
+            !!waive,
+            loyaltyResolver
+          );
+          await tenantDb.run(
+            "UPDATE room_bookings SET status='CHECKED_OUT', actual_checkout_at = ? WHERE id = ?",
+            [now, b.id]
+          );
+          await tenantDb.run("UPDATE rooms SET status='CLEANING' WHERE id = ?", [b.room_id]);
+          await tenantDb.run(
+            "UPDATE room_sessions SET status='checked_out', closed_at = ? WHERE room_id = ? AND status='active'",
+            [now, b.room_id]
+          );
+          totalGrand += Number(settled?.grand_total || 0);
+          settledResults.push({
+            id: b.id, room_id: b.room_id, guest_name: b.guest_name,
+            folio_id: settled?.id || null,
+            grand_total: Number(settled?.grand_total || 0),
+          });
+        } catch (childErr: any) {
+          console.error(`[group-checkout] failed to settle booking ${b.id}:`, childErr);
+          skipped.push({ id: b.id, room_id: b.room_id, reason: 'settle-failed', detail: childErr?.message });
+        }
+      }
+
+      // Stamp the consolidated invoice number on the group ONCE. We use
+      // COALESCE so re-running this endpoint (after fixing a partial
+      // failure) preserves the original number — keeping audit stable.
+      const groupInvNum = group?.invoice_number ||
+        `INV-GRP-${new Date(now).getFullYear()}-${String(req.params.groupId).slice(-6).toUpperCase()}`;
+      try {
+        await tenantDb.run(
+          `UPDATE room_booking_groups
+              SET invoice_number = COALESCE(invoice_number, ?),
+                  settled_at     = COALESCE(settled_at,     ?),
+                  payment_method = COALESCE(payment_method, ?),
+                  settled_by     = COALESCE(settled_by,     ?),
+                  total_amount   = ?
+            WHERE id = ?`,
+          [groupInvNum, now, payment_method || 'CASH', req.user?.id || null,
+           totalGrand, req.params.groupId]
+        );
+      } catch (stampErr) {
+        console.warn(`[group-checkout] failed to stamp group ${req.params.groupId} settle metadata:`, stampErr);
+      }
+
+      // One notification per group, not per child (avoids spamming
+      // staff/owner with N near-identical pings).
+      try {
+        await triggerNotification(req.params.id, 'PAYMENT_RECEIVED', {
+          groupId: req.params.groupId,
+          numSettled: settledResults.length,
+          totalAmount: totalGrand,
+          paymentMethod: payment_method || 'CASH',
+        });
+      } catch { /* non-fatal */ }
+
+      res.json({
+        success: true,
+        group_id: req.params.groupId,
+        invoice_number: groupInvNum,
+        settled_at: now,
+        payment_method: payment_method || 'CASH',
+        total_grand_total: Math.round(totalGrand * 100) / 100,
+        settled: settledResults,
+        skipped,
+      });
+    } catch (err: any) {
+      console.error('group checkout error:', err);
+      res.status(500).json({ error: 'Failed to check out group' });
+    }
+  });
+
   // List groups (room_booking_groups + booking count per group).
   app.get("/api/restaurant/:id/hotel/booking-groups", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
@@ -19401,8 +19558,17 @@ async function startServer() {
       let aggGrand = 0;
       const aggEntries: any[] = [];
       for (const b of bookings) {
+        // P2-B-FIX (B2): exclude CREDIT_NOTE rows. The original query
+        // picked the latest folio per booking — if a credit note had
+        // been issued AFTER the original folio (e.g. a partial refund),
+        // it would silently get aggregated, double-charging or zeroing
+        // the group total. Folios with a NULL doc_type are the original
+        // INVOICE folios; credit notes carry doc_type='CREDIT_NOTE'.
         const folio: any = await tenantDb.get(
-          "SELECT * FROM folios WHERE booking_id = ? ORDER BY created_at DESC LIMIT 1",
+          `SELECT * FROM folios
+            WHERE booking_id = ?
+              AND (doc_type IS NULL OR doc_type = 'INVOICE')
+          ORDER BY created_at DESC LIMIT 1`,
           [b.id]
         );
         if (folio) {
@@ -19432,8 +19598,25 @@ async function startServer() {
       }
       const first = bookings[0];
       const hotel = checkRes.restaurant;
-      const settledAt = new Date().toISOString();
-      const invNum = `INV-GRP-${new Date(settledAt).getFullYear()}-${String(req.params.groupId).slice(-6).toUpperCase()}`;
+      // P2-B-FIX (B3): if the group has been formally settled (via the
+      // new /booking-groups/:groupId/checkout endpoint OR a prior
+      // download stamped one), reuse the persisted invoice_number +
+      // settled_at so every reprint shows the SAME audit-stable number.
+      // For groups that haven't been settled yet, persist a freshly-
+      // generated number NOW so the next download is consistent too.
+      let invNum: string = group?.invoice_number || '';
+      let settledAt: string = group?.settled_at
+        ? new Date(group.settled_at).toISOString()
+        : new Date().toISOString();
+      if (!invNum) {
+        invNum = `INV-GRP-${new Date(settledAt).getFullYear()}-${String(req.params.groupId).slice(-6).toUpperCase()}`;
+        try {
+          await tenantDb.run(
+            "UPDATE room_booking_groups SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?",
+            [invNum, req.params.groupId]
+          );
+        } catch { /* non-fatal — PDF still renders with this number */ }
+      }
 
       // R-3 — group invoices don't have a single folio; we don't surface
       // IRN on the consolidated PDF (a group has N child folios, each
@@ -24608,7 +24791,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'room-lock-edit-plus-file-input-style',
+    commit_marker: 'p2b-fix-group-settle-plus-persisted-invoice-num',
     code_features: [
       'subscription-billing',
       'read-only-mode',
