@@ -87,7 +87,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // to any non-owner with an ancient unmarked allowedTabs list — which is
 // the exact bug the founder flagged on 7 Jun 2026 ("STAFF_ACCESS should
 // only be visible to Business owner. this is critical.").
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -6587,6 +6587,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'ROSTER' | 'TIMESHEET'                      // shift roster + planned-vs-actual (Phase 3)
     | 'ROOMS' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE'  // hospitality Phase 2 & 3
+    | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
   >('MONITOR');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
@@ -10298,13 +10299,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             visible: isHotelEnabled && (!bothEnabled || dashboardMode === 'HOTEL'),
             tabs: [
               ...operationalSummary,
-              { id: 'ROOMS',            label: 'Rooms' },
-              { id: 'HOTEL_BOOKINGS',   label: 'Hotel Bookings' },
-              { id: 'SERVICES',         label: 'Services' },
-              { id: 'SERVICE_REQUESTS', label: 'Service Requests' },
-              { id: 'FOLIOS',           label: 'Folios' },
-              { id: 'COMPLIANCE',       label: 'Compliance' },
-              { id: 'CONCIERGE_FAQ',    label: 'Concierge FAQ' },
+              { id: 'ROOMS',                label: 'Rooms' },
+              { id: 'HOTEL_BOOKINGS',       label: 'Hotel Bookings' },
+              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Office Reports' },
+              { id: 'SERVICES',             label: 'Services' },
+              { id: 'SERVICE_REQUESTS',     label: 'Service Requests' },
+              { id: 'FOLIOS',               label: 'Folios' },
+              { id: 'COMPLIANCE',           label: 'Compliance' },
+              { id: 'CONCIERGE_FAQ',        label: 'Concierge FAQ' },
             ],
           },
           // GENERAL lane is now everything cross-cutting that ISN'T a
@@ -16020,236 +16022,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
           {hotelError && <div className="px-4 py-3 rounded-xl bg-[#fdf0f0] border border-[#c13b3b]/20 text-[#c13b3b] text-sm">{hotelError}</div>}
 
-          {/* ════════════════════════════════════════════════════════════
-              FRONT OFFICE REPORTS (client request 7 Jun 2026)
-              Four classic hotel-ops reports: Arrival, Departure, Room
-              Status, Night Audit. Date range pickers + per-report
-              download buttons. Reports stream JSON from the server and
-              get converted to CSV client-side via downloadCsv().
-              Collapsed by default so the bookings list stays the
-              primary content.
-              ════════════════════════════════════════════════════════════ */}
-          {(() => {
-            const fmtINR = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
-            const downloadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit') => {
-              setFoLoading(kind);
-              try {
-                let url = '';
-                if (kind === 'arrivals' || kind === 'departures') {
-                  url = `/reports/${kind}?from=${foDateFrom}&to=${foDateTo}`;
-                } else if (kind === 'room-status') {
-                  url = `/reports/room-status?as_of=${foDateTo}`;
-                } else {
-                  url = `/reports/night-audit?date=${foDateTo}`;
-                }
-                const data: any = await hotelApi(url);
-                const stamp = (foDateFrom === foDateTo) ? foDateTo : `${foDateFrom}_to_${foDateTo}`;
-                if (kind === 'arrivals') {
-                  const rows = (data.rows || []).map((r: any) => [
-                    r.id || '', r.check_in_date?.toString().slice(0,10) || '',
-                    r.guest_name || '', r.guest_phone || '', r.guest_email || '',
-                    r.guest_nationality || '', r.room_name || '', r.room_number || '',
-                    r.room_category || r.room_type || '', r.num_guests ?? '',
-                    r.extra_adults ?? 0, r.meal_plan_snapshot || r.meal_plan_id || '',
-                    fmtINR(r.room_rate), fmtINR(r.total_amount),
-                    r.status || '', r.booking_source || '',
-                    (r.special_requests || '').replace(/\s+/g, ' ').slice(0, 200),
-                  ]);
-                  downloadCsv(
-                    `arrival-report-${stamp}.csv`,
-                    ['Booking ID', 'Check-in', 'Guest Name', 'Phone', 'Email', 'Nationality',
-                     'Room', 'Room #', 'Category', 'Guests', 'Extra Adults', 'Meal Plan',
-                     'Rate/Night', 'Total', 'Status', 'Source', 'Special Requests'],
-                    rows
-                  );
-                } else if (kind === 'departures') {
-                  const rows = (data.rows || []).map((r: any) => [
-                    r.id || '', r.check_in_date?.toString().slice(0,10) || '',
-                    r.check_out_date?.toString().slice(0,10) || '',
-                    r.guest_name || '', r.guest_phone || '',
-                    r.room_name || '', r.room_number || '', r.room_category || '',
-                    r.num_guests ?? '', r.meal_plan_snapshot || '',
-                    fmtINR(r.room_rate), fmtINR(r.total_amount),
-                    fmtINR(r.folio_total), r.folio_status || '—',
-                    r.status || '', r.booking_source || '',
-                  ]);
-                  downloadCsv(
-                    `departure-report-${stamp}.csv`,
-                    ['Booking ID', 'Check-in', 'Check-out', 'Guest Name', 'Phone',
-                     'Room', 'Room #', 'Category', 'Guests', 'Meal Plan',
-                     'Rate/Night', 'Booking Total', 'Folio Total', 'Folio Status',
-                     'Status', 'Source'],
-                    rows
-                  );
-                } else if (kind === 'room-status') {
-                  const rows = (data.rows || []).map((r: any) => [
-                    r.room_number || '', r.name || '', r.floor ?? '',
-                    r.room_category || r.room_type || '',
-                    r.capacity ?? '', fmtINR(r.base_rate),
-                    r.status || '', r.smoking_preference || 'NON_SMOKING',
-                    r.occupied_by || '', r.booking_id || '',
-                    r.occupied_check_in?.toString().slice(0,10) || '',
-                    r.occupied_check_out?.toString().slice(0,10) || '',
-                    r.hold_reason || '', r.notes || '',
-                  ]);
-                  downloadCsv(
-                    `room-status-report-${data.as_of || foDateTo}.csv`,
-                    ['Room #', 'Name', 'Floor', 'Category', 'Capacity', 'Base Rate',
-                     'Status', 'Smoking', 'Occupied By', 'Booking ID',
-                     'Check-in', 'Check-out', 'Hold Reason', 'Notes'],
-                    rows
-                  );
-                } else {
-                  // Night Audit — 4 sheets in 1 CSV (summary + arrivals + departures + in-house)
-                  const s = data.summary || {};
-                  const rows: any[][] = [
-                    ['── SUMMARY ──'],
-                    ['As Of',                    data.as_of || foDateTo],
-                    ['Total Rooms',              s.total_rooms ?? 0],
-                    ['Occupied Tonight',         s.occupied_tonight ?? 0],
-                    ['Occupancy %',              `${s.occupancy_pct ?? 0}%`],
-                    ['Arrivals',                 s.arrivals_count ?? 0],
-                    ['Departures',               s.departures_count ?? 0],
-                    ['Room Revenue Tonight',     fmtINR(s.room_revenue_tonight)],
-                    ['ADR (Avg Daily Rate)',     fmtINR(s.adr)],
-                    ['RevPAR',                   fmtINR(s.revpar)],
-                    ['Settled Revenue Today',    fmtINR(s.settled_revenue_today)],
-                    [''],
-                    ['── ARRIVALS ──'],
-                    ['Booking ID', 'Guest', 'Phone', 'Room', 'Room #', 'Guests', 'Rate', 'Total', 'Status'],
-                  ];
-                  for (const a of (data.arrivals || [])) {
-                    rows.push([a.id, a.guest_name, a.guest_phone, a.room_name, a.room_number, a.num_guests, fmtINR(a.room_rate), fmtINR(a.total_amount), a.status]);
-                  }
-                  rows.push(['']);
-                  rows.push(['── DEPARTURES ──']);
-                  rows.push(['Booking ID', 'Guest', 'Phone', 'Room', 'Room #', 'Booking Total', 'Folio Total', 'Folio Status']);
-                  for (const d of (data.departures || [])) {
-                    rows.push([d.id, d.guest_name, d.guest_phone, d.room_name, d.room_number, fmtINR(d.total_amount), fmtINR(d.folio_total), d.folio_status || '—']);
-                  }
-                  rows.push(['']);
-                  rows.push(['── IN-HOUSE ──']);
-                  rows.push(['Booking ID', 'Guest', 'Phone', 'Room', 'Room #', 'Check-in', 'Check-out', 'Guests', 'Rate']);
-                  for (const i of (data.in_house || [])) {
-                    rows.push([i.id, i.guest_name, i.guest_phone, i.room_name, i.room_number,
-                               i.check_in_date?.toString().slice(0,10),
-                               i.check_out_date?.toString().slice(0,10),
-                               i.num_guests, fmtINR(i.room_rate)]);
-                  }
-                  downloadCsv(`night-audit-${data.as_of || foDateTo}.csv`, [''], rows);
-                }
-              } catch (err: any) {
-                alert('Report failed: ' + (err?.message || 'unknown error'));
-              } finally {
-                setFoLoading(null);
-              }
-            };
-            return (
-              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setFoReportsOpen(o => !o)}
-                  className="w-full flex items-center justify-between px-5 py-3 hover:bg-[#faf7f2] transition-colors"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-base font-bold font-serif text-[#1a1208]">📊 Front Office Reports</span>
-                    <span className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] bg-[#cc5a16]/10 px-2 py-0.5 rounded-full">CSV</span>
-                  </div>
-                  <span className="text-xs text-[#6b5d52] font-bold">{foReportsOpen ? '− Hide' : '+ Show'}</span>
-                </button>
-                {foReportsOpen && (
-                  <div className="px-5 py-4 border-t border-[#cc5a16]/10 space-y-4">
-                    <div className="flex items-end gap-3 flex-wrap">
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From</label>
-                        <input type="date" value={foDateFrom} onChange={e => setFoDateFrom(e.target.value)}
-                          className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">To</label>
-                        <input type="date" value={foDateTo} onChange={e => setFoDateTo(e.target.value)}
-                          className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
-                        />
-                      </div>
-                      <div className="flex items-center gap-1 text-[10px] text-[#9c8e85] ml-auto">
-                        {(['today', 'yesterday', 'this-week', 'this-month'] as const).map(preset => (
-                          <button
-                            key={preset}
-                            type="button"
-                            onClick={() => {
-                              const now = new Date();
-                              const iso = (d: Date) => d.toISOString().slice(0, 10);
-                              if (preset === 'today') { setFoDateFrom(iso(now)); setFoDateTo(iso(now)); }
-                              else if (preset === 'yesterday') { const y = new Date(now.getTime() - 86400000); setFoDateFrom(iso(y)); setFoDateTo(iso(y)); }
-                              else if (preset === 'this-week') { const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7)); setFoDateFrom(iso(monday)); setFoDateTo(iso(now)); }
-                              else if (preset === 'this-month') { setFoDateFrom(iso(new Date(now.getFullYear(), now.getMonth(), 1))); setFoDateTo(iso(now)); }
-                            }}
-                            className="px-2 py-1 rounded-md bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]"
-                          >{preset.replace('-', ' ')}</button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <button
-                        type="button" disabled={foLoading === 'arrivals'}
-                        onClick={() => downloadReport('arrivals')}
-                        className="text-left p-4 rounded-2xl bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 transition-colors disabled:opacity-50"
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-sm font-bold text-emerald-900">Arrival Report</span>
-                          {foLoading === 'arrivals' ? <span className="text-[10px] text-emerald-700">Loading…</span> : <Download size={14} className="text-emerald-700" />}
-                        </div>
-                        <p className="text-[11px] text-emerald-800 leading-snug">Every check-in scheduled between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Excludes cancellations.</p>
-                      </button>
-
-                      <button
-                        type="button" disabled={foLoading === 'departures'}
-                        onClick={() => downloadReport('departures')}
-                        className="text-left p-4 rounded-2xl bg-amber-50 border border-amber-200 hover:bg-amber-100 transition-colors disabled:opacity-50"
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-sm font-bold text-amber-900">Departure Report</span>
-                          {foLoading === 'departures' ? <span className="text-[10px] text-amber-700">Loading…</span> : <Download size={14} className="text-amber-700" />}
-                        </div>
-                        <p className="text-[11px] text-amber-800 leading-snug">Every check-out scheduled between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Includes folio status for receivables tracking.</p>
-                      </button>
-
-                      <button
-                        type="button" disabled={foLoading === 'room-status'}
-                        onClick={() => downloadReport('room-status')}
-                        className="text-left p-4 rounded-2xl bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50"
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-sm font-bold text-blue-900">Room Status Report</span>
-                          {foLoading === 'room-status' ? <span className="text-[10px] text-blue-700">Loading…</span> : <Download size={14} className="text-blue-700" />}
-                        </div>
-                        <p className="text-[11px] text-blue-800 leading-snug">Snapshot of every room as of <strong>{foDateTo}</strong> — status, occupant, current booking, hold reason.</p>
-                      </button>
-
-                      <button
-                        type="button" disabled={foLoading === 'night-audit'}
-                        onClick={() => downloadReport('night-audit')}
-                        className="text-left p-4 rounded-2xl bg-violet-50 border border-violet-200 hover:bg-violet-100 transition-colors disabled:opacity-50"
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-sm font-bold text-violet-900">Night Audit Report</span>
-                          {foLoading === 'night-audit' ? <span className="text-[10px] text-violet-700">Loading…</span> : <Download size={14} className="text-violet-700" />}
-                        </div>
-                        <p className="text-[11px] text-violet-800 leading-snug">End-of-day rollup for <strong>{foDateTo}</strong> — occupancy %, ADR, RevPAR, arrivals/departures/in-house, settled revenue.</p>
-                      </button>
-                    </div>
-
-                    <p className="text-[10px] text-[#9c8e85] italic">
-                      Reports stream live data, then download as CSV. Open them in Excel / Google Sheets / Tally — they import cleanly with one click.
-                    </p>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
           {/* Sprint A1 — Availability Calendar view */}
           {bookingsView === 'CALENDAR' && (
             <AvailabilityCalendar
@@ -16900,6 +16672,213 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
           </>)}{/* /bookingsView === 'LIST' */}
         </div>
+      ) : activeTab === 'FRONT_OFFICE_REPORTS' && isHotelEnabled ? (
+        /* ════════════════ FRONT OFFICE REPORTS (top-level tab) ════════════════
+           Four classic hotel-ops reports: Arrival / Departure / Room Status /
+           Night Audit. Dedicated tab (vs the old collapsible-on-bookings) so
+           front-desk staff find it immediately — the previous placement was
+           buried inside Hotel Bookings and required a "+ Show" click. */
+        <div className="space-y-5">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">📊 Front Office Reports</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">
+                Arrival, Departure, Room Status, and Night Audit reports — for any date range. Each downloads as CSV ready for Excel / Tally.
+              </p>
+            </div>
+          </div>
+          {(() => {
+            const fmtINR = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
+            const downloadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit') => {
+              setFoLoading(kind);
+              try {
+                let url = '';
+                if (kind === 'arrivals' || kind === 'departures') {
+                  url = `/reports/${kind}?from=${foDateFrom}&to=${foDateTo}`;
+                } else if (kind === 'room-status') {
+                  url = `/reports/room-status?as_of=${foDateTo}`;
+                } else {
+                  url = `/reports/night-audit?date=${foDateTo}`;
+                }
+                const data: any = await hotelApi(url);
+                const stamp = (foDateFrom === foDateTo) ? foDateTo : `${foDateFrom}_to_${foDateTo}`;
+                if (kind === 'arrivals') {
+                  const rows = (data.rows || []).map((r: any) => [
+                    r.id || '', r.check_in_date?.toString().slice(0,10) || '',
+                    r.guest_name || '', r.guest_phone || '', r.guest_email || '',
+                    r.guest_nationality || '', r.room_name || '', r.room_number || '',
+                    r.room_category || r.room_type || '', r.num_guests ?? '',
+                    r.extra_adults ?? 0, r.meal_plan_snapshot || r.meal_plan_id || '',
+                    fmtINR(r.room_rate), fmtINR(r.total_amount),
+                    r.status || '', r.booking_source || '',
+                    (r.special_requests || '').replace(/\s+/g, ' ').slice(0, 200),
+                  ]);
+                  downloadCsv(`arrival-report-${stamp}.csv`,
+                    ['Booking ID','Check-in','Guest Name','Phone','Email','Nationality','Room','Room #','Category','Guests','Extra Adults','Meal Plan','Rate/Night','Total','Status','Source','Special Requests'],
+                    rows);
+                } else if (kind === 'departures') {
+                  const rows = (data.rows || []).map((r: any) => [
+                    r.id || '', r.check_in_date?.toString().slice(0,10) || '',
+                    r.check_out_date?.toString().slice(0,10) || '',
+                    r.guest_name || '', r.guest_phone || '',
+                    r.room_name || '', r.room_number || '', r.room_category || '',
+                    r.num_guests ?? '', r.meal_plan_snapshot || '',
+                    fmtINR(r.room_rate), fmtINR(r.total_amount),
+                    fmtINR(r.folio_total), r.folio_status || '—',
+                    r.status || '', r.booking_source || '',
+                  ]);
+                  downloadCsv(`departure-report-${stamp}.csv`,
+                    ['Booking ID','Check-in','Check-out','Guest Name','Phone','Room','Room #','Category','Guests','Meal Plan','Rate/Night','Booking Total','Folio Total','Folio Status','Status','Source'],
+                    rows);
+                } else if (kind === 'room-status') {
+                  const rows = (data.rows || []).map((r: any) => [
+                    r.room_number || '', r.name || '', r.floor ?? '',
+                    r.room_category || r.room_type || '',
+                    r.capacity ?? '', fmtINR(r.base_rate),
+                    r.status || '', r.smoking_preference || 'NON_SMOKING',
+                    r.occupied_by || '', r.booking_id || '',
+                    r.occupied_check_in?.toString().slice(0,10) || '',
+                    r.occupied_check_out?.toString().slice(0,10) || '',
+                    r.hold_reason || '', r.notes || '',
+                  ]);
+                  downloadCsv(`room-status-report-${data.as_of || foDateTo}.csv`,
+                    ['Room #','Name','Floor','Category','Capacity','Base Rate','Status','Smoking','Occupied By','Booking ID','Check-in','Check-out','Hold Reason','Notes'],
+                    rows);
+                } else {
+                  const s = data.summary || {};
+                  const rows: any[][] = [
+                    ['── SUMMARY ──'],
+                    ['As Of',                 data.as_of || foDateTo],
+                    ['Total Rooms',           s.total_rooms ?? 0],
+                    ['Occupied Tonight',      s.occupied_tonight ?? 0],
+                    ['Occupancy %',           `${s.occupancy_pct ?? 0}%`],
+                    ['Arrivals',              s.arrivals_count ?? 0],
+                    ['Departures',            s.departures_count ?? 0],
+                    ['Room Revenue Tonight',  fmtINR(s.room_revenue_tonight)],
+                    ['ADR (Avg Daily Rate)',  fmtINR(s.adr)],
+                    ['RevPAR',                fmtINR(s.revpar)],
+                    ['Settled Revenue Today', fmtINR(s.settled_revenue_today)],
+                    [''],
+                    ['── ARRIVALS ──'],
+                    ['Booking ID','Guest','Phone','Room','Room #','Guests','Rate','Total','Status'],
+                  ];
+                  for (const a of (data.arrivals || [])) {
+                    rows.push([a.id, a.guest_name, a.guest_phone, a.room_name, a.room_number, a.num_guests, fmtINR(a.room_rate), fmtINR(a.total_amount), a.status]);
+                  }
+                  rows.push(['']);
+                  rows.push(['── DEPARTURES ──']);
+                  rows.push(['Booking ID','Guest','Phone','Room','Room #','Booking Total','Folio Total','Folio Status']);
+                  for (const d of (data.departures || [])) {
+                    rows.push([d.id, d.guest_name, d.guest_phone, d.room_name, d.room_number, fmtINR(d.total_amount), fmtINR(d.folio_total), d.folio_status || '—']);
+                  }
+                  rows.push(['']);
+                  rows.push(['── IN-HOUSE ──']);
+                  rows.push(['Booking ID','Guest','Phone','Room','Room #','Check-in','Check-out','Guests','Rate']);
+                  for (const i of (data.in_house || [])) {
+                    rows.push([i.id, i.guest_name, i.guest_phone, i.room_name, i.room_number,
+                               i.check_in_date?.toString().slice(0,10),
+                               i.check_out_date?.toString().slice(0,10),
+                               i.num_guests, fmtINR(i.room_rate)]);
+                  }
+                  downloadCsv(`night-audit-${data.as_of || foDateTo}.csv`, [''], rows);
+                }
+              } catch (err: any) {
+                alert('Report failed: ' + (err?.message || 'unknown error'));
+              } finally {
+                setFoLoading(null);
+              }
+            };
+            return (
+              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 space-y-5">
+                <div className="flex items-end gap-3 flex-wrap">
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From</label>
+                    <input type="date" value={foDateFrom} onChange={e => setFoDateFrom(e.target.value)}
+                      className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">To</label>
+                    <input type="date" value={foDateTo} onChange={e => setFoDateTo(e.target.value)}
+                      className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1 text-[10px] text-[#9c8e85] ml-auto">
+                    {(['today', 'yesterday', 'this-week', 'this-month'] as const).map(preset => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => {
+                          const now = new Date();
+                          const iso = (d: Date) => d.toISOString().slice(0, 10);
+                          if (preset === 'today') { setFoDateFrom(iso(now)); setFoDateTo(iso(now)); }
+                          else if (preset === 'yesterday') { const y = new Date(now.getTime() - 86400000); setFoDateFrom(iso(y)); setFoDateTo(iso(y)); }
+                          else if (preset === 'this-week') { const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7)); setFoDateFrom(iso(monday)); setFoDateTo(iso(now)); }
+                          else if (preset === 'this-month') { setFoDateFrom(iso(new Date(now.getFullYear(), now.getMonth(), 1))); setFoDateTo(iso(now)); }
+                        }}
+                        className="px-2 py-1 rounded-md bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]"
+                      >{preset.replace('-', ' ')}</button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <button
+                    type="button" disabled={foLoading === 'arrivals'}
+                    onClick={() => downloadReport('arrivals')}
+                    className="text-left p-5 rounded-2xl bg-emerald-50 border-2 border-emerald-200 hover:border-emerald-400 hover:bg-emerald-100 transition-all disabled:opacity-50"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-base font-bold text-emerald-900">Arrival Report</span>
+                      {foLoading === 'arrivals' ? <span className="text-xs text-emerald-700">Loading…</span> : <Download size={18} className="text-emerald-700" />}
+                    </div>
+                    <p className="text-xs text-emerald-800 leading-snug">Every check-in scheduled between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Includes guest contact, room, meal plan, rate. Excludes cancellations.</p>
+                  </button>
+
+                  <button
+                    type="button" disabled={foLoading === 'departures'}
+                    onClick={() => downloadReport('departures')}
+                    className="text-left p-5 rounded-2xl bg-amber-50 border-2 border-amber-200 hover:border-amber-400 hover:bg-amber-100 transition-all disabled:opacity-50"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-base font-bold text-amber-900">Departure Report</span>
+                      {foLoading === 'departures' ? <span className="text-xs text-amber-700">Loading…</span> : <Download size={18} className="text-amber-700" />}
+                    </div>
+                    <p className="text-xs text-amber-800 leading-snug">Every check-out scheduled between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Includes folio total + status for receivables tracking.</p>
+                  </button>
+
+                  <button
+                    type="button" disabled={foLoading === 'room-status'}
+                    onClick={() => downloadReport('room-status')}
+                    className="text-left p-5 rounded-2xl bg-blue-50 border-2 border-blue-200 hover:border-blue-400 hover:bg-blue-100 transition-all disabled:opacity-50"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-base font-bold text-blue-900">Room Status Report</span>
+                      {foLoading === 'room-status' ? <span className="text-xs text-blue-700">Loading…</span> : <Download size={18} className="text-blue-700" />}
+                    </div>
+                    <p className="text-xs text-blue-800 leading-snug">Snapshot of every room as of <strong>{foDateTo}</strong> — status, occupant, current booking, hold reason. Uses the "To" date.</p>
+                  </button>
+
+                  <button
+                    type="button" disabled={foLoading === 'night-audit'}
+                    onClick={() => downloadReport('night-audit')}
+                    className="text-left p-5 rounded-2xl bg-violet-50 border-2 border-violet-200 hover:border-violet-400 hover:bg-violet-100 transition-all disabled:opacity-50"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-base font-bold text-violet-900">Night Audit Report</span>
+                      {foLoading === 'night-audit' ? <span className="text-xs text-violet-700">Loading…</span> : <Download size={18} className="text-violet-700" />}
+                    </div>
+                    <p className="text-xs text-violet-800 leading-snug">End-of-day rollup for <strong>{foDateTo}</strong> — occupancy %, ADR, RevPAR, arrivals / departures / in-house, settled revenue. Multi-sheet CSV.</p>
+                  </button>
+                </div>
+
+                <p className="text-[11px] text-[#9c8e85] italic text-center">
+                  Reports stream live data, then download as CSV. Open them in Excel, Google Sheets, or Tally — they import cleanly with one click.
+                </p>
+              </div>
+            );
+          })()}
+        </div>
       ) : activeTab === 'FOLIOS' && isHotelEnabled ? (
         /* ════════════════ FOLIOS ════════════════ */
         <div className="space-y-5">
@@ -17171,6 +17150,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FOLIOS',            label: 'Folios / Hotel Bills',    description: 'View / settle folios, add F&B charges, apply promos, credit notes.', hotelOnly: true },
               { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
+              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Office Reports', description: 'Arrival / Departure / Room Status / Night Audit reports for any date range. CSV download.', hotelOnly: true },
             ];
             const visibleTabs = PERMISSIBLE_TABS.filter(t => !t.hotelOnly || isHotelEnabled);
 
