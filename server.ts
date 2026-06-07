@@ -17569,7 +17569,7 @@ async function startServer() {
       // Exclude CANCELLED — they didn't actually arrive.
       const rows = await tenantDb.query(
         `SELECT b.id, b.guest_name, b.guest_phone, b.guest_email, b.guest_nationality,
-                b.check_in_date, b.check_out_date, b.actual_check_in_at, b.num_guests,
+                b.check_in_date, b.check_out_date, b.actual_checkin_at, b.num_guests,
                 b.status, b.booking_source, b.special_requests, b.meal_plan_id,
                 b.meal_plan_snapshot, b.extra_adults, b.room_rate, b.total_amount,
                 r.name AS room_name, r.room_number, r.type AS room_type,
@@ -17579,7 +17579,7 @@ async function startServer() {
            LEFT JOIN room_types rt ON rt.id = r.type_id
           WHERE b.check_in_date BETWEEN ? AND ?
             AND b.status <> 'CANCELLED'
-          ORDER BY b.check_in_date ASC, b.actual_check_in_at ASC NULLS LAST, b.guest_name ASC`,
+          ORDER BY b.check_in_date ASC, b.actual_checkin_at ASC NULLS LAST, b.guest_name ASC`,
         [from, to]
       );
       res.json({ from, to, count: rows.length, rows });
@@ -17600,7 +17600,7 @@ async function startServer() {
       // Exclude CANCELLED. Folio total surfaces for receivables tracking.
       const rows = await tenantDb.query(
         `SELECT b.id, b.guest_name, b.guest_phone, b.guest_email,
-                b.check_in_date, b.check_out_date, b.actual_check_out_at,
+                b.check_in_date, b.check_out_date, b.actual_checkout_at,
                 b.status, b.num_guests, b.room_rate, b.total_amount,
                 b.meal_plan_snapshot, b.booking_source,
                 r.name AS room_name, r.room_number, rt.name AS room_category,
@@ -25949,7 +25949,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'front-office-reports-top-level-tab',
+    commit_marker: 'reports-onscreen-table-plus-column-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',

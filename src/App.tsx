@@ -6938,6 +6938,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [foDateFrom, setFoDateFrom] = useState<string>(_today);
   const [foDateTo,   setFoDateTo]   = useState<string>(_today);
   const [foLoading,  setFoLoading]  = useState<string | null>(null);   // which report is loading right now
+  // REPORT-TABLE (client request 7 Jun 2026): hold the most-recently
+  // loaded report so we can render it as an on-screen table inline.
+  // Clicking a different report card replaces the data; CSV export
+  // operates on the currently-loaded data.
+  const [foActiveReport, setFoActiveReport] = useState<{
+    kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit';
+    data: any;
+    loadedAt: number;
+  } | null>(null);
   // Phase 2 & 3 state
   const [hotelBookings, setHotelBookings] = useState<any[]>([]);
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
@@ -16689,7 +16698,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
           {(() => {
             const fmtINR = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
-            const downloadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit') => {
+            // REPORT-TABLE (client request 7 Jun 2026): clicking a report
+            // card now FETCHES + DISPLAYS the data inline as a table.
+            // Separate "Download CSV" button on the table header lets the
+            // user export the same data without re-clicking the card.
+            const loadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit') => {
               setFoLoading(kind);
               try {
                 let url = '';
@@ -16701,9 +16714,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   url = `/reports/night-audit?date=${foDateTo}`;
                 }
                 const data: any = await hotelApi(url);
-                const stamp = (foDateFrom === foDateTo) ? foDateTo : `${foDateFrom}_to_${foDateTo}`;
-                if (kind === 'arrivals') {
-                  const rows = (data.rows || []).map((r: any) => [
+                setFoActiveReport({ kind, data, loadedAt: Date.now() });
+              } catch (err: any) {
+                alert('Report failed: ' + (err?.message || 'unknown error'));
+              } finally {
+                setFoLoading(null);
+              }
+            };
+
+            const exportActiveReportCsv = () => {
+              if (!foActiveReport) return;
+              const { kind, data } = foActiveReport;
+              const stamp = (foDateFrom === foDateTo) ? foDateTo : `${foDateFrom}_to_${foDateTo}`;
+              if (kind === 'arrivals') {
+                downloadCsv(`arrival-report-${stamp}.csv`,
+                  ['Booking ID','Check-in','Guest Name','Phone','Email','Nationality','Room','Room #','Category','Guests','Extra Adults','Meal Plan','Rate/Night','Total','Status','Source','Special Requests'],
+                  (data.rows || []).map((r: any) => [
                     r.id || '', r.check_in_date?.toString().slice(0,10) || '',
                     r.guest_name || '', r.guest_phone || '', r.guest_email || '',
                     r.guest_nationality || '', r.room_name || '', r.room_number || '',
@@ -16712,12 +16738,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     fmtINR(r.room_rate), fmtINR(r.total_amount),
                     r.status || '', r.booking_source || '',
                     (r.special_requests || '').replace(/\s+/g, ' ').slice(0, 200),
-                  ]);
-                  downloadCsv(`arrival-report-${stamp}.csv`,
-                    ['Booking ID','Check-in','Guest Name','Phone','Email','Nationality','Room','Room #','Category','Guests','Extra Adults','Meal Plan','Rate/Night','Total','Status','Source','Special Requests'],
-                    rows);
-                } else if (kind === 'departures') {
-                  const rows = (data.rows || []).map((r: any) => [
+                  ]));
+              } else if (kind === 'departures') {
+                downloadCsv(`departure-report-${stamp}.csv`,
+                  ['Booking ID','Check-in','Check-out','Guest Name','Phone','Room','Room #','Category','Guests','Meal Plan','Rate/Night','Booking Total','Folio Total','Folio Status','Status','Source'],
+                  (data.rows || []).map((r: any) => [
                     r.id || '', r.check_in_date?.toString().slice(0,10) || '',
                     r.check_out_date?.toString().slice(0,10) || '',
                     r.guest_name || '', r.guest_phone || '',
@@ -16726,12 +16751,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     fmtINR(r.room_rate), fmtINR(r.total_amount),
                     fmtINR(r.folio_total), r.folio_status || '—',
                     r.status || '', r.booking_source || '',
-                  ]);
-                  downloadCsv(`departure-report-${stamp}.csv`,
-                    ['Booking ID','Check-in','Check-out','Guest Name','Phone','Room','Room #','Category','Guests','Meal Plan','Rate/Night','Booking Total','Folio Total','Folio Status','Status','Source'],
-                    rows);
-                } else if (kind === 'room-status') {
-                  const rows = (data.rows || []).map((r: any) => [
+                  ]));
+              } else if (kind === 'room-status') {
+                downloadCsv(`room-status-report-${data.as_of || foDateTo}.csv`,
+                  ['Room #','Name','Floor','Category','Capacity','Base Rate','Status','Smoking','Occupied By','Booking ID','Check-in','Check-out','Hold Reason','Notes'],
+                  (data.rows || []).map((r: any) => [
                     r.room_number || '', r.name || '', r.floor ?? '',
                     r.room_category || r.room_type || '',
                     r.capacity ?? '', fmtINR(r.base_rate),
@@ -16740,141 +16764,377 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     r.occupied_check_in?.toString().slice(0,10) || '',
                     r.occupied_check_out?.toString().slice(0,10) || '',
                     r.hold_reason || '', r.notes || '',
-                  ]);
-                  downloadCsv(`room-status-report-${data.as_of || foDateTo}.csv`,
-                    ['Room #','Name','Floor','Category','Capacity','Base Rate','Status','Smoking','Occupied By','Booking ID','Check-in','Check-out','Hold Reason','Notes'],
-                    rows);
-                } else {
-                  const s = data.summary || {};
-                  const rows: any[][] = [
-                    ['── SUMMARY ──'],
-                    ['As Of',                 data.as_of || foDateTo],
-                    ['Total Rooms',           s.total_rooms ?? 0],
-                    ['Occupied Tonight',      s.occupied_tonight ?? 0],
-                    ['Occupancy %',           `${s.occupancy_pct ?? 0}%`],
-                    ['Arrivals',              s.arrivals_count ?? 0],
-                    ['Departures',            s.departures_count ?? 0],
-                    ['Room Revenue Tonight',  fmtINR(s.room_revenue_tonight)],
-                    ['ADR (Avg Daily Rate)',  fmtINR(s.adr)],
-                    ['RevPAR',                fmtINR(s.revpar)],
-                    ['Settled Revenue Today', fmtINR(s.settled_revenue_today)],
-                    [''],
-                    ['── ARRIVALS ──'],
-                    ['Booking ID','Guest','Phone','Room','Room #','Guests','Rate','Total','Status'],
-                  ];
-                  for (const a of (data.arrivals || [])) {
-                    rows.push([a.id, a.guest_name, a.guest_phone, a.room_name, a.room_number, a.num_guests, fmtINR(a.room_rate), fmtINR(a.total_amount), a.status]);
-                  }
-                  rows.push(['']);
-                  rows.push(['── DEPARTURES ──']);
-                  rows.push(['Booking ID','Guest','Phone','Room','Room #','Booking Total','Folio Total','Folio Status']);
-                  for (const d of (data.departures || [])) {
-                    rows.push([d.id, d.guest_name, d.guest_phone, d.room_name, d.room_number, fmtINR(d.total_amount), fmtINR(d.folio_total), d.folio_status || '—']);
-                  }
-                  rows.push(['']);
-                  rows.push(['── IN-HOUSE ──']);
-                  rows.push(['Booking ID','Guest','Phone','Room','Room #','Check-in','Check-out','Guests','Rate']);
-                  for (const i of (data.in_house || [])) {
-                    rows.push([i.id, i.guest_name, i.guest_phone, i.room_name, i.room_number,
-                               i.check_in_date?.toString().slice(0,10),
-                               i.check_out_date?.toString().slice(0,10),
-                               i.num_guests, fmtINR(i.room_rate)]);
-                  }
-                  downloadCsv(`night-audit-${data.as_of || foDateTo}.csv`, [''], rows);
+                  ]));
+              } else {
+                const s = data.summary || {};
+                const rows: any[][] = [
+                  ['── SUMMARY ──'],
+                  ['As Of',                 data.as_of || foDateTo],
+                  ['Total Rooms',           s.total_rooms ?? 0],
+                  ['Occupied Tonight',      s.occupied_tonight ?? 0],
+                  ['Occupancy %',           `${s.occupancy_pct ?? 0}%`],
+                  ['Arrivals',              s.arrivals_count ?? 0],
+                  ['Departures',            s.departures_count ?? 0],
+                  ['Room Revenue Tonight',  fmtINR(s.room_revenue_tonight)],
+                  ['ADR (Avg Daily Rate)',  fmtINR(s.adr)],
+                  ['RevPAR',                fmtINR(s.revpar)],
+                  ['Settled Revenue Today', fmtINR(s.settled_revenue_today)],
+                  [''],
+                  ['── ARRIVALS ──'],
+                  ['Booking ID','Guest','Phone','Room','Room #','Guests','Rate','Total','Status'],
+                ];
+                for (const a of (data.arrivals || [])) {
+                  rows.push([a.id, a.guest_name, a.guest_phone, a.room_name, a.room_number, a.num_guests, fmtINR(a.room_rate), fmtINR(a.total_amount), a.status]);
                 }
-              } catch (err: any) {
-                alert('Report failed: ' + (err?.message || 'unknown error'));
-              } finally {
-                setFoLoading(null);
+                rows.push(['']);
+                rows.push(['── DEPARTURES ──']);
+                rows.push(['Booking ID','Guest','Phone','Room','Room #','Booking Total','Folio Total','Folio Status']);
+                for (const d of (data.departures || [])) {
+                  rows.push([d.id, d.guest_name, d.guest_phone, d.room_name, d.room_number, fmtINR(d.total_amount), fmtINR(d.folio_total), d.folio_status || '—']);
+                }
+                rows.push(['']);
+                rows.push(['── IN-HOUSE ──']);
+                rows.push(['Booking ID','Guest','Phone','Room','Room #','Check-in','Check-out','Guests','Rate']);
+                for (const i of (data.in_house || [])) {
+                  rows.push([i.id, i.guest_name, i.guest_phone, i.room_name, i.room_number,
+                             i.check_in_date?.toString().slice(0,10),
+                             i.check_out_date?.toString().slice(0,10),
+                             i.num_guests, fmtINR(i.room_rate)]);
+                }
+                downloadCsv(`night-audit-${data.as_of || foDateTo}.csv`, [''], rows);
               }
             };
-            return (
-              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 space-y-5">
-                <div className="flex items-end gap-3 flex-wrap">
-                  <div>
-                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From</label>
-                    <input type="date" value={foDateFrom} onChange={e => setFoDateFrom(e.target.value)}
-                      className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">To</label>
-                    <input type="date" value={foDateTo} onChange={e => setFoDateTo(e.target.value)}
-                      className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
-                    />
-                  </div>
-                  <div className="flex items-center gap-1 text-[10px] text-[#9c8e85] ml-auto">
-                    {(['today', 'yesterday', 'this-week', 'this-month'] as const).map(preset => (
+
+            // ─── Table renderer for the active report ───────────────
+            const renderActiveTable = () => {
+              if (!foActiveReport) return null;
+              const { kind, data } = foActiveReport;
+              const tone = kind === 'arrivals' ? 'emerald'
+                         : kind === 'departures' ? 'amber'
+                         : kind === 'room-status' ? 'blue'
+                         : 'violet';
+              const title = kind === 'arrivals' ? `Arrival Report · ${foDateFrom}${foDateFrom === foDateTo ? '' : ` → ${foDateTo}`}`
+                          : kind === 'departures' ? `Departure Report · ${foDateFrom}${foDateFrom === foDateTo ? '' : ` → ${foDateTo}`}`
+                          : kind === 'room-status' ? `Room Status as of ${data.as_of || foDateTo}`
+                          : `Night Audit · ${data.as_of || foDateTo}`;
+              const toneClasses: Record<string, { bg: string; head: string; text: string; border: string }> = {
+                emerald: { bg: 'bg-emerald-50',  head: 'bg-emerald-100', text: 'text-emerald-900', border: 'border-emerald-200' },
+                amber:   { bg: 'bg-amber-50',    head: 'bg-amber-100',   text: 'text-amber-900',   border: 'border-amber-200'   },
+                blue:    { bg: 'bg-blue-50',     head: 'bg-blue-100',    text: 'text-blue-900',    border: 'border-blue-200'    },
+                violet:  { bg: 'bg-violet-50',   head: 'bg-violet-100',  text: 'text-violet-900',  border: 'border-violet-200'  },
+              };
+              const t = toneClasses[tone];
+
+              // Rows for the three list-shaped reports
+              const listKinds: any = { arrivals: true, departures: true, 'room-status': true };
+              const rows: any[] = listKinds[kind] ? (data.rows || []) : [];
+              const count = listKinds[kind] ? rows.length : 0;
+
+              return (
+                <div className={cn("rounded-3xl border-2 overflow-hidden", t.border)}>
+                  <div className={cn("px-5 py-3 flex items-center justify-between gap-3 border-b", t.head, t.border)}>
+                    <div>
+                      <h3 className={cn("text-base font-bold font-serif", t.text)}>{title}</h3>
+                      {listKinds[kind] && (
+                        <p className={cn("text-[11px] mt-0.5", t.text)}>{count} record{count === 1 ? '' : 's'}</p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
                       <button
-                        key={preset}
                         type="button"
-                        onClick={() => {
-                          const now = new Date();
-                          const iso = (d: Date) => d.toISOString().slice(0, 10);
-                          if (preset === 'today') { setFoDateFrom(iso(now)); setFoDateTo(iso(now)); }
-                          else if (preset === 'yesterday') { const y = new Date(now.getTime() - 86400000); setFoDateFrom(iso(y)); setFoDateTo(iso(y)); }
-                          else if (preset === 'this-week') { const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7)); setFoDateFrom(iso(monday)); setFoDateTo(iso(now)); }
-                          else if (preset === 'this-month') { setFoDateFrom(iso(new Date(now.getFullYear(), now.getMonth(), 1))); setFoDateTo(iso(now)); }
-                        }}
-                        className="px-2 py-1 rounded-md bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]"
-                      >{preset.replace('-', ' ')}</button>
-                    ))}
+                        onClick={() => setFoActiveReport(null)}
+                        className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] hover:text-[#1a1208]"
+                      >Close</button>
+                      <button
+                        type="button"
+                        onClick={exportActiveReportCsv}
+                        className={cn("px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest flex items-center gap-1 text-white",
+                          tone === 'emerald' ? 'bg-emerald-600 hover:bg-emerald-700' :
+                          tone === 'amber'   ? 'bg-amber-600 hover:bg-amber-700' :
+                          tone === 'blue'    ? 'bg-blue-600 hover:bg-blue-700' :
+                          'bg-violet-600 hover:bg-violet-700')}
+                      >
+                        <Download size={12} /> Download CSV
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Night Audit — summary block + 3 sub-tables */}
+                  {kind === 'night-audit' && (
+                    <div className="p-5 space-y-5">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                        {([
+                          { label: 'Total Rooms',     value: data.summary?.total_rooms ?? 0 },
+                          { label: 'Occupied Tonight', value: data.summary?.occupied_tonight ?? 0 },
+                          { label: 'Occupancy %',    value: `${data.summary?.occupancy_pct ?? 0}%` },
+                          { label: 'Arrivals',       value: data.summary?.arrivals_count ?? 0 },
+                          { label: 'Departures',     value: data.summary?.departures_count ?? 0 },
+                          { label: 'Room Revenue',   value: fmtINR(data.summary?.room_revenue_tonight) },
+                          { label: 'ADR',            value: fmtINR(data.summary?.adr) },
+                          { label: 'RevPAR',         value: fmtINR(data.summary?.revpar) },
+                          { label: 'Settled Today',  value: fmtINR(data.summary?.settled_revenue_today) },
+                        ] as const).map(k => (
+                          <div key={k.label} className="bg-white rounded-2xl border border-violet-200 px-3 py-2.5">
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-violet-700">{k.label}</p>
+                            <p className="text-lg font-bold font-mono text-violet-900 mt-0.5">{k.value}</p>
+                          </div>
+                        ))}
+                      </div>
+                      {[
+                        { title: 'Arrivals',   rows: data.arrivals || [],   cols: ['Booking ID','Guest','Phone','Room','Room #','Guests','Rate','Total','Status'] },
+                        { title: 'Departures', rows: data.departures || [], cols: ['Booking ID','Guest','Phone','Room','Room #','Booking Total','Folio Total','Folio Status'] },
+                        { title: 'In-house',   rows: data.in_house || [],   cols: ['Booking ID','Guest','Phone','Room','Room #','Check-in','Check-out','Guests','Rate'] },
+                      ].map(sec => (
+                        <div key={sec.title} className="bg-white rounded-2xl border border-violet-200 overflow-hidden">
+                          <div className="bg-violet-100 px-4 py-2 flex items-center justify-between">
+                            <span className="text-[11px] font-bold uppercase tracking-widest text-violet-900">{sec.title}</span>
+                            <span className="text-[10px] text-violet-700">{sec.rows.length} row{sec.rows.length === 1 ? '' : 's'}</span>
+                          </div>
+                          {sec.rows.length === 0 ? (
+                            <p className="px-4 py-3 text-xs text-violet-700 italic">No {sec.title.toLowerCase()} on this date.</p>
+                          ) : (
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-xs">
+                                <thead className="bg-violet-50">
+                                  <tr>{sec.cols.map(c => <th key={c} className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-violet-800">{c}</th>)}</tr>
+                                </thead>
+                                <tbody>
+                                  {sec.rows.map((r: any, i: number) => (
+                                    <tr key={(r.id || i)} className={cn('border-t border-violet-100', i % 2 === 1 && 'bg-violet-50/40')}>
+                                      {sec.title === 'Arrivals' && (<>
+                                        <td className="px-3 py-1.5 font-mono text-[10px]">{r.id}</td>
+                                        <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
+                                        <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
+                                        <td className="px-3 py-1.5">{r.room_name}</td>
+                                        <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                        <td className="px-3 py-1.5 text-center">{r.num_guests}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.room_rate)}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono font-bold">{fmtINR(r.total_amount)}</td>
+                                        <td className="px-3 py-1.5">{r.status}</td>
+                                      </>)}
+                                      {sec.title === 'Departures' && (<>
+                                        <td className="px-3 py-1.5 font-mono text-[10px]">{r.id}</td>
+                                        <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
+                                        <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
+                                        <td className="px-3 py-1.5">{r.room_name}</td>
+                                        <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.total_amount)}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono font-bold">{fmtINR(r.folio_total)}</td>
+                                        <td className="px-3 py-1.5">{r.folio_status || '—'}</td>
+                                      </>)}
+                                      {sec.title === 'In-house' && (<>
+                                        <td className="px-3 py-1.5 font-mono text-[10px]">{r.id}</td>
+                                        <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
+                                        <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
+                                        <td className="px-3 py-1.5">{r.room_name}</td>
+                                        <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                        <td className="px-3 py-1.5 text-xs">{String(r.check_in_date || '').slice(0,10)}</td>
+                                        <td className="px-3 py-1.5 text-xs">{String(r.check_out_date || '').slice(0,10)}</td>
+                                        <td className="px-3 py-1.5 text-center">{r.num_guests}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.room_rate)}</td>
+                                      </>)}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* List-shaped reports (arrivals / departures / room-status) */}
+                  {listKinds[kind] && (
+                    count === 0 ? (
+                      <p className={cn("p-8 text-center text-sm italic", t.text)}>No records for the selected range.</p>
+                    ) : (
+                      <div className="overflow-x-auto bg-white">
+                        <table className="w-full text-xs">
+                          <thead className={cn(t.head, 'sticky top-0')}>
+                            {kind === 'arrivals' && (
+                              <tr>
+                                {['Booking ID','Check-in','Guest','Phone','Room','Room #','Category','Guests','Meal Plan','Rate','Total','Status','Source'].map(c =>
+                                  <th key={c} className={cn("text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest", t.text)}>{c}</th>
+                                )}
+                              </tr>
+                            )}
+                            {kind === 'departures' && (
+                              <tr>
+                                {['Booking ID','Check-in','Check-out','Guest','Phone','Room','Room #','Category','Guests','Booking Total','Folio Total','Folio Status'].map(c =>
+                                  <th key={c} className={cn("text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest", t.text)}>{c}</th>
+                                )}
+                              </tr>
+                            )}
+                            {kind === 'room-status' && (
+                              <tr>
+                                {['Room #','Name','Floor','Category','Capacity','Base Rate','Status','Smoking','Occupied By','Check-in','Check-out','Hold Reason'].map(c =>
+                                  <th key={c} className={cn("text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest", t.text)}>{c}</th>
+                                )}
+                              </tr>
+                            )}
+                          </thead>
+                          <tbody>
+                            {rows.map((r: any, i: number) => (
+                              <tr key={(r.id || r.room_id || i)} className={cn("border-t", t.border, i % 2 === 1 && t.bg)}>
+                                {kind === 'arrivals' && (<>
+                                  <td className="px-3 py-1.5 font-mono text-[10px]">{r.id}</td>
+                                  <td className="px-3 py-1.5 text-xs">{String(r.check_in_date || '').slice(0,10)}</td>
+                                  <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
+                                  <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
+                                  <td className="px-3 py-1.5">{r.room_name || '—'}</td>
+                                  <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                  <td className="px-3 py-1.5">{r.room_category || r.room_type || '—'}</td>
+                                  <td className="px-3 py-1.5 text-center">{r.num_guests}{r.extra_adults ? ` +${r.extra_adults}A` : ''}</td>
+                                  <td className="px-3 py-1.5">{r.meal_plan_snapshot || r.meal_plan_id || '—'}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.room_rate)}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono font-bold">{fmtINR(r.total_amount)}</td>
+                                  <td className="px-3 py-1.5">{r.status}</td>
+                                  <td className="px-3 py-1.5 text-[10px]">{r.booking_source || '—'}</td>
+                                </>)}
+                                {kind === 'departures' && (<>
+                                  <td className="px-3 py-1.5 font-mono text-[10px]">{r.id}</td>
+                                  <td className="px-3 py-1.5 text-xs">{String(r.check_in_date || '').slice(0,10)}</td>
+                                  <td className="px-3 py-1.5 text-xs">{String(r.check_out_date || '').slice(0,10)}</td>
+                                  <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
+                                  <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
+                                  <td className="px-3 py-1.5">{r.room_name || '—'}</td>
+                                  <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                  <td className="px-3 py-1.5">{r.room_category || '—'}</td>
+                                  <td className="px-3 py-1.5 text-center">{r.num_guests}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.total_amount)}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono font-bold">{fmtINR(r.folio_total)}</td>
+                                  <td className="px-3 py-1.5">{r.folio_status || '—'}</td>
+                                </>)}
+                                {kind === 'room-status' && (<>
+                                  <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                  <td className="px-3 py-1.5 font-semibold">{r.name}</td>
+                                  <td className="px-3 py-1.5">{r.floor ?? '—'}</td>
+                                  <td className="px-3 py-1.5">{r.room_category || r.room_type || '—'}</td>
+                                  <td className="px-3 py-1.5 text-center">{r.capacity}</td>
+                                  <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.base_rate)}</td>
+                                  <td className="px-3 py-1.5">{r.status}</td>
+                                  <td className="px-3 py-1.5 text-[10px]">{r.smoking_preference || 'NON_SMOKING'}</td>
+                                  <td className="px-3 py-1.5">{r.occupied_by || '—'}</td>
+                                  <td className="px-3 py-1.5 text-xs">{String(r.occupied_check_in || '').slice(0,10) || '—'}</td>
+                                  <td className="px-3 py-1.5 text-xs">{String(r.occupied_check_out || '').slice(0,10) || '—'}</td>
+                                  <td className="px-3 py-1.5 text-[10px] italic">{r.hold_reason || '—'}</td>
+                                </>)}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )
+                  )}
+                </div>
+              );
+            };
+
+            return (
+              <div className="space-y-5">
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 space-y-5">
+                  <div className="flex items-end gap-3 flex-wrap">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From</label>
+                      <input type="date" value={foDateFrom} onChange={e => setFoDateFrom(e.target.value)}
+                        className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">To</label>
+                      <input type="date" value={foDateTo} onChange={e => setFoDateTo(e.target.value)}
+                        className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1 text-[10px] text-[#9c8e85] ml-auto">
+                      {(['today', 'yesterday', 'this-week', 'this-month'] as const).map(preset => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => {
+                            const now = new Date();
+                            const iso = (d: Date) => d.toISOString().slice(0, 10);
+                            if (preset === 'today') { setFoDateFrom(iso(now)); setFoDateTo(iso(now)); }
+                            else if (preset === 'yesterday') { const y = new Date(now.getTime() - 86400000); setFoDateFrom(iso(y)); setFoDateTo(iso(y)); }
+                            else if (preset === 'this-week') { const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7)); setFoDateFrom(iso(monday)); setFoDateTo(iso(now)); }
+                            else if (preset === 'this-month') { setFoDateFrom(iso(new Date(now.getFullYear(), now.getMonth(), 1))); setFoDateTo(iso(now)); }
+                          }}
+                          className="px-2 py-1 rounded-md bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]"
+                        >{preset.replace('-', ' ')}</button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                    <button
+                      type="button" disabled={foLoading === 'arrivals'}
+                      onClick={() => loadReport('arrivals')}
+                      className={cn("text-left p-4 rounded-2xl border-2 transition-all disabled:opacity-50",
+                        foActiveReport?.kind === 'arrivals'
+                          ? "bg-emerald-100 border-emerald-500 shadow-md"
+                          : "bg-emerald-50 border-emerald-200 hover:border-emerald-400 hover:bg-emerald-100")}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-emerald-900">Arrival</span>
+                        {foLoading === 'arrivals' ? <span className="text-[10px] text-emerald-700">Loading…</span> : <Eye size={14} className="text-emerald-700" />}
+                      </div>
+                      <p className="text-[10px] text-emerald-800 leading-snug">Check-ins between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>.</p>
+                    </button>
+
+                    <button
+                      type="button" disabled={foLoading === 'departures'}
+                      onClick={() => loadReport('departures')}
+                      className={cn("text-left p-4 rounded-2xl border-2 transition-all disabled:opacity-50",
+                        foActiveReport?.kind === 'departures'
+                          ? "bg-amber-100 border-amber-500 shadow-md"
+                          : "bg-amber-50 border-amber-200 hover:border-amber-400 hover:bg-amber-100")}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-amber-900">Departure</span>
+                        {foLoading === 'departures' ? <span className="text-[10px] text-amber-700">Loading…</span> : <Eye size={14} className="text-amber-700" />}
+                      </div>
+                      <p className="text-[10px] text-amber-800 leading-snug">Check-outs between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Folio status included.</p>
+                    </button>
+
+                    <button
+                      type="button" disabled={foLoading === 'room-status'}
+                      onClick={() => loadReport('room-status')}
+                      className={cn("text-left p-4 rounded-2xl border-2 transition-all disabled:opacity-50",
+                        foActiveReport?.kind === 'room-status'
+                          ? "bg-blue-100 border-blue-500 shadow-md"
+                          : "bg-blue-50 border-blue-200 hover:border-blue-400 hover:bg-blue-100")}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-blue-900">Room Status</span>
+                        {foLoading === 'room-status' ? <span className="text-[10px] text-blue-700">Loading…</span> : <Eye size={14} className="text-blue-700" />}
+                      </div>
+                      <p className="text-[10px] text-blue-800 leading-snug">Snapshot as of <strong>{foDateTo}</strong>.</p>
+                    </button>
+
+                    <button
+                      type="button" disabled={foLoading === 'night-audit'}
+                      onClick={() => loadReport('night-audit')}
+                      className={cn("text-left p-4 rounded-2xl border-2 transition-all disabled:opacity-50",
+                        foActiveReport?.kind === 'night-audit'
+                          ? "bg-violet-100 border-violet-500 shadow-md"
+                          : "bg-violet-50 border-violet-200 hover:border-violet-400 hover:bg-violet-100")}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-violet-900">Night Audit</span>
+                        {foLoading === 'night-audit' ? <span className="text-[10px] text-violet-700">Loading…</span> : <Eye size={14} className="text-violet-700" />}
+                      </div>
+                      <p className="text-[10px] text-violet-800 leading-snug">End-of-day rollup for <strong>{foDateTo}</strong>. KPIs + 3 lists.</p>
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-[#9c8e85] italic text-center">
+                    Click any report to preview the data inline. Download CSV button appears in the table header once the report loads.
+                  </p>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <button
-                    type="button" disabled={foLoading === 'arrivals'}
-                    onClick={() => downloadReport('arrivals')}
-                    className="text-left p-5 rounded-2xl bg-emerald-50 border-2 border-emerald-200 hover:border-emerald-400 hover:bg-emerald-100 transition-all disabled:opacity-50"
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-base font-bold text-emerald-900">Arrival Report</span>
-                      {foLoading === 'arrivals' ? <span className="text-xs text-emerald-700">Loading…</span> : <Download size={18} className="text-emerald-700" />}
-                    </div>
-                    <p className="text-xs text-emerald-800 leading-snug">Every check-in scheduled between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Includes guest contact, room, meal plan, rate. Excludes cancellations.</p>
-                  </button>
-
-                  <button
-                    type="button" disabled={foLoading === 'departures'}
-                    onClick={() => downloadReport('departures')}
-                    className="text-left p-5 rounded-2xl bg-amber-50 border-2 border-amber-200 hover:border-amber-400 hover:bg-amber-100 transition-all disabled:opacity-50"
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-base font-bold text-amber-900">Departure Report</span>
-                      {foLoading === 'departures' ? <span className="text-xs text-amber-700">Loading…</span> : <Download size={18} className="text-amber-700" />}
-                    </div>
-                    <p className="text-xs text-amber-800 leading-snug">Every check-out scheduled between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Includes folio total + status for receivables tracking.</p>
-                  </button>
-
-                  <button
-                    type="button" disabled={foLoading === 'room-status'}
-                    onClick={() => downloadReport('room-status')}
-                    className="text-left p-5 rounded-2xl bg-blue-50 border-2 border-blue-200 hover:border-blue-400 hover:bg-blue-100 transition-all disabled:opacity-50"
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-base font-bold text-blue-900">Room Status Report</span>
-                      {foLoading === 'room-status' ? <span className="text-xs text-blue-700">Loading…</span> : <Download size={18} className="text-blue-700" />}
-                    </div>
-                    <p className="text-xs text-blue-800 leading-snug">Snapshot of every room as of <strong>{foDateTo}</strong> — status, occupant, current booking, hold reason. Uses the "To" date.</p>
-                  </button>
-
-                  <button
-                    type="button" disabled={foLoading === 'night-audit'}
-                    onClick={() => downloadReport('night-audit')}
-                    className="text-left p-5 rounded-2xl bg-violet-50 border-2 border-violet-200 hover:border-violet-400 hover:bg-violet-100 transition-all disabled:opacity-50"
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-base font-bold text-violet-900">Night Audit Report</span>
-                      {foLoading === 'night-audit' ? <span className="text-xs text-violet-700">Loading…</span> : <Download size={18} className="text-violet-700" />}
-                    </div>
-                    <p className="text-xs text-violet-800 leading-snug">End-of-day rollup for <strong>{foDateTo}</strong> — occupancy %, ADR, RevPAR, arrivals / departures / in-house, settled revenue. Multi-sheet CSV.</p>
-                  </button>
-                </div>
-
-                <p className="text-[11px] text-[#9c8e85] italic text-center">
-                  Reports stream live data, then download as CSV. Open them in Excel, Google Sheets, or Tally — they import cleanly with one click.
-                </p>
+                {/* Inline table render — appears below the cards once a report is loaded */}
+                {renderActiveTable()}
               </div>
             );
           })()}
