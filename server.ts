@@ -640,6 +640,111 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_rate_overrides_lookup ON rate_overrides (scope, scope_id, start_date, end_date);
 
+    -- ════════════════════════════════════════════════════════════════════
+    -- BCG Tariff Phase 1 (7 Jun 2026) — Room × Season × Meal Plan matrix
+    -- ════════════════════════════════════════════════════════════════════
+    -- The existing rate_overrides table covers Room/Type × Date-range,
+    -- but Indian mid-market hotels also price along TWO more dimensions:
+    --   • Season (named, often with multiple discontinuous date ranges)
+    --   • Meal plan (EP/CP/MAP/API)
+    -- Plus extra-person charges that follow the same dimensional shape.
+    --
+    -- Strategy (zero-regression): these new tables are PURELY ADDITIVE.
+    -- A per-tenant restaurants.tariff_model flag ('LEGACY' default vs
+    -- 'MATRIX' opt-in) gates which path the rate resolver follows.
+    -- Existing tenants stay byte-identical until an owner deliberately
+    -- switches. See docs/HOTEL_TARIFF_MODEL_GAPS.md for the full BCG memo.
+
+    -- Named pricing periods (Peak / Off / Shoulder / Festival).
+    -- One season can span multiple discontinuous date ranges via
+    -- season_periods. Owners create N seasons; each gets a colour for
+    -- the Availability Calendar tinting later in Phase 2.
+    CREATE TABLE IF NOT EXISTS seasons (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,                     -- 'Peak', 'Off', 'Shoulder'
+      description   TEXT,
+      color         TEXT,                              -- hex for UI hint
+      display_order INT DEFAULT 0,
+      is_active     INT DEFAULT 1,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- One row per date range that belongs to a season. The client sheet's
+    -- "Peak = 15 Apr–30 Jun + 20 Dec–05 Jan" is 2 rows here, same season_id.
+    CREATE TABLE IF NOT EXISTS season_periods (
+      id         TEXT PRIMARY KEY,
+      season_id  TEXT NOT NULL,                        -- → seasons.id
+      start_date DATE NOT NULL,
+      end_date   DATE NOT NULL,
+      label      TEXT,                                 -- 'Summer leg', 'Christmas leg'
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_season_periods_lookup ON season_periods (start_date, end_date);
+    CREATE INDEX IF NOT EXISTS idx_season_periods_season ON season_periods (season_id);
+
+    -- Meal plans. Seeded with the four Indian-hospitality standards
+    -- (EP/CP/MAP/API) on first MATRIX-mode use; tenants can add custom
+    -- plans (e.g. 'CP+Tea' for tea-resort properties).
+    CREATE TABLE IF NOT EXISTS meal_plans (
+      id                  TEXT PRIMARY KEY,
+      code                TEXT NOT NULL,               -- 'EP' / 'CP' / 'MAP' / 'AP'
+      name                TEXT NOT NULL,               -- 'European Plan'
+      description         TEXT,
+      includes_breakfast  INT DEFAULT 0,
+      includes_lunch      INT DEFAULT 0,
+      includes_dinner     INT DEFAULT 0,
+      display_order       INT DEFAULT 0,
+      is_active           INT DEFAULT 1,
+      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- The big matrix — one row per (room_type, season, meal_plan).
+    -- Optional room_id_override beats the type-level rate for one
+    -- specific physical room (e.g. a suite in the Superior category).
+    -- Unique constraint enforces "exactly one rate per triple".
+    CREATE TABLE IF NOT EXISTS room_tariffs (
+      id               TEXT PRIMARY KEY,
+      room_type_id     TEXT NOT NULL,                  -- → room_types.id
+      season_id        TEXT NOT NULL,                  -- → seasons.id
+      meal_plan_id     TEXT NOT NULL,                  -- → meal_plans.id
+      rate             DOUBLE PRECISION NOT NULL,
+      room_id_override TEXT,                            -- → rooms.id (NULL = applies to whole type)
+      created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_room_tariffs_unique
+      ON room_tariffs (room_type_id, season_id, meal_plan_id, COALESCE(room_id_override, ''));
+    CREATE INDEX IF NOT EXISTS idx_room_tariffs_lookup
+      ON room_tariffs (room_type_id, season_id, meal_plan_id);
+
+    -- Extra person charges — same dimensional shape as room_tariffs.
+    -- person_type drives the category (Adult / Child w/ mattress / Child w/o).
+    -- age_min/age_max are optional bounds (e.g. CHILD_WITH_MATTRESS 5-12 yrs).
+    CREATE TABLE IF NOT EXISTS extra_person_charges (
+      id           TEXT PRIMARY KEY,
+      person_type  TEXT NOT NULL,                      -- 'ADULT' | 'CHILD_WITH_MATTRESS' | 'CHILD_NO_MATTRESS'
+      season_id    TEXT NOT NULL,                      -- → seasons.id
+      meal_plan_id TEXT NOT NULL,                      -- → meal_plans.id
+      age_min      INT,
+      age_max      INT,
+      charge       DOUBLE PRECISION NOT NULL,
+      created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_extra_person_charges_unique
+      ON extra_person_charges (person_type, season_id, meal_plan_id);
+
+    -- Booking-side fields the new model needs. NULL on legacy bookings —
+    -- the rate resolver falls back to LEGACY (rate_overrides + base_rate)
+    -- whenever meal_plan_id is null, so existing flows keep working.
+    -- Snapshot the meal-plan label alongside the rate snapshot so
+    -- historical bookings reprint correctly even if the owner later
+    -- renames or removes the plan (mirrors currency_snapshot pattern).
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS meal_plan_id TEXT;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS meal_plan_snapshot TEXT;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS extra_adults INT DEFAULT 0;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS extra_children_with_mattress INT DEFAULT 0;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS extra_children_no_mattress INT DEFAULT 0;
+
     -- Phase H3 / Sprint B1 — Room holds.
     -- Non-booking unavailability records: maintenance windows, owner stays,
     -- OTA inventory holds, deep cleaning, etc. Behave the same way as a
@@ -801,6 +906,44 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_room_sessions_token   ON room_sessions(session_token);
     CREATE INDEX IF NOT EXISTS idx_folio_entries_folio   ON folio_entries(folio_id);
   `);
+
+  // BCG Tariff Phase 1 (7 Jun 2026) — seed the four Indian-hospitality
+  // standard meal plans + an empty Peak/Off season skeleton. Owner fills
+  // in the actual date ranges + matrix rates via Settings → Tariff
+  // Configuration (Phase 2 UI). The seed is idempotent (ON CONFLICT
+  // DO NOTHING) so every tenant init re-runs it safely.
+  //
+  // Why seed for ALL hotel tenants — not just MATRIX-mode ones?
+  //   Because the moment an owner flips tariff_model from 'LEGACY' to
+  //   'MATRIX' the UI expects the meal-plan list to be non-empty. Pre-
+  //   seeding avoids a "create your first meal plan" empty-state that
+  //   would otherwise gate the migration. Disable any plan you don't
+  //   sell by clearing the is_active flag in Settings; no rate paths
+  //   are touched.
+  for (const mp of [
+    { id: 'EP',  code: 'EP',  name: 'European Plan',          br: 0, l: 0, d: 0, order: 1 },
+    { id: 'CP',  code: 'CP',  name: 'Continental Plan',       br: 1, l: 0, d: 0, order: 2 },
+    { id: 'MAP', code: 'MAP', name: 'Modified American Plan', br: 1, l: 0, d: 1, order: 3 },
+    { id: 'API', code: 'AP',  name: 'American Plan',          br: 1, l: 1, d: 1, order: 4 },
+  ]) {
+    await tenantDb.run(
+      `INSERT INTO meal_plans (id, code, name, includes_breakfast, includes_lunch, includes_dinner, display_order, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT (id) DO NOTHING`,
+      [mp.id, mp.code, mp.name, mp.br, mp.l, mp.d, mp.order]
+    ).catch(() => { /* swallow — table may not exist on the very first init pass through the exec block */ });
+  }
+  for (const s of [
+    { id: 'PEAK', name: 'Peak', description: 'High-demand months — holidays, festivals, weekends', color: '#c13b3b', order: 1 },
+    { id: 'OFF',  name: 'Off',  description: 'Standard rate for the rest of the year',             color: '#6b5d52', order: 2 },
+  ]) {
+    await tenantDb.run(
+      `INSERT INTO seasons (id, name, description, color, display_order, is_active)
+       VALUES (?, ?, ?, ?, ?, 1)
+       ON CONFLICT (id) DO NOTHING`,
+      [s.id, s.name, s.description, s.color, s.order]
+    ).catch(() => { /* swallow */ });
+  }
 }
 
 // Default service catalogue seeded when a tenant enables the hotel module
@@ -24951,7 +25094,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'booking-modal-widths-bumped',
+    commit_marker: 'tariff-matrix-schema-phase-1',
     code_features: [
       'subscription-billing',
       'read-only-mode',

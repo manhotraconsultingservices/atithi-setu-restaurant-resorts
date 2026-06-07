@@ -200,6 +200,19 @@ export async function initDb() {
     -- byte-identical PDF output unless they deliberately switch.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS invoice_template TEXT DEFAULT 'CLASSIC';
 
+    -- BCG Tariff Phase 1 (7 Jun 2026) — Tariff-model selector. 'LEGACY'
+    -- = the existing rate_overrides + base_rate resolution path (every
+    -- tenant currently in production). 'MATRIX' = the new Room ×
+    -- Season × Meal Plan tables (seasons, season_periods, meal_plans,
+    -- room_tariffs, extra_person_charges). The rate resolver branches
+    -- per-tenant on this flag. See docs/HOTEL_TARIFF_MODEL_GAPS.md.
+    --
+    -- Default 'LEGACY' so existing tenants are byte-identical until
+    -- they deliberately switch via Settings → Tariff Configuration
+    -- (Phase 2). The new client (27-room boutique resort) flips to
+    -- MATRIX at onboarding.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS tariff_model TEXT DEFAULT 'LEGACY';
+
     -- L-2 (BCG follow-up) — Min-margin guard. When > 0, the order POST
     -- and /invoices/manual POST handlers compute the line-level COGS via
     -- the existing recipes + ingredients.unit_cost data and reject the
