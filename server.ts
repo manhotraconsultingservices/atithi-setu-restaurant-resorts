@@ -24577,7 +24577,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'pdf-pagination-plus-iddoc-pdf-upload-fix',
+    commit_marker: 'chk-2-fix-doc-upload-auto-refresh-wizard-count',
     code_features: [
       'subscription-billing',
       'read-only-mode',

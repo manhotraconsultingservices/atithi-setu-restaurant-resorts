@@ -24479,7 +24479,14 @@ const GuestDocumentsWidget: React.FC<{
    *  invokes this with the document row instead of opening file_url in a
    *  new tab. Lets the parent host a lightbox / iframe preview. */
   onPreview?: (doc: any) => void;
-}> = ({ bookingId, bookingStatus, restaurantId, token, onPreview }) => {
+  /** CHK-2-FIX (Book Room → Check-In disabled after upload): fires after
+   *  every successful upload or delete so the parent (CheckInWizardModal,
+   *  CheckInChecklistModal, etc.) can re-fetch its own document count.
+   *  Without this, the parent's gating booleans (canCheckIn) stay stale
+   *  and the Check-In button remains disabled even though the doc is in
+   *  the DB and visible inside the widget. */
+  onChange?: () => void;
+}> = ({ bookingId, bookingStatus, restaurantId, token, onPreview, onChange }) => {
   const [docs, setDocs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -24524,6 +24531,7 @@ const GuestDocumentsWidget: React.FC<{
       setDraftLabel('');
       if (fileRef.current) fileRef.current.value = '';
       await reload();
+      onChange?.();   // CHK-2-FIX: notify parent so it re-fetches its doc count
     } catch (err: any) {
       setError(err?.message || 'Upload failed');
     } finally {
@@ -24542,6 +24550,7 @@ const GuestDocumentsWidget: React.FC<{
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || 'Delete failed');
       await reload();
+      onChange?.();   // CHK-2-FIX: notify parent so it re-fetches its doc count
     } catch (err: any) {
       setError(err?.message || 'Delete failed');
     }
@@ -25004,6 +25013,12 @@ const CheckInWizardModal: React.FC<{
                 restaurantId={restaurantId}
                 token={token}
                 onPreview={onPreview}
+                /* CHK-2-FIX: auto-refresh docCount on every successful upload/delete.
+                 * Previously this only fired when staff manually clicked the
+                 * "Refresh document count" button below — so after uploading
+                 * an ID the Check-In button stayed disabled and staff thought
+                 * it was broken. */
+                onChange={() => setRefreshNonce(n => n + 1)}
               />
               <button
                 type="button"
@@ -25176,6 +25191,10 @@ const CheckInChecklistModal: React.FC<{
                 restaurantId={restaurantId}
                 token={token}
                 onPreview={onPreview}
+                /* CHK-2-FIX: auto-bump the checklist's own count after every
+                 * upload/delete, so the manual "Refresh checklist after upload"
+                 * button is now a fallback rather than a required action. */
+                onChange={() => setRefreshNonce(n => n + 1)}
               />
               {/* A tiny ping so the parent re-fetches its own count. */}
               <button
