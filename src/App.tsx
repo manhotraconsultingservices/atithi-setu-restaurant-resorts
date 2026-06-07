@@ -6640,6 +6640,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     room_id: string;
     room_rate: number;
     saving: boolean;
+    // WALK-IN-FIX (client report 7 Jun 2026 "walk-in workflow not working"):
+    // Task #56 (Req 1b) added a server-side block: check-in is rejected with
+    // HTTP 400 if no guest_documents row exists for the booking AND the
+    // tenant has require_id_at_checkin=1 (the default). The walk-in fast
+    // path skipped doc upload entirely → guaranteed failure every time.
+    // The agent's first instinct ("just bypass requireId for WALKIN")
+    // would break Form-C / DPDP compliance, so instead we capture the ID
+    // doc INSIDE the walk-in modal and upload it before the check-in
+    // call. Optional only if the tenant has turned require_id_at_checkin
+    // off; otherwise the submit button stays disabled.
+    id_doc: File | null;
+    id_doc_type: string;   // PASSPORT | AADHAAR | DRIVING_LICENSE | VOTER_ID | OTHER
   } | null>(null);
   const openWalkInModal = () => {
     // Auto-pick the first VACANT, non-blocked room that has no
@@ -6667,6 +6679,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       room_id: pick?.id || '',
       room_rate: Number(pick?.base_rate || 0),
       saving: false,
+      id_doc: null,
+      id_doc_type: 'AADHAAR',
     });
   };
   const submitWalkIn = async () => {
@@ -6679,7 +6693,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       alert('Pick a room before submitting.');
       return;
     }
+    // WALK-IN-FIX (client report 7 Jun 2026): the server's check-in
+    // endpoint blocks with HTTP 400 if hotel_require_id_at_checkin=1
+    // (the default) and no guest_documents row exists. Catch this
+    // up-front so the receptionist sees the requirement BEFORE we
+    // create a stray booking that then can't be checked in.
+    const requireDocs = hotelSettings.require_id_at_checkin !== false;
+    if (requireDocs && !walkInDraft.id_doc) {
+      alert('ID proof is required to check this guest in. Please attach a photo or scan of their Aadhaar / Passport / Driving Licence to continue.');
+      return;
+    }
     setWalkInDraft({ ...walkInDraft, saving: true });
+    let createdBookingId: string | null = null;
     try {
       const today = new Date().toISOString().slice(0, 10);
       const co = new Date(Date.now() + walkInDraft.nights * 86400000).toISOString().slice(0, 10);
@@ -6698,15 +6723,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           room_rate: walkInDraft.room_rate || 0,
         }),
       });
-      // 2. Immediately check the guest in (force=true since today >= check_in)
+      createdBookingId = created.id;
+      // 2. Upload the ID proof BEFORE attempting check-in so the
+      // server-side Req-1b gate passes. Uses the same multipart endpoint
+      // the dedicated Documents widget uses, with a 'doc_type' tag so
+      // the row is searchable by ID kind later (Form-C reporting).
+      if (walkInDraft.id_doc) {
+        const fd = new FormData();
+        fd.append('file', walkInDraft.id_doc);
+        fd.append('doc_type', walkInDraft.id_doc_type || 'OTHER');
+        fd.append('label', 'Walk-in ID');
+        const upRes = await fetch(
+          `/api/restaurant/${restaurantId}/hotel/bookings/${created.id}/documents`,
+          { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd }
+        );
+        if (!upRes.ok) {
+          const errBody = await upRes.json().catch(() => ({}));
+          throw new Error(errBody.error || `ID document upload failed (HTTP ${upRes.status})`);
+        }
+      }
+      // 3. Immediately check the guest in (force=true since today >= check_in)
       await checkInBooking(created.id, false);
-      // 3. Close modal + refresh views
+      // 4. Close modal + refresh views
       setWalkInDraft(null);
       await fetchHotelBookings();
       markAvailabilityDirty();
       alert(`✓ Walk-in complete — ${walkInDraft.guest_name} checked into ${hotelRooms.find(r => r.id === walkInDraft.room_id)?.name}.`);
     } catch (err: any) {
-      alert(err?.message || 'Walk-in failed');
+      // WALK-IN-FIX: if the booking was created but a subsequent step
+      // (doc upload or check-in) failed, leave the booking in BOOKED
+      // status so the receptionist can recover via the Bookings list
+      // (upload doc via Documents button, then Check-in). Surface that
+      // recovery path in the error message rather than the bare server
+      // error, so staff don't think the whole walk-in vanished.
+      const tail = createdBookingId
+        ? `\n\nThe booking was created (${createdBookingId}). Open it from the Bookings list to upload the ID and complete check-in.`
+        : '';
+      alert((err?.message || 'Walk-in failed') + tail);
       setWalkInDraft(d => d ? { ...d, saving: false } : d);
     }
   };
@@ -19029,6 +19082,56 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <p className="text-[10px] text-[#9c8e85] mt-1">Leave 0 to auto-apply Rate Plan (season / weekend overrides).</p>
                 </div>
 
+                {/* WALK-IN-FIX (client report 7 Jun 2026): ID proof MUST be
+                    attached here because the server-side check-in endpoint
+                    rejects with HTTP 400 when no guest_documents row
+                    exists and hotel_require_id_at_checkin=1 (default).
+                    Previously walk-in had no doc field at all, so every
+                    walk-in failed immediately after the booking was
+                    created — leaving an orphan BOOKED row. Mandatory
+                    when the tenant has the requirement enabled. */}
+                {(() => {
+                  const requireDocs = hotelSettings.require_id_at_checkin !== false;
+                  return (
+                    <div className="space-y-2 p-3 bg-amber-50 border border-amber-200 rounded-2xl">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-[11px] font-bold uppercase tracking-widest text-amber-900">
+                          ID Proof {requireDocs && <span className="text-[#c13b3b]">*</span>}
+                        </label>
+                        <span className="text-[9px] font-bold uppercase tracking-widest text-amber-700">Form-C / DPDP</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <select
+                          value={draft.id_doc_type}
+                          onChange={e => setDraft({ id_doc_type: e.target.value })}
+                          className="bg-white border border-amber-200 rounded-xl px-2.5 py-2 text-xs focus:outline-none focus:ring-2 ring-amber-300/40"
+                        >
+                          <option value="AADHAAR">Aadhaar</option>
+                          <option value="PASSPORT">Passport</option>
+                          <option value="DRIVING_LICENSE">Driving Licence</option>
+                          <option value="VOTER_ID">Voter ID</option>
+                          <option value="OTHER">Other</option>
+                        </select>
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf"
+                          onChange={e => setDraft({ id_doc: e.target.files?.[0] || null })}
+                          className="text-xs file:mr-2 file:py-1.5 file:px-2.5 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-amber-100 file:text-amber-900 hover:file:bg-amber-200"
+                        />
+                      </div>
+                      {draft.id_doc ? (
+                        <p className="text-[10px] text-emerald-700 font-semibold truncate">✓ {draft.id_doc.name} ({Math.round(draft.id_doc.size / 1024)} KB)</p>
+                      ) : (
+                        <p className="text-[10px] text-amber-800 italic leading-snug">
+                          {requireDocs
+                            ? 'Required by your hotel settings — attach a photo or PDF scan to check this guest in.'
+                            : 'Optional — recommended for compliance even though your hotel has disabled the gate.'}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* Stay summary */}
                 <div className="bg-[#faf7f2] rounded-2xl p-3 text-[11px] text-[#6b5d52]">
                   <div className="flex justify-between"><span>Check-in</span><span className="text-[#1a1208] font-semibold">Today · {new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}</span></div>
@@ -19049,18 +19152,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   >
                     Cancel
                   </button>
-                  <button
-                    type="submit"
-                    disabled={draft.saving || !draft.guest_name.trim() || !draft.room_id}
-                    className={cn(
-                      "flex-1 px-4 py-2.5 rounded-2xl text-sm font-bold transition-all flex items-center justify-center gap-1",
-                      draft.guest_name.trim() && draft.room_id && !draft.saving
-                        ? "bg-emerald-600 text-white hover:bg-emerald-700"
-                        : "bg-emerald-300 text-white cursor-not-allowed"
-                    )}
-                  >
-                    {draft.saving ? 'Checking in…' : 'Book & Check-In Now'}
-                  </button>
+                  {(() => {
+                    const requireDocs = hotelSettings.require_id_at_checkin !== false;
+                    const docOk = !requireDocs || !!draft.id_doc;
+                    const canSubmit = !draft.saving && !!draft.guest_name.trim() && !!draft.room_id && docOk;
+                    return (
+                      <button
+                        type="submit"
+                        disabled={!canSubmit}
+                        title={!docOk ? 'Attach an ID proof above to enable check-in.' : undefined}
+                        className={cn(
+                          "flex-1 px-4 py-2.5 rounded-2xl text-sm font-bold transition-all flex items-center justify-center gap-1",
+                          canSubmit
+                            ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                            : "bg-emerald-300 text-white cursor-not-allowed"
+                        )}
+                      >
+                        {draft.saving ? 'Checking in…' : 'Book & Check-In Now'}
+                      </button>
+                    );
+                  })()}
                 </div>
               </form>
             </div>

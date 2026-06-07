@@ -17047,19 +17047,32 @@ async function startServer() {
       // Req 1b — surface ID-doc count alongside each booking so the
       // pre-check-in checklist UI can show "✓/✗ ID documents" without
       // an extra fetch per row.
+      //
+      // FILTER-FIX (client report 7 Jun 2026 "Failed to fetch bookings ...
+      // when staff use filter"): the SQL was built in TWO passes — an
+      // initial assembly here, then a REBUILD at the "Rebuild SQL with
+      // the search ranking columns prepended" comment further down. The
+      // rebuild correctly replaced the SELECT/WHERE skeleton but did NOT
+      // reset the `params` array. Any status filter pushed here was
+      // re-pushed by the post-rebuild block below, so once a staff
+      // member applied a status (or any) filter the param-array length
+      // exceeded the placeholder count and pg threw "bind message
+      // supplies N parameters but X is required". The outer catch then
+      // returned the generic "Failed to fetch bookings" error.
+      //
+      // Fix: do NOT push the status filter here. Let it be applied
+      // exclusively in the post-rebuild pass. The initial `sql` is just
+      // a scaffold that the rebuild always replaces; keeping the WHERE
+      // clause inline here was dead code that polluted the param array.
       let sql = `SELECT b.*, r.name AS room_name,
                         (SELECT COUNT(*)::int FROM guest_documents gd WHERE gd.booking_id = b.id) AS document_count
                  FROM room_bookings b
                  LEFT JOIN rooms r ON r.id = b.room_id
                  WHERE 1 = 1`;
       const params: any[] = [];
-      if (status) {
-        const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
-        if (statuses.length > 0) {
-          sql += ` AND b.status IN (${statuses.map(() => '?').join(',')})`;
-          params.push(...statuses);
-        }
-      }
+      // (status filter intentionally NOT applied here — see FILTER-FIX
+      //  comment above. The post-rebuild block at "if (status)" below
+      //  is the single source of truth.)
       // REQ 5 + FIX-1: free-text search across guest contact fields + ids.
       // Receptionists need to find a returning guest from a phone number
       // they're holding (call-in booking) or an email a guest mentions.
@@ -24938,7 +24951,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-boutique-template-phase-1',
+    commit_marker: 'hotel-walkin-doc-upload-plus-bookings-filter-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
