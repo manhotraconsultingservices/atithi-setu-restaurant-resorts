@@ -15968,6 +15968,37 @@ async function startServer() {
       const tenantDb = await getTenantDb(req.params.id);
       const existing: any = await tenantDb.get("SELECT * FROM rooms WHERE id = ?", [req.params.roomId]);
       if (!existing) return res.status(404).json({ error: "Room not found" });
+
+      // ROOM-LOCK (revenue-leak prevention, client report):
+      // Reject room edits when the room is currently OCCUPIED (guest in
+      // residence) or BLOCKED (held for maintenance/owner-stay/OTA hold).
+      // Without this guard, a staff member could change base_rate mid-stay
+      // and the guest would be charged at the new rate — a real
+      // revenue-leak vector (in either direction). To edit a locked room,
+      // staff must first free it via the status pills (which itself is
+      // a deliberate, audit-trail-worthy action).
+      //
+      // Status-only PATCHes are exempt — that's how staff transition the
+      // room out of the locked state in the first place. The exemption
+      // requires the body to contain ONLY `status` (no other fields).
+      //
+      // SUPER_ADMIN / CTO bypass the lock (platform-side corrections,
+      // e.g. typo fixes pushed by the platform team). OWNER does NOT
+      // bypass — owners should free the room intentionally rather than
+      // silently change a rate while a guest is in it.
+      const lockedStatuses = new Set(['OCCUPIED', 'BLOCKED']);
+      const isLocked = lockedStatuses.has(String(existing.status || '').toUpperCase());
+      const role = String(req.user?.role || '').toUpperCase();
+      const isPlatformOverride = role === 'SUPER_ADMIN' || role === 'CTO';
+      const bodyKeys = Object.keys(req.body || {});
+      const isStatusOnlyPatch = bodyKeys.length === 1 && bodyKeys[0] === 'status';
+      if (isLocked && !isPlatformOverride && !isStatusOnlyPatch) {
+        return res.status(409).json({
+          error: `This room is currently ${existing.status}. Editing room details (including price) is blocked while a room is OCCUPIED or BLOCKED. Free the room first by switching the status to VACANT (or another unblocked state), then make your changes.`,
+          code: 'ROOM_LOCKED',
+          room_status: existing.status,
+        });
+      }
       const sp = smoking_preference === undefined ? null
         : (['SMOKING', 'NON_SMOKING', 'ANY'].includes(smoking_preference) ? smoking_preference : null);
       // type_id explicit handling: null/'' clears, undefined preserves.
@@ -24577,7 +24608,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'chk-2-fix-doc-upload-auto-refresh-wizard-count',
+    commit_marker: 'room-lock-edit-plus-file-input-style',
     code_features: [
       'subscription-billing',
       'read-only-mode',

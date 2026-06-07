@@ -15093,7 +15093,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </div>
                       <div className="flex gap-2 pt-3 border-t border-[#cc5a16]/10">
                         <button onClick={() => setRoomQrPreview({ ...room, qrUrl })} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/10 flex items-center justify-center gap-1" title="View QR code"><QrCode size={14} /> QR</button>
-                        <button onClick={() => { setEditingRoom(room); setShowRoomModal(true); }} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#3d3128] text-xs font-bold hover:bg-[#cc5a16]/10">Edit</button>
+                        {/* ROOM-LOCK (revenue-leak prevention): Edit is disabled when the
+                            room is OCCUPIED (guest in residence) or BLOCKED (held). Staff
+                            could otherwise change base_rate mid-stay and silently affect
+                            what the guest is charged. Free the room to a non-locked
+                            status first (via the status pills above) to edit it. */}
+                        {(() => {
+                          const locked = room.status === 'OCCUPIED' || room.status === 'BLOCKED';
+                          return (
+                            <button
+                              onClick={() => { if (!locked) { setEditingRoom(room); setShowRoomModal(true); } }}
+                              disabled={locked}
+                              title={locked
+                                ? `Cannot edit — room is ${room.status}. Switch the status to VACANT first to make changes.`
+                                : 'Edit room details'}
+                              className={cn(
+                                "flex-1 px-3 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-all",
+                                locked
+                                  ? "bg-stone-100 text-stone-400 cursor-not-allowed"
+                                  : "bg-[#faf7f2] text-[#3d3128] hover:bg-[#cc5a16]/10"
+                              )}
+                            >
+                              {locked && <Lock size={12} />}
+                              Edit
+                            </button>
+                          );
+                        })()}
                         <button onClick={() => setBlockingRoom(room)} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#b8860b] text-xs font-bold hover:bg-[#b8860b]/10 flex items-center justify-center gap-1" title="Block dates"><CalendarClock size={14} /> Block</button>
                         <button onClick={() => deleteRoom(room.id)} className="px-3 py-2 rounded-xl bg-[#fdf0f0] text-[#c13b3b] text-xs font-bold hover:bg-[#c13b3b]/10" title="Delete"><Trash2 size={14} /></button>
                       </div>
@@ -24494,6 +24519,16 @@ const GuestDocumentsWidget: React.FC<{
   const [draftLabel, setDraftLabel] = useState('');
   const [draftType, setDraftType] = useState<string>('AADHAAR');
   const fileRef = useRef<HTMLInputElement | null>(null);
+  // FILE-INPUT-FIX (client report: "Choose file is showing in normal text"):
+  // The native <input type="file"> renders the browser-default ugly
+  // "Choose File [filename]" black-on-grey text that doesn't match the
+  // app's brand. Standard fix: visually hide the input and click-through
+  // a styled <label htmlFor=...>. We mirror the picked filename into
+  // local state so React re-renders cleanly when staff picks a file.
+  // useId() gives every widget instance a collision-free input id —
+  // safe even when multiple GuestDocumentsWidget mount on one page.
+  const fileInputId = React.useId();
+  const [pickedFileName, setPickedFileName] = useState<string>('');
 
   const isFinalized = bookingStatus === 'CHECKED_IN' || bookingStatus === 'CHECKED_OUT' || bookingStatus === 'CANCELLED';
 
@@ -24529,6 +24564,7 @@ const GuestDocumentsWidget: React.FC<{
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || `Upload failed (${res.status})`);
       setDraftLabel('');
+      setPickedFileName('');   // FILE-INPUT-FIX: clear the styled filename display
       if (fileRef.current) fileRef.current.value = '';
       await reload();
       onChange?.();   // CHK-2-FIX: notify parent so it re-fetches its doc count
@@ -24661,19 +24697,45 @@ const GuestDocumentsWidget: React.FC<{
             className="sm:col-span-2 bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-xs focus:ring-2 ring-[#cc5a16]/20 outline-none"
           />
         </div>
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf"
-          className="mt-2 text-xs"
-        />
+        {/* FILE-INPUT-FIX: native input is visually hidden (sr-only)
+            but kept in the DOM for accessibility + form semantics. The
+            <label> with htmlFor is clickable and rendered as a branded
+            button — clicking it forwards the click to the hidden input.
+            We mirror the chosen filename into pickedFileName so the
+            UI shows the user what they picked. */}
+        <div className="mt-2 flex items-center gap-2 flex-wrap">
+          <input
+            ref={fileRef}
+            id={fileInputId}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf"
+            className="sr-only"
+            onChange={e => setPickedFileName(e.target.files?.[0]?.name || '')}
+          />
+          <label
+            htmlFor={fileInputId}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/20 text-[#cc5a16] text-[11px] font-bold uppercase tracking-widest hover:bg-[#cc5a16]/10 cursor-pointer transition-all"
+          >
+            <Upload size={12} />
+            Choose file
+          </label>
+          <span
+            className={cn(
+              "text-xs truncate flex-1 min-w-0",
+              pickedFileName ? "text-[#1a1208] font-bold" : "text-[#9c8e85] italic"
+            )}
+            title={pickedFileName || 'No file chosen'}
+          >
+            {pickedFileName || 'No file chosen'}
+          </span>
+        </div>
         <p className="text-[10px] text-[#9c8e85] mt-1">JPG / PNG / WebP / HEIC / PDF · max 10 MB.</p>
         {error && <p className="text-[10px] text-[#c13b3b] mt-1 font-bold">{error}</p>}
         <button
           type="button"
           onClick={handleUpload}
-          disabled={uploading}
-          className="mt-2 px-4 py-1.5 rounded-xl bg-[#cc5a16] text-white text-[11px] font-bold hover:bg-[#a84612] disabled:opacity-50"
+          disabled={uploading || !pickedFileName}
+          className="mt-2 px-4 py-1.5 rounded-xl bg-[#cc5a16] text-white text-[11px] font-bold hover:bg-[#a84612] disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {uploading ? 'Uploading…' : 'Upload'}
         </button>
