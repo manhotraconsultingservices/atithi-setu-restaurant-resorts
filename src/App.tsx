@@ -6869,6 +6869,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [roomStatusFilter, setRoomStatusFilter] = useState<'ALL' | 'VACANT' | 'OCCUPIED' | 'CLEANING' | 'MAINTENANCE' | 'BLOCKED'>('ALL');
   const [roomSmokingFilter, setRoomSmokingFilter] = useState<'ALL' | 'SMOKING' | 'NON_SMOKING'>('ALL');
   const [roomSearch, setRoomSearch] = useState('');
+  // ROOM-VIEW-MODE (client request 7 Jun 2026): owner asked for a table
+  // view in addition to the existing grid cards. Grid stays default —
+  // visually richer per room — but a property with 27+ rooms (e.g. the
+  // BCG-onboarding boutique resort) scans faster as a table. Persisted
+  // to localStorage so the owner's preference survives reloads.
+  const [roomViewMode, setRoomViewMode] = useState<'GRID' | 'TABLE'>(() => {
+    try {
+      const saved = localStorage.getItem('atithi_room_view_mode');
+      return saved === 'TABLE' ? 'TABLE' : 'GRID';
+    } catch { return 'GRID'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('atithi_room_view_mode', roomViewMode); } catch {}
+  }, [roomViewMode]);
+
+  // FRONT-OFFICE-REPORTS (client request 7 Jun 2026): four classic
+  // front-office reports (Arrival / Departure / Room Status / Night
+  // Audit) for any given time interval. State lives at OwnerDashboard
+  // scope so the collapse + date range survives the user toggling
+  // between LIST / CALENDAR / DASHBOARD views without re-fetching.
+  const [foReportsOpen, setFoReportsOpen] = useState(false);
+  const _today = new Date().toISOString().slice(0, 10);
+  const [foDateFrom, setFoDateFrom] = useState<string>(_today);
+  const [foDateTo,   setFoDateTo]   = useState<string>(_today);
+  const [foLoading,  setFoLoading]  = useState<string | null>(null);   // which report is loading right now
   // Phase 2 & 3 state
   const [hotelBookings, setHotelBookings] = useState<any[]>([]);
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
@@ -15549,9 +15574,42 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </button>
                   ))}
                 </div>
+
+                {/* ROOM-VIEW-MODE — toggle between Grid (cards) and Table (rows).
+                    Grid is the default + visually richer per room; Table is the
+                    new compact view requested by the owner for properties with
+                    many rooms (27+). Preference persists per browser. */}
+                <div className="flex items-center gap-0.5 bg-[#faf7f2] rounded-xl p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setRoomViewMode('GRID')}
+                    title="Grid view — card layout, richer per room"
+                    className={cn(
+                      "px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all flex items-center gap-1",
+                      roomViewMode === 'GRID'
+                        ? "bg-white text-[#cc5a16] shadow-sm"
+                        : "text-[#6b5d52] hover:text-[#3d3128]"
+                    )}
+                  >
+                    <LayoutGrid size={12} /> Grid
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRoomViewMode('TABLE')}
+                    title="Table view — compact, scannable rows"
+                    className={cn(
+                      "px-2.5 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all flex items-center gap-1",
+                      roomViewMode === 'TABLE'
+                        ? "bg-white text-[#cc5a16] shadow-sm"
+                        : "text-[#6b5d52] hover:text-[#3d3128]"
+                    )}
+                  >
+                    <ListOrdered size={12} /> Table
+                  </button>
+                </div>
               </div>
 
-              {/* ── Filtered grid ────────────────────────────────────── */}
+              {/* ── Filtered grid / table ────────────────────────────── */}
               {filteredRooms.length === 0 ? (
                 <div className="bg-white rounded-[32px] border border-dashed border-[#cc5a16]/20 p-12 text-center">
                   <Filter className="mx-auto text-[#9c8e85] mb-3" size={32} />
@@ -15563,6 +15621,95 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     Reset filters
                   </button>
                 </div>
+              ) : roomViewMode === 'TABLE' ? (
+              /* ──────────── TABLE VIEW ──────────── */
+              <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-hidden shadow-sm">
+                <div className="flex items-center justify-between px-5 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                    {filteredRooms.length} room{filteredRooms.length === 1 ? '' : 's'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const typeName = (id?: string) => hotelRoomTypes.find((t: any) => t.id === id)?.name || '';
+                      downloadCsv(
+                        `rooms-${new Date().toISOString().slice(0, 10)}.csv`,
+                        ['Room', 'Number', 'Floor', 'Type', 'Category', 'Capacity', 'Base Rate (INR)', 'Status', 'Smoking', 'Amenities', 'Notes'],
+                        filteredRooms.map((r: any) => [
+                          r.name || '', r.room_number || '', r.floor ?? '',
+                          r.type || '', typeName(r.type_id),
+                          r.capacity ?? '', Number(r.base_rate || 0),
+                          r.status || '', r.smoking_preference || 'NON_SMOKING',
+                          r.amenities || '', r.notes || '',
+                        ])
+                      );
+                    }}
+                    className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] hover:underline flex items-center gap-1"
+                  >
+                    <Download size={12} /> Export CSV
+                  </button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                      <tr>
+                        <th className="text-left px-4 py-3">Room</th>
+                        <th className="text-left px-4 py-3">#</th>
+                        <th className="text-left px-4 py-3">Floor</th>
+                        <th className="text-left px-4 py-3">Type / Category</th>
+                        <th className="text-center px-4 py-3">Cap.</th>
+                        <th className="text-right px-4 py-3">Base Rate</th>
+                        <th className="text-center px-4 py-3">Status</th>
+                        <th className="text-center px-4 py-3">Smoking</th>
+                        <th className="text-right px-4 py-3">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRooms.map((room: any, idx: number) => {
+                        const statusColor: any = {
+                          VACANT:      { bg: 'bg-emerald-50', text: 'text-emerald-700' },
+                          OCCUPIED:    { bg: 'bg-amber-50',   text: 'text-amber-700'   },
+                          CLEANING:    { bg: 'bg-blue-50',    text: 'text-blue-700'    },
+                          MAINTENANCE: { bg: 'bg-rose-50',    text: 'text-rose-700'    },
+                          BLOCKED:     { bg: 'bg-slate-50',   text: 'text-slate-700'   },
+                        }[room.status] || { bg: 'bg-slate-50', text: 'text-slate-700' };
+                        const sp = room.smoking_preference || 'NON_SMOKING';
+                        const typeName = hotelRoomTypes.find((t: any) => t.id === room.type_id)?.name || room.type || 'STANDARD';
+                        const locked = room.status === 'OCCUPIED' || room.status === 'BLOCKED';
+                        return (
+                          <tr key={room.id} className={cn('border-t border-[#cc5a16]/10 hover:bg-[#faf7f2]/40', idx % 2 === 1 && 'bg-[#faf7f2]/20')}>
+                            <td className="px-4 py-2.5 font-bold text-[#1a1208]">{room.name}</td>
+                            <td className="px-4 py-2.5 font-mono text-xs text-[#3d3128]">{room.room_number || '—'}</td>
+                            <td className="px-4 py-2.5 text-xs text-[#3d3128]">{room.floor ?? '—'}</td>
+                            <td className="px-4 py-2.5 text-xs text-[#3d3128]">{typeName}</td>
+                            <td className="px-4 py-2.5 text-center text-xs text-[#3d3128]">{room.capacity || 2}</td>
+                            <td className="px-4 py-2.5 text-right font-mono text-xs text-[#1a1208]">₹{Number(room.base_rate || 0).toLocaleString('en-IN')}</td>
+                            <td className="px-4 py-2.5 text-center">
+                              <span className={cn("inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase", statusColor.bg, statusColor.text)}>
+                                {room.status}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2.5 text-center text-[10px] font-bold">
+                              {sp === 'SMOKING' ? '🚬 Smoking' : sp === 'ANY' ? 'Any' : '🚭 Non-Smk'}
+                            </td>
+                            <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                              <button onClick={() => setRoomQrPreview({ ...room, qrUrl: `${window.location.origin}/${room.qr_code_data || `?r=${restaurantId}&room=${room.id}`}` })} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 mr-1" title="QR code"><QrCode size={12} /></button>
+                              <button
+                                onClick={() => { if (!locked) { setEditingRoom(room); setShowRoomModal(true); } }}
+                                disabled={locked}
+                                title={locked ? `Cannot edit — room is ${room.status}` : 'Edit'}
+                                className={cn('px-2 py-1 rounded-lg text-[10px] font-bold mr-1', locked ? 'bg-stone-100 text-stone-400 cursor-not-allowed' : 'bg-[#faf7f2] text-[#3d3128] hover:bg-[#cc5a16]/10')}
+                              >Edit</button>
+                              <button onClick={() => setBlockingRoom(room)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#b8860b] text-[10px] font-bold hover:bg-[#b8860b]/10 mr-1" title="Block dates"><CalendarClock size={12} /></button>
+                              <button onClick={() => deleteRoom(room.id)} className="px-2 py-1 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[10px] font-bold hover:bg-[#c13b3b]/10" title="Delete"><Trash2 size={12} /></button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
               ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                 {filteredRooms.map((room: any) => {
@@ -15715,9 +15862,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Service Requests</h2>
               <p className="text-sm text-[#6b5d52] mt-1">Live guest requests across housekeeping, maintenance, concierge, and front desk.</p>
             </div>
-            <button onClick={() => fetchHotelRequests()} className="px-4 py-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold uppercase hover:bg-[#cc5a16]/5 flex items-center gap-2">
-              <RefreshCw size={13} /> Refresh
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={hotelRequests.length === 0}
+                onClick={() => downloadCsv(
+                  `service-requests-${new Date().toISOString().slice(0, 10)}.csv`,
+                  ['Request ID', 'Service', 'Category', 'Room', 'Guest', 'Priority',
+                   'Status', 'Assigned Role', 'Requested At', 'Notes'],
+                  hotelRequests.map((r: any) => [
+                    r.id || '', r.service_name || '', r.category || '',
+                    r.room_name || r.room_id || '', r.guest_name || '',
+                    r.priority || '', r.status || '', r.assigned_role || '',
+                    String(r.requested_at || '').slice(0, 19),
+                    (r.notes || '').replace(/\s+/g, ' ').slice(0, 200),
+                  ])
+                )}
+                className="px-3 py-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold uppercase hover:bg-[#cc5a16]/5 flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Download size={12} /> CSV
+              </button>
+              <button onClick={() => fetchHotelRequests()} className="px-4 py-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold uppercase hover:bg-[#cc5a16]/5 flex items-center gap-2">
+                <RefreshCw size={13} /> Refresh
+              </button>
+            </div>
           </div>
           {hotelRequests.length === 0 ? (
             <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 p-12 text-center">
@@ -15808,6 +15976,236 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
           {hotelError && <div className="px-4 py-3 rounded-xl bg-[#fdf0f0] border border-[#c13b3b]/20 text-[#c13b3b] text-sm">{hotelError}</div>}
+
+          {/* ════════════════════════════════════════════════════════════
+              FRONT OFFICE REPORTS (client request 7 Jun 2026)
+              Four classic hotel-ops reports: Arrival, Departure, Room
+              Status, Night Audit. Date range pickers + per-report
+              download buttons. Reports stream JSON from the server and
+              get converted to CSV client-side via downloadCsv().
+              Collapsed by default so the bookings list stays the
+              primary content.
+              ════════════════════════════════════════════════════════════ */}
+          {(() => {
+            const fmtINR = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
+            const downloadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit') => {
+              setFoLoading(kind);
+              try {
+                let url = '';
+                if (kind === 'arrivals' || kind === 'departures') {
+                  url = `/reports/${kind}?from=${foDateFrom}&to=${foDateTo}`;
+                } else if (kind === 'room-status') {
+                  url = `/reports/room-status?as_of=${foDateTo}`;
+                } else {
+                  url = `/reports/night-audit?date=${foDateTo}`;
+                }
+                const data: any = await hotelApi(url);
+                const stamp = (foDateFrom === foDateTo) ? foDateTo : `${foDateFrom}_to_${foDateTo}`;
+                if (kind === 'arrivals') {
+                  const rows = (data.rows || []).map((r: any) => [
+                    r.id || '', r.check_in_date?.toString().slice(0,10) || '',
+                    r.guest_name || '', r.guest_phone || '', r.guest_email || '',
+                    r.guest_nationality || '', r.room_name || '', r.room_number || '',
+                    r.room_category || r.room_type || '', r.num_guests ?? '',
+                    r.extra_adults ?? 0, r.meal_plan_snapshot || r.meal_plan_id || '',
+                    fmtINR(r.room_rate), fmtINR(r.total_amount),
+                    r.status || '', r.booking_source || '',
+                    (r.special_requests || '').replace(/\s+/g, ' ').slice(0, 200),
+                  ]);
+                  downloadCsv(
+                    `arrival-report-${stamp}.csv`,
+                    ['Booking ID', 'Check-in', 'Guest Name', 'Phone', 'Email', 'Nationality',
+                     'Room', 'Room #', 'Category', 'Guests', 'Extra Adults', 'Meal Plan',
+                     'Rate/Night', 'Total', 'Status', 'Source', 'Special Requests'],
+                    rows
+                  );
+                } else if (kind === 'departures') {
+                  const rows = (data.rows || []).map((r: any) => [
+                    r.id || '', r.check_in_date?.toString().slice(0,10) || '',
+                    r.check_out_date?.toString().slice(0,10) || '',
+                    r.guest_name || '', r.guest_phone || '',
+                    r.room_name || '', r.room_number || '', r.room_category || '',
+                    r.num_guests ?? '', r.meal_plan_snapshot || '',
+                    fmtINR(r.room_rate), fmtINR(r.total_amount),
+                    fmtINR(r.folio_total), r.folio_status || '—',
+                    r.status || '', r.booking_source || '',
+                  ]);
+                  downloadCsv(
+                    `departure-report-${stamp}.csv`,
+                    ['Booking ID', 'Check-in', 'Check-out', 'Guest Name', 'Phone',
+                     'Room', 'Room #', 'Category', 'Guests', 'Meal Plan',
+                     'Rate/Night', 'Booking Total', 'Folio Total', 'Folio Status',
+                     'Status', 'Source'],
+                    rows
+                  );
+                } else if (kind === 'room-status') {
+                  const rows = (data.rows || []).map((r: any) => [
+                    r.room_number || '', r.name || '', r.floor ?? '',
+                    r.room_category || r.room_type || '',
+                    r.capacity ?? '', fmtINR(r.base_rate),
+                    r.status || '', r.smoking_preference || 'NON_SMOKING',
+                    r.occupied_by || '', r.booking_id || '',
+                    r.occupied_check_in?.toString().slice(0,10) || '',
+                    r.occupied_check_out?.toString().slice(0,10) || '',
+                    r.hold_reason || '', r.notes || '',
+                  ]);
+                  downloadCsv(
+                    `room-status-report-${data.as_of || foDateTo}.csv`,
+                    ['Room #', 'Name', 'Floor', 'Category', 'Capacity', 'Base Rate',
+                     'Status', 'Smoking', 'Occupied By', 'Booking ID',
+                     'Check-in', 'Check-out', 'Hold Reason', 'Notes'],
+                    rows
+                  );
+                } else {
+                  // Night Audit — 4 sheets in 1 CSV (summary + arrivals + departures + in-house)
+                  const s = data.summary || {};
+                  const rows: any[][] = [
+                    ['── SUMMARY ──'],
+                    ['As Of',                    data.as_of || foDateTo],
+                    ['Total Rooms',              s.total_rooms ?? 0],
+                    ['Occupied Tonight',         s.occupied_tonight ?? 0],
+                    ['Occupancy %',              `${s.occupancy_pct ?? 0}%`],
+                    ['Arrivals',                 s.arrivals_count ?? 0],
+                    ['Departures',               s.departures_count ?? 0],
+                    ['Room Revenue Tonight',     fmtINR(s.room_revenue_tonight)],
+                    ['ADR (Avg Daily Rate)',     fmtINR(s.adr)],
+                    ['RevPAR',                   fmtINR(s.revpar)],
+                    ['Settled Revenue Today',    fmtINR(s.settled_revenue_today)],
+                    [''],
+                    ['── ARRIVALS ──'],
+                    ['Booking ID', 'Guest', 'Phone', 'Room', 'Room #', 'Guests', 'Rate', 'Total', 'Status'],
+                  ];
+                  for (const a of (data.arrivals || [])) {
+                    rows.push([a.id, a.guest_name, a.guest_phone, a.room_name, a.room_number, a.num_guests, fmtINR(a.room_rate), fmtINR(a.total_amount), a.status]);
+                  }
+                  rows.push(['']);
+                  rows.push(['── DEPARTURES ──']);
+                  rows.push(['Booking ID', 'Guest', 'Phone', 'Room', 'Room #', 'Booking Total', 'Folio Total', 'Folio Status']);
+                  for (const d of (data.departures || [])) {
+                    rows.push([d.id, d.guest_name, d.guest_phone, d.room_name, d.room_number, fmtINR(d.total_amount), fmtINR(d.folio_total), d.folio_status || '—']);
+                  }
+                  rows.push(['']);
+                  rows.push(['── IN-HOUSE ──']);
+                  rows.push(['Booking ID', 'Guest', 'Phone', 'Room', 'Room #', 'Check-in', 'Check-out', 'Guests', 'Rate']);
+                  for (const i of (data.in_house || [])) {
+                    rows.push([i.id, i.guest_name, i.guest_phone, i.room_name, i.room_number,
+                               i.check_in_date?.toString().slice(0,10),
+                               i.check_out_date?.toString().slice(0,10),
+                               i.num_guests, fmtINR(i.room_rate)]);
+                  }
+                  downloadCsv(`night-audit-${data.as_of || foDateTo}.csv`, [''], rows);
+                }
+              } catch (err: any) {
+                alert('Report failed: ' + (err?.message || 'unknown error'));
+              } finally {
+                setFoLoading(null);
+              }
+            };
+            return (
+              <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setFoReportsOpen(o => !o)}
+                  className="w-full flex items-center justify-between px-5 py-3 hover:bg-[#faf7f2] transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-base font-bold font-serif text-[#1a1208]">📊 Front Office Reports</span>
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] bg-[#cc5a16]/10 px-2 py-0.5 rounded-full">CSV</span>
+                  </div>
+                  <span className="text-xs text-[#6b5d52] font-bold">{foReportsOpen ? '− Hide' : '+ Show'}</span>
+                </button>
+                {foReportsOpen && (
+                  <div className="px-5 py-4 border-t border-[#cc5a16]/10 space-y-4">
+                    <div className="flex items-end gap-3 flex-wrap">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From</label>
+                        <input type="date" value={foDateFrom} onChange={e => setFoDateFrom(e.target.value)}
+                          className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">To</label>
+                        <input type="date" value={foDateTo} onChange={e => setFoDateTo(e.target.value)}
+                          className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                      <div className="flex items-center gap-1 text-[10px] text-[#9c8e85] ml-auto">
+                        {(['today', 'yesterday', 'this-week', 'this-month'] as const).map(preset => (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() => {
+                              const now = new Date();
+                              const iso = (d: Date) => d.toISOString().slice(0, 10);
+                              if (preset === 'today') { setFoDateFrom(iso(now)); setFoDateTo(iso(now)); }
+                              else if (preset === 'yesterday') { const y = new Date(now.getTime() - 86400000); setFoDateFrom(iso(y)); setFoDateTo(iso(y)); }
+                              else if (preset === 'this-week') { const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7)); setFoDateFrom(iso(monday)); setFoDateTo(iso(now)); }
+                              else if (preset === 'this-month') { setFoDateFrom(iso(new Date(now.getFullYear(), now.getMonth(), 1))); setFoDateTo(iso(now)); }
+                            }}
+                            className="px-2 py-1 rounded-md bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]"
+                          >{preset.replace('-', ' ')}</button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <button
+                        type="button" disabled={foLoading === 'arrivals'}
+                        onClick={() => downloadReport('arrivals')}
+                        className="text-left p-4 rounded-2xl bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 transition-colors disabled:opacity-50"
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-bold text-emerald-900">Arrival Report</span>
+                          {foLoading === 'arrivals' ? <span className="text-[10px] text-emerald-700">Loading…</span> : <Download size={14} className="text-emerald-700" />}
+                        </div>
+                        <p className="text-[11px] text-emerald-800 leading-snug">Every check-in scheduled between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Excludes cancellations.</p>
+                      </button>
+
+                      <button
+                        type="button" disabled={foLoading === 'departures'}
+                        onClick={() => downloadReport('departures')}
+                        className="text-left p-4 rounded-2xl bg-amber-50 border border-amber-200 hover:bg-amber-100 transition-colors disabled:opacity-50"
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-bold text-amber-900">Departure Report</span>
+                          {foLoading === 'departures' ? <span className="text-[10px] text-amber-700">Loading…</span> : <Download size={14} className="text-amber-700" />}
+                        </div>
+                        <p className="text-[11px] text-amber-800 leading-snug">Every check-out scheduled between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Includes folio status for receivables tracking.</p>
+                      </button>
+
+                      <button
+                        type="button" disabled={foLoading === 'room-status'}
+                        onClick={() => downloadReport('room-status')}
+                        className="text-left p-4 rounded-2xl bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50"
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-bold text-blue-900">Room Status Report</span>
+                          {foLoading === 'room-status' ? <span className="text-[10px] text-blue-700">Loading…</span> : <Download size={14} className="text-blue-700" />}
+                        </div>
+                        <p className="text-[11px] text-blue-800 leading-snug">Snapshot of every room as of <strong>{foDateTo}</strong> — status, occupant, current booking, hold reason.</p>
+                      </button>
+
+                      <button
+                        type="button" disabled={foLoading === 'night-audit'}
+                        onClick={() => downloadReport('night-audit')}
+                        className="text-left p-4 rounded-2xl bg-violet-50 border border-violet-200 hover:bg-violet-100 transition-colors disabled:opacity-50"
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-bold text-violet-900">Night Audit Report</span>
+                          {foLoading === 'night-audit' ? <span className="text-[10px] text-violet-700">Loading…</span> : <Download size={14} className="text-violet-700" />}
+                        </div>
+                        <p className="text-[11px] text-violet-800 leading-snug">End-of-day rollup for <strong>{foDateTo}</strong> — occupancy %, ADR, RevPAR, arrivals/departures/in-house, settled revenue.</p>
+                      </button>
+                    </div>
+
+                    <p className="text-[10px] text-[#9c8e85] italic">
+                      Reports stream live data, then download as CSV. Open them in Excel / Google Sheets / Tally — they import cleanly with one click.
+                    </p>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Sprint A1 — Availability Calendar view */}
           {bookingsView === 'CALENDAR' && (
@@ -16203,7 +16601,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   ? 'No bookings match your filters. Try a wider date range or clear the search.'
                   : 'No bookings yet. Create your first booking above.'}
               </div>
-            ) : (
+            ) : (<>
+              <div className="flex items-center justify-between px-5 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
+                <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                  {hotelBookings.length} booking{hotelBookings.length === 1 ? '' : 's'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const fmtINR = (n: any) => Number(n || 0);
+                    downloadCsv(
+                      `hotel-bookings-${new Date().toISOString().slice(0, 10)}.csv`,
+                      ['Booking ID', 'Guest', 'Phone', 'Email', 'Room', 'Room #',
+                       'Check-in', 'Check-out', 'Nights', 'Guests',
+                       'Meal Plan', 'Extra Adults', 'Rate/Night', 'Total',
+                       'Status', 'Source', 'Created'],
+                      hotelBookings.map((b: any) => {
+                        const ci = String(b.check_in_date || '').slice(0, 10);
+                        const co = String(b.check_out_date || '').slice(0, 10);
+                        const nights = ci && co ? Math.max(1, Math.round((new Date(co).getTime() - new Date(ci).getTime()) / 86400000)) : '';
+                        return [
+                          b.id || '', b.guest_name || '', b.guest_phone || '', b.guest_email || '',
+                          b.room_name || '', b.room_number || '',
+                          ci, co, nights, b.num_guests ?? '',
+                          b.meal_plan_snapshot || b.meal_plan_id || '',
+                          b.extra_adults ?? 0,
+                          fmtINR(b.room_rate), fmtINR(b.total_amount),
+                          b.status || '', b.booking_source || '',
+                          String(b.created_at || '').slice(0, 10),
+                        ];
+                      })
+                    );
+                  }}
+                  className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] hover:underline flex items-center gap-1"
+                >
+                  <Download size={12} /> Export CSV
+                </button>
+              </div>
               <table className="w-full text-sm">
                 <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
                   <tr>
@@ -16410,7 +16844,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   })}
                 </tbody>
               </table>
-            )}
+            </>)}
           </div>
           </>)}{/* /bookingsView === 'LIST' */}
         </div>
@@ -16424,7 +16858,34 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-hidden shadow-sm">
             {hotelFolios.length === 0 ? (
               <div className="p-12 text-center text-sm text-[#6b5d52]">No folios yet. Folios are created automatically on check-in.</div>
-            ) : (
+            ) : (<>
+              <div className="flex items-center justify-between px-5 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
+                <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                  {hotelFolios.length} folio{hotelFolios.length === 1 ? '' : 's'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => downloadCsv(
+                    `folios-${new Date().toISOString().slice(0, 10)}.csv`,
+                    ['Folio ID', 'Invoice #', 'Guest', 'Room', 'Check-in', 'Check-out',
+                     'Status', 'Subtotal', 'Discount', 'GST', 'Grand Total',
+                     'Payment Method', 'Settled At'],
+                    hotelFolios.map((f: any) => [
+                      f.id || '', f.invoice_number || '',
+                      f.guest_name || '', f.room_name || f.room_id || '',
+                      String(f.check_in_date || '').slice(0, 10),
+                      String(f.check_out_date || '').slice(0, 10),
+                      f.status || '',
+                      Number(f.subtotal || 0), Number(f.discount || 0),
+                      Number(f.gst_amount || 0), Number(f.grand_total || 0),
+                      f.payment_method || '', String(f.settled_at || '').slice(0, 19),
+                    ])
+                  )}
+                  className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] hover:underline flex items-center gap-1"
+                >
+                  <Download size={12} /> Export CSV
+                </button>
+              </div>
               <table className="w-full text-sm">
                 <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
                   <tr>
@@ -16463,7 +16924,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   ))}
                 </tbody>
               </table>
-            )}
+            </>)}
           </div>
         </div>
       ) : activeTab === 'COMPLIANCE' && isHotelEnabled ? (
@@ -16479,7 +16940,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-hidden shadow-sm">
             {complianceList.length === 0 ? (
               <div className="p-12 text-center text-sm text-[#6b5d52]">No foreign-national bookings. Enter "Nationality" on a booking to surface them here.</div>
-            ) : (
+            ) : (<>
+              <div className="flex items-center justify-between px-5 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
+                <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                  {complianceList.length} foreign-national booking{complianceList.length === 1 ? '' : 's'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => downloadCsv(
+                    `compliance-form-c-${new Date().toISOString().slice(0, 10)}.csv`,
+                    ['Booking ID', 'Guest', 'Nationality', 'ID Proof', 'Room', 'Check-in', 'Check-out', 'Phone', 'Form-C Status'],
+                    complianceList.map((b: any) => [
+                      b.id || '', b.guest_name || '', b.guest_nationality || '',
+                      b.guest_id_proof || '', b.room_name || b.room_id || '',
+                      String(b.check_in_date || '').slice(0, 10),
+                      String(b.check_out_date || '').slice(0, 10),
+                      b.guest_phone || '',
+                      Number(b.form_c_submissions) > 0 ? 'Drafted' : 'Pending',
+                    ])
+                  )}
+                  className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] hover:underline flex items-center gap-1"
+                >
+                  <Download size={12} /> Export CSV
+                </button>
+              </div>
               <table className="w-full text-sm">
                 <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
                   <tr>
@@ -16518,7 +17002,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   ))}
                 </tbody>
               </table>
-            )}
+            </>)}
           </div>
         </div>
       ) : activeTab === 'CONCIERGE_FAQ' && isHotelEnabled ? (
@@ -25079,6 +25563,48 @@ const AvailabilityCalendar: React.FC<{
           >
             <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
             Refresh
+          </button>
+          {/* CSV export of the current calendar window — one row per room,
+              one column per date. Cells contain status code (V/B/I/M/X)
+              plus guest name for booked cells so the export is useful
+              for spreadsheet review by GMs / channel managers. */}
+          <button
+            type="button"
+            disabled={!data || data.rooms?.length === 0}
+            onClick={() => {
+              if (!data) return;
+              const dates: string[] = data.dates || [];
+              const header = ['Room', 'Room #', 'Category', ...dates];
+              const codeFor = (cell: any): string => {
+                if (!cell || cell.status === 'VACANT') return 'V';
+                const status = String(cell.status || '').toUpperCase();
+                const code: Record<string, string> = {
+                  BOOKED: 'B', CHECKED_IN: 'I', CHECKED_OUT: 'O',
+                  CANCELLED: 'X', MAINTENANCE: 'M', BLOCKED: 'X',
+                  HOLD: 'H', CLEANING: 'C',
+                };
+                const guest = cell.guest_name ? ` ${String(cell.guest_name).slice(0, 20)}` : '';
+                return `${code[status] || status[0] || '?'}${guest}`;
+              };
+              const rows: any[][] = [];
+              for (const room of data.rooms) {
+                const cells = (room.cells || []) as any[];
+                const byDate: Record<string, any> = {};
+                for (const c of cells) byDate[c.date] = c;
+                rows.push([
+                  room.name || '', room.room_number || '', room.type_name || room.type || '',
+                  ...dates.map(d => codeFor(byDate[d])),
+                ]);
+              }
+              downloadCsv(
+                `availability-calendar-${start}-to-${dates[dates.length - 1] || start}.csv`,
+                header, rows
+              );
+            }}
+            title="Export current calendar window as CSV"
+            className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold hover:bg-white flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Download size={12} /> CSV
           </button>
           {lastRefresh && (
             <span className="text-[10px] text-[#9c8e85] whitespace-nowrap">

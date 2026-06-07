@@ -17534,6 +17534,239 @@ async function startServer() {
     }
   });
 
+  // ════════════════════════════════════════════════════════════════════
+  // FRONT OFFICE REPORTS (client request 7 Jun 2026)
+  // ════════════════════════════════════════════════════════════════════
+  // Classic hotel-ops reports for any given time interval:
+  //   • Arrival report     — guests checking in during the range
+  //   • Departure report   — guests checking out during the range
+  //   • Room Status report — snapshot of every room as of a given date
+  //   • Night Audit report — end-of-day rollup (occupancy %, ADR, RevPAR,
+  //                          arrivals/departures/in-house counts, revenue)
+  //
+  // All endpoints return JSON; the UI handles CSV download client-side
+  // via the shared downloadCsv() helper so the same data drives the
+  // on-screen table and the exported file.
+  //
+  // Auth: standard hotelStaff gate. The Reports tab is owner-only at the
+  // UI level, but these endpoints stay open to all hotel-tab roles so a
+  // FRONT_DESK user can pull their morning Arrival report without
+  // bouncing it to the owner.
+
+  app.get("/api/restaurant/:id/hotel/reports/arrivals", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const from = String(req.query.from || '').trim();
+      const to   = String(req.query.to   || '').trim();
+      if (!from || !to) return res.status(400).json({ error: "from + to date params required (YYYY-MM-DD)" });
+      const tenantDb = await getTenantDb(req.params.id);
+      // ARRIVALS = bookings whose check_in_date falls in [from, to].
+      // Exclude CANCELLED — they didn't actually arrive.
+      const rows = await tenantDb.query(
+        `SELECT b.id, b.guest_name, b.guest_phone, b.guest_email, b.guest_nationality,
+                b.check_in_date, b.check_out_date, b.actual_check_in_at, b.num_guests,
+                b.status, b.booking_source, b.special_requests, b.meal_plan_id,
+                b.meal_plan_snapshot, b.extra_adults, b.room_rate, b.total_amount,
+                r.name AS room_name, r.room_number, r.type AS room_type,
+                rt.name AS room_category
+           FROM room_bookings b
+           LEFT JOIN rooms r ON r.id = b.room_id
+           LEFT JOIN room_types rt ON rt.id = r.type_id
+          WHERE b.check_in_date BETWEEN ? AND ?
+            AND b.status <> 'CANCELLED'
+          ORDER BY b.check_in_date ASC, b.actual_check_in_at ASC NULLS LAST, b.guest_name ASC`,
+        [from, to]
+      );
+      res.json({ from, to, count: rows.length, rows });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build arrival report" });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/departures", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const from = String(req.query.from || '').trim();
+      const to   = String(req.query.to   || '').trim();
+      if (!from || !to) return res.status(400).json({ error: "from + to date params required (YYYY-MM-DD)" });
+      const tenantDb = await getTenantDb(req.params.id);
+      // DEPARTURES = bookings whose check_out_date falls in [from, to].
+      // Exclude CANCELLED. Folio total surfaces for receivables tracking.
+      const rows = await tenantDb.query(
+        `SELECT b.id, b.guest_name, b.guest_phone, b.guest_email,
+                b.check_in_date, b.check_out_date, b.actual_check_out_at,
+                b.status, b.num_guests, b.room_rate, b.total_amount,
+                b.meal_plan_snapshot, b.booking_source,
+                r.name AS room_name, r.room_number, rt.name AS room_category,
+                (SELECT f.grand_total FROM folios f
+                  WHERE f.booking_id = b.id
+                    AND (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
+                  ORDER BY f.created_at DESC LIMIT 1) AS folio_total,
+                (SELECT f.status FROM folios f
+                  WHERE f.booking_id = b.id
+                    AND (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
+                  ORDER BY f.created_at DESC LIMIT 1) AS folio_status
+           FROM room_bookings b
+           LEFT JOIN rooms r ON r.id = b.room_id
+           LEFT JOIN room_types rt ON rt.id = r.type_id
+          WHERE b.check_out_date BETWEEN ? AND ?
+            AND b.status <> 'CANCELLED'
+          ORDER BY b.check_out_date ASC, b.guest_name ASC`,
+        [from, to]
+      );
+      res.json({ from, to, count: rows.length, rows });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build departure report" });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/room-status", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const asOf = String(req.query.as_of || new Date().toISOString().slice(0, 10)).trim();
+      const tenantDb = await getTenantDb(req.params.id);
+      // For each room, find the booking (if any) that has the room
+      // occupied as-of `asOf`: status IN ('BOOKED','CHECKED_IN') AND
+      // check_in_date <= asOf < check_out_date. Use the most recent.
+      const rows = await tenantDb.query(
+        `SELECT r.id AS room_id, r.name, r.room_number, r.floor, r.type AS room_type,
+                rt.name AS room_category,
+                r.capacity, r.base_rate, r.status, r.smoking_preference,
+                r.notes,
+                (SELECT b.guest_name FROM room_bookings b
+                  WHERE b.room_id = r.id
+                    AND b.status IN ('BOOKED','CHECKED_IN')
+                    AND b.check_in_date <= ?
+                    AND b.check_out_date > ?
+                  ORDER BY b.check_in_date DESC LIMIT 1) AS occupied_by,
+                (SELECT b.id FROM room_bookings b
+                  WHERE b.room_id = r.id
+                    AND b.status IN ('BOOKED','CHECKED_IN')
+                    AND b.check_in_date <= ?
+                    AND b.check_out_date > ?
+                  ORDER BY b.check_in_date DESC LIMIT 1) AS booking_id,
+                (SELECT b.check_in_date FROM room_bookings b
+                  WHERE b.room_id = r.id
+                    AND b.status IN ('BOOKED','CHECKED_IN')
+                    AND b.check_in_date <= ?
+                    AND b.check_out_date > ?
+                  ORDER BY b.check_in_date DESC LIMIT 1) AS occupied_check_in,
+                (SELECT b.check_out_date FROM room_bookings b
+                  WHERE b.room_id = r.id
+                    AND b.status IN ('BOOKED','CHECKED_IN')
+                    AND b.check_in_date <= ?
+                    AND b.check_out_date > ?
+                  ORDER BY b.check_in_date DESC LIMIT 1) AS occupied_check_out,
+                (SELECT h.reason FROM room_holds h
+                  WHERE h.room_id = r.id
+                    AND h.start_date <= ? AND h.end_date >= ?
+                  ORDER BY h.start_date DESC LIMIT 1) AS hold_reason
+           FROM rooms r
+           LEFT JOIN room_types rt ON rt.id = r.type_id
+          ORDER BY r.floor NULLS LAST, r.room_number NULLS LAST, r.name`,
+        [asOf, asOf, asOf, asOf, asOf, asOf, asOf, asOf, asOf, asOf]
+      );
+      res.json({ as_of: asOf, count: rows.length, rows });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build room status report" });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/night-audit", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const asOf = String(req.query.date || new Date().toISOString().slice(0, 10)).trim();
+      const tenantDb = await getTenantDb(req.params.id);
+      // Total rooms in inventory (excludes archived/inactive rooms — if
+      // we ever add that flag).
+      const totalRoomsRow: any = await tenantDb.get(`SELECT COUNT(*)::int AS n FROM rooms`);
+      const totalRooms = Number(totalRoomsRow?.n || 0);
+      // Arrivals = check_in_date = asOf
+      const arrivals: any[] = await tenantDb.query(
+        `SELECT b.id, b.guest_name, b.guest_phone, b.check_in_date, b.check_out_date,
+                b.num_guests, b.room_rate, b.total_amount, b.status, b.booking_source,
+                r.name AS room_name, r.room_number
+           FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE b.check_in_date = ? AND b.status <> 'CANCELLED'
+          ORDER BY b.guest_name`,
+        [asOf]
+      );
+      // Departures = check_out_date = asOf
+      const departures: any[] = await tenantDb.query(
+        `SELECT b.id, b.guest_name, b.guest_phone, b.check_in_date, b.check_out_date,
+                b.total_amount, b.status,
+                r.name AS room_name, r.room_number,
+                (SELECT f.grand_total FROM folios f WHERE f.booking_id = b.id
+                  AND (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
+                  ORDER BY f.created_at DESC LIMIT 1) AS folio_total,
+                (SELECT f.status FROM folios f WHERE f.booking_id = b.id
+                  AND (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
+                  ORDER BY f.created_at DESC LIMIT 1) AS folio_status
+           FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE b.check_out_date = ? AND b.status <> 'CANCELLED'
+          ORDER BY b.guest_name`,
+        [asOf]
+      );
+      // In-house = bookings spanning asOf (check_in_date <= asOf < check_out_date)
+      const inHouse: any[] = await tenantDb.query(
+        `SELECT b.id, b.guest_name, b.guest_phone, b.check_in_date, b.check_out_date,
+                b.num_guests, b.room_rate, b.total_amount,
+                r.name AS room_name, r.room_number
+           FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE b.check_in_date <= ? AND b.check_out_date > ?
+            AND b.status IN ('BOOKED','CHECKED_IN')
+          ORDER BY b.guest_name`,
+        [asOf, asOf]
+      );
+      const occupiedTonight = inHouse.length;
+      const occupancyPct = totalRooms > 0
+        ? Math.round((occupiedTonight / totalRooms) * 1000) / 10
+        : 0;
+      // ADR = total room revenue tonight / occupied rooms.
+      // RevPAR = total room revenue tonight / total inventory.
+      const roomRevenueTonight = inHouse.reduce((s: number, b: any) => s + Number(b.room_rate || 0), 0);
+      const adr = occupiedTonight > 0
+        ? Math.round((roomRevenueTonight / occupiedTonight) * 100) / 100
+        : 0;
+      const revpar = totalRooms > 0
+        ? Math.round((roomRevenueTonight / totalRooms) * 100) / 100
+        : 0;
+      // Total revenue earned today: folios settled on asOf + room nights tonight.
+      // (Approximate — a full hotel revenue model would split room / F&B /
+      // services per folio_entry. Here we surface the easy aggregates.)
+      const foliosSettledToday: any = await tenantDb.get(
+        `SELECT COALESCE(SUM(grand_total), 0)::float AS rev
+           FROM folios
+          WHERE (doc_type IS NULL OR doc_type = 'INVOICE')
+            AND status = 'settled'
+            AND TO_CHAR(settled_at, 'YYYY-MM-DD') = ?`,
+        [asOf]
+      );
+      const settledRevenueToday = Number(foliosSettledToday?.rev || 0);
+      res.json({
+        as_of: asOf,
+        summary: {
+          total_rooms: totalRooms,
+          occupied_tonight: occupiedTonight,
+          occupancy_pct: occupancyPct,
+          arrivals_count: arrivals.length,
+          departures_count: departures.length,
+          room_revenue_tonight: Math.round(roomRevenueTonight * 100) / 100,
+          adr,
+          revpar,
+          settled_revenue_today: Math.round(settledRevenueToday * 100) / 100,
+        },
+        arrivals, departures, in_house: inHouse,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build night audit report" });
+    }
+  });
+
   // REQ 5 — Returning-guest lookup: aggregate every past stay for a phone
   // number. Surfaces lifetime stays, total spend, and the most recent
   // stay so the front desk can welcome a returning guest with context.
@@ -25542,7 +25775,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tariff-matrix-phase-2-3-ui-resolver-booking',
+    commit_marker: 'hotel-csv-exports-plus-front-office-reports',
     code_features: [
       'subscription-billing',
       'read-only-mode',
