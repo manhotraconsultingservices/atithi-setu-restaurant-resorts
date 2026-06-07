@@ -18995,7 +18995,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const total = draft.room_rate * draft.nights;
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7 max-h-[90vh] overflow-y-auto">
+            {/* MODAL-WIDTH-FIX (client report 7 Jun 2026 "fields fall on each
+                other"): bumped from max-w-md (28rem ≈ 448 px) to max-w-2xl
+                (42rem ≈ 672 px) so the ID-type dropdown + file picker grid
+                no longer overlap, the file name string (often 30+ chars)
+                doesn't truncate, and the form breathes on 13"+ screens. */}
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-7 max-h-[90vh] overflow-y-auto">
               <div className="flex items-center justify-between mb-1">
                 <h3 className="text-xl font-bold font-serif text-[#1a1208]">🚶 Walk-in Check-In</h3>
                 <button onClick={() => setWalkInDraft(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
@@ -19376,7 +19381,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const subtotal = draft.rooms.reduce((s, r) => s + r.room_rate * nights, 0);
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+            {/* MODAL-WIDTH-FIX: group bookings list multiple per-room rows
+                (room name + rate input + remove button). max-w-2xl was
+                fine when the list was short but cramped once 3+ rooms
+                are added. max-w-3xl gives each row room to breathe. */}
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
               <div className="flex items-center justify-between p-6 border-b border-[#cc5a16]/10 shrink-0">
                 <div>
                   <h3 className="text-xl font-bold font-serif text-[#1a1208]">New Group Booking</h3>
@@ -19876,7 +19885,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const set = (patch: any) => setEditingYieldRule({ ...d, ...patch });
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7 max-h-[90vh] overflow-y-auto">
+            {/* MODAL-WIDTH-FIX: rule editor has from/to date pickers +
+                multiplier + room-type selector. max-w-2xl lets dates
+                sit side-by-side. */}
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-7 max-h-[90vh] overflow-y-auto">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-xl font-bold font-serif text-[#1a1208]">New Yield Rule</h3>
                 <button onClick={() => setEditingYieldRule(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
@@ -20123,7 +20135,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         };
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7 max-h-[90vh] overflow-y-auto">
+            {/* MODAL-WIDTH-FIX: rate plan has a 7-day-of-week toggle row
+                (MON-SUN), from/to dates, and the rate / multiplier
+                fields. max-w-2xl keeps the day pills on one line. */}
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-7 max-h-[90vh] overflow-y-auto">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-xl font-bold font-serif text-[#1a1208]">New Rate Plan</h3>
                 <button onClick={() => setEditingRateOverride(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
@@ -20524,7 +20539,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       {/* ═════════ Booking create/edit modal ═════════ */}
       {showBookingModal && editingBooking && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-7 max-h-[90vh] overflow-y-auto">
+          {/* MODAL-WIDTH-FIX (client report 7 Jun 2026 "fields fall on each
+              other"): the New/Edit Booking form has the most fields in
+              the app (guest name + phone + email + state + nationality +
+              GSTIN + room + dates + guests + rate + source + notes +
+              special requests). At max-w-lg (32 rem ≈ 512 px), long
+              guest-info rows truncate and the date/time pickers wrap
+              onto separate lines. Bumped to max-w-3xl (48 rem ≈ 768 px)
+              — fits a clean two-column layout for guest info + stay
+              details without forcing the form into a wall of stacked
+              full-width inputs. */}
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl p-7 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xl font-bold font-serif text-[#1a1208]">{editingBooking.id ? 'Edit Booking' : 'New Booking'}</h3>
               <button onClick={() => { setShowBookingModal(false); setEditingBooking(null); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
@@ -20922,8 +20947,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             className="fixed inset-0 z-[55] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
             onClick={() => { setDocsTargetBooking(null); fetchHotelBookings(); }}
           >
+            {/* MODAL-WIDTH-FIX: Docs widget shows file rows with name +
+                size + label + uploader + delete on a single line. max-w-lg
+                truncated the file name to ~12 chars. max-w-2xl gives
+                enough room for the realistic 25-40 char filenames. */}
             <div
-              className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-7 max-h-[92vh] overflow-y-auto"
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-7 max-h-[92vh] overflow-y-auto"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between mb-3">

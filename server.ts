@@ -24951,7 +24951,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-walkin-doc-upload-plus-bookings-filter-fix',
+    commit_marker: 'booking-modal-widths-bumped',
     code_features: [
       'subscription-billing',
       'read-only-mode',
