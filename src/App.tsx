@@ -25588,12 +25588,18 @@ const AvailabilityCalendar: React.FC<{
   }, [refreshNonce]);
 
   // Status palette — keep accessible and high-contrast.
+  // STAY-VIEW-ENHANCE (client request 7 Jun 2026): aligned colour codes
+  // with the Indian-PMS convention shown in the customer's reference
+  // screenshot. Booked = soft pink/coral (pre-arrival assignment),
+  // Checked-in = green (active stay — most prominent), Maintenance =
+  // grey, Hold = darker grey. The legend below renders these explicitly.
   const cellPalette: Record<string, { bg: string; fg: string; border: string; label: string }> = {
-    VACANT:      { bg: '#f7faf7', fg: '#1f513f', border: '#cfe7d6', label: '' },
-    BOOKED:      { bg: '#fef3c7', fg: '#6b4f1a', border: '#facc15', label: 'Booked' },
-    CHECKED_IN:  { bg: '#fde2c8', fg: '#7c2d12', border: '#fb923c', label: 'In-house' },
-    CHECKED_OUT: { bg: '#e2e8f0', fg: '#475569', border: '#94a3b8', label: 'Past' },
-    HOLD:        { bg: '#e7e5e4', fg: '#57534e', border: '#a8a29e', label: 'Hold' },
+    VACANT:      { bg: '#f7faf7', fg: '#1f513f', border: '#cfe7d6', label: 'Available' },
+    BOOKED:      { bg: '#fde2e7', fg: '#9f1239', border: '#f9a8b8', label: 'Assigned' },
+    CHECKED_IN:  { bg: '#d1fae5', fg: '#065f46', border: '#34d399', label: 'Checked-in' },
+    CHECKED_OUT: { bg: '#e2e8f0', fg: '#475569', border: '#94a3b8', label: 'Checked-out' },
+    MAINTENANCE: { bg: '#e5e7eb', fg: '#374151', border: '#9ca3af', label: 'Maintenance' },
+    HOLD:        { bg: '#fef3c7', fg: '#92400e', border: '#fbbf24', label: 'Hold / Complimentary' },
   };
 
   const shiftStart = (deltaDays: number) => {
@@ -25622,8 +25628,60 @@ const AvailabilityCalendar: React.FC<{
     return groups;
   }, [data]);
 
+  // STAY-VIEW-KPIS (client request 7 Jun 2026 — "Stay View" reference
+  // screenshot): top KPI strip showing today's snapshot:
+  //   • Guests  — sum of num_guests across CHECKED_IN bookings covering today
+  //   • Occupied — rooms with CHECKED_IN cell today
+  //   • Available — rooms with VACANT cell today
+  //   • Maintenance — rooms in MAINTENANCE status today
+  //   • Hold/Comp  — rooms with HOLD or BLOCKED today
+  // Recalculated whenever data changes; cheap O(rooms) pass.
+  const todayKpis = useMemo(() => {
+    const todayIso = new Date().toISOString().slice(0, 10);
+    if (!data?.rooms) return { guests: 0, occupied: 0, available: 0, assigned: 0, maintenance: 0, hold: 0 };
+    let guests = 0, occupied = 0, available = 0, assigned = 0, maintenance = 0, hold = 0;
+    for (const room of data.rooms) {
+      const cells = (room.cells || []) as any[];
+      const cell = cells.find(c => c.date === todayIso) || { status: 'VACANT' };
+      switch (String(cell.status || '').toUpperCase()) {
+        case 'CHECKED_IN':
+          occupied++;
+          guests += Number(cell.num_guests || 1);
+          break;
+        case 'BOOKED':       assigned++; break;
+        case 'MAINTENANCE':  maintenance++; break;
+        case 'HOLD':
+        case 'BLOCKED':      hold++; break;
+        case 'VACANT':       available++; break;
+        case 'CHECKED_OUT':  available++; break;   // available again post-checkout
+        default:             available++;
+      }
+    }
+    return { guests, occupied, available, assigned, maintenance, hold };
+  }, [data]);
+
   return (
     <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+      {/* ── KPI STRIP (today's snapshot) ─────────────────────────────
+          Modelled on the Indian-PMS "Stay View" header (customer's
+          reference screenshot, 7 Jun 2026). Mirrors the calendar grid
+          below so the user sees totals + grid together in one screen. */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-[#cc5a16]/10 border-b border-[#cc5a16]/10">
+        {([
+          { id: 'guests',      label: 'Guests',        value: todayKpis.guests,      color: '#0f766e', bg: '#ecfdf5' },
+          { id: 'occupied',    label: 'Occupied',      value: todayKpis.occupied,    color: '#065f46', bg: '#d1fae5' },
+          { id: 'assigned',    label: 'Assigned',      value: todayKpis.assigned,    color: '#9f1239', bg: '#fde2e7' },
+          { id: 'available',   label: 'Available',     value: todayKpis.available,   color: '#1e40af', bg: '#eff6ff' },
+          { id: 'hold',        label: 'Hold / Comp.',  value: todayKpis.hold,        color: '#92400e', bg: '#fef3c7' },
+          { id: 'maintenance', label: 'Maintenance',   value: todayKpis.maintenance, color: '#374151', bg: '#f3f4f6' },
+        ] as const).map(k => (
+          <div key={k.id} className="bg-white px-3 py-2.5 flex items-center justify-between gap-2" style={{ background: k.bg }}>
+            <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: k.color }}>{k.label}</span>
+            <span className="text-lg font-bold font-mono" style={{ color: k.color }}>{k.value}</span>
+          </div>
+        ))}
+      </div>
+
       {/* Toolbar */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
         <div className="flex items-center gap-1">
@@ -25712,15 +25770,21 @@ const AvailabilityCalendar: React.FC<{
             </span>
           )}
         </div>
-        {/* Legend */}
-        <div className="flex items-center gap-2 text-[10px] text-[#6b5d52] flex-wrap">
-          {Object.entries(cellPalette).filter(([k]) => k !== 'VACANT').map(([k, p]) => (
-            <span key={k} className="inline-flex items-center gap-1">
-              <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: p.bg, border: `1px solid ${p.border}` }} />
-              {k.replace('_', ' ').toLowerCase()}
-            </span>
-          ))}
-        </div>
+      </div>
+
+      {/* ── LEGEND BAR (Stay-View style) ──────────────────────────────
+          Moved out of the cramped toolbar into its own row so the colour
+          chips are larger and the labels match the booking-lifecycle
+          vocabulary front-desk staff already know (Assigned, Checked-in,
+          Maintenance, etc.). Mirrors the customer's reference PMS layout. */}
+      <div className="px-3 py-2 border-b border-[#cc5a16]/10 bg-white flex items-center gap-3 flex-wrap text-[11px]">
+        <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Legend:</span>
+        {Object.entries(cellPalette).map(([k, p]) => (
+          <span key={k} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full border" style={{ background: p.bg, borderColor: p.border, color: p.fg }}>
+            <span className="inline-block w-2 h-2 rounded-full" style={{ background: p.border }} />
+            <span className="font-semibold">{p.label || k}</span>
+          </span>
+        ))}
       </div>
 
       {/* Grid */}
