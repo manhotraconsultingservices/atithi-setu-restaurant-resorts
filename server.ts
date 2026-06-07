@@ -16737,11 +16737,15 @@ async function startServer() {
         const bci = iso(b.check_in_date);
         const bco = iso(b.check_out_date);
         if (b.booking_type === 'DAY_USE' && bci === bco) {
-          if (bci >= start && bci < end) stamp(b.room_id, bci, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: 'DAY_USE' });
+          if (bci >= start && bci < end) stamp(b.room_id, bci, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: 'DAY_USE', check_in_date: bci, check_out_date: bco });
           continue;
         }
         for (const d of dates) {
-          if (d >= bci && d < bco) stamp(b.room_id, d, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: b.booking_type });
+          // LIFECYCLE-DATA (7 Jun 2026): include check_out_date on every
+          // cell so the frontend can derive "Checking out today" without
+          // a second lookup. Used by the Stay-View KPI strip + the
+          // calendar cell colour for departure-day rendering.
+          if (d >= bci && d < bco) stamp(b.room_id, d, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: b.booking_type, check_in_date: bci, check_out_date: bco });
         }
       }
       // Checked-out bookings — show as historical (lowest priority)
@@ -16749,7 +16753,7 @@ async function startServer() {
         const bci = iso(b.check_in_date);
         const bco = iso(b.check_out_date);
         for (const d of dates) {
-          if (d >= bci && d < bco) stamp(b.room_id, d, { status: 'CHECKED_OUT', booking_id: b.id, guest_name: b.guest_name });
+          if (d >= bci && d < bco) stamp(b.room_id, d, { status: 'CHECKED_OUT', booking_id: b.id, guest_name: b.guest_name, check_in_date: bci, check_out_date: bco });
         }
       }
       // Holds (lowest priority unless no booking on that cell)
@@ -25775,7 +25779,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'calendar-stayview-kpis-plus-prominent-legend',
+    commit_marker: 'booking-lifecycle-checking-out-state',
     code_features: [
       'subscription-billing',
       'read-only-mode',

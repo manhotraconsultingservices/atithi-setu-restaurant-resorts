@@ -154,6 +154,49 @@ function csvEscape(v: any): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+// ─── Booking lifecycle state (client request 7 Jun 2026) ──────────────────
+// Maps the DB status (BOOKED / CHECKED_IN / CHECKED_OUT / CANCELLED) +
+// check_out_date into the four-state Stay-View vocabulary owners + staff
+// know from competing PMSes:
+//
+//   Assigned       — pre-arrival ("BOOKED")
+//   Checked-in     — guest in-house ("CHECKED_IN", check_out > today)
+//   Checking out   — departure day ("CHECKED_IN", check_out === today)
+//   Checked-out    — gone ("CHECKED_OUT")
+//   Cancelled      — never came ("CANCELLED")
+//
+// Zero schema change — derived purely from existing columns so the 39
+// places that read `status === 'CHECKED_IN'` keep working unchanged.
+// The "Checking out" state is auto-flagged on departure day; receptionist
+// doesn't need to click a transition button. When the cashier finally
+// settles + clicks Check Out, the existing /checkout endpoint flips
+// CHECKED_IN → CHECKED_OUT and the row falls off the "Checking out"
+// derivation.
+export type BookingLifecycle = 'ASSIGNED' | 'CHECKED_IN' | 'CHECKING_OUT' | 'CHECKED_OUT' | 'CANCELLED';
+export function bookingLifecycleState(booking: any, todayIso?: string): BookingLifecycle {
+  const today = (todayIso || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const status = String(booking?.status || '').toUpperCase();
+  if (status === 'CANCELLED') return 'CANCELLED';
+  if (status === 'CHECKED_OUT') return 'CHECKED_OUT';
+  if (status === 'BOOKED') return 'ASSIGNED';
+  if (status === 'CHECKED_IN') {
+    const co = String(booking?.check_out_date || '').slice(0, 10);
+    if (co && co <= today) return 'CHECKING_OUT';
+    return 'CHECKED_IN';
+  }
+  return 'ASSIGNED';
+}
+// Visual treatment per lifecycle state. Mirrors the calendar cellPalette
+// so the booking-list pill, the calendar cell, and the Stay-View legend
+// all read the same.
+export const LIFECYCLE_PALETTE: Record<BookingLifecycle, { bg: string; text: string; border: string; label: string }> = {
+  ASSIGNED:     { bg: 'bg-rose-50',    text: 'text-rose-700',    border: 'border-rose-200',    label: 'Assigned' },
+  CHECKED_IN:   { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', label: 'Checked-in' },
+  CHECKING_OUT: { bg: 'bg-amber-50',   text: 'text-amber-800',   border: 'border-amber-300',   label: 'Checking out' },
+  CHECKED_OUT:  { bg: 'bg-slate-100',  text: 'text-slate-600',   border: 'border-slate-300',   label: 'Checked-out' },
+  CANCELLED:    { bg: 'bg-stone-100',  text: 'text-stone-500',   border: 'border-stone-300',   label: 'Cancelled' },
+};
+
 function downloadCsv(filename: string, header: string[], rows: any[][]): void {
   const lines = [header.join(','), ...rows.map(r => r.map(csvEscape).join(','))];
   const csv = lines.join('\n');
@@ -16651,10 +16694,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </thead>
                 <tbody>
                   {hotelBookings.map((b: any) => {
-                    const statusColor = b.status === 'CHECKED_IN' ? 'bg-amber-50 text-amber-700'
-                      : b.status === 'CHECKED_OUT' ? 'bg-slate-100 text-slate-500'
-                      : b.status === 'CANCELLED' ? 'bg-rose-50 text-rose-700'
-                      : 'bg-emerald-50 text-emerald-700';
+                    // LIFECYCLE-PILL (client request 7 Jun 2026):
+                    // pill now reflects the four-state Stay-View
+                    // lifecycle (Assigned / Checked-in / Checking out /
+                    // Checked-out) rather than the raw DB status.
+                    // "Checking out" auto-flags on departure day so
+                    // the front desk sees who needs attention today.
+                    const lifecycle = bookingLifecycleState(b);
+                    const lcStyle = LIFECYCLE_PALETTE[lifecycle];
                     return (
                       <tr key={b.id} className="border-t border-[#cc5a16]/10 hover:bg-[#faf7f2]/50">
                         <td className="px-4 py-3">
@@ -16684,7 +16731,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           {new Date(b.check_in_date).toLocaleDateString('en-IN')} →<br />
                           {new Date(b.check_out_date).toLocaleDateString('en-IN')}
                         </td>
-                        <td className="px-4 py-3"><span className={cn("px-2 py-1 rounded-md text-[10px] font-bold uppercase", statusColor)}>{b.status.replace('_', ' ')}</span></td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={cn("px-2 py-1 rounded-md text-[10px] font-bold uppercase border", lcStyle.bg, lcStyle.text, lcStyle.border)}
+                            title={`DB status: ${b.status}`}
+                          >{lcStyle.label}</span>
+                        </td>
                         <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>
                         <td className="px-4 py-3 text-right">
                           <div className="flex items-center justify-end gap-1.5 flex-wrap">
@@ -25594,12 +25646,13 @@ const AvailabilityCalendar: React.FC<{
   // Checked-in = green (active stay — most prominent), Maintenance =
   // grey, Hold = darker grey. The legend below renders these explicitly.
   const cellPalette: Record<string, { bg: string; fg: string; border: string; label: string }> = {
-    VACANT:      { bg: '#f7faf7', fg: '#1f513f', border: '#cfe7d6', label: 'Available' },
-    BOOKED:      { bg: '#fde2e7', fg: '#9f1239', border: '#f9a8b8', label: 'Assigned' },
-    CHECKED_IN:  { bg: '#d1fae5', fg: '#065f46', border: '#34d399', label: 'Checked-in' },
-    CHECKED_OUT: { bg: '#e2e8f0', fg: '#475569', border: '#94a3b8', label: 'Checked-out' },
-    MAINTENANCE: { bg: '#e5e7eb', fg: '#374151', border: '#9ca3af', label: 'Maintenance' },
-    HOLD:        { bg: '#fef3c7', fg: '#92400e', border: '#fbbf24', label: 'Hold / Complimentary' },
+    VACANT:       { bg: '#f7faf7', fg: '#1f513f', border: '#cfe7d6', label: 'Available' },
+    BOOKED:       { bg: '#fde2e7', fg: '#9f1239', border: '#f9a8b8', label: 'Assigned' },
+    CHECKED_IN:   { bg: '#d1fae5', fg: '#065f46', border: '#34d399', label: 'Checked-in' },
+    CHECKING_OUT: { bg: '#fef3c7', fg: '#92400e', border: '#fbbf24', label: 'Checking out' },
+    CHECKED_OUT:  { bg: '#e2e8f0', fg: '#475569', border: '#94a3b8', label: 'Checked-out' },
+    MAINTENANCE:  { bg: '#e5e7eb', fg: '#374151', border: '#9ca3af', label: 'Maintenance' },
+    HOLD:         { bg: '#fde68a', fg: '#78350f', border: '#f59e0b', label: 'Hold / Complimentary' },
   };
 
   const shiftStart = (deltaDays: number) => {
@@ -25638,16 +25691,33 @@ const AvailabilityCalendar: React.FC<{
   // Recalculated whenever data changes; cheap O(rooms) pass.
   const todayKpis = useMemo(() => {
     const todayIso = new Date().toISOString().slice(0, 10);
-    if (!data?.rooms) return { guests: 0, occupied: 0, available: 0, assigned: 0, maintenance: 0, hold: 0 };
-    let guests = 0, occupied = 0, available = 0, assigned = 0, maintenance = 0, hold = 0;
+    if (!data?.rooms) return { guests: 0, checkedIn: 0, checkingOut: 0, available: 0, assigned: 0, maintenance: 0, hold: 0 };
+    // LIFECYCLE-KPIS (client request 7 Jun 2026): split "Occupied"
+    // into "Checked-in" (still staying) + "Checking out" (departing
+    // today). Same row-by-row pass, classified via the derived
+    // lifecycle state instead of the raw DB status.
+    //
+    // Cells are read from data.grid[room.id][todayIso] (the server's
+    // wire format); an earlier draft of this hook iterated
+    // room.cells which doesn't exist on the wire — silently zeroed
+    // the strip. Fixed in this pass.
+    let guests = 0, checkedIn = 0, checkingOut = 0, available = 0, assigned = 0, maintenance = 0, hold = 0;
     for (const room of data.rooms) {
-      const cells = (room.cells || []) as any[];
-      const cell = cells.find(c => c.date === todayIso) || { status: 'VACANT' };
+      const cell = data.grid?.[room.id]?.[todayIso] || { status: 'VACANT' };
       switch (String(cell.status || '').toUpperCase()) {
-        case 'CHECKED_IN':
-          occupied++;
+        case 'CHECKED_IN': {
+          // Cell from the availability endpoint carries the booking's
+          // check_out_date when present. Split based on whether the
+          // guest is leaving today (Checking out) vs staying (Checked-in).
+          const co = String(cell.check_out_date || '').slice(0, 10);
+          if (co && co <= todayIso) {
+            checkingOut++;
+          } else {
+            checkedIn++;
+          }
           guests += Number(cell.num_guests || 1);
           break;
+        }
         case 'BOOKED':       assigned++; break;
         case 'MAINTENANCE':  maintenance++; break;
         case 'HOLD':
@@ -25657,7 +25727,7 @@ const AvailabilityCalendar: React.FC<{
         default:             available++;
       }
     }
-    return { guests, occupied, available, assigned, maintenance, hold };
+    return { guests, checkedIn, checkingOut, available, assigned, maintenance, hold };
   }, [data]);
 
   return (
@@ -25666,14 +25736,15 @@ const AvailabilityCalendar: React.FC<{
           Modelled on the Indian-PMS "Stay View" header (customer's
           reference screenshot, 7 Jun 2026). Mirrors the calendar grid
           below so the user sees totals + grid together in one screen. */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-[#cc5a16]/10 border-b border-[#cc5a16]/10">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-px bg-[#cc5a16]/10 border-b border-[#cc5a16]/10">
         {([
-          { id: 'guests',      label: 'Guests',        value: todayKpis.guests,      color: '#0f766e', bg: '#ecfdf5' },
-          { id: 'occupied',    label: 'Occupied',      value: todayKpis.occupied,    color: '#065f46', bg: '#d1fae5' },
-          { id: 'assigned',    label: 'Assigned',      value: todayKpis.assigned,    color: '#9f1239', bg: '#fde2e7' },
-          { id: 'available',   label: 'Available',     value: todayKpis.available,   color: '#1e40af', bg: '#eff6ff' },
-          { id: 'hold',        label: 'Hold / Comp.',  value: todayKpis.hold,        color: '#92400e', bg: '#fef3c7' },
-          { id: 'maintenance', label: 'Maintenance',   value: todayKpis.maintenance, color: '#374151', bg: '#f3f4f6' },
+          { id: 'guests',       label: 'Guests',        value: todayKpis.guests,       color: '#0f766e', bg: '#ecfdf5' },
+          { id: 'assigned',     label: 'Assigned',      value: todayKpis.assigned,     color: '#9f1239', bg: '#fde2e7' },
+          { id: 'checkedIn',    label: 'Checked-in',    value: todayKpis.checkedIn,    color: '#065f46', bg: '#d1fae5' },
+          { id: 'checkingOut',  label: 'Checking out',  value: todayKpis.checkingOut,  color: '#92400e', bg: '#fef3c7' },
+          { id: 'available',    label: 'Available',     value: todayKpis.available,    color: '#1e40af', bg: '#eff6ff' },
+          { id: 'hold',         label: 'Hold / Comp.',  value: todayKpis.hold,         color: '#78350f', bg: '#fde68a' },
+          { id: 'maintenance',  label: 'Maintenance',   value: todayKpis.maintenance,  color: '#374151', bg: '#f3f4f6' },
         ] as const).map(k => (
           <div key={k.id} className="bg-white px-3 py-2.5 flex items-center justify-between gap-2" style={{ background: k.bg }}>
             <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: k.color }}>{k.label}</span>
@@ -25746,12 +25817,12 @@ const AvailabilityCalendar: React.FC<{
               };
               const rows: any[][] = [];
               for (const room of data.rooms) {
-                const cells = (room.cells || []) as any[];
-                const byDate: Record<string, any> = {};
-                for (const c of cells) byDate[c.date] = c;
+                // The server returns availability as `grid[room_id][date]`,
+                // not as a per-room cells array. Earlier export draft read
+                // room.cells (undefined) and produced empty rows — fixed.
                 rows.push([
                   room.name || '', room.room_number || '', room.type_name || room.type || '',
-                  ...dates.map(d => codeFor(byDate[d])),
+                  ...dates.map(d => codeFor(data.grid?.[room.id]?.[d])),
                 ]);
               }
               downloadCsv(
@@ -25838,8 +25909,21 @@ const AvailabilityCalendar: React.FC<{
                       </td>
                       {data.dates.map((d: string) => {
                         const cell = data.grid[r.id]?.[d];
-                        const status = cell?.status || 'VACANT';
-                        const p = cellPalette[status];
+                        // LIFECYCLE-CELL (client request 7 Jun 2026):
+                        // upgrade the raw DB status to the four-state
+                        // lifecycle so departure-day cells render in the
+                        // "Checking out" amber instead of the "Checked-in"
+                        // green. The cell's check_out_date is now
+                        // populated by the server (see the stamp() call
+                        // in /hotel/availability).
+                        let status = cell?.status || 'VACANT';
+                        if (status === 'CHECKED_IN' && cell?.check_out_date) {
+                          const co = String(cell.check_out_date).slice(0, 10);
+                          if (co && co <= d) status = 'CHECKING_OUT' as any;
+                        }
+                        // The palette doesn't have a MAINTENANCE key for
+                        // very old tenants; fall back to HOLD.
+                        const p = cellPalette[status] || cellPalette.HOLD;
                         // VACANT cells → new booking; HOLD cells → block-dates
                         // modal; BOOKED/CHECKED_IN/CHECKED_OUT cells (any cell
                         // with a booking_id) → open the quick-action popover.
