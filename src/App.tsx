@@ -78,11 +78,15 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // A tenant whose role permissions were saved before these tabs existed has
 // an `allowedTabs` list that simply doesn't mention them. Without special
 // handling those tabs would vanish for that tenant until an admin re-saves.
-// STAFF_ACCESS was promoted out of Settings into its own top-level tab in
-// 2026-06. It is owner-only at the SERVER level — including it here means
-// owners with grandfathered allowedTabs still see the tab; non-owners who
-// somehow load it just see a 403 / empty matrix from the API.
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'STAFF_ACCESS']);
+// NB: STAFF_ACCESS is intentionally NOT in this set. It is hard-gated to
+// OWNER / SUPER_ADMIN / CTO above this layer — the nav-rendering code
+// drops it from the tabs array entirely for non-owner roles, and the
+// content branch renders an Access-Denied panel if a non-owner reaches
+// it via direct URL. Putting it in ALWAYS_VISIBLE_TABS would expose it
+// to any non-owner with an ancient unmarked allowedTabs list — which is
+// the exact bug the founder flagged on 7 Jun 2026 ("STAFF_ACCESS should
+// only be visible to Business owner. this is critical.").
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -6914,6 +6918,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (hidden) setActiveTab('MONITOR');
     // activeTab intentionally not in deps — we only want to redirect at
     // the moment the mode flips, not every time the user clicks a tab.
+    // (Owner-only STAFF_ACCESS gate lives in its own effect below.)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dashboardMode, bothEnabled]);
 
@@ -7134,6 +7139,37 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   // Role-Based Tab Access Control
   const [allowedTabs, setAllowedTabs] = useState<string[] | null>(null); // null = no restriction
+
+  // STAFF_ACCESS owner-only gate (founder request 7 Jun 2026 — critical).
+  // The /role-permissions endpoint already 403s on writes from non-owners,
+  // but the tab itself was visible to non-owners with ancient/legacy
+  // permission lists (via ALWAYS_VISIBLE_TABS grandfathering). We now read
+  // the role from localStorage and use isOwnerOrAdmin to:
+  //   • filter STAFF_ACCESS out of the GENERAL lane nav array
+  //   • short-circuit the STAFF_ACCESS content branch with Access Denied
+  //   • auto-redirect to MONITOR if a non-owner somehow lands on STAFF_ACCESS
+  //
+  // Reading once (not as state) is fine — the role only changes on
+  // logout/login, and the app reloads at that point. SUPER_ADMIN and CTO
+  // are platform roles that already see everything; OWNER is the tenant's
+  // top role. Everyone else (MANAGER / CASHIER / FRONT_DESK / CHEF /
+  // WAITER / HOUSEKEEPING / MAINTENANCE / CONCIERGE) is denied.
+  const currentRole: string = (typeof window !== 'undefined'
+    ? (localStorage.getItem('role') || '')
+    : '');
+  const isOwnerOrAdmin: boolean = currentRole === 'OWNER'
+                                || currentRole === 'SUPER_ADMIN'
+                                || currentRole === 'CTO';
+  // Owner-only redirect: if a non-owner directly types ?tab=STAFF_ACCESS
+  // (or had it cached from a prior owner session in localStorage), bounce
+  // them to MONITOR. UI also hides the nav entry, so this only fires on
+  // the URL/cache edge cases.
+  useEffect(() => {
+    if (activeTab === 'STAFF_ACCESS' && !isOwnerOrAdmin) {
+      setActiveTab('MONITOR');
+    }
+  }, [activeTab, isOwnerOrAdmin]);
+
   const [showTemplatePanel, setShowTemplatePanel]     = useState(false);
   const [showOnDemandModal, setShowOnDemandModal]     = useState(false);
   const [printPreviewHtml, setPrintPreviewHtml]       = useState<string|null>(null);
@@ -10106,7 +10142,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             tabs: [
               { id: 'LOYALTY',       label: 'Loyalty Program' },
               { id: 'STAFF',         label: 'Staff Management' },
-              { id: 'STAFF_ACCESS',  label: 'Staff Access' },
+              // STAFF_ACCESS is OWNER-only — dropped from the array entirely
+              // for non-owners. Combined with the isTabVisible() pass below
+              // and the auto-redirect effect, this means MANAGER / CASHIER /
+              // FRONT_DESK / CONCIERGE / CHEF / WAITER / HOUSEKEEPING /
+              // MAINTENANCE never see the tab in the nav, can't click it,
+              // and can't reach it by typing it as activeTab.
+              ...(isOwnerOrAdmin ? [{ id: 'STAFF_ACCESS', label: 'Staff Access' }] : []),
               { id: 'ROSTER',        label: 'Roster' },
               { id: 'TIMESHEET',     label: 'Timesheet' },
               { id: 'ATTENDANCE',    label: 'Attendance' },
@@ -10144,7 +10186,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ? staffAccess[previewRole]
               : null)   // empty array means "no restriction" for that role
           : allowedTabs;
-        const isVisible = (id: string) => isTabVisible(id, effectiveAllowedTabs);
+        // STAFF_ACCESS hard-gate (founder request 7 Jun 2026): owners
+        // must ALWAYS see STAFF_ACCESS in the nav, even if their
+        // legacy/V2/V3 saved allowedTabs list does not include it. The
+        // tab is OWNER-only (it doesn't appear in the nav array at all
+        // for non-owners — see the GENERAL lane spread above), so this
+        // short-circuit is safe: any non-owner who somehow had
+        // STAFF_ACCESS in their allowedTabs would still be blocked
+        // earlier by the lane spread. Conversely, an owner with a tight
+        // V3 list that excluded STAFF_ACCESS would lose visibility
+        // without this bypass — the regression test catches it. Same
+        // safety logic as RBAC-3's ROOMS bypass, scoped narrowly to
+        // STAFF_ACCESS.
+        const isVisible = (id: string) => {
+          if (id === 'STAFF_ACCESS' && isOwnerOrAdmin) return true;
+          return isTabVisible(id, effectiveAllowedTabs);
+        };
 
         return (
           <>
@@ -16072,7 +16129,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             Server ignores OWNER/SUPER_ADMIN rows from save payloads as a
             defensive lockout-prevention. */
         <div className="max-w-7xl space-y-6">
-          {(() => {
+          {!isOwnerOrAdmin ? (
+            // CRITICAL OWNER-ONLY GATE — non-owner reached this branch
+            // somehow (cached activeTab, direct ?tab=STAFF_ACCESS URL,
+            // race before the auto-redirect effect fires). Render an
+            // Access-Denied panel rather than the matrix. The
+            // useEffect above also redirects them to MONITOR on the
+            // next React tick.
+            <div className="bg-white p-10 rounded-[32px] border border-rose-200 shadow-sm">
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-rose-100 flex items-center justify-center text-rose-700 shrink-0">
+                  <Lock size={22} />
+                </div>
+                <div>
+                  <h3 className="text-2xl font-bold font-serif text-rose-900">Access denied</h3>
+                  <p className="text-sm text-[#6b5d52] mt-2 max-w-2xl">
+                    Staff Access is owner-only. Only the Business Owner (and platform Super Admin) can configure which tabs each staff role sees. Please ask your owner if you need a permission changed.
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : (() => {
             // Tabs the user can grant access to. Hotel tabs only show
             // when the property has the hotel module enabled.
             // RBAC-5c: `description` field explains what each tab does
@@ -16089,10 +16166,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'LOYALTY',           label: 'Loyalty',                 description: 'Bronze/Silver/Gold tiers, promo codes, customer enrolment, birthday rewards.' },
               { id: 'STAFF',             label: 'Staff Directory',         description: 'Add/edit staff accounts, set passwords, role assignment.' },
               // NB: STAFF_ACCESS (the matrix itself) is intentionally NOT a
-              // grantable column. The page is owner-only — server enforces
-              // 403 on writes — so it doesn't appear here as a tile owners
-              // can hand to MANAGER / CASHIER etc. It still appears as a
-              // top-level nav entry for owners via the GENERAL lane.
+              // grantable row. The page is owner-only — server enforces
+              // 403 on writes — so it shouldn't be a row owners can hand to
+              // MANAGER / CASHIER etc. It still appears as a top-level nav
+              // entry for owners via the GENERAL lane.
               { id: 'ROSTER',            label: 'Roster',                  description: 'Drag-and-drop weekly shift planning, slot assignment.' },
               { id: 'TIMESHEET',         label: 'Timesheet',               description: 'Planned vs actual hours, payroll prep, overtime variance.' },
               { id: 'ATTENDANCE',        label: 'Attendance',              description: 'Clock-in / clock-out records, daily attendance report.' },
@@ -16121,9 +16198,42 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'CASHIER',      label: 'Cashier',      hint: 'Orders + invoices, no settings' },
               { id: 'WAITER',       label: 'Waiter',       hint: 'Table orders, KOT' },
               { id: 'CHEF',         label: 'Chef / KDS',   hint: 'Kitchen display, recipes' },
-              { id: 'HOUSEKEEPING', label: 'Housekeeping', hint: 'Service requests + room status' },
+              { id: 'HOUSEKEEPING', label: 'Housekeep.',   hint: 'Service requests + room status' },
               { id: 'MAINTENANCE',  label: 'Maintenance',  hint: 'Service requests, room status' },
             ];
+
+            // TRANSPOSE (founder request 7 Jun 2026): the original layout
+            // had roles as rows and tabs as columns with -12deg rotated
+            // labels — readable as a novelty, hard to scan in practice
+            // (the screenshot showed tab labels colliding into the
+            // PREVIEW AS dropdown). The new layout puts tabs as rows
+            // (one row = one menu item, horizontal text) and roles as
+            // columns (short labels, fit in 88 px). The shape inverts but
+            // the underlying state (Record<roleId, tabId[]>) and the
+            // toggleStaffTab(roleId, tabId) handler are unchanged, so the
+            // server contract is byte-identical to before.
+            const grantAllForTab = (tabId: string) => {
+              const everyRoleHasIt = MANAGED_ROLES.every(r => (staffAccess[r.id] || []).includes(tabId));
+              setStaffAccess(prev => {
+                const next: Record<string, string[]> = { ...prev };
+                for (const r of MANAGED_ROLES) {
+                  const cur = next[r.id] || [];
+                  if (everyRoleHasIt) {
+                    next[r.id] = cur.filter(t => t !== tabId);
+                  } else if (!cur.includes(tabId)) {
+                    next[r.id] = [...cur, tabId];
+                  }
+                }
+                return next;
+              });
+            };
+            const grantAllForRole = (roleId: string) => {
+              setStaffAccess(prev => {
+                const cur = prev[roleId] || [];
+                const hasAll = visibleTabs.every(t => cur.includes(t.id));
+                return { ...prev, [roleId]: hasAll ? [] : visibleTabs.map(t => t.id) };
+              });
+            };
 
             return (
               <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
@@ -16135,7 +16245,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <div>
                       <h3 className="text-2xl font-bold font-serif">Staff Access</h3>
                       <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
-                        Control which tabs each staff role can see. Check a box → that role gets access to that tab. Leave a row entirely empty to give that role <strong>no restriction</strong> (they see everything).
+                        Each row is one menu item. Each column is one staff role. Tick a box → that role gets access to that menu. Leave a column entirely empty to give the role <strong>no restriction</strong> (sees everything).
                         Owners + platform admins always see everything regardless of these settings.
                       </p>
                     </div>
@@ -16207,42 +16317,72 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 )}
 
+                {/* ── TRANSPOSED MATRIX ─────────────────────────────────
+                    Rows = tabs (menu items), Columns = roles. The
+                    underlying state shape (staffAccess: Record<role,
+                    tab[]>) is unchanged — only the rendering inverts.   */}
                 <div className="mt-5 overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-white">
-                      <tr className="border-b border-[#cc5a16]/10">
-                        <th className="text-left py-2 pr-3 sticky left-0 bg-white z-10 min-w-[140px]">Role</th>
-                        {visibleTabs.map(t => (
-                          <th
-                            key={t.id}
-                            className="px-2 py-2 text-center min-w-[80px]"
-                            title={`${t.label} — ${t.description}`}
-                          >
-                            <span className="block font-bold text-[10px] uppercase tracking-widest text-[#3d3128] -rotate-12 origin-bottom-left whitespace-nowrap">
-                              {t.label}
-                            </span>
-                          </th>
-                        ))}
-                        <th className="px-2 py-2 text-center text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">All</th>
+                  <table className="w-full text-xs border-collapse">
+                    <thead className="bg-white">
+                      <tr className="border-b-2 border-[#cc5a16]/15">
+                        <th className="text-left py-3 px-3 sticky left-0 bg-white z-10 min-w-[220px] align-bottom">
+                          <span className="font-bold text-[10px] uppercase tracking-widest text-[#6b5d52]">Menu / Tab</span>
+                        </th>
+                        {MANAGED_ROLES.map(r => {
+                          const allowed = staffAccess[r.id] || [];
+                          const noRestriction = allowed.length === 0;
+                          const grantedCount = visibleTabs.filter(t => allowed.includes(t.id)).length;
+                          return (
+                            <th
+                              key={r.id}
+                              className="px-2 py-3 text-center align-bottom min-w-[88px]"
+                              title={r.hint}
+                            >
+                              <div className="flex flex-col items-center gap-1">
+                                <span className="font-bold text-[11px] text-[#1a1208] leading-tight">{r.label}</span>
+                                {noRestriction ? (
+                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 leading-none whitespace-nowrap">Sees all</span>
+                                ) : (
+                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 leading-none whitespace-nowrap">{grantedCount}/{visibleTabs.length}</span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => grantAllForRole(r.id)}
+                                  className="text-[9px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest leading-none"
+                                  title={`Grant or clear every tab for ${r.label}`}
+                                >{noRestriction || grantedCount < visibleTabs.length ? 'Grant all' : 'Clear all'}</button>
+                              </div>
+                            </th>
+                          );
+                        })}
+                        <th className="px-2 py-3 text-center align-bottom min-w-[60px]">
+                          <span className="font-bold text-[10px] uppercase tracking-widest text-[#9c8e85]">Row</span>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {MANAGED_ROLES.map(r => {
-                        const allowed = staffAccess[r.id] || [];
-                        const noRestriction = allowed.length === 0;
+                      {visibleTabs.map((t, ti) => {
+                        const everyRoleHasIt = MANAGED_ROLES.every(r => (staffAccess[r.id] || []).includes(t.id));
                         return (
-                          <tr key={r.id} className="border-b border-[#cc5a16]/5 hover:bg-[#faf7f2]/40">
-                            <td className="py-2 pr-3 sticky left-0 bg-white z-10">
-                              <div className="font-bold text-[#1a1208]">{r.label}</div>
-                              <div className="text-[10px] text-[#9c8e85] truncate" title={r.hint}>{r.hint}</div>
-                              {noRestriction && (
-                                <span className="inline-block text-[9px] font-bold uppercase tracking-widest mt-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">No restriction — sees all</span>
-                              )}
+                          <tr
+                            key={t.id}
+                            className={cn(
+                              'border-b border-[#cc5a16]/5 hover:bg-[#faf7f2]/60 transition-colors',
+                              ti % 2 === 1 && 'bg-[#faf7f2]/30'
+                            )}
+                          >
+                            <td className="py-2 px-3 sticky left-0 bg-inherit z-10 align-middle">
+                              <div className="font-bold text-[#1a1208] text-[12px] leading-tight">{t.label}</div>
+                              <div
+                                className="text-[10px] text-[#9c8e85] mt-0.5 leading-tight line-clamp-2"
+                                title={t.description}
+                              >{t.description}</div>
                             </td>
-                            {visibleTabs.map(t => {
+                            {MANAGED_ROLES.map(r => {
+                              const allowed = staffAccess[r.id] || [];
                               const checked = allowed.includes(t.id);
                               return (
-                                <td key={t.id} className="px-2 py-2 text-center">
+                                <td key={r.id} className="px-2 py-2 text-center align-middle">
                                   <input
                                     type="checkbox"
                                     checked={checked}
@@ -16253,17 +16393,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 </td>
                               );
                             })}
-                            <td className="px-2 py-2 text-center">
+                            <td className="px-2 py-2 text-center align-middle">
                               <button
                                 type="button"
-                                onClick={() => setStaffAccess(prev => ({
-                                  ...prev,
-                                  [r.id]: noRestriction || allowed.length < visibleTabs.length
-                                    ? visibleTabs.map(t => t.id)
-                                    : []
-                                }))}
-                                className="text-[10px] font-bold text-[#cc5a16] hover:underline"
-                              >{noRestriction || allowed.length < visibleTabs.length ? 'Grant all' : 'Clear'}</button>
+                                onClick={() => grantAllForTab(t.id)}
+                                className="text-[10px] font-bold text-[#cc5a16] hover:underline whitespace-nowrap"
+                                title={`Grant or clear ${t.label} for every role`}
+                              >{everyRoleHasIt ? 'Clear' : 'All'}</button>
                             </td>
                           </tr>
                         );

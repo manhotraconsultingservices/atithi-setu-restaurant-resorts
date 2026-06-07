@@ -24908,7 +24908,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'invoice-row-bleed-col-fit-grand-total-clip',
+    commit_marker: 'staff-access-owner-gate-plus-matrix-transpose',
     code_features: [
       'subscription-billing',
       'read-only-mode',
