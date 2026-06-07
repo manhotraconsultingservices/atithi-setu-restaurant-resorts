@@ -133,6 +133,20 @@ const menuImageUpload = multer({
   fileFilter: _makeMimeFilter(IMAGE_MIMES),
 });
 
+// EARLY-CHECKIN-FIX (regression from S-7): hotel guest ID-proof uploads.
+// Same in-memory storage pattern as menuImageUpload (so the handler can
+// branch between R2 and local disk by reading req.file.buffer), but with
+// the GENERAL_ALLOWED_MIMES whitelist so PDFs (Aadhaar / passport scans)
+// are accepted alongside images. Before this fix, the endpoint at
+// /hotel/bookings/:bookingId/documents was wired to menuImageUpload —
+// which rejected every PDF upload with HTTP 415 and consequently blocked
+// check-in for any guest whose only ID doc was a PDF (per Req 1b gate).
+const idDocUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: _makeMimeFilter(GENERAL_ALLOWED_MIMES),
+});
+
 // ── Cloudflare R2 client (lazy-initialised on first use) ─────────────────────
 // Keeping this lazy means UPLOAD_BACKEND=disk deployments don't need R2
 // credentials configured, and a misconfigured R2 fails loudly at upload time
@@ -18783,7 +18797,10 @@ async function startServer() {
   app.post(
     "/api/restaurant/:id/hotel/bookings/:bookingId/documents",
     authenticate,
-    menuImageUpload.single('file'),
+    // EARLY-CHECKIN-FIX (S-7 regression): use idDocUpload (image + PDF)
+    // instead of menuImageUpload (image-only). Without this, PDF ID
+    // proofs were rejected by multer with HTTP 415, blocking check-in.
+    idDocUpload.single('file'),
     async (req: AuthRequest, res: Response) => {
       const check = await ensureHotelEnabled(req.params.id);
       if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -24560,7 +24577,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'cmd-center-2-free-table-on-pay-plus-reconciler',
+    commit_marker: 'pdf-pagination-plus-iddoc-pdf-upload-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',

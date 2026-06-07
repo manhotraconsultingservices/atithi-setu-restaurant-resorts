@@ -226,6 +226,26 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       const MUTED = '#6b5d52';
       const HAIR = '#e8dccf';
       const HIGHLIGHT = '#faf7f2';
+      // PDF-FIX (client report: "Grand Total getting trimmed"): A4 page
+      // height is 842 but the footer renders at PAGE_H-40 = 802. After
+      // M-5 (per-rate CGST/SGST), M-6 (round-off), R-2 (FSSAI line),
+      // and R-3 (IRN block, +86px) the totals + payment-status + signature
+      // block can spill past 802 and PDFKit silently CLIPS it (manual
+      // y-positioned drawings do NOT auto-paginate — only doc.text with
+      // no explicit y does). Result: client sees Grand Total clipped or
+      // amount-in-words missing on folios with > ~10 line items.
+      //
+      // Fix: keep a single content-bottom budget and force-break before
+      // each major block when remaining space < needed.
+      const CONTENT_BOTTOM = PAGE_H - 60; // 60px reserved for footer + padding
+      const ensureSpace = (needed: number) => {
+        if (y + needed > CONTENT_BOTTOM) {
+          doc.addPage();
+          // Repaint the brand strip on continuation pages and reset y.
+          doc.rect(0, 0, PAGE_W, 6).fill(ACCENT);
+          y = 30;
+        }
+      };
 
       // Brand strip
       doc.rect(0, 0, PAGE_W, 6).fill(ACCENT);
@@ -406,6 +426,12 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       const billableEntries = data.entries.filter(e => !['TAX', 'DISCOUNT', 'PAYMENT'].includes(e.entryType));
       doc.font('Helvetica').fontSize(9).fillColor(INK_SOFT);
       billableEntries.forEach((e, i) => {
+        // PDF-FIX: paginate if this row + a sensible-sized totals/IRN/payment
+        // tail wouldn't fit. We reserve ~280px for the post-items section
+        // (totals + amount-in-words + IRN + payment + terms/signature). If
+        // the next 22px row would breach the bottom budget, break here so
+        // the totals always land on a page with enough room.
+        ensureSpace(22);
         const rowY = y;
         const hsn = e.hsnCode || hsnForEntry(e.entryType);
         if (i % 2 === 1) {
@@ -485,6 +511,11 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       const igst = (isIndia && !sameState) ? data.folio.gstAmount : 0;
 
       const drawTotalRow = (text: string, value: string, bold: boolean = false, accent: boolean = false) => {
+        // PDF-FIX: never let the GRAND TOTAL bold row clip. Bold rows
+        // (GRAND_TOTAL is the prime example) draw a 22px accent rect at
+        // y-3 — if we're near the bottom edge, page-break first so the
+        // entire row sits on the new page intact rather than ribboned.
+        ensureSpace(bold ? 25 : 16);
         if (bold) {
           doc.rect(totalsX, y - 3, totalsW, 22).fill(ACCENT);
           doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(11);
@@ -561,8 +592,11 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       y += 10;
 
       // Amount in words
+      // PDF-FIX: keep the words box on the same page as enough to follow.
+      const _amtBoxH = drawBilingual ? 34 : 26;
+      ensureSpace(_amtBoxH + 10);
       const amtLbl = label('AMT_WORDS');
-      doc.roundedRect(M, y, INNER_W, drawBilingual ? 34 : 26, 4).fill(HIGHLIGHT);
+      doc.roundedRect(M, y, INNER_W, _amtBoxH, 4).fill(HIGHLIGHT);
       doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(7.5)
          .text(amtLbl.en, M + 12, y + 5, { characterSpacing: 1.2 });
       if (amtLbl.hi) {
@@ -586,6 +620,10 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       if (irn && (irn.eInvoiceMandatory || irn.irn || irn.status)) {
         const isGenerated = String(irn.status || '').toUpperCase() === 'GENERATED' && irn.irn;
         const irnBoxH = isGenerated ? 86 : 44;
+        // PDF-FIX: the IRN box is the biggest single contributor that pushed
+        // grand-total / amount-in-words off the page on long folios. Force
+        // a page break when there isn't room for the whole box + trailer.
+        ensureSpace(irnBoxH + 12);
         const irnBg = isGenerated ? '#f0f7f3' : '#fff5e6';
         const irnBorder = isGenerated ? '#2d7d5a' : '#cc5a16';
         doc.roundedRect(M, y, INNER_W, irnBoxH, 4).fillAndStroke(irnBg, irnBorder);
@@ -651,6 +689,8 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
         : data.folio.status === 'settled' ? '#edf7f2'
         : data.folio.status === 'voided'   ? '#f0ebe4' : '#fef6e7';
 
+      // PDF-FIX: payment status banner is 40px + 16px gap; force-break if tight.
+      ensureSpace(56);
       doc.roundedRect(M, y, INNER_W, 40, 4).fillAndStroke(statusBg, statusColor);
       const paySLbl = label('PAY_STATUS');
       doc.fillColor(statusColor).font('Helvetica-Bold').fontSize(9)
@@ -678,6 +718,8 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       y += 56;
 
       // ────────────── Terms + Signature ──────────────
+      // PDF-FIX: ~80px for terms+signature block; force-break if tight.
+      ensureSpace(80);
       const termsLbl = label('TERMS');
       doc.fillColor(MUTED).font('Helvetica-Bold').fontSize(8)
          .text(termsLbl.en, M, y, { characterSpacing: 1 });
