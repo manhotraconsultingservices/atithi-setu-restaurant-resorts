@@ -401,14 +401,28 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       y += stripH + 16;
 
       // ────────────── LINE ITEMS TABLE ──────────────
+      // COLUMN-FIT (client report: "Rate column overflowing"):
+      // Old layout had a 50 px RATE column which couldn't hold
+      // "INR 1,500.00" (~62 px at fontSize 9) → wrapped to two lines.
+      // Two changes together solve it:
+      //   1) Drop the currency code from per-row values (use
+      //      moneyNumeric instead of money). Currency stays explicit
+      //      on TOTALS where it belongs.
+      //   2) Slightly redistribute columns so RATE + AMOUNT both have
+      //      breathing room for 5-digit Indian numbers like
+      //      "1,24,500.00" and DESCRIPTION gets a bit more space too.
+      // Currency-symbol-aware header labels make it crystal-clear
+      // what currency the numbers are in even when staff scan only
+      // the table.
+      const currencySym = data.tenant?.currency_symbol || '₹';
       const colPositions = {
         num:  M,
         desc: M + 28,
-        hsn:  M + INNER_W - 280,
-        qty:  M + INNER_W - 220,
-        rate: M + INNER_W - 170,
-        tax:  M + INNER_W - 110,
-        amt:  M + INNER_W - 60,
+        hsn:  M + INNER_W - 270,   // was -280 (5 px more for desc)
+        qty:  M + INNER_W - 215,   // was -220
+        rate: M + INNER_W - 170,   // unchanged
+        tax:  M + INNER_W - 100,   // was -110
+        amt:  M + INNER_W - 60,    // unchanged
       };
 
       doc.rect(M, y, INNER_W, 22).fill(INK);
@@ -417,9 +431,9 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
       doc.text(label('DESC').en,             colPositions.desc + 4, y + 8);
       doc.text(label('HSN').en,              colPositions.hsn,      y + 8);
       doc.text(label('QTY').en,              colPositions.qty,      y + 8, { width: 40, align: 'right' });
-      doc.text(label('RATE').en,             colPositions.rate,     y + 8, { width: 50, align: 'right' });
+      doc.text(`${label('RATE').en} (${currencySym})`,   colPositions.rate, y + 8, { width: 65, align: 'right' });
       doc.text(label('TAX_PCT').en,          colPositions.tax,      y + 8, { width: 40, align: 'right' });
-      doc.text(label('AMOUNT').en,           colPositions.amt - 20, y + 8, { width: 80, align: 'right' });
+      doc.text(`${label('AMOUNT').en} (${currencySym})`, colPositions.amt - 20, y + 8, { width: 80, align: 'right' });
       y += 22;
 
       const sign = data.isCreditNote ? -1 : 1;
@@ -446,10 +460,13 @@ export async function generateInvoicePdf(data: InvoiceData): Promise<Buffer> {
         doc.fillColor(INK_SOFT).font('Helvetica').fontSize(9);
         doc.text(hsn,                      colPositions.hsn,      rowY + 6);
         doc.text(String(e.quantity),       colPositions.qty,      rowY + 6, { width: 40, align: 'right' });
-        doc.text(money(data.tenant, e.unitPrice * sign),colPositions.rate, rowY + 6, { width: 50, align: 'right' });
-        doc.text(`${e.gstRate ?? 0}%`,                  colPositions.tax,  rowY + 6, { width: 40, align: 'right' });
+        // COLUMN-FIT: numeric-only (no currency prefix) — fits cleanly
+        // in the 65/80 px columns. Currency is shown in the header label
+        // "(₹)" and again on every TOTALS row, so no info is lost.
+        doc.text(moneyNumeric(data.tenant, e.unitPrice * sign), colPositions.rate, rowY + 6, { width: 65, align: 'right' });
+        doc.text(`${e.gstRate ?? 0}%`,                          colPositions.tax,  rowY + 6, { width: 40, align: 'right' });
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
-           .text(money(data.tenant, e.amount * sign),   colPositions.amt - 20, rowY + 6, { width: 80, align: 'right' });
+           .text(moneyNumeric(data.tenant, e.amount * sign),    colPositions.amt - 20, rowY + 6, { width: 80, align: 'right' });
         y += 22;
       });
 
@@ -787,6 +804,29 @@ function money(
     formatted = abs.toFixed(2);
   }
   return `${isNeg ? '-' : ''}${code} ${formatted}`;
+}
+
+// COLUMN-FIT (client report: "Rate column overflowing"): numeric-only
+// variant of money() used inside the line-items table. The RATE column
+// is 50 px wide — "INR 1,500.00" (~62 px at Helvetica 9) wraps to two
+// lines, ribboning the row. Industry-standard invoice convention is to
+// show currency ONCE on the totals section and numeric-only values in
+// the table itself (Tally, QuickBooks, Stripe, Zoho all do this). The
+// totals section keeps using money() so the currency stays explicit.
+function moneyNumeric(
+  tenant: InvoiceData['tenant'] | undefined,
+  n: number,
+): string {
+  const isNeg = n < 0;
+  const abs = Math.abs(n || 0);
+  const locale = tenant?.locale || 'en-IN';
+  let formatted: string;
+  try {
+    formatted = abs.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  } catch {
+    formatted = abs.toFixed(2);
+  }
+  return `${isNeg ? '-' : ''}${formatted}`;
 }
 // Backwards-compatible alias retained for the few remaining call sites
 // (amount-in-words, etc.). Equivalent to money(undefined, n).

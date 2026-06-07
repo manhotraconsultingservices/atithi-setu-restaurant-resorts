@@ -24908,7 +24908,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'p2b-fix-2-discount-alloc-email-grouplist',
+    commit_marker: 'invoice-column-fit-numeric-rate-no-wrap',
     code_features: [
       'subscription-billing',
       'read-only-mode',
