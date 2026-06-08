@@ -18657,6 +18657,150 @@ async function startServer() {
   });
 
   // ════════════════════════════════════════════════════════════════════
+  // ─── OTA 360° DASHBOARD (executive view) ───────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  // BCG-grade per-channel KPI rollup. One endpoint, one round trip,
+  // every metric needed for an executive OTA review. Covers volume,
+  // revenue, margin, mix, behaviour, and strategic-concentration risk.
+  //
+  // ?days=7 | 30 | 90 | 365  (default 30)
+  //
+  // For each channel (incl. DIRECT/WALK_IN, treated as zero-commission):
+  //   • bookings              — active booking count
+  //   • cancellations         — cancelled in window
+  //   • cancellation_rate     — cancellations / (bookings + cancellations)
+  //   • room_nights           — Σ (check_out - check_in)  (day-use = 1)
+  //   • guests_total          — Σ num_guests
+  //   • gross_revenue         — Σ total_amount (active only)
+  //   • commission_paid       — Σ commission_amount
+  //   • net_revenue           — Σ net_amount
+  //   • adr                   — gross / room_nights
+  //   • net_adr               — net   / room_nights
+  //   • avg_booking_value     — gross / bookings
+  //   • avg_commission_pct    — AVG of commission_pct
+  //   • net_margin_pct        — net / gross × 100
+  //   • avg_length_of_stay    — AVG nights/booking
+  //   • avg_lead_time_days    — AVG (check_in - created_at)
+  //   • revenue_share_pct     — this.gross / Σ all.gross
+  //   • booking_share_pct     — this.bookings / Σ all.bookings
+  //
+  // Plus a portfolio-level rollup + strategic flags:
+  //   • top_channel_by_net, best_margin_channel, worst_margin_channel
+  //   • concentration_top1, concentration_top2 (revenue share)
+  //   • channel_count
+  app.get("/api/restaurant/:id/hotel/reports/ota-360", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const days  = Math.max(1, Math.min(730, Number(req.query.days) || 30));
+      const today = new Date().toISOString().slice(0, 10);
+      const from  = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+
+      // Single query: per-channel rollup. Day-use bookings counted as 1
+      // night so they're not erased from ADR/RevPAR math (check_out =
+      // check_in in our schema for DAY_USE).
+      const channelRows: any[] = await tenantDb.query(
+        `SELECT
+            COALESCE(NULLIF(TRIM(booking_source), ''), 'DIRECT') AS channel,
+            COUNT(*) FILTER (WHERE status NOT IN ('CANCELLED'))     AS bookings,
+            COUNT(*) FILTER (WHERE status = 'CANCELLED')            AS cancellations,
+            COALESCE(SUM(total_amount)      FILTER (WHERE status NOT IN ('CANCELLED')), 0) AS gross,
+            COALESCE(SUM(commission_amount) FILTER (WHERE status NOT IN ('CANCELLED')), 0) AS commission,
+            COALESCE(SUM(net_amount)        FILTER (WHERE status NOT IN ('CANCELLED')), 0) AS net,
+            COALESCE(SUM(GREATEST(1, (check_out_date - check_in_date)))
+              FILTER (WHERE status NOT IN ('CANCELLED')), 0)        AS room_nights,
+            COALESCE(SUM(num_guests) FILTER (WHERE status NOT IN ('CANCELLED')), 0) AS guests_total,
+            COALESCE(AVG(commission_pct) FILTER (WHERE status NOT IN ('CANCELLED')), 0) AS avg_commission_pct,
+            COALESCE(AVG(GREATEST(1, (check_out_date - check_in_date)))
+              FILTER (WHERE status NOT IN ('CANCELLED')), 0) AS avg_length_of_stay,
+            COALESCE(AVG(GREATEST(0, (check_in_date - created_at::date)))
+              FILTER (WHERE status NOT IN ('CANCELLED')), 0) AS avg_lead_time_days
+          FROM room_bookings
+          WHERE check_in_date BETWEEN ? AND ?
+          GROUP BY COALESCE(NULLIF(TRIM(booking_source), ''), 'DIRECT')
+          ORDER BY net DESC`,
+        [from, today]
+      ).catch(() => []);
+
+      // Compute derived metrics + shares in JS so the SQL stays readable.
+      const totalGross    = channelRows.reduce((s, r) => s + Number(r.gross || 0), 0);
+      const totalBookings = channelRows.reduce((s, r) => s + Number(r.bookings || 0), 0);
+      const totalNet      = channelRows.reduce((s, r) => s + Number(r.net || 0), 0);
+      const totalComm     = channelRows.reduce((s, r) => s + Number(r.commission || 0), 0);
+      const totalCancels  = channelRows.reduce((s, r) => s + Number(r.cancellations || 0), 0);
+      const totalNights   = channelRows.reduce((s, r) => s + Number(r.room_nights || 0), 0);
+      const totalGuests   = channelRows.reduce((s, r) => s + Number(r.guests_total || 0), 0);
+
+      const channels = channelRows.map((r) => {
+        const bookings    = Number(r.bookings || 0);
+        const cancellations = Number(r.cancellations || 0);
+        const gross       = Number(r.gross || 0);
+        const commission  = Number(r.commission || 0);
+        const net         = Number(r.net || 0);
+        const nights      = Number(r.room_nights || 0);
+        const denom       = bookings + cancellations;
+        return {
+          channel: String(r.channel),
+          bookings,
+          cancellations,
+          cancellation_rate: denom > 0 ? Math.round((cancellations / denom) * 1000) / 10 : 0,
+          room_nights: nights,
+          guests_total: Number(r.guests_total || 0),
+          gross,
+          commission,
+          net,
+          adr: nights > 0 ? Math.round((gross / nights) * 100) / 100 : 0,
+          net_adr: nights > 0 ? Math.round((net / nights) * 100) / 100 : 0,
+          avg_booking_value: bookings > 0 ? Math.round((gross / bookings) * 100) / 100 : 0,
+          avg_commission_pct: Math.round(Number(r.avg_commission_pct || 0) * 100) / 100,
+          net_margin_pct: gross > 0 ? Math.round((net / gross) * 1000) / 10 : 100,
+          avg_length_of_stay: Math.round(Number(r.avg_length_of_stay || 0) * 10) / 10,
+          avg_lead_time_days: Math.round(Number(r.avg_lead_time_days || 0) * 10) / 10,
+          revenue_share_pct: totalGross > 0 ? Math.round((gross / totalGross) * 1000) / 10 : 0,
+          booking_share_pct: totalBookings > 0 ? Math.round((bookings / totalBookings) * 1000) / 10 : 0,
+        };
+      });
+
+      // Strategic flags — what a senior partner would want surfaced
+      // without scrolling the table.
+      const sortedByNet     = [...channels].sort((a, b) => b.net - a.net);
+      const sortedByMargin  = [...channels].filter(c => c.bookings > 0).sort((a, b) => b.net_margin_pct - a.net_margin_pct);
+      const sortedByRevShare= [...channels].sort((a, b) => b.revenue_share_pct - a.revenue_share_pct);
+      const top1Share = sortedByRevShare[0]?.revenue_share_pct || 0;
+      const top2Share = (sortedByRevShare[0]?.revenue_share_pct || 0) + (sortedByRevShare[1]?.revenue_share_pct || 0);
+
+      res.json({
+        period: { from, to: today, days },
+        portfolio: {
+          channel_count: channels.length,
+          total_bookings: totalBookings,
+          total_cancellations: totalCancels,
+          total_room_nights: totalNights,
+          total_guests: totalGuests,
+          total_gross: Math.round(totalGross * 100) / 100,
+          total_commission: Math.round(totalComm * 100) / 100,
+          total_net: Math.round(totalNet * 100) / 100,
+          overall_margin_pct: totalGross > 0 ? Math.round((totalNet / totalGross) * 1000) / 10 : 100,
+          overall_adr: totalNights > 0 ? Math.round((totalGross / totalNights) * 100) / 100 : 0,
+          overall_net_adr: totalNights > 0 ? Math.round((totalNet / totalNights) * 100) / 100 : 0,
+          overall_cancellation_rate: (totalBookings + totalCancels) > 0
+            ? Math.round((totalCancels / (totalBookings + totalCancels)) * 1000) / 10 : 0,
+          top_channel_by_net: sortedByNet[0] || null,
+          best_margin_channel: sortedByMargin[0] || null,
+          worst_margin_channel: sortedByMargin[sortedByMargin.length - 1] || null,
+          concentration_top1_pct: Math.round(top1Share * 10) / 10,
+          concentration_top2_pct: Math.round(top2Share * 10) / 10,
+          concentration_risk: top1Share >= 50 ? 'HIGH' : top2Share >= 75 ? 'MEDIUM' : 'LOW',
+        },
+        channels,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to build OTA 360 report' });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
   // ─── OUTBOUND SYNC QUEUE INSPECTOR (Gap 7) ─────────────────────────
   // ════════════════════════════════════════════════════════════════════
   // List + manual-retry + dismiss endpoints for the channel_sync_log
@@ -26874,7 +27018,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'channel-mgr-friendly-redesign-with-live-rate-card',
+    commit_marker: 'channel-mgr-ota-360-dashboard-bcg-grade-kpis',
     code_features: [
       'subscription-billing',
       'read-only-mode',

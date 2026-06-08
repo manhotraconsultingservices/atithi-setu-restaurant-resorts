@@ -7560,6 +7560,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     try { setChannelSecurityConfig(await hotelApi('/channel-security-config')); } catch { setChannelSecurityConfig(null); }
   };
 
+  // OTA 360° dashboard — executive view. One round-trip pulls every
+  // KPI we need for the per-channel performance breakdown. Time window
+  // is owner-selectable (7/30/90/365 days).
+  const [ota360Data, setOta360Data] = useState<any>(null);
+  const [ota360Days, setOta360Days] = useState<number>(30);
+  const [ota360Loading, setOta360Loading] = useState(false);
+  const fetchOta360 = async (days = ota360Days) => {
+    if (!isHotelEnabled) return;
+    setOta360Loading(true);
+    try { setOta360Data(await hotelApi(`/reports/ota-360?days=${days}`)); }
+    catch { setOta360Data(null); }
+    finally { setOta360Loading(false); }
+  };
+
   // ── Menu Management Enhancements ─────────────────────────────────────────────
   const [menuCatFilter, setMenuCatFilter] = useState<string>('ALL');
   const [menuSearchTerm, setMenuSearchTerm] = useState<string>('');
@@ -9978,7 +9992,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // BCG client request 8 Jun 2026 — Channel Manager moved out of Settings.
     // Eagerly load credentials + iCal feeds + recent webhook events when
     // the tab is opened so the page renders with data, not loading spinners.
-    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); }
+    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); }
     if (activeTab === 'FOLIOS') fetchHotelFolios();
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
@@ -17837,6 +17851,264 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             );
           })()}
+
+          {/* ════════════════ OTA 360° DASHBOARD ════════════════
+              Executive scorecard — every per-channel KPI on one screen.
+              Built like a BCG insights deck: portfolio rollup → strategic
+              callouts → per-channel cards → side-by-side comparison.
+              Owner picks the time window (7/30/90/365 days). */}
+          <div className="bg-gradient-to-br from-indigo-50 via-white to-purple-50 p-6 sm:p-8 rounded-[32px] border-2 border-indigo-200 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-5 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif text-[#1a1208]">🎯 OTA 360° Dashboard</h3>
+                <p className="text-sm text-[#6b5d52] mt-1 max-w-3xl">
+                  Complete performance scorecard per OTA — revenue, margin, volume, mix, behaviour. Built for the weekly owner / GM review.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 bg-white rounded-2xl p-1 border border-indigo-200">
+                {[7, 30, 90, 365].map((d) => (
+                  <button
+                    key={d}
+                    onClick={() => { setOta360Days(d); fetchOta360(d); }}
+                    className={cn(
+                      'px-3 py-1.5 rounded-xl text-xs font-bold transition',
+                      ota360Days === d ? 'bg-indigo-600 text-white' : 'text-[#6b5d52] hover:bg-indigo-50'
+                    )}
+                  >Last {d === 365 ? '1Y' : `${d}d`}</button>
+                ))}
+                <button onClick={() => fetchOta360()} className="px-2 py-1.5 rounded-xl text-xs font-bold text-[#6b5d52] hover:bg-indigo-50">↻</button>
+              </div>
+            </div>
+            {ota360Loading && (<p className="text-sm text-[#9c8e85] italic">Crunching numbers…</p>)}
+            {!ota360Loading && (!ota360Data || !ota360Data.channels || ota360Data.channels.length === 0) ? (
+              <p className="text-sm text-[#9c8e85] italic">No bookings in this window — once OTAs start delivering bookings the dashboard fills in automatically.</p>
+            ) : ota360Data && ota360Data.channels && ota360Data.channels.length > 0 ? (
+              <div className="space-y-5">
+                {(() => {
+                  const p = ota360Data.portfolio || {};
+                  const fmt = (n: number) => `₹${Math.round(Number(n || 0)).toLocaleString('en-IN')}`;
+                  const fmtPct = (n: number) => `${Number(n || 0).toFixed(1)}%`;
+                  const labels: Record<string, string> = { BOOKING: '🌐 Booking.com', MMT: '✈️ MakeMyTrip', GOIBIBO: '🧳 Goibibo', AGODA: '🏨 Agoda', EXPEDIA: '🌍 Expedia', AIRBNB: '🏠 Airbnb', DIRECT: '🏠 Direct', WALK_IN: '🚶 Walk-in' };
+                  const labelOf = (c: string) => labels[c] || c;
+                  const marginColor = (m: number) =>
+                    m >= 95 ? 'text-emerald-700 bg-emerald-50' :
+                    m >= 85 ? 'text-lime-700 bg-lime-50' :
+                    m >= 78 ? 'text-amber-700 bg-amber-50' :
+                              'text-red-700 bg-red-50';
+                  const riskColor = p.concentration_risk === 'HIGH' ? 'bg-red-100 text-red-800' : p.concentration_risk === 'MEDIUM' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800';
+                  return (
+                    <>
+                      {/* ── Portfolio KPI strip ────────────────────────────── */}
+                      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                        <div className="bg-white rounded-2xl p-3 border border-indigo-100">
+                          <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Bookings</p>
+                          <p className="text-2xl font-bold text-[#1a1208] mt-1">{Number(p.total_bookings || 0).toLocaleString('en-IN')}</p>
+                          <p className="text-[10px] text-[#6b5d52]">{p.overall_cancellation_rate}% cancel</p>
+                        </div>
+                        <div className="bg-white rounded-2xl p-3 border border-indigo-100">
+                          <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Room Nights</p>
+                          <p className="text-2xl font-bold text-[#1a1208] mt-1">{Number(p.total_room_nights || 0).toLocaleString('en-IN')}</p>
+                          <p className="text-[10px] text-[#6b5d52]">{Number(p.total_guests || 0).toLocaleString('en-IN')} guests</p>
+                        </div>
+                        <div className="bg-white rounded-2xl p-3 border border-indigo-100">
+                          <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Gross Revenue</p>
+                          <p className="text-2xl font-bold text-[#1a1208] mt-1">{fmt(p.total_gross)}</p>
+                          <p className="text-[10px] text-[#6b5d52]">ADR {fmt(p.overall_adr)}</p>
+                        </div>
+                        <div className="bg-white rounded-2xl p-3 border border-indigo-100">
+                          <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Commission Paid</p>
+                          <p className="text-2xl font-bold text-red-700 mt-1">{fmt(p.total_commission)}</p>
+                          <p className="text-[10px] text-[#6b5d52]">to all OTAs</p>
+                        </div>
+                        <div className="bg-white rounded-2xl p-3 border border-indigo-100">
+                          <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Net Revenue</p>
+                          <p className="text-2xl font-bold text-emerald-700 mt-1">{fmt(p.total_net)}</p>
+                          <p className="text-[10px] text-[#6b5d52]">net ADR {fmt(p.overall_net_adr)}</p>
+                        </div>
+                        <div className="bg-white rounded-2xl p-3 border border-indigo-100">
+                          <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Overall Margin</p>
+                          <p className={cn('text-2xl font-bold mt-1', p.overall_margin_pct >= 90 ? 'text-emerald-700' : p.overall_margin_pct >= 82 ? 'text-amber-700' : 'text-red-700')}>{fmtPct(p.overall_margin_pct)}</p>
+                          <p className="text-[10px] text-[#6b5d52]">net ÷ gross</p>
+                        </div>
+                      </div>
+
+                      {/* ── Strategic insights box ─────────────────────────── */}
+                      <div className="bg-gradient-to-r from-amber-50 to-yellow-50 rounded-2xl p-4 border border-amber-200">
+                        <p className="text-xs font-bold uppercase tracking-widest text-amber-900 mb-2">📊 Strategic insights</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                          <div>
+                            <p className="text-[10px] text-amber-800 font-bold uppercase">Top earner (net)</p>
+                            {p.top_channel_by_net ? (
+                              <p className="font-bold text-[#1a1208] mt-0.5">{labelOf(p.top_channel_by_net.channel)} — {fmt(p.top_channel_by_net.net)}</p>
+                            ) : <p className="text-[#6b5d52] mt-0.5">—</p>}
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-amber-800 font-bold uppercase">Best margin</p>
+                            {p.best_margin_channel ? (
+                              <p className="font-bold text-emerald-700 mt-0.5">{labelOf(p.best_margin_channel.channel)} — {fmtPct(p.best_margin_channel.net_margin_pct)}</p>
+                            ) : <p className="text-[#6b5d52] mt-0.5">—</p>}
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-amber-800 font-bold uppercase">Thinnest margin</p>
+                            {p.worst_margin_channel && p.worst_margin_channel.channel !== p.best_margin_channel?.channel ? (
+                              <p className="font-bold text-red-700 mt-0.5">{labelOf(p.worst_margin_channel.channel)} — {fmtPct(p.worst_margin_channel.net_margin_pct)}</p>
+                            ) : <p className="text-[#6b5d52] mt-0.5">N/A (only one channel)</p>}
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-amber-800 font-bold uppercase">Concentration risk</p>
+                            <p className="mt-0.5">
+                              <span className={cn('inline-block text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full mr-1', riskColor)}>{p.concentration_risk}</span>
+                              <span className="text-[10px] text-[#6b5d52]">Top 1 = {fmtPct(p.concentration_top1_pct)} · Top 2 = {fmtPct(p.concentration_top2_pct)}</span>
+                            </p>
+                          </div>
+                        </div>
+                        {p.concentration_risk === 'HIGH' && (
+                          <p className="text-[10px] text-red-800 italic mt-2">⚠️ More than 50% of revenue comes from one channel — if they de-list you or change their algorithm, you have a major problem. Diversify.</p>
+                        )}
+                      </div>
+
+                      {/* ── Per-channel cards ──────────────────────────────── */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                        {ota360Data.channels.map((c: any) => (
+                          <div key={c.channel} className="bg-white rounded-2xl p-4 border border-indigo-100 shadow-sm">
+                            <div className="flex items-start justify-between gap-2 mb-3">
+                              <div>
+                                <p className="text-base font-bold text-[#1a1208]">{labelOf(c.channel)}</p>
+                                <p className="text-[10px] text-[#6b5d52]">{c.bookings} bookings · {c.revenue_share_pct}% of revenue</p>
+                              </div>
+                              <span className={cn('text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', marginColor(c.net_margin_pct))}>
+                                {fmtPct(c.net_margin_pct)} margin
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div className="bg-[#faf7f2] rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-[#9c8e85] uppercase font-bold">Gross</p>
+                                <p className="font-bold text-[#1a1208]">{fmt(c.gross)}</p>
+                              </div>
+                              <div className="bg-emerald-50 rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-emerald-800 uppercase font-bold">Net (yours)</p>
+                                <p className="font-bold text-emerald-700">{fmt(c.net)}</p>
+                              </div>
+                              <div className="bg-red-50 rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-red-800 uppercase font-bold">Commission</p>
+                                <p className="font-bold text-red-700">{fmt(c.commission)}</p>
+                              </div>
+                              <div className="bg-[#faf7f2] rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-[#9c8e85] uppercase font-bold">Avg %</p>
+                                <p className="font-bold text-[#1a1208]">{fmtPct(c.avg_commission_pct)}</p>
+                              </div>
+                              <div className="bg-[#faf7f2] rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-[#9c8e85] uppercase font-bold">ADR</p>
+                                <p className="font-bold text-[#1a1208]">{fmt(c.adr)}</p>
+                              </div>
+                              <div className="bg-[#faf7f2] rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-[#9c8e85] uppercase font-bold">Net ADR</p>
+                                <p className="font-bold text-[#1a1208]">{fmt(c.net_adr)}</p>
+                              </div>
+                              <div className="bg-[#faf7f2] rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-[#9c8e85] uppercase font-bold">Avg Booking</p>
+                                <p className="font-bold text-[#1a1208]">{fmt(c.avg_booking_value)}</p>
+                              </div>
+                              <div className="bg-[#faf7f2] rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-[#9c8e85] uppercase font-bold">Room Nights</p>
+                                <p className="font-bold text-[#1a1208]">{c.room_nights.toLocaleString('en-IN')}</p>
+                              </div>
+                              <div className="bg-[#faf7f2] rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-[#9c8e85] uppercase font-bold">Avg Stay</p>
+                                <p className="font-bold text-[#1a1208]">{c.avg_length_of_stay} nights</p>
+                              </div>
+                              <div className="bg-[#faf7f2] rounded-xl px-3 py-2">
+                                <p className="text-[9px] text-[#9c8e85] uppercase font-bold">Lead Time</p>
+                                <p className="font-bold text-[#1a1208]">{c.avg_lead_time_days} days</p>
+                              </div>
+                              <div className="bg-[#faf7f2] rounded-xl px-3 py-2 col-span-2">
+                                <p className="text-[9px] text-[#9c8e85] uppercase font-bold">Cancellations</p>
+                                <p className="font-bold text-[#1a1208]">{c.cancellations} <span className="text-[10px] font-normal text-[#6b5d52]">({fmtPct(c.cancellation_rate)} rate)</span></p>
+                              </div>
+                            </div>
+                            {/* Mini share bar */}
+                            <div className="mt-3">
+                              <div className="flex items-center justify-between text-[9px] text-[#9c8e85] uppercase font-bold mb-1">
+                                <span>Revenue share</span>
+                                <span>{fmtPct(c.revenue_share_pct)}</span>
+                              </div>
+                              <div className="h-1.5 bg-[#f0e6d6] rounded-full overflow-hidden">
+                                <div className="h-full bg-indigo-500" style={{ width: `${Math.min(100, c.revenue_share_pct)}%` }}></div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* ── Side-by-side comparison table ──────────────────── */}
+                      <div className="bg-white rounded-2xl border border-indigo-100 overflow-hidden">
+                        <div className="px-4 py-3 border-b border-indigo-100">
+                          <p className="text-sm font-bold text-[#1a1208]">📋 Side-by-side comparison</p>
+                          <p className="text-[10px] text-[#6b5d52]">Sorted by net revenue. Hover any column header for context.</p>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs border-collapse">
+                            <thead>
+                              <tr className="bg-[#faf7f2] text-[#6b5d52] text-[10px] uppercase tracking-wider">
+                                <th className="text-left px-3 py-2 sticky left-0 bg-[#faf7f2] z-10">Channel</th>
+                                <th className="text-right px-3 py-2" title="Active bookings">Bookings</th>
+                                <th className="text-right px-3 py-2" title="Sum of nights">Nights</th>
+                                <th className="text-right px-3 py-2" title="What guests paid">Gross</th>
+                                <th className="text-right px-3 py-2" title="What the OTA kept">Comm</th>
+                                <th className="text-right px-3 py-2" title="What you kept">Net</th>
+                                <th className="text-right px-3 py-2" title="net ÷ gross">Margin</th>
+                                <th className="text-right px-3 py-2" title="Average Daily Rate">ADR</th>
+                                <th className="text-right px-3 py-2" title="Average Length Of Stay">ALOS</th>
+                                <th className="text-right px-3 py-2" title="Days between booking and check-in">Lead</th>
+                                <th className="text-right px-3 py-2" title="% of bookings cancelled">Cancel</th>
+                                <th className="text-right px-3 py-2" title="% of total revenue">Share</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ota360Data.channels.map((c: any) => (
+                                <tr key={c.channel} className="border-t border-[#e8e0d6]">
+                                  <td className="px-3 py-2 font-bold sticky left-0 bg-white z-10">{labelOf(c.channel)}</td>
+                                  <td className="px-3 py-2 text-right">{c.bookings}</td>
+                                  <td className="px-3 py-2 text-right">{c.room_nights}</td>
+                                  <td className="px-3 py-2 text-right font-mono">{fmt(c.gross)}</td>
+                                  <td className="px-3 py-2 text-right font-mono text-red-700">{fmt(c.commission)}</td>
+                                  <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">{fmt(c.net)}</td>
+                                  <td className={cn('px-3 py-2 text-right font-bold', marginColor(c.net_margin_pct))}>{fmtPct(c.net_margin_pct)}</td>
+                                  <td className="px-3 py-2 text-right font-mono">{fmt(c.adr)}</td>
+                                  <td className="px-3 py-2 text-right">{c.avg_length_of_stay}</td>
+                                  <td className="px-3 py-2 text-right">{c.avg_lead_time_days}d</td>
+                                  <td className="px-3 py-2 text-right">{fmtPct(c.cancellation_rate)}</td>
+                                  <td className="px-3 py-2 text-right">{fmtPct(c.revenue_share_pct)}</td>
+                                </tr>
+                              ))}
+                              <tr className="border-t-2 border-indigo-300 bg-indigo-50">
+                                <td className="px-3 py-2 font-bold sticky left-0 bg-indigo-50 z-10">PORTFOLIO TOTAL</td>
+                                <td className="px-3 py-2 text-right font-bold">{p.total_bookings}</td>
+                                <td className="px-3 py-2 text-right font-bold">{p.total_room_nights}</td>
+                                <td className="px-3 py-2 text-right font-mono font-bold">{fmt(p.total_gross)}</td>
+                                <td className="px-3 py-2 text-right font-mono font-bold text-red-700">{fmt(p.total_commission)}</td>
+                                <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">{fmt(p.total_net)}</td>
+                                <td className={cn('px-3 py-2 text-right font-bold', marginColor(p.overall_margin_pct))}>{fmtPct(p.overall_margin_pct)}</td>
+                                <td className="px-3 py-2 text-right font-mono font-bold">{fmt(p.overall_adr)}</td>
+                                <td className="px-3 py-2 text-right">—</td>
+                                <td className="px-3 py-2 text-right">—</td>
+                                <td className="px-3 py-2 text-right font-bold">{fmtPct(p.overall_cancellation_rate)}</td>
+                                <td className="px-3 py-2 text-right font-bold">100%</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <p className="text-[10px] text-[#9c8e85] italic">
+                        Period: {ota360Data.period?.from} → {ota360Data.period?.to}. Cancellation rate, ADR, ALOS, lead time all measured per-channel. Concentration risk: HIGH if any single channel ≥ 50%, MEDIUM if top two ≥ 75%.
+                      </p>
+                    </>
+                  );
+                })()}
+              </div>
+            ) : null}
+          </div>
 
           {/* ════════════════ LIVE RATE CARD ════════════════
               THE headline view — answers "What rate will guests see on
