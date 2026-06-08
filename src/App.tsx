@@ -7255,8 +7255,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     meal_plans: [], room_tariffs: [], extra_person_charges: [], room_types: [],
   });
   const [tariffLoading, setTariffLoading] = useState(false);
+  const [tariffError, setTariffError] = useState<string | null>(null);
   const fetchTariff = useCallback(async () => {
+    // BCG Tariff Phase 4.7 (8 Jun 2026) — client report: "meal plans
+    // disappear between sessions; clicking Matrix toggle makes them
+    // reappear." Root cause was the silent catch below + the effect
+    // depending only on [activeTab, isHotelEnabled] (token / restaurantId
+    // changes never re-triggered the fetch). Now we log failures, expose
+    // the error to the UI, and the boot-time useEffect re-fires whenever
+    // token or restaurantId changes.
+    if (!restaurantId || !token) return; // no auth yet
     setTariffLoading(true);
+    setTariffError(null);
     try {
       const data = await hotelApi('/tariff');
       setTariffData({
@@ -7268,10 +7278,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         extra_person_charges: Array.isArray(data.extra_person_charges) ? data.extra_person_charges : [],
         room_types: Array.isArray(data.room_types) ? data.room_types : [],
       });
-    } catch { /* non-hotel tenant — silent */ }
+    } catch (err: any) {
+      // Loud failure — was previously swallowed. Now visible in console
+      // AND surfaced to the UI via tariffError so the owner sees
+      // "couldn't load tariff" instead of a confusing empty state.
+      console.error('[fetchTariff] failed:', err?.message || err);
+      setTariffError(err?.message || 'Failed to load tariff configuration. Try refreshing.');
+    }
     finally { setTariffLoading(false); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restaurantId, token]);
+
+  // BCG Tariff Phase 4.7 — Dedicated boot-time fetch for tariff data.
+  // Fires whenever auth (restaurantId + token) becomes available AND the
+  // hotel module is enabled. Independent of activeTab so the data is
+  // ready by the time the owner opens the Settings or Hotel Bookings tab.
+  useEffect(() => {
+    if (!isHotelEnabled || !restaurantId || !token) return;
+    fetchTariff();
+  }, [isHotelEnabled, restaurantId, token, fetchTariff]);
 
   // ════════════════════════════════════════════════════════════════════
   // BCG Tariff Phase 4.2 — Client-side matrix price PREVIEW.
@@ -15491,9 +15516,33 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           tariff.tariff_model === 'MATRIX' ? 'bg-emerald-600 text-white' : 'bg-[#faf7f2] text-[#6b5d52] border border-[#cc5a16]/15'
                         )}
                       >{tariff.tariff_model === 'MATRIX' ? '✓ Matrix' : 'Legacy'}</button>
-                      {tariffLoading && <span className="text-[10px] text-[#9c8e85]">Loading…</span>}
+                      <button
+                        type="button"
+                        onClick={fetchTariff}
+                        disabled={tariffLoading}
+                        title="Reload tariff data from server"
+                        className="text-[10px] font-bold uppercase tracking-widest px-2 py-1.5 rounded-lg bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#6b5d52] border border-[#cc5a16]/15 disabled:opacity-50"
+                      >{tariffLoading ? 'Loading…' : '↻ Reload'}</button>
                     </div>
                   </div>
+
+                  {/* BCG Tariff Phase 4.7 — surface fetch failures instead of
+                      swallowing them into an empty state. The owner sees the
+                      actual error AND a Retry button instead of "0 ACTIVE". */}
+                  {tariffError && (
+                    <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 flex items-start gap-3">
+                      <AlertCircle size={16} className="text-red-600 shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold text-red-700">Could not load tariff configuration</p>
+                        <p className="text-[11px] text-red-600/90 mt-0.5">{tariffError}</p>
+                        <button
+                          type="button"
+                          onClick={fetchTariff}
+                          className="mt-2 text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700"
+                        >Retry</button>
+                      </div>
+                    </div>
+                  )}
 
                   {tariff.tariff_model !== 'MATRIX' && (
                     <div className="rounded-xl bg-[#faf7f2] border border-[#cc5a16]/10 px-4 py-3 text-[12px] text-[#3d3128]">
