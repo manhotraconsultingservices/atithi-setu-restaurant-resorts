@@ -717,6 +717,107 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_channel_recon_channel
       ON channel_reconciliation_reports (channel, ran_at DESC);
 
+    -- ─── RECEIVABLES PLATFORM (client request 9 Jun 2026) ─────────────
+    -- OTAs and travel agents pay net of commission with 30-60 day terms.
+    -- These 3 tables + 2 ALTERs let us track:
+    --   • Who owes us money (per OTA channel, per travel agent)
+    --   • What's been invoiced (their statement, our claim)
+    --   • What's been received (and how much is still outstanding)
+    --   • Aging buckets (Current / 30-60d / 60-90d / 90+d)
+    -- Drives the Receivables Dashboard + Partner Statement modal.
+
+    -- Travel agents master — sits alongside OTA channels as a third-party
+    -- distribution channel. Types: TRAVEL_AGENT (FIT bookings), CORPORATE
+    -- (negotiated room rates for one company), TOUR_OPERATOR (group
+    -- bookings, inbound DMCs).
+    CREATE TABLE IF NOT EXISTS travel_agents (
+      id                  TEXT PRIMARY KEY,           -- 'AGT-001'
+      name                TEXT NOT NULL,
+      type                TEXT DEFAULT 'TRAVEL_AGENT',
+      contact_person      TEXT,
+      phone               TEXT,
+      email               TEXT,
+      gstin               TEXT,
+      address             TEXT,
+      commission_pct      DOUBLE PRECISION DEFAULT 0,
+      payment_terms_days  INT DEFAULT 30,
+      credit_limit        DOUBLE PRECISION,
+      notes               TEXT,
+      is_active           INT DEFAULT 1,
+      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_travel_agents_active
+      ON travel_agents (is_active, name);
+
+    -- Tag bookings with the specific travel agent (in addition to or
+    -- instead of booking_source). Lets the same OTA channel show up as
+    -- "BOOKING via Cox & Kings" in reporting.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS agent_id TEXT;
+    -- Per-booking payment status — denormalised cache for fast aging
+    -- queries. Recomputed when a payment is allocated.
+    --   UNINVOICED  → not yet on a partner statement
+    --   INVOICED    → on a partner_invoices row, awaiting payment
+    --   PAID        → settled (full payment received)
+    --   WRITTEN_OFF → bad debt; excluded from receivables
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'UNINVOICED';
+    CREATE INDEX IF NOT EXISTS idx_room_bookings_payment_status
+      ON room_bookings (payment_status, check_out_date);
+    CREATE INDEX IF NOT EXISTS idx_room_bookings_agent
+      ON room_bookings (agent_id, status);
+
+    -- Partner invoices/statements. One row per OTA monthly statement OR
+    -- per-agent invoice. The auto-generator cron creates one row per
+    -- OTA per month aggregating last-month's checked-out bookings.
+    -- Owner can edit / mark disputed / mark written-off.
+    --   source: 'AUTO'   → cron-generated from local bookings
+    --           'MANUAL' → owner-entered from OTA's actual PDF
+    CREATE TABLE IF NOT EXISTS partner_invoices (
+      id                  TEXT PRIMARY KEY,
+      partner_type        TEXT NOT NULL,          -- 'OTA' | 'AGENT'
+      partner_code        TEXT NOT NULL,          -- 'BOOKING' or 'AGT-001'
+      partner_name        TEXT,                   -- denormalised for display
+      invoice_number      TEXT,
+      invoice_date        DATE NOT NULL,
+      period_start        DATE,
+      period_end          DATE,
+      gross_amount        DOUBLE PRECISION DEFAULT 0,
+      commission_amount   DOUBLE PRECISION DEFAULT 0,
+      net_due             DOUBLE PRECISION DEFAULT 0,
+      net_received        DOUBLE PRECISION DEFAULT 0,
+      due_date            DATE,
+      status              TEXT DEFAULT 'PENDING',
+        -- PENDING | PARTIAL | PAID | OVERDUE | DISPUTED | WRITTEN_OFF
+      source              TEXT DEFAULT 'MANUAL',  -- AUTO | MANUAL
+      booking_ids_json    TEXT,                   -- which bookings this invoice covers
+      notes               TEXT,
+      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_partner_invoices_partner
+      ON partner_invoices (partner_type, partner_code, due_date);
+    CREATE INDEX IF NOT EXISTS idx_partner_invoices_status
+      ON partner_invoices (status, due_date);
+
+    -- Payment receipts. One row per actual bank transfer received.
+    -- Manual allocation per user's choice (selected option 3 questions ago).
+    CREATE TABLE IF NOT EXISTS partner_payments (
+      id                       TEXT PRIMARY KEY,
+      partner_type             TEXT NOT NULL,
+      partner_code             TEXT NOT NULL,
+      payment_date             DATE NOT NULL,
+      amount_received          DOUBLE PRECISION NOT NULL,
+      payment_method           TEXT,              -- BANK_TRANSFER|UPI|CHEQUE|NETBANKING
+      reference_number         TEXT,              -- UTR / cheque no.
+      allocated_to_invoice_id  TEXT,              -- nullable; manual pick
+      notes                    TEXT,
+      created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_partner_payments_partner
+      ON partner_payments (partner_type, partner_code, payment_date DESC);
+    CREATE INDEX IF NOT EXISTS idx_partner_payments_invoice
+      ON partner_payments (allocated_to_invoice_id);
+
     -- Sprint P2-H — Yield management rules.
     -- Owner-defined occupancy-triggered multipliers. Example:
     --   "When occupancy >= 80%, multiply rate by 1.25 (+25%)"
@@ -18801,6 +18902,405 @@ async function startServer() {
   });
 
   // ════════════════════════════════════════════════════════════════════
+  // ─── RECEIVABLES PLATFORM (Travel agents + invoices + payments) ────
+  // ════════════════════════════════════════════════════════════════════
+  // Tracks who owes the hotel money — OTAs paying net of commission +
+  // travel agents on credit terms. Drives the Receivables Dashboard
+  // and Partner Statement modal. See createHotelTables() for schema.
+
+  // Helper — friendly display name for an OTA code. Used in invoice
+  // partner_name denormalisation so reports stay readable.
+  const otaDisplayName = (code: string): string => {
+    const map: Record<string, string> = {
+      BOOKING: 'Booking.com', MMT: 'MakeMyTrip', GOIBIBO: 'Goibibo',
+      AGODA: 'Agoda', EXPEDIA: 'Expedia', AIRBNB: 'Airbnb',
+      DIRECT: 'Direct', WALK_IN: 'Walk-in',
+    };
+    return map[code] || code;
+  };
+
+  // ─── TRAVEL AGENTS CRUD ────────────────────────────────────────────
+  app.get("/api/restaurant/:id/hotel/agents", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM travel_agents ORDER BY is_active DESC, name").catch(() => []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.put("/api/restaurant/:id/hotel/agents/:agentId", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const b = req.body || {};
+    if (!b.name) return res.status(400).json({ error: 'name is required' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const id = req.params.agentId === 'new' ? `AGT-${Date.now()}-${Math.floor(Math.random()*1000)}` : req.params.agentId;
+      await db.run(
+        `INSERT INTO travel_agents
+            (id, name, type, contact_person, phone, email, gstin, address,
+             commission_pct, payment_terms_days, credit_limit, notes, is_active)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name, type = EXCLUDED.type,
+             contact_person = EXCLUDED.contact_person,
+             phone = EXCLUDED.phone, email = EXCLUDED.email,
+             gstin = EXCLUDED.gstin, address = EXCLUDED.address,
+             commission_pct = EXCLUDED.commission_pct,
+             payment_terms_days = EXCLUDED.payment_terms_days,
+             credit_limit = EXCLUDED.credit_limit,
+             notes = EXCLUDED.notes, is_active = EXCLUDED.is_active,
+             updated_at = CURRENT_TIMESTAMP`,
+        [id, String(b.name).trim(), b.type || 'TRAVEL_AGENT',
+         b.contact_person || null, b.phone || null, b.email || null,
+         b.gstin || null, b.address || null,
+         Number(b.commission_pct || 0),
+         Number(b.payment_terms_days || 30),
+         b.credit_limit == null ? null : Number(b.credit_limit),
+         b.notes || null,
+         b.is_active === 0 ? 0 : 1]
+      );
+      res.json({ ok: true, id });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.delete("/api/restaurant/:id/hotel/agents/:agentId", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      // Soft-delete — bookings reference agent_id.
+      await db.run("UPDATE travel_agents SET is_active = 0 WHERE id = ?", [req.params.agentId]);
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── PARTNER INVOICES ──────────────────────────────────────────────
+  app.get("/api/restaurant/:id/hotel/partner-invoices", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const partner = String(req.query.partner || '');
+      const status  = String(req.query.status  || '');
+      let sql = `SELECT * FROM partner_invoices WHERE 1=1`;
+      const params: any[] = [];
+      if (partner) { sql += ' AND partner_code = ?'; params.push(partner); }
+      if (status)  { sql += ' AND status = ?'; params.push(status); }
+      sql += ' ORDER BY invoice_date DESC, due_date DESC LIMIT 500';
+      const rows = await db.query(sql, params).catch(() => []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.post("/api/restaurant/:id/hotel/partner-invoices", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const b = req.body || {};
+    if (!b.partner_type || !b.partner_code || !b.invoice_date || !b.net_due) {
+      return res.status(400).json({ error: 'partner_type, partner_code, invoice_date and net_due are required' });
+    }
+    try {
+      const db = await getTenantDb(req.params.id);
+      const id = b.id || `INV-${b.partner_code}-${Date.now()}`;
+      const partnerName = b.partner_name ||
+        (b.partner_type === 'OTA' ? otaDisplayName(b.partner_code) : b.partner_code);
+      const gross = Number(b.gross_amount || b.net_due || 0);
+      const comm  = Number(b.commission_amount || 0);
+      const netDue = Number(b.net_due || (gross - comm));
+      const dueDate = b.due_date || (() => {
+        const d = new Date(b.invoice_date);
+        d.setDate(d.getDate() + 30);
+        return d.toISOString().slice(0, 10);
+      })();
+      await db.run(
+        `INSERT INTO partner_invoices
+            (id, partner_type, partner_code, partner_name, invoice_number,
+             invoice_date, period_start, period_end, gross_amount,
+             commission_amount, net_due, net_received, due_date,
+             status, source, booking_ids_json, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+          ON CONFLICT (id) DO UPDATE SET
+            invoice_number = EXCLUDED.invoice_number,
+            gross_amount = EXCLUDED.gross_amount,
+            commission_amount = EXCLUDED.commission_amount,
+            net_due = EXCLUDED.net_due,
+            due_date = EXCLUDED.due_date,
+            status = EXCLUDED.status,
+            notes = EXCLUDED.notes,
+            updated_at = CURRENT_TIMESTAMP`,
+        [id, b.partner_type, b.partner_code, partnerName, b.invoice_number || null,
+         b.invoice_date, b.period_start || null, b.period_end || null,
+         gross, comm, netDue, dueDate,
+         b.status || 'PENDING', b.source || 'MANUAL',
+         b.booking_ids_json || null, b.notes || null]
+      );
+      res.json({ ok: true, id });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Auto-generate monthly OTA invoices from local bookings.
+  // Idempotent per (partner_code, period). Owner can re-run any time.
+  // For each enabled OTA, aggregates CHECKED_OUT bookings in the
+  // specified period into one invoice row with source='AUTO'.
+  app.post("/api/restaurant/:id/hotel/partner-invoices/auto-generate", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const b = req.body || {};
+    // Default: last calendar month.
+    const monthOffset = Number(b.month_offset || 1);
+    const today = new Date();
+    const start = new Date(today.getFullYear(), today.getMonth() - monthOffset, 1);
+    const end   = new Date(today.getFullYear(), today.getMonth() - monthOffset + 1, 0);
+    const periodStart = start.toISOString().slice(0, 10);
+    const periodEnd   = end.toISOString().slice(0, 10);
+    try {
+      const db = await getTenantDb(req.params.id);
+      const creds: any[] = await db.query(
+        "SELECT channel, COALESCE(commission_pct, 0) AS commission_pct FROM channel_credentials WHERE is_enabled = 1"
+      ).catch(() => []);
+      const generated: any[] = [];
+      for (const c of creds) {
+        const agg: any = await db.get(
+          `SELECT COUNT(*) AS n,
+                  COALESCE(SUM(total_amount), 0)      AS gross,
+                  COALESCE(SUM(commission_amount), 0) AS comm,
+                  COALESCE(SUM(net_amount), 0)        AS net,
+                  COALESCE(json_agg(id) FILTER (WHERE id IS NOT NULL), '[]') AS ids
+             FROM room_bookings
+            WHERE booking_source = ? AND status = 'CHECKED_OUT'
+              AND check_out_date BETWEEN ? AND ?`,
+          [c.channel, periodStart, periodEnd]
+        ).catch(() => ({ n: 0, gross: 0, comm: 0, net: 0, ids: '[]' }));
+        const n = Number(agg?.n || 0);
+        if (n === 0) continue;
+        const invoiceId = `INV-${c.channel}-${periodStart.slice(0, 7)}`;
+        const invDate = end.toISOString().slice(0, 10);
+        const dueDate = (() => { const d = new Date(end); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); })();
+        const name = otaDisplayName(c.channel);
+        await db.run(
+          `INSERT INTO partner_invoices
+              (id, partner_type, partner_code, partner_name, invoice_number,
+               invoice_date, period_start, period_end, gross_amount,
+               commission_amount, net_due, net_received, due_date,
+               status, source, booking_ids_json, notes)
+            VALUES (?, 'OTA', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'PENDING', 'AUTO', ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+              gross_amount      = EXCLUDED.gross_amount,
+              commission_amount = EXCLUDED.commission_amount,
+              net_due           = EXCLUDED.net_due,
+              booking_ids_json  = EXCLUDED.booking_ids_json,
+              updated_at        = CURRENT_TIMESTAMP`,
+          [invoiceId, c.channel, name, `AUTO-${periodStart.slice(0, 7)}`,
+           invDate, periodStart, periodEnd,
+           Number(agg.gross), Number(agg.comm), Number(agg.net), dueDate,
+           agg.ids, `${n} bookings checked-out in period`]
+        );
+        // Mark the underlying bookings as INVOICED.
+        await db.run(
+          `UPDATE room_bookings SET payment_status = 'INVOICED'
+            WHERE booking_source = ? AND status = 'CHECKED_OUT'
+              AND check_out_date BETWEEN ? AND ?
+              AND COALESCE(payment_status, 'UNINVOICED') = 'UNINVOICED'`,
+          [c.channel, periodStart, periodEnd]
+        );
+        generated.push({ partner_code: c.channel, partner_name: name, invoice_id: invoiceId,
+                         bookings: n, net_due: Number(agg.net) });
+      }
+      res.json({ ok: true, period: { start: periodStart, end: periodEnd }, generated });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── PARTNER PAYMENTS ──────────────────────────────────────────────
+  app.get("/api/restaurant/:id/hotel/partner-payments", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const partner = String(req.query.partner || '');
+      let sql = `SELECT * FROM partner_payments`;
+      const params: any[] = [];
+      if (partner) { sql += ' WHERE partner_code = ?'; params.push(partner); }
+      sql += ' ORDER BY payment_date DESC LIMIT 500';
+      const rows = await db.query(sql, params).catch(() => []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Record a payment. Manual allocation per user's selected strategy:
+  // if allocated_to_invoice_id is provided, that invoice's net_received
+  // is incremented and its status recomputed (PARTIAL/PAID).
+  app.post("/api/restaurant/:id/hotel/partner-payments", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const b = req.body || {};
+    if (!b.partner_type || !b.partner_code || !b.payment_date || !b.amount_received) {
+      return res.status(400).json({ error: 'partner_type, partner_code, payment_date, amount_received required' });
+    }
+    try {
+      const db = await getTenantDb(req.params.id);
+      const id = `PAY-${b.partner_code}-${Date.now()}`;
+      const amt = Number(b.amount_received);
+      await db.run(
+        `INSERT INTO partner_payments
+            (id, partner_type, partner_code, payment_date, amount_received,
+             payment_method, reference_number, allocated_to_invoice_id, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, b.partner_type, b.partner_code, b.payment_date, amt,
+         b.payment_method || null, b.reference_number || null,
+         b.allocated_to_invoice_id || null, b.notes || null]
+      );
+      // If allocated, bump the invoice's net_received and recompute status.
+      if (b.allocated_to_invoice_id) {
+        const inv: any = await db.get(
+          "SELECT id, net_due, net_received FROM partner_invoices WHERE id = ?",
+          [b.allocated_to_invoice_id]
+        );
+        if (inv) {
+          const newReceived = Number(inv.net_received || 0) + amt;
+          const newStatus = newReceived >= Number(inv.net_due) ? 'PAID'
+                          : newReceived > 0 ? 'PARTIAL' : 'PENDING';
+          await db.run(
+            "UPDATE partner_invoices SET net_received = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [newReceived, newStatus, b.allocated_to_invoice_id]
+          );
+          // If fully paid, mark the underlying bookings PAID too.
+          if (newStatus === 'PAID') {
+            try {
+              const ids = JSON.parse(await db.get("SELECT booking_ids_json AS j FROM partner_invoices WHERE id = ?", [b.allocated_to_invoice_id]).then((r: any) => r?.j || '[]'));
+              if (Array.isArray(ids) && ids.length > 0) {
+                const placeholders = ids.map(() => '?').join(',');
+                await db.run(`UPDATE room_bookings SET payment_status = 'PAID' WHERE id IN (${placeholders})`, ids);
+              }
+            } catch { /* booking_ids_json may be malformed; skip */ }
+          }
+        }
+      }
+      res.json({ ok: true, id });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── RECEIVABLES AGING REPORT ──────────────────────────────────────
+  // Per-partner aging grid: Current / 30-60d / 60-90d / 90+d.
+  // Outstanding = net_due - net_received, per invoice.
+  // Bucket by (today - due_date) for invoiced amounts.
+  app.get("/api/restaurant/:id/hotel/reports/receivables-aging", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      // Pull all open invoices (anything not PAID/WRITTEN_OFF).
+      const invoices: any[] = await db.query(
+        `SELECT id, partner_type, partner_code, partner_name, invoice_date,
+                due_date, net_due, net_received, status,
+                (net_due - net_received) AS outstanding
+           FROM partner_invoices
+          WHERE status NOT IN ('PAID', 'WRITTEN_OFF')
+            AND (net_due - net_received) > 0
+          ORDER BY due_date ASC NULLS LAST`
+      ).catch(() => []);
+      const today = new Date();
+      const partners: Record<string, any> = {};
+      let totals = { current: 0, b30_60: 0, b60_90: 0, b90_plus: 0, total: 0 };
+      for (const inv of invoices) {
+        const due = inv.due_date ? new Date(inv.due_date) : today;
+        const daysOverdue = Math.floor((today.getTime() - due.getTime()) / 86400000);
+        const out = Number(inv.outstanding || 0);
+        const key = `${inv.partner_type}|${inv.partner_code}`;
+        if (!partners[key]) {
+          partners[key] = {
+            partner_type: inv.partner_type, partner_code: inv.partner_code,
+            partner_name: inv.partner_name,
+            current: 0, b30_60: 0, b60_90: 0, b90_plus: 0, total: 0,
+            invoice_count: 0, oldest_due: inv.due_date,
+          };
+        }
+        const p = partners[key];
+        if (daysOverdue < 30)       { p.current  += out; totals.current  += out; }
+        else if (daysOverdue < 60)  { p.b30_60   += out; totals.b30_60   += out; }
+        else if (daysOverdue < 90)  { p.b60_90   += out; totals.b60_90   += out; }
+        else                        { p.b90_plus += out; totals.b90_plus += out; }
+        p.total += out; totals.total += out;
+        p.invoice_count += 1;
+        if (inv.due_date && (!p.oldest_due || inv.due_date < p.oldest_due)) p.oldest_due = inv.due_date;
+      }
+      const partnerArr = Object.values(partners).sort((a: any, b: any) => b.total - a.total);
+      const round = (n: number) => Math.round(n * 100) / 100;
+      const formatted = partnerArr.map((p: any) => ({
+        ...p,
+        current: round(p.current), b30_60: round(p.b30_60),
+        b60_90: round(p.b60_90), b90_plus: round(p.b90_plus), total: round(p.total),
+      }));
+      res.json({
+        as_of: today.toISOString().slice(0, 10),
+        totals: { current: round(totals.current), b30_60: round(totals.b30_60),
+                  b60_90: round(totals.b60_90), b90_plus: round(totals.b90_plus),
+                  total: round(totals.total) },
+        partners: formatted,
+        invoice_count: invoices.length,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // Per-partner statement: bookings + invoices + payments + running balance.
+  app.get("/api/restaurant/:id/hotel/reports/partner-statement", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const partnerType = String(req.query.partner_type || 'OTA');
+    const partnerCode = String(req.query.partner_code || '');
+    if (!partnerCode) return res.status(400).json({ error: 'partner_code is required' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const bookingsSql = partnerType === 'OTA'
+        ? `SELECT id, guest_name, check_in_date, check_out_date, status,
+                  total_amount, commission_amount, net_amount, payment_status
+             FROM room_bookings
+            WHERE booking_source = ? AND check_in_date BETWEEN ? AND ?
+            ORDER BY check_in_date DESC`
+        : `SELECT id, guest_name, check_in_date, check_out_date, status,
+                  total_amount, commission_amount, net_amount, payment_status
+             FROM room_bookings
+            WHERE agent_id = ? AND check_in_date BETWEEN ? AND ?
+            ORDER BY check_in_date DESC`;
+      const bookings = await db.query(bookingsSql, [partnerCode, from, to]).catch(() => []);
+      const invoices = await db.query(
+        `SELECT * FROM partner_invoices
+          WHERE partner_type = ? AND partner_code = ?
+            AND invoice_date BETWEEN ? AND ?
+          ORDER BY invoice_date DESC`,
+        [partnerType, partnerCode, from, to]
+      ).catch(() => []);
+      const payments = await db.query(
+        `SELECT * FROM partner_payments
+          WHERE partner_type = ? AND partner_code = ?
+            AND payment_date BETWEEN ? AND ?
+          ORDER BY payment_date DESC`,
+        [partnerType, partnerCode, from, to]
+      ).catch(() => []);
+      const totalInvoiced  = invoices.reduce((s: number, i: any) => s + Number(i.net_due || 0), 0);
+      const totalReceived  = invoices.reduce((s: number, i: any) => s + Number(i.net_received || 0), 0);
+      const outstanding    = totalInvoiced - totalReceived;
+      res.json({
+        partner: { type: partnerType, code: partnerCode, name: otaDisplayName(partnerCode) },
+        period: { from, to },
+        bookings, invoices, payments,
+        totals: {
+          invoiced: Math.round(totalInvoiced * 100) / 100,
+          received: Math.round(totalReceived * 100) / 100,
+          outstanding: Math.round(outstanding * 100) / 100,
+          booking_count: bookings.length,
+          invoice_count: invoices.length,
+          payment_count: payments.length,
+        },
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
   // ─── OUTBOUND SYNC QUEUE INSPECTOR (Gap 7) ─────────────────────────
   // ════════════════════════════════════════════════════════════════════
   // List + manual-retry + dismiss endpoints for the channel_sync_log
@@ -27264,7 +27764,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ota-demo-seed-endpoint-admin-only-curl-trigger',
+    commit_marker: 'receivables-platform-agents-invoices-payments-aging',
     code_features: [
       'subscription-billing',
       'read-only-mode',

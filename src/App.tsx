@@ -7574,6 +7574,82 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     finally { setOta360Loading(false); }
   };
 
+  // Receivables platform (9 Jun 2026) — agents + invoices + payments
+  // + aging. All loaded on Channel Manager tab activation.
+  const [travelAgents, setTravelAgents] = useState<any[]>([]);
+  const [editingAgent, setEditingAgent] = useState<any | null>(null);
+  const [receivablesAging, setReceivablesAging] = useState<any>(null);
+  const [partnerInvoices, setPartnerInvoices] = useState<any[]>([]);
+  const [partnerStatement, setPartnerStatement] = useState<any>(null);
+  const [statementLoading, setStatementLoading] = useState(false);
+  const [recordingPaymentFor, setRecordingPaymentFor] = useState<any | null>(null);
+  const [autoGeneratingInvoices, setAutoGeneratingInvoices] = useState(false);
+  const fetchTravelAgents = async () => {
+    if (!isHotelEnabled) return;
+    try {
+      const res = await hotelApi('/agents');
+      setTravelAgents(Array.isArray(res) ? res : []);
+    } catch { setTravelAgents([]); }
+  };
+  const saveTravelAgent = async (a: any) => {
+    try {
+      await hotelApi(`/agents/${encodeURIComponent(a.id || 'new')}`, { method: 'PUT', body: JSON.stringify(a) });
+      setEditingAgent(null);
+      await fetchTravelAgents();
+    } catch (e: any) { alert(e?.message || 'Failed to save agent'); }
+  };
+  const deleteTravelAgent = async (id: string) => {
+    if (!window.confirm('Deactivate this travel agent? Existing bookings stay intact.')) return;
+    try { await hotelApi(`/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchTravelAgents(); }
+    catch (e: any) { alert(e?.message || 'Failed to delete agent'); }
+  };
+  const fetchReceivablesAging = async () => {
+    if (!isHotelEnabled) return;
+    try { setReceivablesAging(await hotelApi('/reports/receivables-aging')); }
+    catch { setReceivablesAging(null); }
+  };
+  const fetchPartnerInvoices = async () => {
+    if (!isHotelEnabled) return;
+    try {
+      const res = await hotelApi('/partner-invoices');
+      setPartnerInvoices(Array.isArray(res) ? res : []);
+    } catch { setPartnerInvoices([]); }
+  };
+  const openPartnerStatement = async (partnerType: string, partnerCode: string) => {
+    setPartnerStatement({ loading: true, partner: { type: partnerType, code: partnerCode } });
+    setStatementLoading(true);
+    try {
+      const res = await hotelApi(`/reports/partner-statement?partner_type=${encodeURIComponent(partnerType)}&partner_code=${encodeURIComponent(partnerCode)}`);
+      setPartnerStatement(res);
+    } catch (e: any) {
+      alert(e?.message || 'Failed to load statement');
+      setPartnerStatement(null);
+    } finally { setStatementLoading(false); }
+  };
+  const recordPayment = async (data: any) => {
+    try {
+      await hotelApi('/partner-payments', { method: 'POST', body: JSON.stringify(data) });
+      setRecordingPaymentFor(null);
+      await fetchReceivablesAging();
+      await fetchPartnerInvoices();
+      // Refresh statement if open
+      if (partnerStatement?.partner) {
+        await openPartnerStatement(partnerStatement.partner.type, partnerStatement.partner.code);
+      }
+    } catch (e: any) { alert(e?.message || 'Failed to record payment'); }
+  };
+  const autoGenerateInvoices = async () => {
+    if (!window.confirm('Auto-generate OTA invoices for LAST MONTH from checked-out bookings? Idempotent — re-running refreshes amounts.')) return;
+    setAutoGeneratingInvoices(true);
+    try {
+      const res = await hotelApi('/partner-invoices/auto-generate', { method: 'POST', body: JSON.stringify({ month_offset: 1 }) });
+      alert(`Generated ${res?.generated?.length || 0} invoice(s) for period ${res?.period?.start} → ${res?.period?.end}.`);
+      await fetchPartnerInvoices();
+      await fetchReceivablesAging();
+    } catch (e: any) { alert(e?.message || 'Auto-generate failed'); }
+    finally { setAutoGeneratingInvoices(false); }
+  };
+
   // ── Menu Management Enhancements ─────────────────────────────────────────────
   const [menuCatFilter, setMenuCatFilter] = useState<string>('ALL');
   const [menuSearchTerm, setMenuSearchTerm] = useState<string>('');
@@ -9992,7 +10068,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // BCG client request 8 Jun 2026 — Channel Manager moved out of Settings.
     // Eagerly load credentials + iCal feeds + recent webhook events when
     // the tab is opened so the page renders with data, not loading spinners.
-    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); }
+    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); fetchTravelAgents(); fetchReceivablesAging(); fetchPartnerInvoices(); }
     if (activeTab === 'FOLIOS') fetchHotelFolios();
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
@@ -18110,6 +18186,189 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ) : null}
           </div>
 
+          {/* ════════════════ 💳 RECEIVABLES DASHBOARD ════════════════
+              Tracks outstanding money owed by OTAs and travel agents.
+              Drives weekly collections review. Click any partner row to
+              open their full statement. */}
+          <div className="bg-gradient-to-br from-rose-50 via-white to-orange-50 p-6 sm:p-8 rounded-[32px] border-2 border-rose-200 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-5 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif text-[#1a1208]">💳 Receivables — what OTAs & agents owe us</h3>
+                <p className="text-sm text-[#6b5d52] mt-1 max-w-3xl">
+                  Outstanding balance per partner, aged into Current / 30-60d / 60-90d / 90+d buckets. OTAs typically pay 30-60 days after the guest checks out; travel agents per their negotiated terms. Click any row to drill into the full statement.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={autoGenerateInvoices}
+                  disabled={autoGeneratingInvoices}
+                  className="px-3 py-1.5 rounded-xl bg-rose-600 text-white text-xs font-bold hover:bg-rose-700 disabled:opacity-50"
+                  title="Aggregate last month's checked-out OTA bookings into one invoice per channel. Idempotent."
+                >{autoGeneratingInvoices ? 'Generating…' : '⚡ Auto-generate last month'}</button>
+                <button onClick={() => { fetchReceivablesAging(); fetchPartnerInvoices(); }} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
+              </div>
+            </div>
+            {!receivablesAging ? (
+              <p className="text-sm text-[#9c8e85] italic">Loading aging report…</p>
+            ) : (receivablesAging.invoice_count || 0) === 0 ? (
+              <div className="bg-white rounded-2xl p-6 border border-rose-100 text-center">
+                <p className="text-sm text-[#6b5d52] mb-3">No open invoices yet.</p>
+                <p className="text-xs text-[#9c8e85]">
+                  Click <strong>"Auto-generate last month"</strong> above to roll your last month's checked-out OTA bookings into one invoice per channel.
+                  Or upload an OTA's actual statement manually from any partner's statement view.
+                </p>
+              </div>
+            ) : (() => {
+              const t = receivablesAging.totals || {};
+              const fmt = (n: number) => `₹${Math.round(Number(n || 0)).toLocaleString('en-IN')}`;
+              const overdueTotal = (t.b30_60 || 0) + (t.b60_90 || 0) + (t.b90_plus || 0);
+              return (
+                <div className="space-y-4">
+                  {/* KPI strip */}
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    <div className="bg-white rounded-2xl p-3 border border-rose-100">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Total Outstanding</p>
+                      <p className="text-2xl font-bold text-[#1a1208] mt-1">{fmt(t.total)}</p>
+                      <p className="text-[10px] text-[#6b5d52]">{receivablesAging.invoice_count} invoice{receivablesAging.invoice_count === 1 ? '' : 's'}</p>
+                    </div>
+                    <div className="bg-emerald-50 rounded-2xl p-3 border border-emerald-100">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-900">Current (within terms)</p>
+                      <p className="text-xl font-bold text-emerald-700 mt-1">{fmt(t.current)}</p>
+                    </div>
+                    <div className="bg-amber-50 rounded-2xl p-3 border border-amber-100">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-amber-900">30-60 days late</p>
+                      <p className="text-xl font-bold text-amber-700 mt-1">{fmt(t.b30_60)}</p>
+                    </div>
+                    <div className="bg-orange-50 rounded-2xl p-3 border border-orange-100">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-orange-900">60-90 days late</p>
+                      <p className="text-xl font-bold text-orange-700 mt-1">{fmt(t.b60_90)}</p>
+                    </div>
+                    <div className="bg-red-50 rounded-2xl p-3 border border-red-100">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-red-900">90+ days late</p>
+                      <p className="text-xl font-bold text-red-700 mt-1">{fmt(t.b90_plus)}</p>
+                    </div>
+                  </div>
+                  {overdueTotal > 0 && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3">
+                      <p className="text-xs text-amber-900">
+                        ⚠️ <strong>{fmt(overdueTotal)}</strong> is overdue. Reach out to the partners in the 60+ day buckets this week.
+                      </p>
+                    </div>
+                  )}
+                  {/* Aging grid */}
+                  <div className="bg-white rounded-2xl border border-rose-100 overflow-hidden">
+                    <div className="px-4 py-3 border-b border-rose-100">
+                      <p className="text-sm font-bold text-[#1a1208]">By partner</p>
+                      <p className="text-[10px] text-[#6b5d52]">Click any row for the full statement, invoice history, and "Record Payment" button.</p>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs border-collapse">
+                        <thead>
+                          <tr className="bg-[#faf7f2] text-[#6b5d52] text-[10px] uppercase tracking-wider">
+                            <th className="text-left px-3 py-2">Partner</th>
+                            <th className="text-left px-3 py-2">Type</th>
+                            <th className="text-right px-3 py-2">Invoices</th>
+                            <th className="text-right px-3 py-2 text-emerald-700">Current</th>
+                            <th className="text-right px-3 py-2 text-amber-700">30-60d</th>
+                            <th className="text-right px-3 py-2 text-orange-700">60-90d</th>
+                            <th className="text-right px-3 py-2 text-red-700">90+d</th>
+                            <th className="text-right px-3 py-2">Total Owed</th>
+                            <th className="text-left px-3 py-2">Oldest Due</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(receivablesAging.partners || []).map((p: any) => (
+                            <tr
+                              key={`${p.partner_type}-${p.partner_code}`}
+                              onClick={() => openPartnerStatement(p.partner_type, p.partner_code)}
+                              className="border-t border-[#e8e0d6] hover:bg-rose-50 cursor-pointer"
+                            >
+                              <td className="px-3 py-2 font-bold">{p.partner_name || p.partner_code}</td>
+                              <td className="px-3 py-2 text-[#6b5d52]">{p.partner_type}</td>
+                              <td className="px-3 py-2 text-right">{p.invoice_count}</td>
+                              <td className="px-3 py-2 text-right font-mono text-emerald-700">{fmt(p.current)}</td>
+                              <td className="px-3 py-2 text-right font-mono text-amber-700">{fmt(p.b30_60)}</td>
+                              <td className="px-3 py-2 text-right font-mono text-orange-700">{fmt(p.b60_90)}</td>
+                              <td className="px-3 py-2 text-right font-mono text-red-700">{fmt(p.b90_plus)}</td>
+                              <td className="px-3 py-2 text-right font-mono font-bold">{fmt(p.total)}</td>
+                              <td className="px-3 py-2 text-[10px] text-[#9c8e85]">{p.oldest_due || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-[#9c8e85] italic">As of {receivablesAging.as_of}. Aging based on (today − invoice due_date). Click a row to record a payment or view per-booking ledger.</p>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* ════════════════ 🤝 TRAVEL AGENTS ════════════════
+              Master CRUD for travel agents / corporate accounts / tour
+              operators. Once an agent is registered, they show up in
+              the booking-creation form as a tag-able source. */}
+          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif">🤝 Travel agents & corporate accounts</h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
+                  Travel agencies, corporate booking desks, tour operators, and DMCs that send you bookings on credit.
+                  Once registered, you can tag individual bookings to a specific agent — bookings then roll up
+                  into that agent's statement and aging.
+                </p>
+              </div>
+              <button
+                onClick={() => setEditingAgent({ id: '', name: '', type: 'TRAVEL_AGENT', contact_person: '', phone: '', email: '', gstin: '', address: '', commission_pct: 10, payment_terms_days: 30, credit_limit: null, notes: '', is_active: 1 })}
+                className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] flex items-center gap-1"
+              ><Plus size={12} /> Add Agent</button>
+            </div>
+            {travelAgents.length === 0 ? (
+              <p className="text-xs text-[#9c8e85] italic mt-2">No travel agents registered yet. Click "Add Agent" to start tagging bookings to a partner.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                      <th className="text-left px-3 py-2">Name</th>
+                      <th className="text-left px-3 py-2">Type</th>
+                      <th className="text-left px-3 py-2">Contact</th>
+                      <th className="text-right px-3 py-2">Commission %</th>
+                      <th className="text-right px-3 py-2">Payment terms</th>
+                      <th className="text-right px-3 py-2">Credit limit</th>
+                      <th className="text-center px-3 py-2">Active</th>
+                      <th className="text-right px-3 py-2">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {travelAgents.map((a: any) => (
+                      <tr key={a.id} className="border-t border-[#e8e0d6]">
+                        <td className="px-3 py-2 font-bold">{a.name}<div className="text-[10px] text-[#9c8e85] font-mono font-normal">{a.id}</div></td>
+                        <td className="px-3 py-2 text-xs">{a.type}</td>
+                        <td className="px-3 py-2 text-xs">
+                          {a.contact_person && <div>{a.contact_person}</div>}
+                          {a.phone && <div className="text-[10px] text-[#9c8e85]">{a.phone}</div>}
+                          {a.email && <div className="text-[10px] text-[#9c8e85]">{a.email}</div>}
+                        </td>
+                        <td className="px-3 py-2 text-right">{Number(a.commission_pct || 0).toFixed(2)}%</td>
+                        <td className="px-3 py-2 text-right">{a.payment_terms_days} days</td>
+                        <td className="px-3 py-2 text-right">{a.credit_limit ? `₹${Number(a.credit_limit).toLocaleString('en-IN')}` : '—'}</td>
+                        <td className="px-3 py-2 text-center">
+                          <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', a.is_active ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700')}>{a.is_active ? 'Active' : 'Off'}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          <button onClick={() => openPartnerStatement('AGENT', a.id)} className="text-[10px] font-bold text-rose-700 hover:underline mr-3">Statement</button>
+                          <button onClick={() => setEditingAgent({ ...a })} className="text-[10px] font-bold text-[#3d3128] hover:underline mr-3">Edit</button>
+                          <button onClick={() => deleteTravelAgent(a.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Deactivate</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
           {/* ════════════════ LIVE RATE CARD ════════════════
               THE headline view — answers "What rate will guests see on
               each OTA, and how much will I actually keep?"
@@ -22945,6 +23204,302 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <div className="flex gap-2 pt-2">
                   <button type="button" onClick={() => setEditingChannelCred(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
                   <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Save</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═════════ Travel Agent edit modal ═════════ */}
+      {editingAgent && (() => {
+        const d = editingAgent;
+        const set = (patch: any) => setEditingAgent({ ...d, ...patch });
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-7 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">{d.id ? 'Edit travel agent' : 'Add travel agent'}</h3>
+                <button onClick={() => setEditingAgent(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+              <form onSubmit={(e) => { e.preventDefault(); if (!d.name) { alert('Name is required.'); return; } saveTravelAgent(d); }} className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="col-span-2">
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Name *</label>
+                    <input required value={d.name || ''} onChange={e => set({ name: e.target.value })} placeholder="Vacations India Pvt Ltd" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Type</label>
+                    <select value={d.type || 'TRAVEL_AGENT'} onChange={e => set({ type: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                      <option value="TRAVEL_AGENT">Travel Agent</option>
+                      <option value="CORPORATE">Corporate</option>
+                      <option value="TOUR_OPERATOR">Tour Operator</option>
+                      <option value="DMC">Destination Mgmt Co.</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Commission %</label>
+                    <input type="number" min="0" max="100" step="0.1" value={d.commission_pct ?? 0} onChange={e => set({ commission_pct: Number(e.target.value) })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Contact person</label>
+                    <input value={d.contact_person || ''} onChange={e => set({ contact_person: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone</label>
+                    <input value={d.phone || ''} onChange={e => set({ phone: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Email</label>
+                    <input type="email" value={d.email || ''} onChange={e => set({ email: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">GSTIN</label>
+                    <input value={d.gstin || ''} onChange={e => set({ gstin: e.target.value })} placeholder="29ABCDE1234F1Z5" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment terms (days)</label>
+                    <input type="number" min="0" value={d.payment_terms_days ?? 30} onChange={e => set({ payment_terms_days: Number(e.target.value) })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Credit limit (₹)</label>
+                    <input type="number" min="0" value={d.credit_limit ?? ''} onChange={e => set({ credit_limit: e.target.value === '' ? null : Number(e.target.value) })} placeholder="e.g. 500000" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Address</label>
+                    <textarea value={d.address || ''} onChange={e => set({ address: e.target.value })} rows={2} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
+                    <textarea value={d.notes || ''} onChange={e => set({ notes: e.target.value })} rows={2} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <label className="col-span-2 flex items-center gap-2 text-sm text-[#3d3128]">
+                    <input type="checkbox" checked={!!d.is_active} onChange={e => set({ is_active: e.target.checked ? 1 : 0 })} className="w-4 h-4" />
+                    Active
+                  </label>
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <button type="button" onClick={() => setEditingAgent(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                  <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Save</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═════════ Partner Statement modal ═════════
+          Drill-in from the receivables aging grid. Shows the full
+          ledger for one partner: invoices issued + payments received
+          + bookings in period. Owner can Record Payment from here. */}
+      {partnerStatement && (() => {
+        const fmt = (n: number) => `₹${Math.round(Number(n || 0)).toLocaleString('en-IN')}`;
+        const p = partnerStatement.partner || {};
+        const t = partnerStatement.totals || {};
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl p-7 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-2xl font-bold font-serif text-[#1a1208]">{partnerStatement.partner?.name || p.code} — statement</h3>
+                  <p className="text-xs text-[#6b5d52]">{p.type} · {partnerStatement.period?.from} → {partnerStatement.period?.to}</p>
+                </div>
+                <button onClick={() => setPartnerStatement(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+              {statementLoading ? (
+                <p className="text-sm text-[#9c8e85] italic">Loading…</p>
+              ) : (
+                <div className="space-y-5">
+                  {/* Totals strip */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="bg-[#faf7f2] rounded-2xl p-3">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Bookings</p>
+                      <p className="text-xl font-bold mt-1">{t.booking_count || 0}</p>
+                    </div>
+                    <div className="bg-blue-50 rounded-2xl p-3">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-blue-900">Invoiced</p>
+                      <p className="text-xl font-bold text-blue-700 mt-1">{fmt(t.invoiced)}</p>
+                    </div>
+                    <div className="bg-emerald-50 rounded-2xl p-3">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-900">Received</p>
+                      <p className="text-xl font-bold text-emerald-700 mt-1">{fmt(t.received)}</p>
+                    </div>
+                    <div className="bg-rose-50 rounded-2xl p-3">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-rose-900">Outstanding</p>
+                      <p className="text-xl font-bold text-rose-700 mt-1">{fmt(t.outstanding)}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setRecordingPaymentFor({ partner_type: p.type, partner_code: p.code, partner_name: partnerStatement.partner?.name, payment_date: new Date().toISOString().slice(0, 10), amount_received: t.outstanding || 0, payment_method: 'BANK_TRANSFER', reference_number: '', allocated_to_invoice_id: '', notes: '' })}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700"
+                  >+ Record Payment</button>
+                  {/* Invoices */}
+                  <div>
+                    <p className="text-sm font-bold text-[#1a1208] mb-2">Invoices</p>
+                    {(!partnerStatement.invoices || partnerStatement.invoices.length === 0) ? (
+                      <p className="text-xs text-[#9c8e85] italic">No invoices in period.</p>
+                    ) : (
+                      <div className="overflow-x-auto bg-white rounded-xl border border-[#e8e0d6]">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-[#faf7f2] text-[#6b5d52] text-[10px] uppercase tracking-wider">
+                              <th className="text-left px-3 py-2">Invoice #</th>
+                              <th className="text-left px-3 py-2">Date</th>
+                              <th className="text-left px-3 py-2">Period</th>
+                              <th className="text-right px-3 py-2">Net Due</th>
+                              <th className="text-right px-3 py-2">Received</th>
+                              <th className="text-right px-3 py-2">Outstanding</th>
+                              <th className="text-left px-3 py-2">Due</th>
+                              <th className="text-center px-3 py-2">Status</th>
+                              <th className="text-left px-3 py-2">Source</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {partnerStatement.invoices.map((inv: any) => (
+                              <tr key={inv.id} className="border-t border-[#e8e0d6]">
+                                <td className="px-3 py-2 font-mono">{inv.invoice_number || inv.id}</td>
+                                <td className="px-3 py-2">{inv.invoice_date}</td>
+                                <td className="px-3 py-2 text-[10px]">{inv.period_start} → {inv.period_end}</td>
+                                <td className="px-3 py-2 text-right font-mono">{fmt(inv.net_due)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-emerald-700">{fmt(inv.net_received)}</td>
+                                <td className="px-3 py-2 text-right font-mono font-bold text-rose-700">{fmt(Number(inv.net_due) - Number(inv.net_received || 0))}</td>
+                                <td className="px-3 py-2 text-[10px]">{inv.due_date}</td>
+                                <td className="px-3 py-2 text-center"><span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', inv.status === 'PAID' ? 'bg-emerald-100 text-emerald-800' : inv.status === 'PARTIAL' ? 'bg-amber-100 text-amber-800' : inv.status === 'OVERDUE' ? 'bg-red-100 text-red-800' : inv.status === 'DISPUTED' ? 'bg-purple-100 text-purple-800' : 'bg-stone-200 text-stone-700')}>{inv.status}</span></td>
+                                <td className="px-3 py-2 text-[10px] text-[#9c8e85]">{inv.source}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                  {/* Payments */}
+                  <div>
+                    <p className="text-sm font-bold text-[#1a1208] mb-2">Payments received</p>
+                    {(!partnerStatement.payments || partnerStatement.payments.length === 0) ? (
+                      <p className="text-xs text-[#9c8e85] italic">No payments recorded yet.</p>
+                    ) : (
+                      <div className="overflow-x-auto bg-white rounded-xl border border-[#e8e0d6]">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-[#faf7f2] text-[#6b5d52] text-[10px] uppercase tracking-wider">
+                              <th className="text-left px-3 py-2">Date</th>
+                              <th className="text-right px-3 py-2">Amount</th>
+                              <th className="text-left px-3 py-2">Method</th>
+                              <th className="text-left px-3 py-2">Reference</th>
+                              <th className="text-left px-3 py-2">Allocated to</th>
+                              <th className="text-left px-3 py-2">Notes</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {partnerStatement.payments.map((pay: any) => (
+                              <tr key={pay.id} className="border-t border-[#e8e0d6]">
+                                <td className="px-3 py-2">{pay.payment_date}</td>
+                                <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">{fmt(pay.amount_received)}</td>
+                                <td className="px-3 py-2 text-[10px]">{pay.payment_method || '—'}</td>
+                                <td className="px-3 py-2 text-[10px] font-mono">{pay.reference_number || '—'}</td>
+                                <td className="px-3 py-2 text-[10px] font-mono">{pay.allocated_to_invoice_id || '— unallocated —'}</td>
+                                <td className="px-3 py-2 text-[10px]">{pay.notes || ''}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                  {/* Bookings */}
+                  <div>
+                    <p className="text-sm font-bold text-[#1a1208] mb-2">Bookings ({partnerStatement.bookings?.length || 0})</p>
+                    {(!partnerStatement.bookings || partnerStatement.bookings.length === 0) ? (
+                      <p className="text-xs text-[#9c8e85] italic">No bookings from this partner in period.</p>
+                    ) : (
+                      <div className="overflow-x-auto bg-white rounded-xl border border-[#e8e0d6] max-h-72">
+                        <table className="w-full text-xs">
+                          <thead className="sticky top-0">
+                            <tr className="bg-[#faf7f2] text-[#6b5d52] text-[10px] uppercase tracking-wider">
+                              <th className="text-left px-3 py-2">Guest</th>
+                              <th className="text-left px-3 py-2">Check-in</th>
+                              <th className="text-left px-3 py-2">Check-out</th>
+                              <th className="text-right px-3 py-2">Gross</th>
+                              <th className="text-right px-3 py-2">Net</th>
+                              <th className="text-center px-3 py-2">Status</th>
+                              <th className="text-center px-3 py-2">Payment</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {partnerStatement.bookings.map((b: any) => (
+                              <tr key={b.id} className="border-t border-[#e8e0d6]">
+                                <td className="px-3 py-2">{b.guest_name}</td>
+                                <td className="px-3 py-2 text-[10px]">{b.check_in_date}</td>
+                                <td className="px-3 py-2 text-[10px]">{b.check_out_date}</td>
+                                <td className="px-3 py-2 text-right font-mono">{fmt(b.total_amount)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-emerald-700">{fmt(b.net_amount)}</td>
+                                <td className="px-3 py-2 text-center text-[10px]">{b.status}</td>
+                                <td className="px-3 py-2 text-center"><span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', b.payment_status === 'PAID' ? 'bg-emerald-100 text-emerald-800' : b.payment_status === 'INVOICED' ? 'bg-blue-100 text-blue-800' : b.payment_status === 'WRITTEN_OFF' ? 'bg-stone-200 text-stone-700' : 'bg-amber-100 text-amber-800')}>{b.payment_status || 'UNINVOICED'}</span></td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═════════ Record Payment modal ═════════ */}
+      {recordingPaymentFor && (() => {
+        const d = recordingPaymentFor;
+        const set = (patch: any) => setRecordingPaymentFor({ ...d, ...patch });
+        const openInvoices = partnerStatement?.invoices?.filter((i: any) => i.status !== 'PAID' && i.status !== 'WRITTEN_OFF') || [];
+        return (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Record payment</h3>
+                <button onClick={() => setRecordingPaymentFor(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+              <p className="text-xs text-[#6b5d52] mb-3">From <strong>{d.partner_name || d.partner_code}</strong> ({d.partner_type})</p>
+              <form onSubmit={(e) => { e.preventDefault(); if (!d.amount_received || Number(d.amount_received) <= 0) { alert('Amount must be greater than 0.'); return; } recordPayment(d); }} className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment date *</label>
+                    <input required type="date" value={d.payment_date} onChange={e => set({ payment_date: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Amount (₹) *</label>
+                    <input required type="number" min="0.01" step="0.01" value={d.amount_received} onChange={e => set({ amount_received: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Method</label>
+                    <select value={d.payment_method} onChange={e => set({ payment_method: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                      <option>BANK_TRANSFER</option><option>UPI</option><option>CHEQUE</option><option>NETBANKING</option><option>CASH</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Reference / UTR</label>
+                    <input value={d.reference_number} onChange={e => set({ reference_number: e.target.value })} placeholder="UTR..." className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Allocate to invoice (optional, manual)</label>
+                    <select value={d.allocated_to_invoice_id || ''} onChange={e => set({ allocated_to_invoice_id: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                      <option value="">— don't allocate (on-account) —</option>
+                      {openInvoices.map((i: any) => (
+                        <option key={i.id} value={i.id}>{i.invoice_number || i.id} — outstanding ₹{(Number(i.net_due) - Number(i.net_received || 0)).toLocaleString('en-IN')}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
+                    <textarea rows={2} value={d.notes} onChange={e => set({ notes: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <button type="button" onClick={() => setRecordingPaymentFor(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                  <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700">Save payment</button>
                 </div>
               </form>
             </div>
