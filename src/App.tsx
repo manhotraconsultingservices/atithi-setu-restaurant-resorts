@@ -7476,6 +7476,68 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [webhookLog, setWebhookLog] = useState<any[]>([]);
   const [hotelSettingsSaved, setHotelSettingsSaved] = useState(false);
 
+  // OTA Gaps 5-9 — Channel Manager extension state.
+  // Gap 5: commission summary per channel (gross/commission/net last 30d).
+  // Gap 6: rate plans (BAR/NRF/LSTAY/MEMBER) editor.
+  // Gap 7: outbound queue inspector with retry/dismiss.
+  // Gap 8: daily reconciliation reports viewer.
+  // Gap 9: per-channel IP allowlist read-only config display.
+  const [commissionSummary, setCommissionSummary] = useState<any[]>([]);
+  const [ratePlans, setRatePlans] = useState<any[]>([]);
+  const [editingRatePlan, setEditingRatePlan] = useState<any | null>(null);
+  const [channelSyncQueue, setChannelSyncQueue] = useState<any[]>([]);
+  const [reconciliationReports, setReconciliationReports] = useState<any[]>([]);
+  const [reconciliationRunning, setReconciliationRunning] = useState(false);
+  const [channelSecurityConfig, setChannelSecurityConfig] = useState<any>(null);
+  const fetchCommissionSummary = async () => {
+    if (!isHotelEnabled) return;
+    try { setCommissionSummary(await hotelApi('/reports/commission-summary')); } catch { setCommissionSummary([]); }
+  };
+  const fetchRatePlans = async () => {
+    if (!isHotelEnabled) return;
+    try { setRatePlans(await hotelApi('/rate-plans')); } catch { setRatePlans([]); }
+  };
+  const saveRatePlan = async (plan: any) => {
+    try {
+      await hotelApi(`/rate-plans/${encodeURIComponent(plan.id || plan.code)}`, { method: 'PUT', body: JSON.stringify(plan) });
+      setEditingRatePlan(null);
+      await fetchRatePlans();
+    } catch (e: any) { alert(e?.message || 'Failed to save rate plan'); }
+  };
+  const deleteRatePlan = async (id: string) => {
+    if (!window.confirm('Deactivate this rate plan? Existing bookings stay intact.')) return;
+    try { await hotelApi(`/rate-plans/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchRatePlans(); }
+    catch (e: any) { alert(e?.message || 'Failed to delete rate plan'); }
+  };
+  const fetchChannelSyncQueue = async () => {
+    if (!isHotelEnabled) return;
+    try { setChannelSyncQueue(await hotelApi('/channel-sync-queue')); } catch { setChannelSyncQueue([]); }
+  };
+  const retrySyncQueueRow = async (rowId: string) => {
+    try { await hotelApi(`/channel-sync-queue/${encodeURIComponent(rowId)}/retry`, { method: 'POST' }); await fetchChannelSyncQueue(); }
+    catch (e: any) { alert(e?.message || 'Retry failed'); }
+  };
+  const dismissSyncQueueRow = async (rowId: string) => {
+    if (!window.confirm('Dismiss this queued sync? It will not retry automatically.')) return;
+    try { await hotelApi(`/channel-sync-queue/${encodeURIComponent(rowId)}/dismiss`, { method: 'POST' }); await fetchChannelSyncQueue(); }
+    catch (e: any) { alert(e?.message || 'Dismiss failed'); }
+  };
+  const fetchReconciliationReports = async () => {
+    if (!isHotelEnabled) return;
+    try { setReconciliationReports(await hotelApi('/channel-reconciliation-reports')); } catch { setReconciliationReports([]); }
+  };
+  const runReconciliationNow = async () => {
+    if (!window.confirm('Run reconciliation now for all enabled OTA channels? This pulls last 24h of bookings from each.')) return;
+    setReconciliationRunning(true);
+    try { await hotelApi('/channel-reconciliation-reports/run', { method: 'POST' }); await fetchReconciliationReports(); }
+    catch (e: any) { alert(e?.message || 'Reconciliation failed'); }
+    finally { setReconciliationRunning(false); }
+  };
+  const fetchChannelSecurityConfig = async () => {
+    if (!isHotelEnabled) return;
+    try { setChannelSecurityConfig(await hotelApi('/channel-security-config')); } catch { setChannelSecurityConfig(null); }
+  };
+
   // ── Menu Management Enhancements ─────────────────────────────────────────────
   const [menuCatFilter, setMenuCatFilter] = useState<string>('ALL');
   const [menuSearchTerm, setMenuSearchTerm] = useState<string>('');
@@ -9894,7 +9956,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // BCG client request 8 Jun 2026 — Channel Manager moved out of Settings.
     // Eagerly load credentials + iCal feeds + recent webhook events when
     // the tab is opened so the page renders with data, not loading spinners.
-    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); }
+    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); }
     if (activeTab === 'FOLIOS') fetchHotelFolios();
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
@@ -17862,6 +17924,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <p className="text-[10px] text-[#6b5d52] mt-0.5 font-mono">
                           API Key: {c.api_key || '—'} · Secret: {c.api_secret ? '••••••••' : '—'} · Property: {c.property_id || '—'}
                         </p>
+                        <p className="text-[10px] text-[#6b5d52] mt-0.5 font-mono">
+                          Commission: {Number(c.commission_pct || 0).toFixed(2)}% · Webhook signing: {c.webhook_signing_secret ? '••••••••' : '—'}
+                        </p>
                         {c.last_synced && (
                           <p className="text-[10px] text-[#9c8e85] mt-0.5">Last outbound push: {new Date(c.last_synced).toLocaleString()}</p>
                         )}
@@ -17872,7 +17937,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           c.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
                         )}>{c.is_enabled ? 'Enabled' : 'Disabled'}</span>
                         <button
-                          onClick={() => setEditingChannelCred({ channel: c.channel, api_key: '', api_secret: '', property_id: c.property_id || '', is_enabled: c.is_enabled })}
+                          onClick={() => setEditingChannelCred({ channel: c.channel, api_key: '', api_secret: '', property_id: c.property_id || '', is_enabled: c.is_enabled, commission_pct: c.commission_pct ?? '', webhook_signing_secret: '' })}
                           className="text-[10px] font-bold text-[#3d3128] hover:underline"
                         >Edit</button>
                         <button
@@ -17885,6 +17950,277 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               )}
             </div>
+          </div>
+
+          {/* ════════════════ Gap 5 — Commission summary ════════════════
+              Per-channel gross / commission / net for the last 30 days.
+              Auto-computed at booking-creation time from each OTA's
+              configured commission_pct (Booking.com typically 15-18%,
+              MMT/Goibibo 18-22%, direct 0%). Shows the owner exactly how
+              much each channel is costing in margin, so they can shift
+              inventory toward higher-margin sources. */}
+          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif">Commission Summary <span className="text-xs font-normal text-[#9c8e85]">· last 30 days</span></h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Gross revenue, commission paid, and net per OTA channel. Configure each channel's commission % when editing its API credentials above.</p>
+              </div>
+              <button onClick={fetchCommissionSummary} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
+            </div>
+            {commissionSummary.length === 0 ? (
+              <p className="text-xs text-[#9c8e85] italic mt-2">No OTA bookings in the last 30 days — once webhooks start delivering commission auto-computes from channel_credentials.commission_pct.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                      <th className="text-left px-3 py-2">Channel</th>
+                      <th className="text-right px-3 py-2">Bookings</th>
+                      <th className="text-right px-3 py-2">Gross (INR)</th>
+                      <th className="text-right px-3 py-2">Commission %</th>
+                      <th className="text-right px-3 py-2">Commission (INR)</th>
+                      <th className="text-right px-3 py-2">Net (INR)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {commissionSummary.map((r: any) => (
+                      <tr key={r.channel} className="border-t border-[#e8e0d6]">
+                        <td className="px-3 py-2 font-bold">{r.channel || 'DIRECT'}</td>
+                        <td className="px-3 py-2 text-right">{r.bookings || 0}</td>
+                        <td className="px-3 py-2 text-right font-mono">{Number(r.gross || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2 text-right">{Number(r.avg_commission_pct || 0).toFixed(2)}%</td>
+                        <td className="px-3 py-2 text-right font-mono text-[#c13b3b]">{Number(r.commission || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">{Number(r.net || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* ════════════════ Gap 6 — Rate plans ════════════════
+              Industry-standard rate plan codes (BAR / NRF / LSTAY / MEMBER)
+              that OTAs map to their own product types. Each physical room
+              can be sold under multiple plans simultaneously — e.g. a
+              Deluxe room sold as BAR (refundable, full price) AND NRF
+              (10% off, non-refundable) on the same OTA. Seeded
+              automatically on first load; owner can add custom plans. */}
+          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif">Rate Plans</h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Standard codes OTAs recognise: <strong>BAR</strong> (Best Available Rate), <strong>NRF</strong> (Non-Refundable), <strong>LSTAY</strong> (Long Stay), <strong>MEMBER</strong> (Member). Used by webhook handlers to tag inbound bookings + by channel room mappings for OTA push.</p>
+              </div>
+              <button
+                onClick={() => setEditingRatePlan({ id: '', code: '', name: '', description: '', is_refundable: 1, discount_pct: 0, min_nights: 1, max_nights: null, display_order: 0, is_active: 1 })}
+                className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] flex items-center gap-1"
+              ><Plus size={12} /> Add Rate Plan</button>
+            </div>
+            {ratePlans.length === 0 ? (
+              <p className="text-xs text-[#9c8e85] italic mt-2">No rate plans yet — defaults seed on first load.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                      <th className="text-left px-3 py-2">Code</th>
+                      <th className="text-left px-3 py-2">Name</th>
+                      <th className="text-center px-3 py-2">Refundable</th>
+                      <th className="text-right px-3 py-2">Discount %</th>
+                      <th className="text-right px-3 py-2">Min nights</th>
+                      <th className="text-right px-3 py-2">Max nights</th>
+                      <th className="text-center px-3 py-2">Active</th>
+                      <th className="text-right px-3 py-2">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ratePlans.map((p: any) => (
+                      <tr key={p.id} className="border-t border-[#e8e0d6]">
+                        <td className="px-3 py-2 font-mono font-bold">{p.code}</td>
+                        <td className="px-3 py-2">{p.name}<div className="text-[10px] text-[#9c8e85]">{p.description}</div></td>
+                        <td className="px-3 py-2 text-center">{p.is_refundable ? '✓' : '—'}</td>
+                        <td className="px-3 py-2 text-right">{Number(p.discount_pct || 0).toFixed(1)}%</td>
+                        <td className="px-3 py-2 text-right">{p.min_nights || 1}</td>
+                        <td className="px-3 py-2 text-right">{p.max_nights || '—'}</td>
+                        <td className="px-3 py-2 text-center">
+                          <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', p.is_active ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700')}>{p.is_active ? 'Active' : 'Off'}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          <button onClick={() => setEditingRatePlan({ ...p })} className="text-[10px] font-bold text-[#3d3128] hover:underline mr-3">Edit</button>
+                          <button onClick={() => deleteRatePlan(p.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Deactivate</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* ════════════════ Gap 7 — Outbound sync queue ════════════════
+              Inspector for the channel_sync_log queue. Each row = one
+              outbound payload to an OTA (rate / availability / booking
+              push). On failure the worker retries with exponential backoff
+              (30s, 2m, 10m, 1h, 6h). After 5 failures → permanently_failed
+              and requires manual retry from this panel. */}
+          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif">Outbound Sync Queue</h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Pending and failed pushes to OTAs. Retries are automatic (30s → 6h backoff). After 5 attempts a row becomes <code>permanently_failed</code> and waits for your manual retry below.</p>
+              </div>
+              <button onClick={fetchChannelSyncQueue} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
+            </div>
+            {channelSyncQueue.length === 0 ? (
+              <p className="text-xs text-[#9c8e85] italic mt-2">Queue is empty — everything is in sync.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                      <th className="text-left px-3 py-2">Channel</th>
+                      <th className="text-left px-3 py-2">Operation</th>
+                      <th className="text-left px-3 py-2">Status</th>
+                      <th className="text-right px-3 py-2">Retries</th>
+                      <th className="text-left px-3 py-2">Next retry</th>
+                      <th className="text-left px-3 py-2">Last error</th>
+                      <th className="text-right px-3 py-2">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {channelSyncQueue.map((r: any) => (
+                      <tr key={r.id} className="border-t border-[#e8e0d6]">
+                        <td className="px-3 py-2 font-bold">{r.channel}</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">{r.operation}</td>
+                        <td className="px-3 py-2">
+                          <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
+                            r.status === 'success' ? 'bg-emerald-100 text-emerald-800' :
+                            r.status === 'failed' ? 'bg-amber-100 text-amber-800' :
+                            r.status === 'permanently_failed' ? 'bg-red-100 text-red-800' :
+                            r.status === 'dismissed' ? 'bg-stone-200 text-stone-700' : 'bg-sky-100 text-sky-800')}>{r.status}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">{r.retry_count || 0}/5</td>
+                        <td className="px-3 py-2 text-[11px]">{r.next_retry_at ? new Date(r.next_retry_at).toLocaleString() : '—'}</td>
+                        <td className="px-3 py-2 text-[10px] text-[#c13b3b] max-w-[280px] truncate" title={r.error_message}>{r.error_message || '—'}</td>
+                        <td className="px-3 py-2 text-right">
+                          {r.status !== 'success' && r.status !== 'dismissed' && (
+                            <>
+                              <button onClick={() => retrySyncQueueRow(r.id)} className="text-[10px] font-bold text-[#1a4a6f] hover:underline mr-3">Retry</button>
+                              <button onClick={() => dismissSyncQueueRow(r.id)} className="text-[10px] font-bold text-[#c13b3b] hover:underline">Dismiss</button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* ════════════════ Gap 8 — Reconciliation reports ════════════════
+              Daily 03:15 IST cron pulls last 24h of bookings from each
+              enabled OTA (via adapter.pullBookings) and diffs against
+              local room_bookings tagged with that channel. Missing in
+              either side → triage signal. Owner can also trigger an
+              ad-hoc run from this panel. */}
+          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif">Reconciliation Reports <span className="text-xs font-normal text-[#9c8e85]">· daily 03:15 IST</span></h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Compares local bookings against each OTA's reservation list (last 24h). Surfaces missing or duplicate bookings before they cause double-bookings.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={runReconciliationNow} disabled={reconciliationRunning} className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] disabled:opacity-50">{reconciliationRunning ? 'Running…' : 'Run now'}</button>
+                <button onClick={fetchReconciliationReports} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
+              </div>
+            </div>
+            {reconciliationReports.length === 0 ? (
+              <p className="text-xs text-[#9c8e85] italic mt-2">No reconciliation reports yet — first cron run is at 03:15 IST tomorrow, or click "Run now".</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                      <th className="text-left px-3 py-2">Ran at</th>
+                      <th className="text-left px-3 py-2">Channel</th>
+                      <th className="text-left px-3 py-2">Period</th>
+                      <th className="text-right px-3 py-2">Local</th>
+                      <th className="text-right px-3 py-2">Remote</th>
+                      <th className="text-right px-3 py-2">Missing local</th>
+                      <th className="text-right px-3 py-2">Missing remote</th>
+                      <th className="text-center px-3 py-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reconciliationReports.map((r: any) => (
+                      <tr key={r.id} className="border-t border-[#e8e0d6]">
+                        <td className="px-3 py-2 text-[11px]">{r.ran_at ? new Date(r.ran_at).toLocaleString() : '—'}</td>
+                        <td className="px-3 py-2 font-bold">{r.channel}</td>
+                        <td className="px-3 py-2 text-[11px]">{r.period_start} → {r.period_end}</td>
+                        <td className="px-3 py-2 text-right font-mono">{r.local_count || 0}</td>
+                        <td className="px-3 py-2 text-right font-mono">{r.remote_count || 0}</td>
+                        <td className="px-3 py-2 text-right font-mono text-amber-700">{r.missing_in_local || 0}</td>
+                        <td className="px-3 py-2 text-right font-mono text-amber-700">{r.missing_in_remote || 0}</td>
+                        <td className="px-3 py-2 text-center">
+                          <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
+                            r.status === 'ok' ? 'bg-emerald-100 text-emerald-800' :
+                            r.status === 'mismatch' ? 'bg-amber-100 text-amber-800' :
+                            r.status === 'stub' ? 'bg-stone-200 text-stone-700' :
+                            'bg-red-100 text-red-800')}>{r.status}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* ════════════════ Gap 9 — IP allowlist security config ════════════════
+              Defense-in-depth on top of HMAC signature verification.
+              Configured per-channel via env CHANNEL_IP_ALLOWLIST_<CHANNEL>
+              with comma-separated CIDRs. Permissive by default
+              (no env → allow + log) so existing tenants don't see
+              accidental 403s. */}
+          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif">Inbound Webhook Security</h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Per-channel source-IP allowlist (in addition to HMAC signature verification). Set <code>CHANNEL_IP_ALLOWLIST_BOOKING</code>, <code>CHANNEL_IP_ALLOWLIST_MMT</code>, etc. as env vars on the server with comma-separated CIDRs.</p>
+              </div>
+              <button onClick={fetchChannelSecurityConfig} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
+            </div>
+            {!channelSecurityConfig ? (
+              <p className="text-xs text-[#9c8e85] italic mt-2">Loading security config…</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                      <th className="text-left px-3 py-2">Channel</th>
+                      <th className="text-left px-3 py-2">Allowlist (CIDRs)</th>
+                      <th className="text-center px-3 py-2">Enforcing</th>
+                      <th className="text-left px-3 py-2">Env var name</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(channelSecurityConfig.channels || []).map((c: any) => (
+                      <tr key={c.channel} className="border-t border-[#e8e0d6]">
+                        <td className="px-3 py-2 font-bold">{c.channel}</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">{(c.cidrs && c.cidrs.length) ? c.cidrs.join(', ') : <em className="text-[#9c8e85]">none — permissive mode</em>}</td>
+                        <td className="px-3 py-2 text-center">
+                          <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', c.enforcing ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800')}>{c.enforcing ? 'Locked' : 'Open'}</span>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[10px] text-[#6b5d52]">CHANNEL_IP_ALLOWLIST_{c.channel}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="text-[10px] text-[#9c8e85] mt-3 italic">After updating env vars, restart the server for changes to take effect. HMAC signature verification (always-on) remains the primary line of defense.</p>
+              </div>
+            )}
           </div>
         </div>
       ) : activeTab === 'FOLIOS' && isHotelEnabled ? (
@@ -22069,6 +22405,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     api_secret: d.api_secret || null,
                     property_id: d.property_id || null,
                     is_enabled: d.is_enabled ? 1 : 0,
+                    commission_pct: d.commission_pct == null || d.commission_pct === '' ? null : Number(d.commission_pct),
+                    webhook_signing_secret: d.webhook_signing_secret || null,
                   });
                   setEditingChannelCred(null);
                 } catch (err: any) { alert(err?.message || 'Failed to save'); }
@@ -22100,12 +22438,91 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <input value={d.property_id || ''} onChange={e => set({ property_id: e.target.value })}
                     placeholder="e.g. 12345678" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
                 </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Commission %</label>
+                  <input type="number" min="0" max="100" step="0.1" value={d.commission_pct ?? ''} onChange={e => set({ commission_pct: e.target.value })}
+                    placeholder="e.g. 15 for Booking.com, 20 for MMT" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Snapshot onto each booking at receive time. Net revenue = gross × (1 − commission %).</p>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Webhook Signing Secret</label>
+                  <input type="password" autoComplete="new-password" value={d.webhook_signing_secret || ''} onChange={e => set({ webhook_signing_secret: e.target.value })}
+                    placeholder="Leave blank to keep existing" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  <p className="text-[10px] text-[#9c8e85] mt-1">OTA-specific HMAC key for verifying inbound webhook signatures. Often shown in a different extranet panel than the outbound API secret.</p>
+                </div>
                 <label className="flex items-center gap-2 text-sm text-[#3d3128]">
                   <input type="checkbox" checked={!!d.is_enabled} onChange={e => set({ is_enabled: e.target.checked })} className="w-4 h-4" />
                   Enable inventory sync to this channel
                 </label>
                 <div className="flex gap-2 pt-2">
                   <button type="button" onClick={() => setEditingChannelCred(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                  <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Save</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═════════ Rate Plan modal (Gap 6) ═════════
+          Add or edit an industry-standard rate plan (BAR / NRF / LSTAY /
+          MEMBER) or a custom one. Code becomes the OTA-recognised tag
+          when the plan is mapped via channel_room_mappings. */}
+      {editingRatePlan && (() => {
+        const d = editingRatePlan;
+        const set = (patch: any) => setEditingRatePlan({ ...d, ...patch });
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">{d.id ? 'Edit Rate Plan' : 'Add Rate Plan'}</h3>
+                <button onClick={() => setEditingRatePlan(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+              </div>
+              <form onSubmit={(e) => { e.preventDefault(); if (!d.code || !d.name) { alert('Code and name are required.'); return; } const code = String(d.code).toUpperCase().trim(); saveRatePlan({ ...d, id: d.id || code, code, name: String(d.name).trim() }); }} className="space-y-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Code * <span className="text-[#9c8e85] font-normal">(BAR / NRF / LSTAY / MEMBER / custom)</span></label>
+                  <input required disabled={!!d.id} value={d.code || ''} onChange={e => set({ code: e.target.value.toUpperCase() })}
+                    placeholder="BAR" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono uppercase outline-none focus:ring-2 ring-[#cc5a16]/20 disabled:opacity-60" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Name *</label>
+                  <input required value={d.name || ''} onChange={e => set({ name: e.target.value })}
+                    placeholder="Best Available Rate" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Description</label>
+                  <input value={d.description || ''} onChange={e => set({ description: e.target.value })}
+                    placeholder="Free cancellation up to 24h before check-in" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Discount %</label>
+                    <input type="number" min="0" max="100" step="0.5" value={d.discount_pct ?? 0} onChange={e => set({ discount_pct: Number(e.target.value) })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Min nights</label>
+                    <input type="number" min="1" value={d.min_nights ?? 1} onChange={e => set({ min_nights: Number(e.target.value) })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Max nights</label>
+                    <input type="number" min="0" value={d.max_nights ?? ''} onChange={e => set({ max_nights: e.target.value === '' ? null : Number(e.target.value) })}
+                      placeholder="—" className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-2 text-sm text-[#3d3128]">
+                    <input type="checkbox" checked={!!d.is_refundable} onChange={e => set({ is_refundable: e.target.checked ? 1 : 0 })} className="w-4 h-4" />
+                    Refundable
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-[#3d3128]">
+                    <input type="checkbox" checked={!!d.is_active} onChange={e => set({ is_active: e.target.checked ? 1 : 0 })} className="w-4 h-4" />
+                    Active
+                  </label>
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <button type="button" onClick={() => setEditingRatePlan(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
                   <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Save</button>
                 </div>
               </form>

@@ -26874,7 +26874,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ota-gaps-5-to-9-commission-rateplans-retry-recon-allowlist',
+    commit_marker: 'ota-gaps-5-to-9-full-ui-commission-rateplans-retry-recon-sec',
     code_features: [
       'subscription-billing',
       'read-only-mode',
