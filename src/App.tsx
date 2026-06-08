@@ -15401,12 +15401,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   return;
                 }
                 try {
-                  await hotelApi('/tariff/meal-plans', {
+                  // BCG Tariff Phase 4.5 — server now returns the canonical
+                  // saved list along with any per-row skip/error details.
+                  // Apply the response directly to local state (single source
+                  // of truth) instead of relying on a separate fetchTariff
+                  // call that could race or fail silently.
+                  const resp: any = await hotelApi('/tariff/meal-plans', {
                     method: 'PUT',
                     body: JSON.stringify({ meal_plans: tariff.meal_plans }),
                   });
-                  await fetchTariff();
-                  alert('Meal plans saved.');
+                  if (Array.isArray(resp?.meal_plans)) {
+                    setTariffData(prev => ({ ...prev, meal_plans: resp.meal_plans }));
+                  } else {
+                    await fetchTariff();
+                  }
+                  const skipMsg = (resp?.skipped || []).length > 0
+                    ? `\n${resp.skipped.length} row(s) skipped (missing fields).`
+                    : '';
+                  const errMsg = (resp?.errors || []).length > 0
+                    ? `\n${resp.errors.length} row(s) failed: ${resp.errors.map((e: any) => e.error).join('; ')}`
+                    : '';
+                  alert(`Meal plans saved (${resp?.count || 0} stored).${skipMsg}${errMsg}`);
                 } catch (err: any) {
                   alert('Save failed: ' + (err?.message || 'unknown error'));
                 }

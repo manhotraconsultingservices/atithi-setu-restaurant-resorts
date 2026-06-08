@@ -920,6 +920,14 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
   //   would otherwise gate the migration. Disable any plan you don't
   //   sell by clearing the is_active flag in Settings; no rate paths
   //   are touched.
+  // BCG Tariff Phase 4.5 — the old version of this loop had .catch(()=>{})
+  // which silently swallowed seed failures. When the INSERTs fired before
+  // the CREATE TABLE commit settled on certain tenants, the meal-plan list
+  // was never populated and every subsequent /tariff GET returned an empty
+  // list — leaving the tenant stuck with "0 active" in the UI.
+  // Now: log loudly. The GET endpoint ALSO has a self-heal pass that
+  // re-runs this seed inline on first request, so even if the boot-time
+  // seed misses, the next page-load fixes it.
   for (const mp of [
     { id: 'EP',  code: 'EP',  name: 'European Plan',          br: 0, l: 0, d: 0, order: 1 },
     { id: 'CP',  code: 'CP',  name: 'Continental Plan',       br: 1, l: 0, d: 0, order: 2 },
@@ -931,7 +939,7 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
        ON CONFLICT (id) DO NOTHING`,
       [mp.id, mp.code, mp.name, mp.br, mp.l, mp.d, mp.order]
-    ).catch(() => { /* swallow — table may not exist on the very first init pass through the exec block */ });
+    ).catch((err: any) => console.error(`[createHotelTables] meal_plan ${mp.id} seed failed:`, err?.message || err));
   }
   for (const s of [
     { id: 'PEAK', name: 'Peak', description: 'High-demand months — holidays, festivals, weekends', color: '#c13b3b', order: 1 },
@@ -942,7 +950,7 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
        VALUES (?, ?, ?, ?, ?, 1)
        ON CONFLICT (id) DO NOTHING`,
       [s.id, s.name, s.description, s.color, s.order]
-    ).catch(() => { /* swallow */ });
+    ).catch((err: any) => console.error(`[createHotelTables] season ${s.id} seed failed:`, err?.message || err));
   }
 }
 
@@ -20143,19 +20151,130 @@ async function startServer() {
   // gate as hotel/settings. Reads require an authenticated session.
   // ════════════════════════════════════════════════════════════════════
 
+  // ════════════════════════════════════════════════════════════════════
+  // Self-healing helper — ensures the meal_plans + seasons tables are
+  // non-empty for any hotel tenant. Idempotent (ON CONFLICT DO NOTHING).
+  //
+  // Why this exists (BCG Tariff Phase 4.5, 7 Jun 2026 client report):
+  //
+  //   Client reported their Tariff Configuration UI showed "0 active"
+  //   and an empty meal-plans list, even though their tenant had the
+  //   hotel module enabled and was in MATRIX mode.
+  //
+  //   Root cause: the original seed inside createHotelTables() runs
+  //   in the same exec() batch as the CREATE TABLE statements. On some
+  //   tenants the INSERTs fired before the table commit settled and
+  //   silently failed (the catch swallowed the error). Once that
+  //   happened, the tenant was stuck — every subsequent /tariff GET
+  //   returned an empty meal_plans array, the UI showed "0 active",
+  //   and the matrix tariff path couldn't resolve any rates.
+  //
+  // The fix below makes the GET endpoint SELF-HEALING: when the table
+  // is empty, it re-runs the canonical EP/CP/MAP/API seed inline before
+  // returning the snapshot. Every owner sees meal plans on the very
+  // next page load, no manual intervention required.
+  // ════════════════════════════════════════════════════════════════════
+  async function ensureMealPlansSeeded(tenantDb: DbInterface): Promise<any[]> {
+    try {
+      const existing: any[] = await tenantDb.query("SELECT * FROM meal_plans ORDER BY display_order, name");
+      if (Array.isArray(existing) && existing.length > 0) return existing;
+    } catch (err: any) {
+      // Table might not exist on a hotel-not-enabled tenant — bail quietly.
+      console.warn(`[meal_plans heal] SELECT failed for tenant: ${err?.message || err}`);
+      return [];
+    }
+    // Re-seed defaults.
+    console.log(`[meal_plans heal] table empty — seeding EP/CP/MAP/API defaults`);
+    const defaults = [
+      { id: 'EP',  code: 'EP',  name: 'European Plan',          br: 0, l: 0, d: 0, order: 1 },
+      { id: 'CP',  code: 'CP',  name: 'Continental Plan',       br: 1, l: 0, d: 0, order: 2 },
+      { id: 'MAP', code: 'MAP', name: 'Modified American Plan', br: 1, l: 0, d: 1, order: 3 },
+      { id: 'API', code: 'AP',  name: 'American Plan',          br: 1, l: 1, d: 1, order: 4 },
+    ];
+    for (const mp of defaults) {
+      try {
+        await tenantDb.run(
+          `INSERT INTO meal_plans (id, code, name, includes_breakfast, includes_lunch, includes_dinner, display_order, is_active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+           ON CONFLICT (id) DO NOTHING`,
+          [mp.id, mp.code, mp.name, mp.br, mp.l, mp.d, mp.order]
+        );
+      } catch (err: any) {
+        // Log loudly this time — previous swallow is what caused the bug.
+        console.error(`[meal_plans heal] insert ${mp.id} failed: ${err?.message || err}`);
+      }
+    }
+    try {
+      return await tenantDb.query("SELECT * FROM meal_plans ORDER BY display_order, name");
+    } catch {
+      return [];
+    }
+  }
+
+  // Same pattern for seasons — if a tenant somehow has no seasons but is
+  // in MATRIX mode, the matrix lookup always returns null and every rate
+  // falls back to base_rate. Reseed PEAK / OFF defaults.
+  async function ensureSeasonsSeeded(tenantDb: DbInterface): Promise<any[]> {
+    try {
+      const existing: any[] = await tenantDb.query("SELECT * FROM seasons ORDER BY display_order, name");
+      if (Array.isArray(existing) && existing.length > 0) return existing;
+    } catch (err: any) {
+      console.warn(`[seasons heal] SELECT failed for tenant: ${err?.message || err}`);
+      return [];
+    }
+    console.log(`[seasons heal] table empty — seeding PEAK / OFF defaults`);
+    const defaults = [
+      { id: 'PEAK', name: 'Peak', description: 'High-demand months — holidays, festivals, weekends', color: '#c13b3b', order: 1 },
+      { id: 'OFF',  name: 'Off',  description: 'Standard rate for the rest of the year',             color: '#6b5d52', order: 2 },
+    ];
+    for (const s of defaults) {
+      try {
+        await tenantDb.run(
+          `INSERT INTO seasons (id, name, description, color, display_order, is_active)
+           VALUES (?, ?, ?, ?, ?, 1)
+           ON CONFLICT (id) DO NOTHING`,
+          [s.id, s.name, s.description, s.color, s.order]
+        );
+      } catch (err: any) {
+        console.error(`[seasons heal] insert ${s.id} failed: ${err?.message || err}`);
+      }
+    }
+    try {
+      return await tenantDb.query("SELECT * FROM seasons ORDER BY display_order, name");
+    } catch {
+      return [];
+    }
+  }
+
   app.get("/api/restaurant/:id/hotel/tariff", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const [meta, seasons, periods, meals, tariffs, extras, roomTypes] = await Promise.all([
+      // Self-heal first — guarantees meal_plans + seasons are non-empty
+      // before the read. Cheap when already-seeded (single SELECT).
+      const [meals, seasons] = await Promise.all([
+        ensureMealPlansSeeded(tenantDb),
+        ensureSeasonsSeeded(tenantDb),
+      ]);
+      const [meta, periods, tariffs, extras, roomTypes] = await Promise.all([
         centralDb.get("SELECT tariff_model FROM restaurants WHERE id = ?", [req.params.id]),
-        tenantDb.query("SELECT * FROM seasons ORDER BY display_order, name").catch(() => []),
-        tenantDb.query("SELECT * FROM season_periods ORDER BY start_date").catch(() => []),
-        tenantDb.query("SELECT * FROM meal_plans ORDER BY display_order, name").catch(() => []),
-        tenantDb.query("SELECT * FROM room_tariffs").catch(() => []),
-        tenantDb.query("SELECT * FROM extra_person_charges").catch(() => []),
-        tenantDb.query("SELECT id, name, base_rate, display_order FROM room_types WHERE is_active = 1 ORDER BY display_order, name").catch(() => []),
+        tenantDb.query("SELECT * FROM season_periods ORDER BY start_date").catch((err: any) => {
+          console.warn(`[/tariff GET] season_periods select failed: ${err?.message}`);
+          return [];
+        }),
+        tenantDb.query("SELECT * FROM room_tariffs").catch((err: any) => {
+          console.warn(`[/tariff GET] room_tariffs select failed: ${err?.message}`);
+          return [];
+        }),
+        tenantDb.query("SELECT * FROM extra_person_charges").catch((err: any) => {
+          console.warn(`[/tariff GET] extra_person_charges select failed: ${err?.message}`);
+          return [];
+        }),
+        tenantDb.query("SELECT id, name, base_rate, display_order FROM room_types WHERE is_active = 1 ORDER BY display_order, name").catch((err: any) => {
+          console.warn(`[/tariff GET] room_types select failed: ${err?.message}`);
+          return [];
+        }),
       ]);
       res.json({
         tariff_model: (meta as any)?.tariff_model === 'LEGACY' ? 'LEGACY' : 'MATRIX',
@@ -20164,6 +20283,7 @@ async function startServer() {
         room_types: roomTypes,
       });
     } catch (err: any) {
+      console.error(`[/tariff GET] tenant ${req.params.id}:`, err);
       res.status(500).json({ error: err?.message || "Failed to fetch tariff snapshot" });
     }
   });
@@ -20256,26 +20376,49 @@ async function startServer() {
       if (!check.ok) return res.status(check.status).json({ error: check.error });
       const list: any[] = Array.isArray(req.body?.meal_plans) ? req.body.meal_plans : [];
       const tenantDb = await getTenantDb(req.params.id);
-      for (const m of list) {
-        if (!m?.id || !m?.name) continue;
-        await tenantDb.run(
-          `INSERT INTO meal_plans (id, code, name, description, includes_breakfast, includes_lunch, includes_dinner, display_order, is_active)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (id) DO UPDATE SET
-             code = EXCLUDED.code,
-             name = EXCLUDED.name,
-             description = EXCLUDED.description,
-             includes_breakfast = EXCLUDED.includes_breakfast,
-             includes_lunch = EXCLUDED.includes_lunch,
-             includes_dinner = EXCLUDED.includes_dinner,
-             display_order = EXCLUDED.display_order,
-             is_active = EXCLUDED.is_active`,
-          [String(m.id), String(m.code || m.id), String(m.name).trim(), m.description || null,
-           m.includes_breakfast ? 1 : 0, m.includes_lunch ? 1 : 0, m.includes_dinner ? 1 : 0,
-           Number(m.display_order || 0), m.is_active === 0 || m.is_active === false ? 0 : 1]
-        );
+      // BCG Tariff Phase 4.5 — surface per-row validation failures and
+      // return the actual saved list. Previously this endpoint returned
+      // {ok: true, count: input.length} which was misleading when rows
+      // were silently dropped because of missing id/name. Now it counts
+      // saved-vs-skipped and returns the canonical snapshot.
+      let saved = 0;
+      const skipped: Array<{ index: number; reason: string }> = [];
+      const errors: Array<{ index: number; error: string }> = [];
+      for (let i = 0; i < list.length; i++) {
+        const m = list[i];
+        if (!m?.id) { skipped.push({ index: i, reason: 'missing id' }); continue; }
+        if (!String(m?.name || '').trim()) { skipped.push({ index: i, reason: 'missing name' }); continue; }
+        if (!String(m?.code || '').trim()) { skipped.push({ index: i, reason: 'missing code' }); continue; }
+        try {
+          await tenantDb.run(
+            `INSERT INTO meal_plans (id, code, name, description, includes_breakfast, includes_lunch, includes_dinner, display_order, is_active)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET
+               code = EXCLUDED.code,
+               name = EXCLUDED.name,
+               description = EXCLUDED.description,
+               includes_breakfast = EXCLUDED.includes_breakfast,
+               includes_lunch = EXCLUDED.includes_lunch,
+               includes_dinner = EXCLUDED.includes_dinner,
+               display_order = EXCLUDED.display_order,
+               is_active = EXCLUDED.is_active`,
+            [String(m.id), String(m.code || m.id).trim().toUpperCase(), String(m.name).trim(), m.description || null,
+             m.includes_breakfast ? 1 : 0, m.includes_lunch ? 1 : 0, m.includes_dinner ? 1 : 0,
+             Number(m.display_order || 0), m.is_active === 0 || m.is_active === false ? 0 : 1]
+          );
+          saved++;
+        } catch (err: any) {
+          console.error(`[meal-plans PUT] tenant ${req.params.id} row ${i} (${m.id}) failed:`, err?.message || err);
+          errors.push({ index: i, error: err?.message || 'insert failed' });
+        }
       }
-      res.json({ ok: true, count: list.length });
+      // Echo back the actual stored rows so the client can sync state
+      // from the source of truth (no race with a follow-up fetchTariff).
+      const persisted = await tenantDb.query(
+        "SELECT * FROM meal_plans ORDER BY display_order, name"
+      ).catch(() => []);
+      console.log(`[meal-plans PUT] tenant ${req.params.id}: saved=${saved} skipped=${skipped.length} errors=${errors.length}; ${persisted.length} total rows now stored`);
+      res.json({ ok: errors.length === 0, count: saved, skipped, errors, meal_plans: persisted });
     }
   );
 
@@ -26031,7 +26174,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tariff-category-no-base-price-plus-live-e2e-test',
+    commit_marker: 'tariff-self-healing-meal-plans-plus-loud-errors',
     code_features: [
       'subscription-billing',
       'read-only-mode',
