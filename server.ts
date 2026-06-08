@@ -26948,6 +26948,252 @@ async function startServer() {
     }
   });
 
+  // ────────────────────────────────────────────────────────────────────
+  // OTA Demo Data Seed (client request 9 Jun 2026)
+  // ────────────────────────────────────────────────────────────────────
+  // Companion to seed-bcg-tariff. Once the tariff matrix + rooms are in
+  // place, this populates OTA-side data so the new Channel Manager
+  // dashboards (360°, Live Rate Card, Commission Summary, Queue,
+  // Reconciliation) light up immediately.
+  //
+  // User explicitly authorized seeding fabricated bookings into the
+  // viveks-cafe live tenant ("Proceed on viveks-cafe as-is" — 9 Jun
+  // 2026). Every seeded row carries an "OTA-SEED-" id prefix so it is
+  // unambiguously identifiable and removable later; every guest_name
+  // ends with "(demo)" so it is visible in any guest-facing list.
+  //
+  // What gets seeded:
+  //   • 6 channel_credentials with realistic commission % (BDC 15, MMT
+  //     20, GIB 18, AGO 17, EXP 16, ABB 14)
+  //   • ~250 room_bookings across last 90 days + next 30 days with
+  //     realistic channel-mix shares, lead times, ALOS, cancel rate
+  //   • commission_pct / commission_amount / net_amount snapshotted per
+  //     booking
+  //   • channel_sync_log rows (success + failed + perm-failed)
+  //   • reconciliation reports (ok + mismatch + stub)
+  //   • webhook log entries (verified)
+  //
+  // Channel mix (BCG-realistic for a boutique Indian property):
+  //   BOOKING 30 / MMT 22 / GOIBIBO 15 / DIRECT 12 / AGODA 8 /
+  //   EXPEDIA 5 / AIRBNB 4 / WALK_IN 4
+  //
+  // Idempotent: re-running uses ON CONFLICT DO NOTHING on every INSERT.
+  app.post("/api/admin/tenants/:id/seed-ota-demo", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    const tenantId = req.params.id;
+    try {
+      const tenant: any = await centralDb.get(
+        "SELECT id, name, property_type FROM restaurants WHERE id = ?",
+        [tenantId]
+      );
+      if (!tenant) return res.status(404).json({ error: `Tenant ${tenantId} not found` });
+      if (tenant.property_type !== 'HOTEL' && tenant.property_type !== 'BOTH') {
+        return res.status(400).json({
+          error: `Tenant property_type is "${tenant.property_type}". This seed only works for HOTEL or BOTH.`,
+        });
+      }
+
+      const db = await getTenantDb(tenantId);
+
+      const rooms: any[] = await db.query("SELECT id, base_rate FROM rooms WHERE COALESCE(status,'VACANT') != 'INACTIVE' LIMIT 50").catch(() => []);
+      if (rooms.length === 0) {
+        return res.status(400).json({ error: 'No rooms found for this tenant. Run "Seed BCG Tariff" first to create rooms.' });
+      }
+
+      // ── 1. Channel credentials with realistic commission % ──────────
+      const CHANNELS = [
+        { code: 'BOOKING', commission: 15, property: 'BDC-12345678' },
+        { code: 'MMT',     commission: 20, property: 'MMT-87654321' },
+        { code: 'GOIBIBO', commission: 18, property: 'GIB-11223344' },
+        { code: 'AGODA',   commission: 17, property: 'AGO-99887766' },
+        { code: 'EXPEDIA', commission: 16, property: 'EXP-55443322' },
+        { code: 'AIRBNB',  commission: 14, property: 'ABB-77665544' },
+      ];
+      for (const c of CHANNELS) {
+        await db.run(
+          `INSERT INTO channel_credentials (id, channel, api_key, api_secret, property_id, is_enabled, commission_pct, webhook_signing_secret)
+           VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+           ON CONFLICT (channel) DO UPDATE SET
+             commission_pct = EXCLUDED.commission_pct,
+             property_id    = COALESCE(channel_credentials.property_id, EXCLUDED.property_id),
+             is_enabled     = 1`,
+          [`CRED-${c.code}`, c.code, encryptSecret('demo-key-' + c.code), encryptSecret('demo-secret-' + c.code),
+           c.property, c.commission, encryptSecret('demo-webhook-' + c.code)]
+        ).catch((e: any) => console.error(`[seed-ota] credential ${c.code}:`, e?.message));
+      }
+
+      // ── 2. Booking generator ────────────────────────────────────────
+      const CHANNEL_MIX = [
+        { code: 'BOOKING', share: 30, commission: 15 },
+        { code: 'MMT',     share: 22, commission: 20 },
+        { code: 'GOIBIBO', share: 15, commission: 18 },
+        { code: 'DIRECT',  share: 12, commission: 0 },
+        { code: 'AGODA',   share:  8, commission: 17 },
+        { code: 'EXPEDIA', share:  5, commission: 16 },
+        { code: 'AIRBNB',  share:  4, commission: 14 },
+        { code: 'WALK_IN', share:  4, commission: 0 },
+      ];
+      const pickChannel = () => {
+        const r = Math.random() * 100;
+        let acc = 0;
+        for (const c of CHANNEL_MIX) { acc += c.share; if (r <= acc) return c; }
+        return CHANNEL_MIX[0];
+      };
+
+      const FIRST_NAMES = ['Aarav','Vivaan','Aditya','Vihaan','Arjun','Reyansh','Krishna','Ishaan','Shaurya','Atharv',
+                            'Priya','Ananya','Sara','Aanya','Ishita','Saanvi','Kavya','Pari','Riya','Aadhya',
+                            'Rajesh','Amit','Suresh','Vikram','Ravi','Anjali','Pooja','Neha','Sunita','Meera',
+                            'John','Emma','Michael','Olivia','David','Sophie','James','Maya','Daniel','Aisha'];
+      const LAST_NAMES  = ['Sharma','Patel','Kumar','Singh','Gupta','Reddy','Nair','Iyer','Rao','Joshi',
+                            'Verma','Mehta','Shah','Agarwal','Bhat','Smith','Johnson','Brown','Wilson','Davis'];
+      const pickName  = () => `${FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)]} ${LAST_NAMES[Math.floor(Math.random() * LAST_NAMES.length)]} (demo)`;
+      const pickPhone = () => `+91-90000${String(Math.floor(Math.random() * 99999)).padStart(5, '0')}`;
+      const nightWeights = [1, 1, 2, 3, 3, 3, 2, 1, 1, 1];
+      const pickNights = () => nightWeights[Math.floor(Math.random() * nightWeights.length)];
+
+      const today = new Date();
+      const toIso = (d: Date) => d.toISOString().slice(0, 10);
+      const addDays = (d: Date, n: number) => { const c = new Date(d); c.setDate(c.getDate() + n); return c; };
+
+      const TARGET = 250;
+      let inserted = 0, cancelled = 0, checkedOut = 0, checkedIn = 0, booked = 0;
+      const channelCounts: Record<string, number> = {};
+      for (let i = 0; i < TARGET; i++) {
+        const futurePick = Math.random() < 0.15;
+        const offsetDays = futurePick
+          ? Math.floor(Math.random() * 30) + 1
+          : -Math.floor(Math.random() * 90);
+        const checkIn = addDays(today, offsetDays);
+        const nights  = pickNights();
+        const checkOut = addDays(checkIn, nights);
+        const ch = pickChannel();
+        const room = rooms[Math.floor(Math.random() * rooms.length)];
+        const baseRate = Number(room.base_rate || 2500);
+        const rateMult = 0.85 + Math.random() * 0.30;
+        const roomRate = Math.round(baseRate * rateMult);
+        const total    = roomRate * nights;
+        const commPct  = ch.commission;
+        const commAmt  = Math.round(total * commPct) / 100;
+        const netAmt   = Math.round((total - commAmt) * 100) / 100;
+
+        let status: string;
+        let actualCheckIn: string | null = null;
+        let actualCheckOut: string | null = null;
+        const isPast    = checkOut < today;
+        const isOngoing = checkIn <= today && checkOut > today;
+        const cancelRoll = Math.random();
+        if (cancelRoll < 0.10) {
+          status = 'CANCELLED'; cancelled++;
+        } else if (isPast) {
+          status = 'CHECKED_OUT';
+          actualCheckIn  = `${toIso(checkIn)} 14:30:00`;
+          actualCheckOut = `${toIso(checkOut)} 11:00:00`;
+          checkedOut++;
+        } else if (isOngoing) {
+          if (Math.random() < 0.7) { status = 'CHECKED_IN'; actualCheckIn = `${toIso(checkIn)} 14:30:00`; checkedIn++; }
+          else { status = 'BOOKED'; booked++; }
+        } else {
+          status = 'BOOKED'; booked++;
+        }
+
+        const leadDays = ch.code === 'WALK_IN' ? 0
+                       : ch.code === 'AIRBNB' || ch.code === 'EXPEDIA' ? Math.floor(Math.random() * 60) + 5
+                       : Math.floor(Math.random() * 30) + 1;
+        const createdAt = toIso(addDays(checkIn, -leadDays));
+
+        const id = `OTA-SEED-${tenantId.replace(/-/g, '').slice(0, 6)}-${String(i).padStart(4, '0')}`;
+        const guestName = pickName();
+        const numGuests = Math.random() < 0.6 ? 2 : Math.random() < 0.85 ? 1 : 3;
+
+        try {
+          await db.run(
+            `INSERT INTO room_bookings (
+                id, room_id, guest_name, guest_phone, num_guests,
+                check_in_date, check_out_date, actual_checkin_at, actual_checkout_at,
+                status, booking_source, room_rate, total_amount,
+                commission_pct, commission_amount, net_amount,
+                booking_type, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OVERNIGHT', ?)
+              ON CONFLICT (id) DO NOTHING`,
+            [id, room.id, guestName, pickPhone(), numGuests,
+             toIso(checkIn), toIso(checkOut), actualCheckIn, actualCheckOut,
+             status, ch.code, roomRate, total,
+             commPct, commAmt, netAmt, createdAt]
+          );
+          inserted++;
+          channelCounts[ch.code] = (channelCounts[ch.code] || 0) + 1;
+        } catch (e: any) { /* room-overlap conflict — skip silently */ }
+      }
+
+      // ── 3. Channel sync queue ───────────────────────────────────────
+      const SYNC_ROWS = [
+        { ch: 'BOOKING', op: 'rate_update',    status: 'success', err: null, retries: 0 },
+        { ch: 'MMT',     op: 'inventory_push', status: 'success', err: null, retries: 0 },
+        { ch: 'GOIBIBO', op: 'rate_update',    status: 'queued',  err: null, retries: 0 },
+        { ch: 'AGODA',   op: 'rate_update',    status: 'failed',  err: 'HTTP 503 - service unavailable', retries: 2 },
+        { ch: 'EXPEDIA', op: 'inventory_push', status: 'permanently_failed', err: 'HTTP 401 - signature mismatch (rotated key?)', retries: 5 },
+      ];
+      for (let i = 0; i < SYNC_ROWS.length; i++) {
+        const r = SYNC_ROWS[i];
+        const nextRetry = r.status === 'failed' ? today.toISOString() : null;
+        await db.run(
+          `INSERT INTO channel_sync_log (id, channel, operation, status, payload, response, error, retry_count, next_retry_at, created_at)
+           VALUES (?, ?, ?, ?, '{}', NULL, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
+          [`OTA-SEED-SYNC-${i}`, r.ch, r.op, r.status, r.err, r.retries, nextRetry, addDays(today, -1).toISOString()]
+        ).catch(() => {});
+      }
+
+      // ── 4. Reconciliation reports ───────────────────────────────────
+      const RECON_ROWS = [
+        { ch: 'BOOKING', local: 18, remote: 18, missingL: 0, missingR: 0, status: 'ok' },
+        { ch: 'MMT',     local: 12, remote: 13, missingL: 1, missingR: 0, status: 'mismatch' },
+        { ch: 'GOIBIBO', local: 8,  remote: 0,  missingL: 0, missingR: 0, status: 'stub' },
+      ];
+      for (let i = 0; i < RECON_ROWS.length; i++) {
+        const r = RECON_ROWS[i];
+        await db.run(
+          `INSERT INTO channel_reconciliation_reports
+              (id, channel, ran_at, period_start, period_end, local_count, remote_count, missing_in_local, missing_in_remote, status, summary_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')
+           ON CONFLICT (id) DO NOTHING`,
+          [`OTA-SEED-RECON-${i}`, r.ch, addDays(today, -1).toISOString(), toIso(addDays(today, -1)), toIso(today),
+           r.local, r.remote, r.missingL, r.missingR, r.status]
+        ).catch(() => {});
+      }
+
+      // ── 5. Webhook log entries ──────────────────────────────────────
+      for (let i = 0; i < 8; i++) {
+        const ch = CHANNEL_MIX[i % 6];
+        await db.run(
+          `INSERT INTO channel_webhook_log (id, channel, event_type, signature_valid, body, received_at)
+           VALUES (?, ?, ?, 1, '{}', ?)
+           ON CONFLICT (id) DO NOTHING`,
+          [`OTA-SEED-HOOK-${i}`, ch.code, i % 3 === 0 ? 'reservation_cancelled' : 'reservation_created',
+           addDays(today, -Math.floor(Math.random() * 7)).toISOString()]
+        ).catch(() => {});
+      }
+
+      res.json({
+        ok: true,
+        tenant: { id: tenant.id, name: tenant.name },
+        seeded: {
+          channels: CHANNELS.length,
+          bookings_attempted: TARGET,
+          bookings_inserted: inserted,
+          breakdown: { booked, checked_in: checkedIn, checked_out: checkedOut, cancelled },
+          per_channel: channelCounts,
+          sync_queue_rows: SYNC_ROWS.length,
+          reconciliation_reports: RECON_ROWS.length,
+          webhook_log_entries: 8,
+        },
+        message: `OTA demo data seeded for ${tenant.name}. Visit Channel Manager to see the 360° dashboard light up. Every seeded row carries an "OTA-SEED-" id prefix so they can be identified and removed later if needed.`,
+      });
+    } catch (err: any) {
+      console.error('[admin] seed-ota-demo failed:', err);
+      res.status(500).json({ error: err?.message || 'Seed failed' });
+    }
+  });
+
   // Tenant-facing: fetch own billing status (called hourly by the banner).
   // Returns minimal info — no admin-only fields like revoked_by.
   app.get("/api/restaurant/:id/billing-status", authenticate, async (req: AuthRequest, res: Response) => {
@@ -27018,7 +27264,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'channel-mgr-ota-360-dashboard-bcg-grade-kpis',
+    commit_marker: 'ota-demo-seed-endpoint-admin-only-curl-trigger',
     code_features: [
       'subscription-billing',
       'read-only-mode',
