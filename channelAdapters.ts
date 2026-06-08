@@ -37,6 +37,11 @@ export interface ChannelCredentials {
   // + Agoda YCS specs, the webhook signing key is shown in a different
   // panel of the OTA extranet than the outbound push key.
   webhook_signing_secret?: string | null;
+  // Gap 5 — per-channel commission % applied to gross booking amount
+  // to compute net revenue. 0 = no deduction. Set in the Channel Manager
+  // UI; the inbound webhook handler snapshots this onto room_bookings
+  // at booking time.
+  commission_pct?: number;
 }
 
 export interface AdapterBookingPayload {
@@ -86,6 +91,21 @@ export interface ValidateResult {
   replay_check_skipped?: boolean;
 }
 
+/** Gap 8 — daily reconciliation. The 03:00 IST cron calls
+ *  adapter.pullBookings() per (tenant, channel) and diffs the result
+ *  against local room_bookings tagged with that channel. Stub adapters
+ *  return { ok: true, bookings: [], note: 'stub' } so the cron logs a
+ *  clear 'skipped_stub' row instead of failing. */
+export interface AdapterPullResult {
+  ok: boolean;
+  bookings: Array<Partial<AdapterBookingPayload>>;
+  /** When the adapter is a stub (no real API call). */
+  stub?: boolean;
+  /** Free-text note for the reconciliation report's summary_json. */
+  note?: string;
+  reason?: string;
+}
+
 export interface ChannelAdapter {
   channel: string;
   /** Is this adapter ready for live calls (credentials configured + enabled)? */
@@ -103,6 +123,10 @@ export interface ChannelAdapter {
     operation?: 'CREATED' | 'MODIFIED' | 'CANCELLED';
     reason?: string;
   };
+  /** Gap 8 — pull recently-changed bookings from the OTA. Used by the
+   *  daily reconciliation cron to catch missed webhooks. Stubs return
+   *  an empty array tagged stub:true. */
+  pullBookings(creds: ChannelCredentials, sinceIso: string): Promise<AdapterPullResult>;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -213,6 +237,9 @@ class MockAdapter implements ChannelAdapter {
   parseInbound() {
     return { ok: false, reason: 'MOCK adapter cannot parse inbound webhooks' };
   }
+  async pullBookings(): Promise<AdapterPullResult> {
+    return { ok: true, bookings: [], stub: true, note: 'MockAdapter has no real API' };
+  }
 }
 
 /**
@@ -280,6 +307,11 @@ class BookingComAdapter implements ChannelAdapter {
       operation: (body.cancelled ? 'CANCELLED' : (body.modified ? 'MODIFIED' : 'CREATED')) as 'CREATED' | 'MODIFIED' | 'CANCELLED',
       reason: body.bookingId ? undefined : 'bookingId missing from BDC webhook body',
     };
+  }
+  async pullBookings(creds: ChannelCredentials, _sinceIso: string): Promise<AdapterPullResult> {
+    if (!this.isReady(creds)) return { ok: false, bookings: [], reason: 'Booking.com credentials not configured' };
+    // TODO(BDC): GET https://supply-xml.booking.com/hotels/xml/reservations?modify_date_from={sinceIso}
+    return { ok: true, bookings: [], stub: true, note: 'bdc-stub: awaiting partner approval' };
   }
 }
 
@@ -358,6 +390,10 @@ class MakeMyTripAdapter implements ChannelAdapter {
                  : body.status === 'MODIFIED' ? 'MODIFIED'
                  : 'CREATED') as 'CREATED' | 'MODIFIED' | 'CANCELLED',
     };
+  }
+  async pullBookings(creds: ChannelCredentials, _sinceIso: string): Promise<AdapterPullResult> {
+    if (!this.isReady(creds)) return { ok: false, bookings: [], reason: `${this.channel} credentials not configured` };
+    return { ok: true, bookings: [], stub: true, note: `${this.channel}-stub: awaiting partner approval` };
   }
 }
 
@@ -444,6 +480,10 @@ class AgodaAdapter implements ChannelAdapter {
       operation: (body.status === 'CANCELLED' ? 'CANCELLED' : 'CREATED') as 'CREATED' | 'MODIFIED' | 'CANCELLED',
     };
   }
+  async pullBookings(creds: ChannelCredentials, _sinceIso: string): Promise<AdapterPullResult> {
+    if (!this.isReady(creds)) return { ok: false, bookings: [], reason: 'Agoda credentials not configured' };
+    return { ok: true, bookings: [], stub: true, note: 'agoda-stub: awaiting partner approval' };
+  }
 }
 
 /**
@@ -507,6 +547,10 @@ class ExpediaAdapter implements ChannelAdapter {
       operation: (body.status === 'CANCELLED' ? 'CANCELLED' : 'CREATED') as 'CREATED' | 'MODIFIED' | 'CANCELLED',
     };
   }
+  async pullBookings(creds: ChannelCredentials, _sinceIso: string): Promise<AdapterPullResult> {
+    if (!this.isReady(creds)) return { ok: false, bookings: [], reason: 'Expedia credentials not configured' };
+    return { ok: true, bookings: [], stub: true, note: 'expedia-stub: awaiting partner approval' };
+  }
 }
 
 /**
@@ -536,6 +580,9 @@ class AirbnbAdapter implements ChannelAdapter {
   }
   parseInbound() {
     return { ok: false, reason: 'Airbnb webhook path disabled — iCal path is the supported integration.' };
+  }
+  async pullBookings(): Promise<AdapterPullResult> {
+    return { ok: true, bookings: [], stub: true, note: 'Airbnb non-API-tier — use iCal one-way sync' };
   }
 }
 

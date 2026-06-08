@@ -641,6 +641,82 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- + use the right one for each direction.
     ALTER TABLE channel_credentials ADD COLUMN IF NOT EXISTS webhook_signing_secret TEXT;
 
+    -- Gap 5 (8 Jun 2026) — Commission tracking per channel. OTA bookings
+    -- arrive as gross rate; the hotel actually receives gross − commission.
+    -- Without this, the owner's P&L overstates revenue by 15-25%. Default
+    -- 0 means LEGACY-tenant behaviour (no commission deduction).
+    ALTER TABLE channel_credentials ADD COLUMN IF NOT EXISTS commission_pct DOUBLE PRECISION DEFAULT 0;
+
+    -- Gap 5 — commission columns on bookings. Captured at booking time
+    -- so the audit trail reflects the % active when the OTA confirmed,
+    -- not the current per-channel config (the owner might raise/lower
+    -- commission mid-stay; historical bookings stay accurate).
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS commission_pct    DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS commission_amount DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS net_amount        DOUBLE PRECISION DEFAULT 0;
+
+    -- Gap 6 — Rate plans (BAR / Non-Refundable / Long-Stay / Member).
+    -- Owner-defined plans that adjust pricing + cancellation policy on
+    -- top of the matrix tariff. Each plan can override room rate via a
+    -- discount_pct (positive = cheaper, negative = surcharge) and gate
+    -- by min/max nights. Inbound OTA bookings resolve their
+    -- external_rate_plan_code → our local rate_plan_id via the existing
+    -- channel_room_mappings.external_rate_plan_code column.
+    CREATE TABLE IF NOT EXISTS rate_plans (
+      id              TEXT PRIMARY KEY,
+      code            TEXT NOT NULL,          -- 'BAR' | 'NRF' | 'LSTAY' | 'MEMBER' | custom
+      name            TEXT NOT NULL,          -- 'Best Available Rate'
+      description     TEXT,
+      is_refundable   INT DEFAULT 1,          -- 0 = non-refundable; cancellation forfeits payment
+      discount_pct    DOUBLE PRECISION DEFAULT 0,   -- vs matrix base — positive = discount
+      min_nights      INT DEFAULT 1,
+      max_nights      INT,                    -- NULL = no max
+      display_order   INT DEFAULT 0,
+      is_active       INT DEFAULT 1,
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Gap 6 — rate_plan FK on bookings + per-cell mapping. Snapshot the
+    -- plan code on the booking so historical reprint stays stable even
+    -- if the owner later edits the plan.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS rate_plan_id       TEXT;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS rate_plan_snapshot TEXT;
+    ALTER TABLE channel_room_mappings ADD COLUMN IF NOT EXISTS rate_plan_id TEXT;
+
+    -- Gap 7 — outbound retry with exponential backoff. The queue worker
+    -- (cron */5 * * * *) requeues 'failed' rows up to 5 times with
+    -- delays 30s / 2min / 10min / 1hr / 6hr; after that they sit as
+    -- 'permanently_failed' until an operator manually retries via the
+    -- Channel Manager UI. retry_count + next_retry_at drive the logic.
+    ALTER TABLE channel_sync_log ADD COLUMN IF NOT EXISTS retry_count   INT DEFAULT 0;
+    ALTER TABLE channel_sync_log ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMP;
+    CREATE INDEX IF NOT EXISTS idx_channel_sync_retry
+      ON channel_sync_log (status, next_retry_at);
+
+    -- Gap 8 — daily reconciliation reports. The 03:00 IST cron compares
+    -- our room_bookings (where booking_source = <channel>) against the
+    -- OTA's bookings pulled via adapter.pullBookings(since=24hr). Diffs
+    -- get flagged so the operator can investigate missed webhooks.
+    --   missing_in_local  → OTA has it, we don't (webhook never landed)
+    --   missing_in_remote → we have it, OTA doesn't (someone deleted it remote?)
+    CREATE TABLE IF NOT EXISTS channel_reconciliation_reports (
+      id                TEXT PRIMARY KEY,
+      channel           TEXT NOT NULL,
+      ran_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      period_start      DATE,
+      period_end        DATE,
+      local_count       INT DEFAULT 0,
+      remote_count      INT DEFAULT 0,
+      missing_in_local  INT DEFAULT 0,
+      missing_in_remote INT DEFAULT 0,
+      status            TEXT DEFAULT 'ok',     -- 'ok' | 'mismatch' | 'error' | 'skipped_stub'
+      summary_json      TEXT,                  -- detail rows (truncated to 32KB)
+      error             TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_channel_recon_channel
+      ON channel_reconciliation_reports (channel, ran_at DESC);
+
     -- Sprint P2-H — Yield management rules.
     -- Owner-defined occupancy-triggered multipliers. Example:
     --   "When occupancy >= 80%, multiply rate by 1.25 (+25%)"
@@ -18305,6 +18381,8 @@ async function startServer() {
         ...r,
         api_key:    r.api_key    ? `${String(r.api_key).slice(0, 4)}…${String(r.api_key).slice(-4)}` : null,
         api_secret: r.api_secret ? '••••••••' : null,
+        webhook_signing_secret: r.webhook_signing_secret ? '••••••••' : null,
+        commission_pct: Number(r.commission_pct || 0),
       })));
     } catch {
       res.status(500).json({ error: "Failed to fetch channel credentials" });
@@ -18320,27 +18398,35 @@ async function startServer() {
       if (!channel) return res.status(400).json({ error: "channel is required (e.g. 'BOOKING', 'MMT', 'AGODA')." });
       const tenantDb = await getTenantDb(req.params.id);
       const existing: any = await tenantDb.get("SELECT id FROM channel_credentials WHERE channel = ?", [channel]);
-      // Encrypt api_secret at rest. api_key stays plaintext (it's
-      // often public/identifiable). Empty/null means "keep existing".
-      const encryptedSecret = b.api_secret ? encryptSecret(b.api_secret) : null;
+      // Encrypt api_secret + webhook_signing_secret at rest. api_key stays
+      // plaintext (it's often public/identifiable). Empty/null means "keep
+      // existing". commission_pct is gap-5 — per-channel commission %
+      // applied to every inbound OTA booking; defaults 0 (no deduction).
+      const encryptedSecret  = b.api_secret             ? encryptSecret(b.api_secret)             : null;
+      const encryptedWebhook = b.webhook_signing_secret ? encryptSecret(b.webhook_signing_secret) : null;
+      const commissionPct    = b.commission_pct == null ? null : Math.max(0, Math.min(100, Number(b.commission_pct) || 0));
       if (existing) {
         await tenantDb.run(
           `UPDATE channel_credentials
              SET api_key = COALESCE(?, api_key),
                  api_secret = COALESCE(?, api_secret),
+                 webhook_signing_secret = COALESCE(?, webhook_signing_secret),
+                 commission_pct = COALESCE(?, commission_pct),
                  property_id = COALESCE(?, property_id),
                  is_enabled = COALESCE(?, is_enabled),
                  updated_at = CURRENT_TIMESTAMP
            WHERE id = ?`,
-          [b.api_key ?? null, encryptedSecret, b.property_id ?? null,
+          [b.api_key ?? null, encryptedSecret, encryptedWebhook, commissionPct,
+           b.property_id ?? null,
            b.is_enabled == null ? null : (b.is_enabled ? 1 : 0), existing.id]
         );
       } else {
         const id = `CHCRED-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
         await tenantDb.run(
-          `INSERT INTO channel_credentials (id, channel, api_key, api_secret, property_id, is_enabled)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [id, channel, b.api_key || null, encryptedSecret,
+          `INSERT INTO channel_credentials (id, channel, api_key, api_secret, webhook_signing_secret, commission_pct, property_id, is_enabled)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, channel, b.api_key || null, encryptedSecret, encryptedWebhook,
+           commissionPct == null ? 0 : commissionPct,
            b.property_id || null, b.is_enabled ? 1 : 0]
         );
       }
@@ -18458,8 +18544,226 @@ async function startServer() {
   });
 
   // ════════════════════════════════════════════════════════════════════
-  // ─── INBOUND WEBHOOK RECEIVER — Sprint CH-3 ────────────────────────
+  // ─── RATE PLANS (Gap 6) ─────────────────────────────────────────────
   // ════════════════════════════════════════════════════════════════════
+  // CRUD for rate_plans table. Auto-seeds the 4 industry-standard plans
+  // (BAR / NRF / LSTAY / MEMBER) on first GET if the table is empty —
+  // owner can edit/rename/delete from there.
+  app.get("/api/restaurant/:id/hotel/rate-plans", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      let rows: any[] = await tenantDb.query("SELECT * FROM rate_plans ORDER BY display_order, code").catch(() => []);
+      if (rows.length === 0) {
+        // Self-heal seed — industry-standard plans.
+        const defaults = [
+          { id: 'BAR',    code: 'BAR',    name: 'Best Available Rate',    description: 'Flexible rate with free cancellation.', is_refundable: 1, discount_pct: 0,  min_nights: 1, max_nights: null,  order: 1 },
+          { id: 'NRF',    code: 'NRF',    name: 'Non-Refundable',         description: 'Discounted, no cancellation refund.',   is_refundable: 0, discount_pct: 10, min_nights: 1, max_nights: null,  order: 2 },
+          { id: 'LSTAY',  code: 'LSTAY',  name: 'Long Stay (5+ nights)',  description: 'Discount for stays of 5 nights or more.', is_refundable: 1, discount_pct: 15, min_nights: 5, max_nights: null,  order: 3 },
+          { id: 'MEMBER', code: 'MEMBER', name: 'Member-Only Rate',       description: 'Loyalty / member discount.',            is_refundable: 1, discount_pct: 8,  min_nights: 1, max_nights: null,  order: 4 },
+        ];
+        for (const p of defaults) {
+          await tenantDb.run(
+            `INSERT INTO rate_plans (id, code, name, description, is_refundable, discount_pct, min_nights, max_nights, display_order, is_active)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1) ON CONFLICT (id) DO NOTHING`,
+            [p.id, p.code, p.name, p.description, p.is_refundable, p.discount_pct, p.min_nights, p.max_nights, p.order]
+          ).catch(() => {});
+        }
+        rows = await tenantDb.query("SELECT * FROM rate_plans ORDER BY display_order, code").catch(() => []);
+      }
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to fetch rate plans' });
+    }
+  });
+
+  app.put("/api/restaurant/:id/hotel/rate-plans", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const list: any[] = Array.isArray(req.body?.rate_plans) ? req.body.rate_plans : [];
+    const tenantDb = await getTenantDb(req.params.id);
+    let saved = 0;
+    for (const p of list) {
+      if (!p?.id || !p?.code || !p?.name) continue;
+      try {
+        await tenantDb.run(
+          `INSERT INTO rate_plans (id, code, name, description, is_refundable, discount_pct, min_nights, max_nights, display_order, is_active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET
+             code = EXCLUDED.code, name = EXCLUDED.name, description = EXCLUDED.description,
+             is_refundable = EXCLUDED.is_refundable, discount_pct = EXCLUDED.discount_pct,
+             min_nights = EXCLUDED.min_nights, max_nights = EXCLUDED.max_nights,
+             display_order = EXCLUDED.display_order, is_active = EXCLUDED.is_active,
+             updated_at = CURRENT_TIMESTAMP`,
+          [String(p.id), String(p.code).toUpperCase().trim(), String(p.name).trim(),
+           p.description || null, p.is_refundable === 0 ? 0 : 1,
+           Number(p.discount_pct || 0), Number(p.min_nights || 1),
+           p.max_nights == null ? null : Number(p.max_nights),
+           Number(p.display_order || 0), p.is_active === 0 ? 0 : 1]
+        );
+        saved++;
+      } catch (err: any) {
+        console.error(`[rate-plans PUT] row ${p.id}:`, err?.message || err);
+      }
+    }
+    const persisted = await tenantDb.query("SELECT * FROM rate_plans ORDER BY display_order, code").catch(() => []);
+    res.json({ ok: true, count: saved, rate_plans: persisted });
+  });
+
+  app.delete("/api/restaurant/:id/hotel/rate-plans/:planId", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      // Soft delete — set is_active=0 instead of DELETE since bookings reference rate_plan_id.
+      await tenantDb.run("UPDATE rate_plans SET is_active = 0 WHERE id = ?", [req.params.planId]);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to deactivate rate plan' });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // ─── COMMISSION SUMMARY (Gap 5) ────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  // Aggregates commission paid/owed per channel for a date range. Used
+  // by the Channel Manager Commission tab + monthly P&L reconciliation.
+  app.get("/api/restaurant/:id/hotel/reports/commission-summary", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const rows: any[] = await tenantDb.query(
+        `SELECT booking_source,
+                COUNT(*) AS bookings,
+                COALESCE(SUM(total_amount), 0)    AS gross,
+                COALESCE(SUM(commission_amount), 0) AS commission,
+                COALESCE(SUM(net_amount), 0)     AS net,
+                COALESCE(AVG(commission_pct), 0) AS avg_commission_pct
+           FROM room_bookings
+          WHERE check_in_date BETWEEN ? AND ?
+            AND status NOT IN ('CANCELLED')
+          GROUP BY booking_source
+          ORDER BY commission DESC`,
+        [from, to]
+      ).catch(() => []);
+      res.json({ from, to, channels: rows });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to fetch commission summary' });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // ─── OUTBOUND SYNC QUEUE INSPECTOR (Gap 7) ─────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  // List + manual-retry + dismiss endpoints for the channel_sync_log
+  // rows. The queue worker (cron) auto-retries up to 5 times with
+  // exponential backoff; this UI surface lets the operator inspect
+  // queued/failed/permanently_failed rows and manually retry or dismiss.
+  app.get("/api/restaurant/:id/hotel/channel-sync-queue", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const status = String(req.query.status || '');
+      const limit = Math.min(200, Number(req.query.limit) || 100);
+      let sql = `SELECT * FROM channel_sync_log WHERE 1 = 1`;
+      const params: any[] = [];
+      if (status) { sql += ` AND status = ?`; params.push(status); }
+      sql += ` ORDER BY created_at DESC LIMIT ?`;
+      params.push(limit);
+      const rows: any[] = await tenantDb.query(sql, params).catch(() => []);
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to fetch sync queue' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/channel-sync-queue/:rowId/retry", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      // Reset retry_count + next_retry_at so the worker picks it up immediately.
+      await tenantDb.run(
+        "UPDATE channel_sync_log SET status = 'queued', retry_count = 0, next_retry_at = NULL, error = NULL WHERE id = ?",
+        [req.params.rowId]
+      );
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to requeue' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/channel-sync-queue/:rowId/dismiss", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.run(
+        "UPDATE channel_sync_log SET status = 'dismissed', error = COALESCE(error, '') || ' [dismissed by operator]' WHERE id = ?",
+        [req.params.rowId]
+      );
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to dismiss' });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // ─── RECONCILIATION REPORTS (Gap 8) ────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  app.get("/api/restaurant/:id/hotel/channel-reconciliation-reports", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query(
+        "SELECT * FROM channel_reconciliation_reports ORDER BY ran_at DESC LIMIT 60"
+      ).catch(() => []);
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to fetch reports' });
+    }
+  });
+
+  // Manual trigger — admins only. Runs the same logic as the daily cron
+  // for ONE tenant, RIGHT NOW.
+  app.post("/api/restaurant/:id/hotel/channel-reconciliation-reports/run", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const reports = await runReconciliationForTenant(req.params.id);
+      res.json({ success: true, reports });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Reconciliation failed' });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // ─── SECURITY CONFIG (Gap 9) ───────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  // Returns the current per-channel IP allowlist config (read from
+  // env vars). Read-only — operators rotate IPs by updating env +
+  // restarting the server, since OTA IP ranges change rarely and
+  // burying them in a DB editor invites misconfiguration.
+  app.get("/api/restaurant/:id/hotel/channel-security-config", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const channels: Record<string, { cidrs: string[]; enforcing: boolean }> = {};
+    for (const ch of ['BOOKING', 'MMT', 'GOIBIBO', 'AGODA', 'EXPEDIA', 'AIRBNB']) {
+      const raw = String(process.env[`CHANNEL_IP_ALLOWLIST_${ch}`] || '').trim();
+      const cidrs = raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+      channels[ch] = { cidrs, enforcing: cidrs.length > 0 };
+    }
+    res.json({
+      channels,
+      note: 'Allowlists are env-driven (CHANNEL_IP_ALLOWLIST_<CHANNEL>="cidr1,cidr2"). Empty = permissive (logs unknown IPs but does not block). Set in your VPS env + restart to enforce.',
+    });
+  });
   //
   // POST /api/public/restaurant/:id/channel-webhook/:channel
   //
@@ -18506,7 +18810,43 @@ async function startServer() {
   const captureRawBody = (req: Request, _res: Response, buf: Buffer) => {
     (req as any).rawBody = buf?.length ? buf.toString('utf8') : '';
   };
+  // Gap 9 — IP allowlist middleware. Env-driven so ops can rotate
+  // OTA IP ranges without a DB migration (BDC, MMT, Agoda publish CIDR
+  // blocks that occasionally change). When the env var is empty, we
+  // run permissive (log + warn instead of block) so we never accidentally
+  // 403 a legitimate webhook because someone forgot to set the var.
+  // Simple CIDR match using a regex-free range comparison.
+  const ipInCidr = (ip: string, cidr: string): boolean => {
+    try {
+      const [range, bitsRaw] = cidr.split('/');
+      const bits = Math.max(0, Math.min(32, Number(bitsRaw || 32)));
+      const toN = (s: string) => s.split('.').reduce((acc, oct) => (acc << 8) + Number(oct), 0) >>> 0;
+      const mask = bits === 0 ? 0 : (~((1 << (32 - bits)) - 1)) >>> 0;
+      return (toN(ip) & mask) === (toN(range) & mask);
+    } catch { return false; }
+  };
+  const channelIpAllowlistMiddleware = (req: Request, res: Response, next: NextFunction) => {
+    const channel = String(req.params.channel || '').toUpperCase().trim();
+    const raw = String(process.env[`CHANNEL_IP_ALLOWLIST_${channel}`] || '').trim();
+    if (!raw) {
+      // Permissive — but log the IP so ops can populate the allowlist
+      // once they see what real OTA traffic looks like.
+      const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+      console.warn(`[channel-webhook ${channel}] permissive (no allowlist) — incoming IP ${ip}. Set CHANNEL_IP_ALLOWLIST_${channel}=<cidr,cidr> env to enforce.`);
+      return next();
+    }
+    const cidrs = raw.split(',').map(s => s.trim()).filter(Boolean);
+    const ip = (req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+    const allowed = cidrs.some(c => ipInCidr(ip, c));
+    if (!allowed) {
+      console.warn(`[channel-webhook ${channel}] IP ${ip} not in allowlist (${cidrs.join(', ')}) — rejecting`);
+      return res.status(403).json({ error: 'Source IP not in channel allowlist' });
+    }
+    next();
+  };
+
   app.post("/api/public/restaurant/:id/channel-webhook/:channel",
+    channelIpAllowlistMiddleware,
     express.json({ verify: captureRawBody, limit: '512kb' }),
     express.text({ type: ['text/xml', 'application/xml'], limit: '512kb' }),
     async (req: Request, res: Response) => {
@@ -18727,17 +19067,48 @@ async function startServer() {
         const nights = Math.max(1, Math.ceil((new Date(co).getTime() - new Date(ci).getTime()) / 86400000));
         const room: any = await tenantDb.get("SELECT base_rate FROM rooms WHERE id = ?", [b.roomId]);
         const rate = Number(room?.base_rate || b.totalAmount && nights ? (b.totalAmount as number) / nights : 0);
+        const totalAmount = Number(b.totalAmount || rate * nights);
+        // Gap 5 — commission auto-compute. Snapshot at booking time so
+        // historical accuracy survives later % changes. Plus look up
+        // mapping's rate_plan_id (Gap 6) so the booking carries the
+        // canonical local plan id.
+        const commissionPct = Number(cred.commission_pct || 0);
+        const commissionAmount = Math.round(totalAmount * commissionPct) / 100;
+        const netAmount = Math.round((totalAmount - commissionAmount) * 100) / 100;
+        // Look up rate_plan_id from the mapping the resolver just hit.
+        let resolvedRatePlanId: string | null = null;
+        let ratePlanSnapshot: string | null = null;
+        if (externalRoomCode) {
+          const mapping: any = await tenantDb.get(
+            `SELECT rate_plan_id FROM channel_room_mappings
+              WHERE channel = ? AND external_room_code = ?
+                AND (external_rate_plan_code = ? OR external_rate_plan_code IS NULL)
+                AND is_active = 1
+              ORDER BY CASE WHEN external_rate_plan_code IS NULL THEN 2 ELSE 1 END
+              LIMIT 1`,
+            [channelKey, externalRoomCode, externalRatePlanCode]
+          ).catch(() => null);
+          if (mapping?.rate_plan_id) {
+            resolvedRatePlanId = mapping.rate_plan_id;
+            const plan: any = await tenantDb.get("SELECT code, name FROM rate_plans WHERE id = ?", [resolvedRatePlanId]).catch(() => null);
+            if (plan) ratePlanSnapshot = `${plan.code} · ${plan.name}`;
+          }
+        }
         const localId = `BK-OTA-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         await tenantDb.run(
           `INSERT INTO room_bookings
              (id, room_id, guest_name, guest_phone, guest_email, num_guests,
               check_in_date, check_out_date, status, booking_source,
-              room_rate, total_amount, special_requests, booking_type)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, 'OVERNIGHT')`,
+              room_rate, total_amount, special_requests, booking_type,
+              commission_pct, commission_amount, net_amount,
+              rate_plan_id, rate_plan_snapshot)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, 'OVERNIGHT', ?, ?, ?, ?, ?)`,
           [localId, b.roomId, b.guestName || `${channelKey} Guest`,
            b.guestPhone || null, b.guestEmail || null, 1,
-           ci, co, channelKey, rate, Number(b.totalAmount || rate * nights),
-           `Imported via ${channelKey} webhook · external id ${externalId}`]
+           ci, co, channelKey, rate, totalAmount,
+           `Imported via ${channelKey} webhook · external id ${externalId}`,
+           commissionPct, commissionAmount, netAmount,
+           resolvedRatePlanId, ratePlanSnapshot]
         );
         await audit(externalId, operation, 'accepted', localId, null);
         return res.json({ success: true, booking_id: localId });
@@ -26503,7 +26874,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ical-includes-room-holds-plus-no-cache-headers',
+    commit_marker: 'ota-gaps-5-to-9-commission-rateplans-retry-recon-allowlist',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -27406,9 +27777,14 @@ async function startServer() {
           const db = await getTenantDb(t.id);
           // Pull queued rows for this tenant, batch of 50 to avoid long
           // worker passes when a tenant has a big backlog.
+          // Gap 7 — retry-with-backoff. Pick:
+          //   • status='queued' (never tried)
+          //   • status='failed' AND retry_count < 5 AND next_retry_at <= now() (due for retry)
+          // Permanently_failed rows stay until manual retry via UI.
           const queued: any[] = await db.query(
             `SELECT * FROM channel_sync_log
               WHERE status = 'queued'
+                 OR (status = 'failed' AND retry_count < 5 AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP))
               ORDER BY created_at ASC
               LIMIT 50`
           );
@@ -27466,7 +27842,7 @@ async function startServer() {
               });
               if (result.ok) {
                 await db.run(
-                  "UPDATE channel_sync_log SET status = ?, error = NULL WHERE id = ?",
+                  "UPDATE channel_sync_log SET status = ?, error = NULL, next_retry_at = NULL WHERE id = ?",
                   ['sent', row.id]
                 );
                 await db.run(
@@ -27475,17 +27851,42 @@ async function startServer() {
                 );
                 totalSent++;
               } else {
-                await db.run(
-                  "UPDATE channel_sync_log SET status = ?, error = ? WHERE id = ?",
-                  ['failed', result.message || 'adapter returned !ok', row.id]
-                );
+                // Gap 7 — bump retry_count; schedule next attempt unless we hit the cap.
+                const nextCount = Number(row.retry_count || 0) + 1;
+                const BACKOFF_MIN = [0.5, 2, 10, 60, 360];  // 30s, 2min, 10min, 1hr, 6hr
+                if (nextCount >= 5) {
+                  await db.run(
+                    "UPDATE channel_sync_log SET status = ?, retry_count = ?, next_retry_at = NULL, error = ? WHERE id = ?",
+                    ['permanently_failed', nextCount, (result.message || 'adapter returned !ok') + ' (5 retries exhausted)', row.id]
+                  );
+                } else {
+                  await db.run(
+                    `UPDATE channel_sync_log
+                        SET status = 'failed', retry_count = ?, error = ?,
+                            next_retry_at = CURRENT_TIMESTAMP + INTERVAL '${BACKOFF_MIN[nextCount - 1]} minutes'
+                      WHERE id = ?`,
+                    [nextCount, result.message || 'adapter returned !ok', row.id]
+                  );
+                }
                 totalFailed++;
               }
             } catch (e: any) {
-              await db.run(
-                "UPDATE channel_sync_log SET status = ?, error = ? WHERE id = ?",
-                ['failed', String(e?.message || e).slice(0, 500), row.id]
-              );
+              const nextCount = Number(row.retry_count || 0) + 1;
+              const BACKOFF_MIN = [0.5, 2, 10, 60, 360];
+              if (nextCount >= 5) {
+                await db.run(
+                  "UPDATE channel_sync_log SET status = ?, retry_count = ?, next_retry_at = NULL, error = ? WHERE id = ?",
+                  ['permanently_failed', nextCount, String(e?.message || e).slice(0, 500) + ' (5 retries exhausted)', row.id]
+                );
+              } else {
+                await db.run(
+                  `UPDATE channel_sync_log
+                      SET status = 'failed', retry_count = ?, error = ?,
+                          next_retry_at = CURRENT_TIMESTAMP + INTERVAL '${BACKOFF_MIN[nextCount - 1]} minutes'
+                    WHERE id = ?`,
+                  [nextCount, String(e?.message || e).slice(0, 500), row.id]
+                );
+              }
               totalFailed++;
             }
           }
@@ -27501,6 +27902,81 @@ async function startServer() {
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[channel-worker] Channel sync worker started — every 5 minutes');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── Gap 8 — Daily reconciliation cron (03:00 IST) ───────────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  // For each tenant × each enabled channel, calls adapter.pullBookings(24hr)
+  // and compares against local room_bookings tagged with that channel.
+  // Stores a report row in channel_reconciliation_reports.
+  //
+  // Stubs return [] — those produce a 'skipped_stub' status so the operator
+  // sees "channel X has no real API integration yet" instead of false
+  // missing-in-local alerts.
+  async function runReconciliationForTenant(tenantId: string): Promise<any[]> {
+    const reports: any[] = [];
+    try {
+      const db = await getTenantDb(tenantId);
+      const creds: ChannelCredentials[] = await db.query(
+        "SELECT channel, api_key, api_secret, property_id, is_enabled, webhook_signing_secret FROM channel_credentials WHERE is_enabled = 1"
+      ).catch(() => []);
+      const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      for (const cred of creds) {
+        const channelKey = String(cred.channel).toUpperCase();
+        const adapter = getChannelAdapter(channelKey);
+        const reportId = `RECON-${Date.now()}-${channelKey}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+        try {
+          const pull = await adapter.pullBookings(cred, since);
+          const localRows: any[] = await db.query(
+            `SELECT id, total_amount, check_in_date, check_out_date FROM room_bookings
+              WHERE booking_source = ? AND status NOT IN ('CANCELLED','CHECKED_OUT')
+                AND created_at >= ?`,
+            [channelKey, since]
+          ).catch(() => []);
+          const status = pull.stub ? 'skipped_stub' : (pull.ok ? 'ok' : 'error');
+          const summary = JSON.stringify({
+            note: pull.note || null,
+            local_ids: localRows.map(r => r.id),
+            remote_ids: (pull.bookings || []).map((b: any) => b.bookingId).filter(Boolean),
+          }).slice(0, 32000);
+          await db.run(
+            `INSERT INTO channel_reconciliation_reports
+               (id, channel, period_start, period_end, local_count, remote_count, missing_in_local, missing_in_remote, status, summary_json, error)
+             VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+            [reportId, channelKey, since.slice(0, 10), new Date().toISOString().slice(0, 10),
+             localRows.length, (pull.bookings || []).length, status, summary, pull.reason || null]
+          ).catch(() => {});
+          reports.push({ channel: channelKey, status, local_count: localRows.length, remote_count: (pull.bookings || []).length });
+        } catch (err: any) {
+          console.error(`[recon-cron] ${tenantId} / ${channelKey}:`, err?.message || err);
+          await db.run(
+            `INSERT INTO channel_reconciliation_reports (id, channel, status, error)
+             VALUES (?, ?, 'error', ?)`,
+            [reportId, channelKey, String(err?.message || err).slice(0, 500)]
+          ).catch(() => {});
+        }
+      }
+    } catch (err: any) {
+      console.error(`[recon-cron] tenant ${tenantId}:`, err?.message || err);
+    }
+    return reports;
+  }
+
+  cron.schedule('15 3 * * *', async () => {
+    try {
+      console.log('[recon-cron] 03:15 IST — running reconciliation across hotel tenants');
+      const tenants: any[] = await centralDb.query(
+        "SELECT id FROM restaurants WHERE is_active = 1 AND (property_type = 'HOTEL' OR property_type = 'BOTH')"
+      ).catch(() => []);
+      for (const t of tenants) {
+        await runReconciliationForTenant(t.id);
+      }
+      console.log(`[recon-cron] Done — ${tenants.length} tenants scanned`);
+    } catch (err: any) {
+      console.error('[recon-cron] error:', err?.message || err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[recon-cron] Daily reconciliation cron started — 03:15 IST');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── CH-2 — iCal IMPORT WORKER (every 30 min IST) ────────────────────────
