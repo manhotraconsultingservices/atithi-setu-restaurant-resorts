@@ -87,7 +87,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // to any non-owner with an ancient unmarked allowedTabs list — which is
 // the exact bug the founder flagged on 7 Jun 2026 ("STAFF_ACCESS should
 // only be visible to Business owner. this is critical.").
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -6588,6 +6588,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'ROOMS' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE'  // hospitality Phase 2 & 3
     | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
+    | 'CHANNEL_MANAGER'                           // OTA credentials + iCal feeds + webhook log + room mappings
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
   >('MONITOR');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
@@ -9890,6 +9891,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // from hotelRooms, so we eagerly fetch rooms + bookings + tariff when
     // the tab opens so the data is ready before staff clicks any cell.
     if (activeTab === 'FRONT_OFFICE_REPORTS') { fetchHotelRooms(); fetchHotelBookings(); fetchTariff(); }
+    // BCG client request 8 Jun 2026 — Channel Manager moved out of Settings.
+    // Eagerly load credentials + iCal feeds + recent webhook events when
+    // the tab is opened so the page renders with data, not loading spinners.
+    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); }
     if (activeTab === 'FOLIOS') fetchHotelFolios();
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
@@ -10480,6 +10485,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             tabs: [
               ...operationalSummary,
               { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk' },
+              { id: 'CHANNEL_MANAGER',      label: 'Channel Manager' },
               { id: 'ROOMS',                label: 'Rooms' },
               { id: 'HOTEL_BOOKINGS',       label: 'Hotel Bookings' },
               { id: 'SERVICES',             label: 'Services' },
@@ -17663,6 +17669,224 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             );
           })()}
         </div>
+      ) : activeTab === 'CHANNEL_MANAGER' && isHotelEnabled ? (
+        /* ════════════════ CHANNEL MANAGER (top-level tab) ════════════════
+           Promoted from Settings → top-level (client request 8 Jun 2026).
+           OTAs are a high-frequency operational concern (daily iCal review,
+           weekly room-mapping audits, webhook-error firefighting), so the
+           page deserves muscle-memory placement next to Front Desk.
+
+           Same content that used to live under Settings — iCal feeds,
+           webhook activity, OTA credentials — just hoisted up. */
+        <div className="space-y-5">
+          <div>
+            <h2 className="text-3xl font-bold font-serif text-[#1a1208]">🛰️ Channel Manager</h2>
+            <p className="text-sm text-[#6b5d52] mt-1">
+              OTA integrations · iCal feeds (Booking.com / Airbnb / Vrbo / Agoda / MMT / Goibibo) · inbound webhook activity · API credentials.
+              Outbound availability distribution via iCal export (see Settings → iCal export URLs).
+            </p>
+          </div>
+
+          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif">Inbound + Outbound Sync</h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
+                  <strong>iCal feeds</strong> below pull bookings from each OTA every 30 min — the practical real-world integration that works without partner approval.
+                  <strong className="ml-1">API credentials</strong> are stored at-rest encrypted (AES-256-GCM); inbound webhooks are HMAC-verified per channel.
+                </p>
+              </div>
+            </div>
+
+            {/* ── 1. INBOUND — iCal feeds ───────────────────────────── */}
+            <div className="mt-6">
+              <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                <div>
+                  <h4 className="text-sm font-bold text-[#1a1208]">Inbound — iCal feeds</h4>
+                  <p className="text-[10px] text-[#9c8e85] mt-0.5">Auto-pulls every 30 min · Manual sync available below</p>
+                </div>
+                <button
+                  onClick={() => setEditingIcalFeed({ scope: 'ROOM', scope_id: '', channel: 'BOOKING', url: '', label: '', is_enabled: true })}
+                  className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] flex items-center gap-1"
+                >
+                  <Plus size={12} /> Add iCal Feed
+                </button>
+              </div>
+              {icalFeeds.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic mt-2">
+                  No iCal feeds configured. Paste an export URL from your OTA's calendar settings to start syncing.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {icalFeeds.map((f: any) => (
+                    <div key={f.id} className="flex items-start justify-between gap-3 bg-[#f4f0eb] rounded-2xl px-4 py-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-[#1a1208]">
+                          {f.channel} <span className="text-[10px] font-normal text-[#6b5d52]">· {f.scope}{f.scope_id ? ` ${f.scope_id}` : ''}</span>
+                        </p>
+                        <p className="text-[10px] text-[#6b5d52] mt-0.5 font-mono truncate" title={f.url}>{f.url}</p>
+                        <p className="text-[10px] text-[#9c8e85] mt-0.5">
+                          Last synced: {f.last_synced ? new Date(f.last_synced).toLocaleString() : 'never'}
+                          {f.last_error && <span className="text-[#c13b3b] ml-2">⚠ {f.last_error}</span>}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className={cn(
+                          'text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
+                          f.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
+                        )}>{f.is_enabled ? 'Active' : 'Paused'}</span>
+                        <button
+                          onClick={() => syncIcalFeedNow(f.id)}
+                          disabled={syncingIcalFeedId === f.id}
+                          className="text-[10px] font-bold text-[#1a4a6f] hover:underline disabled:opacity-50"
+                        >{syncingIcalFeedId === f.id ? 'Syncing…' : 'Sync now'}</button>
+                        <button
+                          onClick={() => deleteIcalFeed(f.id)}
+                          className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                        >Delete</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* ── 2. OUTBOUND — iCal export URLs (read-only reference) ── */}
+            <div className="mt-6 p-4 rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/10">
+              <h4 className="text-sm font-bold text-[#1a1208]">Outbound — iCal export URLs</h4>
+              <p className="text-[10px] text-[#9c8e85] mt-0.5 mb-2">
+                Paste these into each OTA's "Sync external calendar" panel. They auto-update as bookings come in.
+              </p>
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] w-32">Property-wide</span>
+                  <code className="flex-1 min-w-0 text-[10px] font-mono bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1 break-all">
+                    {typeof window !== 'undefined' ? window.location.origin : ''}/api/restaurant/{restaurantId}/hotel/ical/property.ics
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const url = `${window.location.origin}/api/restaurant/${restaurantId}/hotel/ical/property.ics`;
+                      navigator.clipboard.writeText(url);
+                      alert('Property iCal URL copied.');
+                    }}
+                    className="text-[10px] font-bold text-[#cc5a16] hover:underline whitespace-nowrap"
+                  >Copy</button>
+                </div>
+                <p className="text-[10px] text-[#9c8e85] italic">
+                  Per-room URLs: <code className="font-mono text-[#6b5d52]">/api/restaurant/{restaurantId}/hotel/ical/room/&lt;ROOM-ID&gt;.ics</code> — use when each OTA listing maps to a specific room.
+                </p>
+              </div>
+            </div>
+
+            {/* ── 3. INBOUND — Recent webhook events ────────────────── */}
+            <div className="mt-6">
+              <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                <div>
+                  <h4 className="text-sm font-bold text-[#1a1208]">Inbound — Webhook activity</h4>
+                  <p className="text-[10px] text-[#9c8e85] mt-0.5">Last 50 OTA push events received at /channel-webhook/:channel · HMAC-verified per channel</p>
+                </div>
+                <button
+                  onClick={fetchWebhookLog}
+                  className="px-3 py-1.5 rounded-xl border border-[#cc5a16]/30 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5 flex items-center gap-1"
+                >Refresh</button>
+              </div>
+              {webhookLog.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic mt-2">No webhook events yet.</p>
+              ) : (
+                <div className="max-h-64 overflow-y-auto border border-[#cc5a16]/10 rounded-2xl">
+                  <table className="w-full text-[10px]">
+                    <thead className="bg-[#faf7f2] sticky top-0">
+                      <tr className="text-left text-[#6b5d52]">
+                        <th className="px-3 py-2">Time</th>
+                        <th className="px-3 py-2">Channel</th>
+                        <th className="px-3 py-2">Operation</th>
+                        <th className="px-3 py-2">External ID</th>
+                        <th className="px-3 py-2">Status</th>
+                        <th className="px-3 py-2">Booking</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {webhookLog.map((w: any) => (
+                        <tr key={w.id} className="border-t border-[#cc5a16]/5">
+                          <td className="px-3 py-1.5 font-mono text-[#6b5d52]">{new Date(w.received_at).toLocaleString()}</td>
+                          <td className="px-3 py-1.5 font-bold">{w.channel}</td>
+                          <td className="px-3 py-1.5">{w.operation || '—'}</td>
+                          <td className="px-3 py-1.5 font-mono truncate max-w-[120px]" title={w.external_id || ''}>{w.external_id || '—'}</td>
+                          <td className="px-3 py-1.5">
+                            <span className={cn(
+                              'px-2 py-0.5 rounded-full font-bold',
+                              w.status === 'accepted'  ? 'bg-emerald-100 text-emerald-800' :
+                              w.status === 'duplicate' ? 'bg-blue-100 text-blue-800' :
+                              w.status === 'rejected'  ? 'bg-amber-100 text-amber-800' :
+                                                         'bg-rose-100 text-rose-800'
+                            )}>{w.status}</span>
+                            {w.error && <span className="text-[#c13b3b] ml-1" title={w.error}>⚠</span>}
+                          </td>
+                          <td className="px-3 py-1.5 font-mono">{w.booking_id || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* ── 4. OUTBOUND — API credentials ─────────────────────── */}
+            <div className="mt-6">
+              <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                <div>
+                  <h4 className="text-sm font-bold text-[#1a1208]">Outbound — OTA credentials</h4>
+                  <p className="text-[10px] text-[#9c8e85] mt-0.5">
+                    Real OTA API push is stubbed pending partner approval (2-4 months per channel).
+                    Credentials stored AES-256-GCM at rest. Webhook signing keys are a SEPARATE field per OTA spec.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setEditingChannelCred({ channel: 'BOOKING', is_enabled: false })}
+                  className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612] flex items-center gap-1"
+                >
+                  <Plus size={12} /> Add Channel
+                </button>
+              </div>
+              {channelCredentials.length === 0 ? (
+                <p className="text-xs text-[#9c8e85] italic mt-2">
+                  No OTA credentials configured. Add a channel once you have partnership credentials.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {channelCredentials.map((c: any) => (
+                    <div key={c.id} className="flex items-center justify-between gap-3 bg-[#faf7f2] rounded-2xl px-4 py-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-[#1a1208]">{c.channel}</p>
+                        <p className="text-[10px] text-[#6b5d52] mt-0.5 font-mono">
+                          API Key: {c.api_key || '—'} · Secret: {c.api_secret ? '••••••••' : '—'} · Property: {c.property_id || '—'}
+                        </p>
+                        {c.last_synced && (
+                          <p className="text-[10px] text-[#9c8e85] mt-0.5">Last outbound push: {new Date(c.last_synced).toLocaleString()}</p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className={cn(
+                          'text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
+                          c.is_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
+                        )}>{c.is_enabled ? 'Enabled' : 'Disabled'}</span>
+                        <button
+                          onClick={() => setEditingChannelCred({ channel: c.channel, api_key: '', api_secret: '', property_id: c.property_id || '', is_enabled: c.is_enabled })}
+                          className="text-[10px] font-bold text-[#3d3128] hover:underline"
+                        >Edit</button>
+                        <button
+                          onClick={() => deleteChannelCredential(c.channel)}
+                          className="text-[10px] font-bold text-[#c13b3b] hover:underline"
+                        >Delete</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       ) : activeTab === 'FOLIOS' && isHotelEnabled ? (
         /* ════════════════ FOLIOS ════════════════ */
         <div className="space-y-5">
@@ -17935,6 +18159,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
               { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk', description: 'Live Stay View + Arrival / Departure / Room Status / Night Audit reports for any date range. CSV download.', hotelOnly: true },
+              { id: 'CHANNEL_MANAGER', label: 'Channel Manager', description: 'OTA integrations: API credentials, iCal feeds (Booking.com/Airbnb/Vrbo/Agoda/MMT/Goibibo), inbound webhook log, room-code mappings.', hotelOnly: true },
             ];
             const visibleTabs = PERMISSIBLE_TABS.filter(t => !t.hotelOnly || isHotelEnabled);
 
@@ -18583,26 +18808,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
 
-          {/* ── Sprint D2 — Channel manager credentials ──────────────
-              Stub credentials for Booking.com / MMT / Agoda / etc.
-              Real push is a follow-up; this surface unblocks owner
-              entry. api_key/api_secret are masked on display. */}
+          {/* ── Channel Manager moved to top-level tab (8 Jun 2026) ───
+              The Channel Manager card that used to live here is now the
+              dedicated "Channel Manager" tab in the Hotel lane nav (next
+              to Front Desk). This block is intentionally left as a
+              navigational pointer so admins who muscle-memory it to
+              Settings don't think it's gone. */}
           {isHotelEnabled && (
-            <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
-              <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
-                <div>
-                  <h3 className="text-2xl font-bold font-serif">Channel Manager</h3>
-                  <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
-                    Inbound and outbound sync with OTAs (Booking.com / MakeMyTrip / Goibibo / Agoda / Expedia / Airbnb).
-                    <span className="block mt-1">
-                      <strong>iCal feeds</strong> below pull bookings from each OTA every 30 min — the practical real-world integration that works without partner approval.
-                      <strong className="ml-1">API credentials</strong> are stored at-rest encrypted; outbound push is stubbed pending OTA partnership approval.
-                    </span>
-                  </p>
-                </div>
+            <div className="bg-blue-50 border border-blue-200 rounded-3xl p-5 flex items-start gap-3">
+              <span className="text-2xl">🛰️</span>
+              <div className="flex-1">
+                <h3 className="text-sm font-bold text-blue-900">Channel Manager has moved</h3>
+                <p className="text-xs text-blue-800 mt-1">
+                  OTA credentials, iCal feeds, and webhook activity now live in their own top-level tab — open the <strong>Channel Manager</strong> tab in the Hotel nav (right after Front Desk).
+                </p>
               </div>
-
-              {/* ── 1. INBOUND — iCal feeds ───────────────────────────── */}
+              <button
+                type="button"
+                onClick={() => setActiveTab('CHANNEL_MANAGER')}
+                className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 whitespace-nowrap"
+              >Open Channel Manager →</button>
+            </div>
+          )}
+          {false && isHotelEnabled && (
+            <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm hidden">
+              {/* ── 1. INBOUND — iCal feeds (kept hidden — moved to dedicated tab) ── */}
               <div className="mt-6">
                 <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
                   <div>
