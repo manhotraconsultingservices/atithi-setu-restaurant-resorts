@@ -26437,7 +26437,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ota-room-mapping-plus-hmac-verification-plus-replay-protection',
+    commit_marker: 'ota-audit-doc-ical-strategy-confirmation',
     code_features: [
       'subscription-billing',
       'read-only-mode',

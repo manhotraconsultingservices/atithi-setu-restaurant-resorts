@@ -8,14 +8,16 @@
 
 ## TL;DR
 
-The existing framework (adapters, audit log, idempotency, queue worker, iCal one-way) is well-structured and ahead of most early-stage PMS products. **However**, six gaps block real OTA production traffic from working safely. This commit ships fixes for the three most-critical ones; the other three are documented with concrete next steps.
+The existing framework (adapters, audit log, idempotency, queue worker, iCal one-way) is well-structured and ahead of most early-stage PMS products. **However**, three security/correctness blockers needed fixing for real OTA production traffic to work safely. Those are fixed in this commit.
+
+**Strategy decision (8 Jun 2026):** Use **iCal export** for availability distribution to OTAs (Gap #4 below). This is the standard SMB-hotel approach — supported by every major OTA, no partnership approval needed, zero ongoing maintenance. Per-channel API push remains a future option if/when scale demands it; the adapter framework already supports the swap.
 
 | # | Gap | Severity | Shipped? |
 |---|---|---|---|
 | 1 | OTA room codes can't reach internal room IDs (no mapping table) | 🔴 BLOCKER | ✅ Yes |
 | 2 | Webhook signature verification is stubbed `{ok:true}` | 🔴 BLOCKER (security) | ✅ Yes |
 | 3 | Webhook replay/timestamp protection missing | 🔴 BLOCKER (security) | ✅ Yes |
-| 4 | No availability/rate push to OTAs → oversold rooms | 🟠 HIGH | Roadmap |
+| 4 | No availability/rate push to OTAs → oversold rooms | 🟢 OUT OF SCOPE | iCal export covers it (see below) |
 | 5 | No commission tracking on OTA bookings | 🟠 HIGH | Roadmap |
 | 6 | No rate-plan code mapping (BAR / Non-Refundable / Long-Stay) | 🟠 HIGH | Roadmap |
 | 7 | No outbound retry with exponential backoff | 🟡 MED | Roadmap |
@@ -102,16 +104,56 @@ If the channel doesn't send `X-Timestamp` (legacy OTAs), the adapter can opt out
 
 ---
 
-### 🟠 Gap 4 — No availability/rate push (HIGH)
+### 🟢 Gap 4 — Availability push (RESOLVED via iCal export)
 
-**Problem:** OTAs need to be told when rooms are sold so they stop selling them. Currently we receive bookings from OTAs but never push availability back. **Result: overselling within 5-10 minutes of a busy weekend's booking surge.**
+**Owner decision (8 Jun 2026):** Use iCal export for distributing availability to OTAs. No per-channel API push needed.
 
-**Roadmap (next sprint):** New cron + endpoint:
-```
-POST /api/restaurant/:id/hotel/channels/push-availability
-  body: { start: 'YYYY-MM-DD', days: 90, channels?: ['BOOKING','MMT'] }
-```
-Computes per-(room_type × date) inventory using the same logic as `/hotel/availability`, then calls each enabled adapter's `pushAvailability()`. Cron every 5 minutes for the next 7 days, every hour for days 8-90.
+This is the standard approach for ~90% of small/mid hotels and is supported by **every major OTA**:
+
+| OTA | iCal Import Path | Pull Frequency |
+|---|---|---|
+| Booking.com | Extranet → Property → Rates & Availability → Sync Calendars → Import | Every 15-60 min |
+| Airbnb | Listing → Calendar → Availability → Sync calendars from another website | Every 2 hours |
+| Vrbo | Calendar → Reservation Manager → Import Calendar | Every 1-2 hours |
+| Expedia | Partner Central → Rooms & Rates → Calendar sync | Every 1 hour |
+| Agoda | YCS → Calendar Sync → External Calendar | Every 2-4 hours |
+| Goibibo / MMT | Extranet → Inventory → Calendar Sync (iCal URL) | Every 2 hours |
+
+**How the existing iCal export already covers this:**
+
+1. **Live URL per property** (no auth — URL is the bearer):
+   ```
+   https://<your-domain>/api/restaurant/<RESTO-ID>/hotel/ical/property.ics
+   ```
+2. **Per-room URLs** (when each OTA listing maps to a specific room):
+   ```
+   https://<your-domain>/api/restaurant/<RESTO-ID>/hotel/ical/room/<ROOM-ID>.ics
+   ```
+3. **Format**: RFC 5545 VCALENDAR with `METHOD:PUBLISH`, one `VEVENT` per non-CANCELLED booking, `STATUS:CONFIRMED`, day-use bookings get a single-day event.
+4. **Auto-updates**: when a booking is created, modified, or cancelled in our system, the next time the OTA polls the iCal URL it sees the change.
+
+**Why this is sufficient for SMB hotels:**
+
+- Industry standard — Cloudbeds, Mews, Hotelogix, Little Hotelier all rely heavily on iCal for the long-tail of OTA connections
+- No partnership approval needed (BDC Connectivity Partner takes 3-6 months, MMT Hotel Connect needs MOU)
+- Zero ongoing maintenance — OTAs poll our endpoint; no outbound calls to maintain
+- Free of API rate-limits, OAuth token refreshes, and channel-specific quirks
+- Acceptable 15-min to 2-hr lag matches the booking-volume profile of a 30-100 room property
+
+**Operational setup (per OTA):**
+
+1. From each OTA extranet, find the "Sync external calendar" / "iCal import" panel
+2. Paste the property URL (or per-room URLs if the OTA wants per-listing feeds)
+3. OTA polls the URL on its own schedule and blocks/releases dates based on what's there
+
+**When this is NOT sufficient (and we'd need API push):**
+
+- Property has > 100 rooms and inventory changes faster than iCal poll lag
+- Same room sold on multiple OTAs simultaneously within the same minute (rare for SMB)
+- Need to push different rates per channel (iCal carries availability only, not rates)
+- OTA contractually requires API integration (e.g. high-volume chains)
+
+**If/when API push is needed later:** The framework is already in place (adapter contract, queue worker, signing keys, room mappings). Swap each stub for an `axios.post()` per OTA spec — the wiring is done.
 
 ---
 
