@@ -6948,7 +6948,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Clicking a different report card replaces the data; CSV export
   // operates on the currently-loaded data.
   const [foActiveReport, setFoActiveReport] = useState<{
-    kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit';
+    kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'stay-view';
     data: any;
     loadedAt: number;
   } | null>(null);
@@ -9885,6 +9885,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'SERVICES') fetchHotelServices();
     if (activeTab === 'SERVICE_REQUESTS') fetchHotelRequests();
     if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); fetchTariff(); }
+    // BCG client request 8 Jun 2026 — Front Desk tab now embeds Stay View
+    // (AvailabilityCalendar). The cell-click handler resolves room.base_rate
+    // from hotelRooms, so we eagerly fetch rooms + bookings + tariff when
+    // the tab opens so the data is ready before staff clicks any cell.
+    if (activeTab === 'FRONT_OFFICE_REPORTS') { fetchHotelRooms(); fetchHotelBookings(); fetchTariff(); }
     if (activeTab === 'FOLIOS') fetchHotelFolios();
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
@@ -10468,11 +10473,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             icon: <Bed size={12} />,
             // Same gating logic, mirrored for Hotel.
             visible: isHotelEnabled && (!bothEnabled || dashboardMode === 'HOTEL'),
+            // BCG client request 8 Jun 2026: Front Office Reports moved
+            // adjacent to Command & Control. Stay View + 4 ops reports
+            // are the receptionist's most-used screens, so they sit
+            // next to MONITOR for muscle memory.
             tabs: [
               ...operationalSummary,
+              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk' },
               { id: 'ROOMS',                label: 'Rooms' },
               { id: 'HOTEL_BOOKINGS',       label: 'Hotel Bookings' },
-              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Office Reports' },
               { id: 'SERVICES',             label: 'Services' },
               { id: 'SERVICE_REQUESTS',     label: 'Service Requests' },
               { id: 'FOLIOS',               label: 'Folios' },
@@ -17145,9 +17154,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="space-y-5">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
-              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">📊 Front Office Reports</h2>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">📊 Front Desk</h2>
               <p className="text-sm text-[#6b5d52] mt-1">
-                Arrival, Departure, Room Status, and Night Audit reports — for any date range. Each downloads as CSV ready for Excel / Tally.
+                Live Stay View, plus Arrival / Departure / Room Status / Night Audit reports for any date range. Each report downloads as CSV ready for Excel / Tally.
               </p>
             </div>
           </div>
@@ -17264,6 +17273,46 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             const renderActiveTable = () => {
               if (!foActiveReport) return null;
               const { kind, data } = foActiveReport;
+              // BCG client request 8 Jun 2026: Stay View renders the
+              // existing AvailabilityCalendar component (same one used on
+              // Hotel Bookings → Calendar View) — no per-report wrapper
+              // chrome because the component already has its own KPI strip,
+              // legend, toolbar, and CSV export.
+              if (kind === 'stay-view') {
+                return (
+                  <div className="rounded-3xl border-2 border-rose-200 overflow-hidden">
+                    <div className="px-5 py-3 flex items-center justify-between gap-3 border-b border-rose-200 bg-rose-100">
+                      <div>
+                        <h3 className="text-base font-bold font-serif text-rose-900">Stay View · Live</h3>
+                        <p className="text-[11px] text-rose-900 mt-0.5">Click any booked cell to open the guest card. Click a vacant cell to start a new booking.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFoActiveReport(null)}
+                        className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] hover:text-[#1a1208]"
+                      >Close</button>
+                    </div>
+                    <AvailabilityCalendar
+                      restaurantId={restaurantId}
+                      token={token}
+                      refreshNonce={calendarRefreshNonce}
+                      onBookingClick={(bookingId) => setCalendarBookingPopover(bookingId)}
+                      onCellClick={(roomId, date) => {
+                        const room = hotelRooms.find(r => r.id === roomId);
+                        setEditingBooking({
+                          room_id: roomId,
+                          room_rate: room?.base_rate || 0,
+                          check_in_date: date,
+                          check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
+                          booking_type: 'OVERNIGHT',
+                        });
+                        setShowBookingModal(true);
+                      }}
+                      onHoldClick={() => { /* Stay View in reports is read-mostly; hold flow lives in Hotel Bookings */ }}
+                    />
+                  </div>
+                );
+              }
               const tone = kind === 'arrivals' ? 'emerald'
                          : kind === 'departures' ? 'amber'
                          : kind === 'room-status' ? 'blue'
@@ -17521,7 +17570,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+                    {/* BCG client request 8 Jun 2026: Stay View card —
+                        renders the existing AvailabilityCalendar (KPI strip +
+                        legend + rooms × dates grid) inline. Same component
+                        used in Hotel Bookings → Calendar View, so both tabs
+                        share one source of truth. */}
+                    <button
+                      type="button"
+                      onClick={() => setFoActiveReport({ kind: 'stay-view', data: null, loadedAt: Date.now() })}
+                      className={cn("text-left p-4 rounded-2xl border-2 transition-all",
+                        foActiveReport?.kind === 'stay-view'
+                          ? "bg-rose-100 border-rose-500 shadow-md"
+                          : "bg-rose-50 border-rose-200 hover:border-rose-400 hover:bg-rose-100")}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-rose-900">Stay View</span>
+                        <CalendarClock size={14} className="text-rose-700" />
+                      </div>
+                      <p className="text-[10px] text-rose-800 leading-snug">Calendar grid · rooms × dates with live status colours, KPI strip + legend.</p>
+                    </button>
+
                     <button
                       type="button" disabled={foLoading === 'arrivals'}
                       onClick={() => loadReport('arrivals')}
@@ -17865,7 +17934,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FOLIOS',            label: 'Folios / Hotel Bills',    description: 'View / settle folios, add F&B charges, apply promos, credit notes.', hotelOnly: true },
               { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
-              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Office Reports', description: 'Arrival / Departure / Room Status / Night Audit reports for any date range. CSV download.', hotelOnly: true },
+              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk', description: 'Live Stay View + Arrival / Departure / Room Status / Night Audit reports for any date range. CSV download.', hotelOnly: true },
             ];
             const visibleTabs = PERMISSIBLE_TABS.filter(t => !t.hotelOnly || isHotelEnabled);
 

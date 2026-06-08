@@ -26174,7 +26174,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tariff-boot-time-fetch-plus-loud-errors-plus-reload-button',
+    commit_marker: 'front-desk-tab-promotion-plus-stay-view-card',
     code_features: [
       'subscription-billing',
       'read-only-mode',
