@@ -19360,6 +19360,12 @@ async function startServer() {
     bookings: any[],
     propertyName: string,
     feedName: string,
+    /** OTA hardening — room_holds (maintenance, owner stays, OTA holds)
+     *  are surfaced as VEVENTs too so polling OTAs see those date ranges
+     *  as taken. Without this, a tenant who blocks room 103 for
+     *  maintenance Jun 15-17 would still see Booking.com / MMT etc sell
+     *  the room on those dates. */
+    holds: any[] = [],
   ): string => {
     const lines: string[] = [
       'BEGIN:VCALENDAR',
@@ -19368,7 +19374,7 @@ async function startServer() {
       'CALSCALE:GREGORIAN',
       'METHOD:PUBLISH',
       `X-WR-CALNAME:${escapeIcal(feedName)}`,
-      `X-WR-CALDESC:${escapeIcal(`Direct bookings for ${propertyName}`)}`,
+      `X-WR-CALDESC:${escapeIcal(`Direct bookings + maintenance blocks for ${propertyName}`)}`,
     ];
     const nowStamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
     for (const b of bookings) {
@@ -19392,8 +19398,49 @@ async function startServer() {
         'END:VEVENT'
       );
     }
+    // Maintenance / hold blocks — surfaces room_holds rows as VEVENTs so
+    // OTAs polling the feed treat those dates as unavailable. Use the
+    // hold's kind (MAINTENANCE / OWNER_STAY / OTA_HOLD) as the summary
+    // category prefix; reason becomes the description.
+    for (const h of holds) {
+      const s = normaliseDateIso(h.start_date).replace(/-/g, '');
+      // RFC 5545 DTEND for VALUE=DATE is EXCLUSIVE. room_holds.end_date
+      // is INCLUSIVE in our schema (last blocked night). Add 1 day so the
+      // VEVENT spans through the last blocked night.
+      const endIso = h.end_date instanceof Date
+        ? new Date(h.end_date.getTime() + 86400000).toISOString().slice(0, 10)
+        : new Date(new Date(h.end_date).getTime() + 86400000).toISOString().slice(0, 10);
+      const e = endIso.replace(/-/g, '');
+      if (!s || !e) continue;
+      lines.push(
+        'BEGIN:VEVENT',
+        `UID:atithi-hold-${h.id}@atithi-setu.com`,
+        `DTSTAMP:${nowStamp}`,
+        `DTSTART;VALUE=DATE:${s}`,
+        `DTEND;VALUE=DATE:${e}`,
+        `SUMMARY:${escapeIcal(`[BLOCKED · ${h.kind || 'MAINTENANCE'}]${h.room_name ? ` ${h.room_name}` : ''}`)}`,
+        `DESCRIPTION:${escapeIcal(`Hold ${h.id} · ${h.kind || 'MAINTENANCE'}${h.reason ? ` · ${h.reason}` : ''}`)}`,
+        'STATUS:CONFIRMED',
+        h.room_name ? `LOCATION:${escapeIcal(`${propertyName} · ${h.room_name}`)}` : `LOCATION:${escapeIcal(propertyName)}`,
+        'END:VEVENT'
+      );
+    }
     lines.push('END:VCALENDAR');
     return lines.join('\r\n');
+  };
+
+  // OTA hardening — every iCal response forces freshness so OTAs / CDNs
+  // can't serve stale availability. Combined with iCal's own poll cadence
+  // (15min-2hr depending on OTA), this guarantees the feed always reflects
+  // the latest cancellations + new holds.
+  const setIcalHeaders = (res: Response, filename: string) => {
+    res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
   };
 
   // Property-wide feed.
@@ -19402,16 +19449,26 @@ async function startServer() {
     if (!check.ok) return res.status(check.status).send(check.error);
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const bookings: any[] = await tenantDb.query(
-        `SELECT b.*, r.name AS room_name
-           FROM room_bookings b
-      LEFT JOIN rooms r ON r.id = b.room_id
-          WHERE b.status NOT IN ('CANCELLED')
-       ORDER BY b.check_in_date`
-      );
-      const ics = buildIcalFeed(bookings, check.restaurant?.name || 'Property', `${check.restaurant?.name || 'Property'} — All bookings`);
-      res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
-      res.setHeader('Content-Disposition', 'inline; filename="property.ics"');
+      const [bookings, holds]: [any[], any[]] = await Promise.all([
+        tenantDb.query(
+          `SELECT b.*, r.name AS room_name
+             FROM room_bookings b
+        LEFT JOIN rooms r ON r.id = b.room_id
+            WHERE b.status NOT IN ('CANCELLED')
+         ORDER BY b.check_in_date`
+        ),
+        // OTA hardening — include maintenance / owner-stay / OTA holds so
+        // polling OTAs treat those dates as unavailable. Future-dated only.
+        tenantDb.query(
+          `SELECT h.*, r.name AS room_name
+             FROM room_holds h
+        LEFT JOIN rooms r ON r.id = h.room_id
+            WHERE h.end_date >= CURRENT_DATE
+         ORDER BY h.start_date`
+        ).catch(() => []),
+      ]);
+      const ics = buildIcalFeed(bookings, check.restaurant?.name || 'Property', `${check.restaurant?.name || 'Property'} — All bookings`, holds);
+      setIcalHeaders(res, 'property.ics');
       res.send(ics);
     } catch (err) {
       res.status(500).send('Failed to generate iCal feed');
@@ -19427,17 +19484,26 @@ async function startServer() {
       const tenantDb = await getTenantDb(req.params.id);
       const room: any = await tenantDb.get("SELECT id, name FROM rooms WHERE id = ?", [req.params.roomId]);
       if (!room) return res.status(404).send('Room not found');
-      const bookings: any[] = await tenantDb.query(
-        `SELECT b.*, r.name AS room_name
-           FROM room_bookings b
-      LEFT JOIN rooms r ON r.id = b.room_id
-          WHERE b.room_id = ? AND b.status NOT IN ('CANCELLED')
-       ORDER BY b.check_in_date`,
-        [req.params.roomId]
-      );
-      const ics = buildIcalFeed(bookings, check.restaurant?.name || 'Property', `${room.name} — Bookings`);
-      res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
-      res.setHeader('Content-Disposition', `inline; filename="room-${room.name.replace(/[^a-z0-9_-]+/gi, '-')}.ics"`);
+      const [bookings, holds]: [any[], any[]] = await Promise.all([
+        tenantDb.query(
+          `SELECT b.*, r.name AS room_name
+             FROM room_bookings b
+        LEFT JOIN rooms r ON r.id = b.room_id
+            WHERE b.room_id = ? AND b.status NOT IN ('CANCELLED')
+         ORDER BY b.check_in_date`,
+          [req.params.roomId]
+        ),
+        tenantDb.query(
+          `SELECT h.*, r.name AS room_name
+             FROM room_holds h
+        LEFT JOIN rooms r ON r.id = h.room_id
+            WHERE h.room_id = ? AND h.end_date >= CURRENT_DATE
+         ORDER BY h.start_date`,
+          [req.params.roomId]
+        ).catch(() => []),
+      ]);
+      const ics = buildIcalFeed(bookings, check.restaurant?.name || 'Property', `${room.name} — Bookings`, holds);
+      setIcalHeaders(res, `room-${room.name.replace(/[^a-z0-9_-]+/gi, '-')}.ics`);
       res.send(ics);
     } catch (err) {
       res.status(500).send('Failed to generate room iCal feed');
@@ -26437,7 +26503,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'channel-manager-top-level-tab',
+    commit_marker: 'ical-includes-room-holds-plus-no-cache-headers',
     code_features: [
       'subscription-billing',
       'read-only-mode',
