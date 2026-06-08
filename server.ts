@@ -535,6 +535,49 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_channel_webhook_channel ON channel_webhook_log (channel, received_at DESC);
     CREATE INDEX IF NOT EXISTS idx_channel_webhook_external ON channel_webhook_log (channel, external_id);
 
+    -- OTA hardening (8 Jun 2026) — see docs/OTA_INTEGRATION_AUDIT.md
+    --
+    -- Replay-attack defence. Every webhook receives a nonce (or timestamp)
+    -- from the OTA; we record it here with a short TTL so an attacker
+    -- who captures a signed payload can't replay it 6 hours later. Rows
+    -- are pruned by a daily cron — TTL is intentionally short (10 min)
+    -- because every legitimate OTA delivers within seconds.
+    CREATE TABLE IF NOT EXISTS channel_webhook_nonces (
+      channel     TEXT NOT NULL,
+      nonce       TEXT NOT NULL,
+      received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      expires_at  TIMESTAMP NOT NULL,
+      PRIMARY KEY (channel, nonce)
+    );
+    CREATE INDEX IF NOT EXISTS idx_channel_webhook_nonces_expiry
+      ON channel_webhook_nonces (expires_at);
+
+    -- Room-code mapping per OTA. Without this, the inbound webhook
+    -- handler has no way to translate Booking.com's room_id "145678901"
+    -- (or MMT's "DBL_DLX_AC", Agoda's "Deluxe Twin") to our internal
+    -- ROOM-103. Resolution order in the handler:
+    --   1. (channel, external_room_code, external_rate_plan_code) exact
+    --   2. (channel, external_room_code, NULL) — channel-default plan
+    --   3. local_room_type_id → pick first available room of that type
+    --   4. reject with a clear "no mapping for {code}" error
+    CREATE TABLE IF NOT EXISTS channel_room_mappings (
+      id                      TEXT PRIMARY KEY,
+      channel                 TEXT NOT NULL,         -- 'BOOKING' | 'MMT' | 'GOIBIBO' | 'AGODA' | ...
+      external_room_code      TEXT NOT NULL,         -- the OTA's room_id / room_type_code
+      external_rate_plan_code TEXT,                  -- 'BAR' / 'NRF' / 'LONG_STAY' / NULL = applies to any plan
+      local_room_id           TEXT,                  -- ROOM-103 (when mapping is room-specific)
+      local_room_type_id      TEXT,                  -- preferred — the category (any room of this type works)
+      label                   TEXT,                  -- human-readable OTA name ("Deluxe Twin Booking.com")
+      is_active               INT DEFAULT 1,
+      notes                   TEXT,
+      created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_room_mappings_unique
+      ON channel_room_mappings (channel, external_room_code, COALESCE(external_rate_plan_code, ''));
+    CREATE INDEX IF NOT EXISTS idx_channel_room_mappings_lookup
+      ON channel_room_mappings (channel, external_room_code);
+
     -- REQ 1 — Guest ID-proof documents (file uploads).
     --
     -- A booking can have N documents (e.g. Aadhaar front + back, passport,
@@ -589,6 +632,14 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
       created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    -- OTA hardening (8 Jun 2026) — webhook_signing_secret is a SEPARATE
+    -- secret from api_secret. Per Booking.com Connectivity v2, MMT Hotel
+    -- Connect v3, Agoda YCS, and Expedia EQC specs, the inbound-webhook
+    -- HMAC is signed with a different key than the outbound-push key, and
+    -- the OTA shows the owner the webhook secret in a separate "Webhook
+    -- Configuration" panel of their extranet. Storing both lets us encrypt
+    -- + use the right one for each direction.
+    ALTER TABLE channel_credentials ADD COLUMN IF NOT EXISTS webhook_signing_secret TEXT;
 
     -- Sprint P2-H — Yield management rules.
     -- Owner-defined occupancy-triggered multipliers. Example:
@@ -18313,6 +18364,100 @@ async function startServer() {
   });
 
   // ════════════════════════════════════════════════════════════════════
+  // ─── CHANNEL ROOM MAPPINGS (OTA hardening, 8 Jun 2026) ────────────
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // CRUD for the channel_room_mappings table. Without these mappings,
+  // the inbound webhook handler cannot translate the OTA's room code
+  // (e.g. Booking.com "145678901", MMT "DBL_DLX_AC", Agoda "Deluxe Twin")
+  // to our internal ROOM-103 / RTYPE-SUPERIOR_VIEW.
+  //
+  // Owner workflow:
+  //   1. List OTA listings + their codes from each extranet
+  //   2. For each (channel, room_code) pair, POST a mapping row pointing
+  //      at either a specific local_room_id or a local_room_type_id
+  //   3. Per-rate-plan mappings (BAR vs Non-Refundable) are supported
+  //      via external_rate_plan_code — leave NULL for "applies to all
+  //      rate plans for this code".
+  //
+  // Resolution order at inbound time:
+  //   exact (channel + code + plan) → (channel + code + NULL) → type-level
+  app.get("/api/restaurant/:id/hotel/channel-room-mappings", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query(
+        `SELECT m.*, r.name AS local_room_name, r.room_number AS local_room_number,
+                rt.name AS local_room_type_name
+           FROM channel_room_mappings m
+           LEFT JOIN rooms r ON r.id = m.local_room_id
+           LEFT JOIN room_types rt ON rt.id = m.local_room_type_id
+          ORDER BY m.channel, m.external_room_code, COALESCE(m.external_rate_plan_code, '')`
+      );
+      res.json(rows);
+    } catch (err: any) {
+      console.error('[channel-room-mappings GET]', err);
+      res.status(500).json({ error: 'Failed to fetch room mappings' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/channel-room-mappings", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const b = req.body || {};
+    const channel = String(b.channel || '').toUpperCase().trim();
+    const code = String(b.external_room_code || '').trim();
+    if (!channel || !code) {
+      return res.status(400).json({ error: 'channel + external_room_code required (e.g. {channel:"BOOKING", external_room_code:"145678901", local_room_type_id:"SUPERIOR_VIEW"})' });
+    }
+    if (!b.local_room_id && !b.local_room_type_id) {
+      return res.status(400).json({ error: 'Either local_room_id (specific room) or local_room_type_id (category — preferred) must be set' });
+    }
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const id = b.id || `CRM-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO channel_room_mappings
+           (id, channel, external_room_code, external_rate_plan_code, local_room_id, local_room_type_id, label, is_active, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (channel, external_room_code, COALESCE(external_rate_plan_code, ''))
+         DO UPDATE SET
+           local_room_id = EXCLUDED.local_room_id,
+           local_room_type_id = EXCLUDED.local_room_type_id,
+           label = EXCLUDED.label,
+           is_active = EXCLUDED.is_active,
+           notes = EXCLUDED.notes,
+           updated_at = CURRENT_TIMESTAMP`,
+        [id, channel, code, b.external_rate_plan_code || null,
+         b.local_room_id || null, b.local_room_type_id || null,
+         b.label || null, b.is_active === 0 ? 0 : 1, b.notes || null]
+      );
+      const saved: any = await tenantDb.get(
+        `SELECT * FROM channel_room_mappings WHERE channel = ? AND external_room_code = ?
+           AND (external_rate_plan_code = ? OR (external_rate_plan_code IS NULL AND ? IS NULL))`,
+        [channel, code, b.external_rate_plan_code || null, b.external_rate_plan_code || null]
+      );
+      res.status(201).json(saved);
+    } catch (err: any) {
+      console.error('[channel-room-mappings POST]', err);
+      res.status(500).json({ error: err?.message || 'Failed to save mapping' });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hotel/channel-room-mappings/:mappingId", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.run("DELETE FROM channel_room_mappings WHERE id = ?", [req.params.mappingId]);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to delete mapping' });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
   // ─── INBOUND WEBHOOK RECEIVER — Sprint CH-3 ────────────────────────
   // ════════════════════════════════════════════════════════════════════
   //
@@ -18353,7 +18498,18 @@ async function startServer() {
   //   OTAs can't carry our JWT. Signature validation in the adapter is
   //   how this endpoint authenticates the caller — using the api_secret
   //   the tenant entered into channel_credentials.
-  app.post("/api/public/restaurant/:id/channel-webhook/:channel", async (req: Request, res: Response) => {
+  // OTA hardening — capture the raw body alongside the parsed JSON so the
+  // adapter can verify HMAC signatures over the EXACT bytes that the OTA
+  // signed. Express's default JSON parser discards the raw bytes after
+  // parsing, so we register a verify-callback that stashes them on req.
+  // ALSO accept text/xml + application/xml (Booking.com BDC sends XML).
+  const captureRawBody = (req: Request, _res: Response, buf: Buffer) => {
+    (req as any).rawBody = buf?.length ? buf.toString('utf8') : '';
+  };
+  app.post("/api/public/restaurant/:id/channel-webhook/:channel",
+    express.json({ verify: captureRawBody, limit: '512kb' }),
+    express.text({ type: ['text/xml', 'application/xml'], limit: '512kb' }),
+    async (req: Request, res: Response) => {
     const restaurantId = req.params.id;
     const channelKey = String(req.params.channel || '').toUpperCase().trim();
     const check = await ensureHotelEnabled(restaurantId);
@@ -18406,11 +18562,54 @@ async function startServer() {
       return res.status(401).json({ error: `No credentials configured for ${channelKey}` });
     }
 
-    // 3. Validate
-    const v = adapter.validateWebhook(cred, req.headers, req.body);
+    // 3. Validate — HMAC signature + timestamp + replay protection.
+    //    Adapter is responsible for the per-channel signature algorithm;
+    //    the raw body (captured via captureRawBody verify-callback above)
+    //    is what we sign, NOT the parsed JSON.
+    const rawBody: string = (req as any).rawBody || '';
+    if (typeof req.body === 'string' && !rawBody) {
+      // text/xml path — Express stored it as req.body directly.
+      (req as any).rawBody = req.body;
+    }
+    const v = adapter.validateWebhook(cred, req.headers, (req as any).rawBody || '', req.body);
     if (!v.ok) {
       await audit(null, null, 'rejected', null, v.reason || 'signature validation failed');
       return res.status(401).json({ error: v.reason || 'signature validation failed' });
+    }
+    // 3b. Replay-nonce check. The adapter reports a nonce it pulled from
+    // the request (typically a request-id header that the OTA generates
+    // uniquely per delivery). We persist (channel, nonce) for 10 minutes
+    // — if we see the same nonce twice the second delivery is a replay.
+    if (v.nonce) {
+      try {
+        // Prune expired entries opportunistically (very cheap on a small
+        // table; the daily cron does the real cleanup).
+        await tenantDb.run("DELETE FROM channel_webhook_nonces WHERE expires_at < CURRENT_TIMESTAMP");
+        const seen: any = await tenantDb.get(
+          "SELECT nonce FROM channel_webhook_nonces WHERE channel = ? AND nonce = ?",
+          [channelKey, v.nonce]
+        );
+        if (seen) {
+          await audit(null, null, 'rejected', null, `replay detected — nonce ${v.nonce} seen recently`);
+          return res.status(401).json({ error: 'replay detected' });
+        }
+        // Insert the nonce with a 10-minute TTL. Slightly longer than the
+        // 5-minute signature skew window so a borderline-timestamped
+        // retry still gets caught.
+        await tenantDb.run(
+          `INSERT INTO channel_webhook_nonces (channel, nonce, expires_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP + INTERVAL '10 minutes')`,
+          [channelKey, v.nonce]
+        );
+      } catch (err: any) {
+        // Don't fail the webhook on a nonce-table issue (e.g. a tenant
+        // that pre-dates the table — its createHotelTables will catch
+        // up next boot). Just log loudly.
+        console.warn(`[channel-webhook ${channelKey}] nonce check skipped:`, err?.message || err);
+      }
+    }
+    if (v.replay_check_skipped) {
+      console.warn(`[channel-webhook ${channelKey}] replay protection SKIPPED — channel sent no timestamp/nonce. This is a known gap for legacy OTAs.`);
     }
 
     // 4. Parse
@@ -18444,10 +18643,74 @@ async function startServer() {
       const ci = normaliseDateIso(b.checkInDate || '');
       const co = normaliseDateIso(b.checkOutDate || '');
       if (operation === 'CREATED') {
-        if (!ci || !co || !b.roomId) {
-          await audit(externalId, operation, 'rejected', null, 'missing room_id / dates');
-          return res.status(400).json({ error: 'missing room_id / dates' });
+        if (!ci || !co) {
+          await audit(externalId, operation, 'rejected', null, 'missing check_in / check_out dates');
+          return res.status(400).json({ error: 'missing check_in / check_out dates' });
         }
+        // ── OTA hardening: resolve external room code → local room ─────
+        // Adapter populates b.externalRoomCode from the OTA payload (the
+        // OTA's room_type_code / room_id — never ours). We resolve via
+        // channel_room_mappings in this order:
+        //   1. exact (channel, code, rate_plan) match
+        //   2. (channel, code, NULL) — any rate plan
+        //   3. by local_room_type_id — pick first available room of that type
+        //   4. reject with a clear "no mapping for {code}" error
+        const externalRoomCode = (b as any).externalRoomCode || b.roomId || null;
+        const externalRatePlanCode = (b as any).externalRatePlanCode || null;
+        let resolvedRoomId: string | null = null;
+        let resolvedVia: string = '';
+        if (externalRoomCode) {
+          // Step 1+2: direct mapping lookup
+          const exact: any = await tenantDb.get(
+            `SELECT local_room_id, local_room_type_id FROM channel_room_mappings
+              WHERE channel = ? AND external_room_code = ?
+                AND (external_rate_plan_code = ? OR external_rate_plan_code IS NULL)
+                AND is_active = 1
+              ORDER BY CASE WHEN external_rate_plan_code IS NULL THEN 2 ELSE 1 END
+              LIMIT 1`,
+            [channelKey, externalRoomCode, externalRatePlanCode]
+          );
+          if (exact?.local_room_id) {
+            resolvedRoomId = exact.local_room_id;
+            resolvedVia = 'mapping(room)';
+          } else if (exact?.local_room_type_id) {
+            // Step 3: type-level mapping → pick first available room of that
+            // category that has no overlap on the requested window.
+            const candidate: any = await tenantDb.get(
+              `SELECT r.id FROM rooms r
+                WHERE r.type_id = ? AND r.status NOT IN ('MAINTENANCE','BLOCKED')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM room_bookings b
+                     WHERE b.room_id = r.id
+                       AND b.status NOT IN ('CANCELLED','CHECKED_OUT')
+                       AND NOT (b.check_out_date <= ? OR b.check_in_date >= ?)
+                  )
+                ORDER BY r.id ASC LIMIT 1`,
+              [exact.local_room_type_id, ci, co]
+            );
+            if (candidate?.id) {
+              resolvedRoomId = candidate.id;
+              resolvedVia = `mapping(type:${exact.local_room_type_id})`;
+            }
+          }
+        }
+        // Legacy fallback: if the OTA happened to send our internal room
+        // id (e.g. during a manual sandbox test), accept it.
+        if (!resolvedRoomId && b.roomId) {
+          const direct: any = await tenantDb.get("SELECT id FROM rooms WHERE id = ?", [b.roomId]);
+          if (direct?.id) {
+            resolvedRoomId = direct.id;
+            resolvedVia = 'direct(legacy)';
+          }
+        }
+        if (!resolvedRoomId) {
+          const msg = externalRoomCode
+            ? `No room mapping for ${channelKey} code "${externalRoomCode}"${externalRatePlanCode ? ` rate ${externalRatePlanCode}` : ''}. Configure under Settings → Channel Manager → Room Mappings.`
+            : 'OTA payload missing room code (externalRoomCode) and direct room_id';
+          await audit(externalId, operation, 'rejected', null, msg);
+          return res.status(400).json({ error: msg });
+        }
+        b.roomId = resolvedRoomId;
         // Overlap check
         const conflict: any = await tenantDb.get(
           `SELECT id FROM room_bookings
@@ -26174,7 +26437,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'front-desk-tab-promotion-plus-stay-view-card',
+    commit_marker: 'ota-room-mapping-plus-hmac-verification-plus-replay-protection',
     code_features: [
       'subscription-billing',
       'read-only-mode',
