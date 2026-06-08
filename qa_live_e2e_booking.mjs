@@ -118,8 +118,9 @@ async function login() {
     const r = await api('POST', '/api/auth/login', { loginId: LOGIN_ID, password: PASSWORD, restaurantId: RESTAURANT_ID });
     body = r.body;
   }
-  if (!body.token) throw new Error('Login returned no token: ' + JSON.stringify(body).slice(0, 200));
-  TOKEN = body.token;
+  // Owner login returns `jwt_token`; legacy /api/auth/login returns `token`.
+  TOKEN = body.jwt_token || body.token;
+  if (!TOKEN) throw new Error('Login returned no token: ' + JSON.stringify(body).slice(0, 200));
   const rid = body.restaurantId || body.restaurant?.id || RESTAURANT_ID;
   console.log(`  ${C.green}✓ Logged in${C.reset} as ${body.name || body.owner?.name || LOGIN_ID} (role=${body.role || 'OWNER'}, restaurantId=${rid})`);
   if (rid && rid !== RESTAURANT_ID && body.role !== 'SUPER_ADMIN' && body.role !== 'CTO') {

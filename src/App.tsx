@@ -15539,26 +15539,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               className="text-[11px] font-bold uppercase tracking-widest px-4 py-2 rounded-xl bg-[#cc5a16] text-white hover:bg-[#a8460f]"
                             >+ Add First Meal Plan</button>
                           </div>
-                        ) : (
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-xs">
-                              <thead>
-                                <tr className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
-                                  <th className="text-left px-2 py-1.5 w-[80px]">Code</th>
-                                  <th className="text-left px-2 py-1.5">Name</th>
-                                  <th className="text-center px-2 py-1.5 w-[50px]" title="Includes breakfast">B</th>
-                                  <th className="text-center px-2 py-1.5 w-[50px]" title="Includes lunch">L</th>
-                                  <th className="text-center px-2 py-1.5 w-[50px]" title="Includes dinner">D</th>
-                                  <th className="text-center px-2 py-1.5 w-[80px]">Order</th>
-                                  <th className="text-center px-2 py-1.5 w-[90px]">Status</th>
-                                  <th className="px-2 py-1.5 w-[80px]"></th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {allMealPlans.map((m: any) => {
-                                  const isInactive = m.is_active === 0 || m.is_active === false;
-                                  return (
-                                    <tr key={m.id} className={cn("border-t border-[#cc5a16]/10", isInactive && "opacity-50")}>
+                        ) : (() => {
+                          // BCG Tariff Phase 4.6 (8 Jun 2026) — split the editor
+                          // into ACTIVE and ARCHIVED sections so deactivated
+                          // plans never silently disappear from the UI. Owner
+                          // can see what's archived and restore in one click.
+                          const activeList = allMealPlans.filter((m: any) => m.is_active !== 0 && m.is_active !== false);
+                          const archivedList = allMealPlans.filter((m: any) => m.is_active === 0 || m.is_active === false);
+                          const renderEditableTable = (rows: any[], showActions: 'active' | 'archived') => (
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                                    <th className="text-left px-2 py-1.5 w-[80px]">Code</th>
+                                    <th className="text-left px-2 py-1.5">Name</th>
+                                    <th className="text-center px-2 py-1.5 w-[50px]" title="Includes breakfast">B</th>
+                                    <th className="text-center px-2 py-1.5 w-[50px]" title="Includes lunch">L</th>
+                                    <th className="text-center px-2 py-1.5 w-[50px]" title="Includes dinner">D</th>
+                                    <th className="text-center px-2 py-1.5 w-[80px]">Order</th>
+                                    <th className="px-2 py-1.5 w-[110px] text-right pr-3">Action</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {rows.map((m: any) => {
+                                    const isInactive = showActions === 'archived';
+                                    return (
+                                      <tr key={m.id} className={cn("border-t border-[#cc5a16]/10", isInactive && "opacity-60 bg-[#faf7f2]/60")}>
                                       <td className="px-2 py-1.5">
                                         <input
                                           type="text"
@@ -15610,36 +15616,44 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                           className="w-full bg-white border border-[#cc5a16]/20 rounded-md px-2 py-1 text-xs text-center focus:outline-none focus:border-[#cc5a16]"
                                         />
                                       </td>
-                                      <td className="px-2 py-1.5 text-center">
-                                        {isInactive ? (
+                                      <td className="px-2 py-1.5 text-right pr-3">
+                                        {showActions === 'archived' ? (
                                           <button
                                             type="button"
                                             onClick={() => updateMealPlan(m.id, { is_active: 1 })}
-                                            className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 hover:underline"
-                                          >Reactivate</button>
-                                        ) : (
-                                          <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-700">Active</span>
-                                        )}
-                                      </td>
-                                      <td className="px-2 py-1.5 text-center">
-                                        {m._new ? (
+                                            className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                          >↻ Restore</button>
+                                        ) : m._new ? (
                                           <button
                                             type="button"
                                             onClick={() => removeMealPlan(m.id)}
-                                            title="Discard"
-                                            className="text-[#c13b3b] hover:text-red-700 font-bold text-sm"
-                                          >×</button>
-                                        ) : !isInactive ? (
+                                            title="Discard unsaved row"
+                                            className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-md bg-red-50 text-red-700 hover:bg-red-100"
+                                          >× Discard</button>
+                                        ) : (
                                           <button
                                             type="button"
                                             onClick={() => {
-                                              if (confirm(`Deactivate "${m.code} · ${m.name}"?\n\nHistorical bookings with this plan stay readable. The plan no longer appears in new booking forms or the tariff matrix until you reactivate.`)) {
-                                                removeMealPlan(m.id);
+                                              // BCG Phase 4.6 — stronger confirm. Owner must
+                                              // type the code to archive an existing plan, so
+                                              // accidental misclicks can't silently disappear
+                                              // user data (the original bug).
+                                              const reply = prompt(
+                                                `Archive "${m.code} · ${m.name}"?\n\n` +
+                                                `Historical bookings using this plan stay readable. The plan disappears from new booking forms + the tariff matrix until you click Restore.\n\n` +
+                                                `To confirm, type the plan code below (e.g. "${m.code}"):`
+                                              );
+                                              if (reply == null) return; // cancel
+                                              if (String(reply).trim().toUpperCase() !== String(m.code).trim().toUpperCase()) {
+                                                alert(`Code didn't match "${m.code}" — nothing changed.`);
+                                                return;
                                               }
+                                              removeMealPlan(m.id);
+                                              alert(`"${m.code}" moved to Archived. Click Save Meal Plans to persist, or Restore to undo.`);
                                             }}
-                                            className="text-[10px] font-bold uppercase tracking-widest text-[#c13b3b] hover:underline"
-                                          >Deactivate</button>
-                                        ) : null}
+                                            className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-md bg-[#faf7f2] text-[#c13b3b] hover:bg-red-50 border border-red-200"
+                                          >Archive…</button>
+                                        )}
                                       </td>
                                     </tr>
                                   );
@@ -15648,7 +15662,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             </table>
                             <p className="text-[10px] text-[#9c8e85] italic mt-2">B/L/D = includes Breakfast / Lunch / Dinner. Code is the short header (3-4 chars) used in the matrix; name is the full label shown in booking forms.</p>
                           </div>
-                        )}
+                          );
+                          return (
+                            <>
+                              {/* ACTIVE section */}
+                              {activeList.length === 0 ? (
+                                <p className="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-3">
+                                  No active meal plans. {archivedList.length > 0 ? `${archivedList.length} archived plan${archivedList.length > 1 ? 's' : ''} below — click ↻ Restore to bring one back.` : 'Add a meal plan above to start.'}
+                                </p>
+                              ) : (
+                                renderEditableTable(activeList, 'active')
+                              )}
+
+                              {/* ARCHIVED section — always rendered when non-empty,
+                                  in its own clearly-labelled block so the owner
+                                  never has to wonder where a deactivated plan went. */}
+                              {archivedList.length > 0 && (
+                                <div className="mt-4 pt-4 border-t-2 border-dashed border-[#cc5a16]/20">
+                                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                                    <div>
+                                      <h5 className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">📁 Archived Meal Plans ({archivedList.length})</h5>
+                                      <p className="text-[10px] text-[#9c8e85] mt-0.5">These plans are hidden from booking forms but still exist in the DB. Historical invoices referencing them stay readable. Click <strong>↻ Restore</strong> on any row to bring it back to active.</p>
+                                    </div>
+                                  </div>
+                                  {renderEditableTable(archivedList, 'archived')}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
 
                       {/* Seasons + periods editor */}
