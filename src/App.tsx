@@ -7482,24 +7482,40 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Gap 7: outbound queue inspector with retry/dismiss.
   // Gap 8: daily reconciliation reports viewer.
   // Gap 9: per-channel IP allowlist read-only config display.
+  // Server shape: { from, to, channels: [...] } — un-wrap to the rows array.
   const [commissionSummary, setCommissionSummary] = useState<any[]>([]);
   const [ratePlans, setRatePlans] = useState<any[]>([]);
   const [editingRatePlan, setEditingRatePlan] = useState<any | null>(null);
   const [channelSyncQueue, setChannelSyncQueue] = useState<any[]>([]);
   const [reconciliationReports, setReconciliationReports] = useState<any[]>([]);
   const [reconciliationRunning, setReconciliationRunning] = useState(false);
+  // Server shape: { channels: { BOOKING: {cidrs, enforcing}, MMT: {...} } } —
+  // store the raw response and render via Object.entries.
   const [channelSecurityConfig, setChannelSecurityConfig] = useState<any>(null);
   const fetchCommissionSummary = async () => {
     if (!isHotelEnabled) return;
-    try { setCommissionSummary(await hotelApi('/reports/commission-summary')); } catch { setCommissionSummary([]); }
+    try {
+      const res = await hotelApi('/reports/commission-summary');
+      // Backend wraps rows in { from, to, channels: [...] }; older deploys
+      // returned a bare array. Accept both for forward/backward compat.
+      const rows = Array.isArray(res) ? res : (Array.isArray(res?.channels) ? res.channels : []);
+      setCommissionSummary(rows);
+    } catch { setCommissionSummary([]); }
   };
   const fetchRatePlans = async () => {
     if (!isHotelEnabled) return;
-    try { setRatePlans(await hotelApi('/rate-plans')); } catch { setRatePlans([]); }
+    try {
+      const res = await hotelApi('/rate-plans');
+      // PUT returns { ok, count, rate_plans:[...] }; GET returns a bare array.
+      const rows = Array.isArray(res) ? res : (Array.isArray(res?.rate_plans) ? res.rate_plans : []);
+      setRatePlans(rows);
+    } catch { setRatePlans([]); }
   };
   const saveRatePlan = async (plan: any) => {
     try {
-      await hotelApi(`/rate-plans/${encodeURIComponent(plan.id || plan.code)}`, { method: 'PUT', body: JSON.stringify(plan) });
+      // Server expects PUT /rate-plans with body { rate_plans: [...] }
+      // (batch upsert; pass a single-item array for one save).
+      await hotelApi(`/rate-plans`, { method: 'PUT', body: JSON.stringify({ rate_plans: [plan] }) });
       setEditingRatePlan(null);
       await fetchRatePlans();
     } catch (e: any) { alert(e?.message || 'Failed to save rate plan'); }
@@ -7511,7 +7527,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   const fetchChannelSyncQueue = async () => {
     if (!isHotelEnabled) return;
-    try { setChannelSyncQueue(await hotelApi('/channel-sync-queue')); } catch { setChannelSyncQueue([]); }
+    try {
+      const res = await hotelApi('/channel-sync-queue');
+      setChannelSyncQueue(Array.isArray(res) ? res : []);
+    } catch { setChannelSyncQueue([]); }
   };
   const retrySyncQueueRow = async (rowId: string) => {
     try { await hotelApi(`/channel-sync-queue/${encodeURIComponent(rowId)}/retry`, { method: 'POST' }); await fetchChannelSyncQueue(); }
@@ -7524,7 +7543,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   const fetchReconciliationReports = async () => {
     if (!isHotelEnabled) return;
-    try { setReconciliationReports(await hotelApi('/channel-reconciliation-reports')); } catch { setReconciliationReports([]); }
+    try {
+      const res = await hotelApi('/channel-reconciliation-reports');
+      setReconciliationReports(Array.isArray(res) ? res : []);
+    } catch { setReconciliationReports([]); }
   };
   const runReconciliationNow = async () => {
     if (!window.confirm('Run reconciliation now for all enabled OTA channels? This pulls last 24h of bookings from each.')) return;
@@ -18206,14 +18228,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </tr>
                   </thead>
                   <tbody>
-                    {(channelSecurityConfig.channels || []).map((c: any) => (
-                      <tr key={c.channel} className="border-t border-[#e8e0d6]">
-                        <td className="px-3 py-2 font-bold">{c.channel}</td>
-                        <td className="px-3 py-2 font-mono text-[11px]">{(c.cidrs && c.cidrs.length) ? c.cidrs.join(', ') : <em className="text-[#9c8e85]">none — permissive mode</em>}</td>
+                    {Object.entries(channelSecurityConfig.channels || {}).map(([channel, cfg]: [string, any]) => (
+                      <tr key={channel} className="border-t border-[#e8e0d6]">
+                        <td className="px-3 py-2 font-bold">{channel}</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">{(cfg?.cidrs && cfg.cidrs.length) ? cfg.cidrs.join(', ') : <em className="text-[#9c8e85]">none — permissive mode</em>}</td>
                         <td className="px-3 py-2 text-center">
-                          <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', c.enforcing ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800')}>{c.enforcing ? 'Locked' : 'Open'}</span>
+                          <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', cfg?.enforcing ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800')}>{cfg?.enforcing ? 'Locked' : 'Open'}</span>
                         </td>
-                        <td className="px-3 py-2 font-mono text-[10px] text-[#6b5d52]">CHANNEL_IP_ALLOWLIST_{c.channel}</td>
+                        <td className="px-3 py-2 font-mono text-[10px] text-[#6b5d52]">CHANNEL_IP_ALLOWLIST_{channel}</td>
                       </tr>
                     ))}
                   </tbody>
