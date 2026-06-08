@@ -17965,7 +17965,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   const fmt = (n: number) => `₹${Math.round(Number(n || 0)).toLocaleString('en-IN')}`;
                   const fmtPct = (n: number) => `${Number(n || 0).toFixed(1)}%`;
                   const labels: Record<string, string> = { BOOKING: '🌐 Booking.com', MMT: '✈️ MakeMyTrip', GOIBIBO: '🧳 Goibibo', AGODA: '🏨 Agoda', EXPEDIA: '🌍 Expedia', AIRBNB: '🏠 Airbnb', DIRECT: '🏠 Direct', WALK_IN: '🚶 Walk-in' };
-                  const labelOf = (c: string) => labels[c] || c;
+                  // For OTA channels: use emoji-prefixed friendly label.
+                  // For AGENTs: server already resolves their display_name
+                  // from travel_agents.name; prefix with 🤝 so it's visually
+                  // distinct from OTA platforms in the dashboard.
+                  const labelOf = (c: any) => {
+                    if (typeof c === 'string') return labels[c] || c;
+                    if (c?.partner_type === 'AGENT') return `🤝 ${c.display_name || c.channel}`;
+                    return labels[c.channel] || c.display_name || c.channel;
+                  };
                   const marginColor = (m: number) =>
                     m >= 95 ? 'text-emerald-700 bg-emerald-50' :
                     m >= 85 ? 'text-lime-700 bg-lime-50' :
@@ -18015,19 +18023,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <div>
                             <p className="text-[10px] text-amber-800 font-bold uppercase">Top earner (net)</p>
                             {p.top_channel_by_net ? (
-                              <p className="font-bold text-[#1a1208] mt-0.5">{labelOf(p.top_channel_by_net.channel)} — {fmt(p.top_channel_by_net.net)}</p>
+                              <p className="font-bold text-[#1a1208] mt-0.5">{labelOf(p.top_channel_by_net)} — {fmt(p.top_channel_by_net.net)}</p>
                             ) : <p className="text-[#6b5d52] mt-0.5">—</p>}
                           </div>
                           <div>
                             <p className="text-[10px] text-amber-800 font-bold uppercase">Best margin</p>
                             {p.best_margin_channel ? (
-                              <p className="font-bold text-emerald-700 mt-0.5">{labelOf(p.best_margin_channel.channel)} — {fmtPct(p.best_margin_channel.net_margin_pct)}</p>
+                              <p className="font-bold text-emerald-700 mt-0.5">{labelOf(p.best_margin_channel)} — {fmtPct(p.best_margin_channel.net_margin_pct)}</p>
                             ) : <p className="text-[#6b5d52] mt-0.5">—</p>}
                           </div>
                           <div>
                             <p className="text-[10px] text-amber-800 font-bold uppercase">Thinnest margin</p>
                             {p.worst_margin_channel && p.worst_margin_channel.channel !== p.best_margin_channel?.channel ? (
-                              <p className="font-bold text-red-700 mt-0.5">{labelOf(p.worst_margin_channel.channel)} — {fmtPct(p.worst_margin_channel.net_margin_pct)}</p>
+                              <p className="font-bold text-red-700 mt-0.5">{labelOf(p.worst_margin_channel)} — {fmtPct(p.worst_margin_channel.net_margin_pct)}</p>
                             ) : <p className="text-[#6b5d52] mt-0.5">N/A (only one channel)</p>}
                           </div>
                           <div>
@@ -18046,15 +18054,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       {/* ── Per-channel cards ──────────────────────────────── */}
                       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                         {ota360Data.channels.map((c: any) => (
-                          <div key={c.channel} className="bg-white rounded-2xl p-4 border border-indigo-100 shadow-sm">
+                          <div key={`${c.partner_type}-${c.channel}`} className={cn(
+                            'bg-white rounded-2xl p-4 border shadow-sm',
+                            c.bookings === 0 ? 'border-stone-200 opacity-75' : 'border-indigo-100'
+                          )}>
                             <div className="flex items-start justify-between gap-2 mb-3">
-                              <div>
-                                <p className="text-base font-bold text-[#1a1208]">{labelOf(c.channel)}</p>
-                                <p className="text-[10px] text-[#6b5d52]">{c.bookings} bookings · {c.revenue_share_pct}% of revenue</p>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <p className="text-base font-bold text-[#1a1208]">{labelOf(c)}</p>
+                                  <span className={cn(
+                                    'text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded-full',
+                                    c.partner_type === 'AGENT' ? 'bg-purple-100 text-purple-800' : 'bg-sky-100 text-sky-800'
+                                  )}>{c.partner_type === 'AGENT' ? 'Agent' : 'OTA'}</span>
+                                </div>
+                                <p className="text-[10px] text-[#6b5d52] mt-0.5">{c.bookings} booking{c.bookings === 1 ? '' : 's'} · {c.revenue_share_pct}% of revenue</p>
                               </div>
-                              <span className={cn('text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', marginColor(c.net_margin_pct))}>
-                                {fmtPct(c.net_margin_pct)} margin
-                              </span>
+                              {c.bookings > 0 && (
+                                <span className={cn('text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full shrink-0', marginColor(c.net_margin_pct))}>
+                                  {fmtPct(c.net_margin_pct)} margin
+                                </span>
+                              )}
+                              {c.bookings === 0 && (
+                                <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-stone-200 text-stone-700 shrink-0">
+                                  No data
+                                </span>
+                              )}
                             </div>
                             <div className="grid grid-cols-2 gap-2 text-xs">
                               <div className="bg-[#faf7f2] rounded-xl px-3 py-2">
@@ -18109,7 +18133,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   'rounded-xl px-3 py-2 col-span-2 cursor-pointer transition hover:scale-[1.01]',
                                   (c.outstanding || 0) > 0 ? 'bg-rose-50 border border-rose-200' : 'bg-emerald-50 border border-emerald-200'
                                 )}
-                                onClick={() => openPartnerStatement('OTA', c.channel)}
+                                onClick={() => openPartnerStatement(c.partner_type || 'OTA', c.channel)}
                                 title="Click to view full statement"
                               >
                                 <p className={cn('text-[9px] uppercase font-bold', (c.outstanding || 0) > 0 ? 'text-rose-800' : 'text-emerald-800')}>
@@ -18161,7 +18185,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <tbody>
                               {ota360Data.channels.map((c: any) => (
                                 <tr key={c.channel} className="border-t border-[#e8e0d6]">
-                                  <td className="px-3 py-2 font-bold sticky left-0 bg-white z-10">{labelOf(c.channel)}</td>
+                                  <td className="px-3 py-2 font-bold sticky left-0 bg-white z-10">{labelOf(c)}</td>
                                   <td className="px-3 py-2 text-right">{c.bookings}</td>
                                   <td className="px-3 py-2 text-right">{c.room_nights}</td>
                                   <td className="px-3 py-2 text-right font-mono">{fmt(c.gross)}</td>

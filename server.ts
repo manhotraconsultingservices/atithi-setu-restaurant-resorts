@@ -18803,12 +18803,25 @@ async function startServer() {
       const today = new Date().toISOString().slice(0, 10);
       const from  = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 
-      // Single query: per-channel rollup. Day-use bookings counted as 1
-      // night so they're not erased from ADR/RevPAR math (check_out =
-      // check_in in our schema for DAY_USE).
+      // Per-attribution rollup. Day-use bookings counted as 1 night so
+      // they're not erased from ADR/RevPAR math (check_out = check_in
+      // in our schema for DAY_USE).
+      //
+      // CRITICAL: attribution rule.
+      // If agent_id is set -> the booking counts under that AGENT row.
+      // Else                -> it counts under its booking_source channel.
+      // This way a booking via "Cox & Kings on MMT" rolls into the
+      // Cox & Kings statement (the partner who owes us money), not the
+      // MMT bucket. If owner wants to double-count, we can swap later.
       const channelRows: any[] = await tenantDb.query(
         `SELECT
-            COALESCE(NULLIF(TRIM(booking_source), ''), 'DIRECT') AS channel,
+            CASE WHEN agent_id IS NOT NULL AND agent_id <> ''
+                 THEN agent_id
+                 ELSE COALESCE(NULLIF(TRIM(booking_source), ''), 'DIRECT')
+            END AS channel,
+            CASE WHEN agent_id IS NOT NULL AND agent_id <> ''
+                 THEN 'AGENT' ELSE 'OTA'
+            END AS partner_type,
             COUNT(*) FILTER (WHERE status NOT IN ('CANCELLED'))     AS bookings,
             COUNT(*) FILTER (WHERE status = 'CANCELLED')            AS cancellations,
             COALESCE(SUM(total_amount)      FILTER (WHERE status NOT IN ('CANCELLED')), 0) AS gross,
@@ -18824,26 +18837,63 @@ async function startServer() {
               FILTER (WHERE status NOT IN ('CANCELLED')), 0) AS avg_lead_time_days
           FROM room_bookings
           WHERE check_in_date BETWEEN ? AND ?
-          GROUP BY COALESCE(NULLIF(TRIM(booking_source), ''), 'DIRECT')
+          GROUP BY 1, 2
           ORDER BY net DESC`,
         [from, today]
       ).catch(() => []);
 
-      // Receivables Phase 2 — per-channel outstanding (sum of unpaid
-      // partner_invoices rows). Joined into each channel's payload below.
+      // EVERY-CHANNEL placeholder rule. The owner wants to compare ALL
+      // their OTA platforms and ALL their registered travel agents,
+      // even ones with zero bookings in the window. So we union in:
+      //   • Every enabled channel_credentials row -> "OTA" channel
+      //   • Every active travel_agents row       -> "AGENT" channel
+      //   • Plus DIRECT + WALK_IN as defaults (always-on, no setup)
+      // Rows already present in channelRows are NOT duplicated.
+      const enabledOtas: any[] = await tenantDb.query(
+        "SELECT channel FROM channel_credentials WHERE is_enabled = 1"
+      ).catch(() => []);
+      const activeAgents: any[] = await tenantDb.query(
+        "SELECT id, name FROM travel_agents WHERE is_active = 1"
+      ).catch(() => []);
+      const seen = new Set(channelRows.map((r: any) => `${r.partner_type}|${r.channel}`));
+      const zeroRow = (channel: string, type: string) => ({
+        channel, partner_type: type,
+        bookings: 0, cancellations: 0, gross: 0, commission: 0, net: 0,
+        room_nights: 0, guests_total: 0, avg_commission_pct: 0,
+        avg_length_of_stay: 0, avg_lead_time_days: 0,
+      });
+      // Always-on defaults so an empty tenant still sees a meaningful dashboard.
+      for (const ch of ['DIRECT', 'WALK_IN']) {
+        if (!seen.has(`OTA|${ch}`)) { channelRows.push(zeroRow(ch, 'OTA')); seen.add(`OTA|${ch}`); }
+      }
+      for (const c of enabledOtas) {
+        const key = `OTA|${c.channel}`;
+        if (!seen.has(key)) { channelRows.push(zeroRow(c.channel, 'OTA')); seen.add(key); }
+      }
+      // Agent name lookup so the UI shows "Cox & Kings" not the raw id.
+      const agentNameById: Record<string, string> = {};
+      for (const a of activeAgents) {
+        agentNameById[a.id] = a.name;
+        const key = `AGENT|${a.id}`;
+        if (!seen.has(key)) { channelRows.push(zeroRow(a.id, 'AGENT')); seen.add(key); }
+      }
+
+      // Receivables Phase 2 — per-partner outstanding (sum of unpaid
+      // partner_invoices rows). Joined into each row's payload below.
+      // Now covers BOTH 'OTA' and 'AGENT' partner_types so agent cards
+      // also surface what each agent owes you.
       const outRows: any[] = await tenantDb.query(
-        `SELECT partner_code,
+        `SELECT partner_type, partner_code,
                 COALESCE(SUM(net_due - net_received), 0) AS outstanding,
                 COUNT(*) AS open_invoices
            FROM partner_invoices
-          WHERE partner_type = 'OTA'
-            AND status NOT IN ('PAID', 'WRITTEN_OFF')
+          WHERE status NOT IN ('PAID', 'WRITTEN_OFF')
             AND (net_due - net_received) > 0
-          GROUP BY partner_code`
+          GROUP BY partner_type, partner_code`
       ).catch(() => []);
       const outstandingByChannel: Record<string, { amount: number; invoices: number }> = {};
       for (const r of outRows) {
-        outstandingByChannel[r.partner_code] = {
+        outstandingByChannel[`${r.partner_type}|${r.partner_code}`] = {
           amount: Number(r.outstanding || 0),
           invoices: Number(r.open_invoices || 0),
         };
@@ -18866,8 +18916,16 @@ async function startServer() {
         const net         = Number(r.net || 0);
         const nights      = Number(r.room_nights || 0);
         const denom       = bookings + cancellations;
+        const channelCode = String(r.channel);
+        const partnerType = String(r.partner_type || 'OTA');
+        const display_name = partnerType === 'AGENT'
+          ? (agentNameById[channelCode] || channelCode)
+          : otaDisplayName(channelCode);
+        const outKey = `${partnerType}|${channelCode}`;
         return {
-          channel: String(r.channel),
+          channel: channelCode,
+          partner_type: partnerType,
+          display_name,
           bookings,
           cancellations,
           cancellation_rate: denom > 0 ? Math.round((cancellations / denom) * 1000) / 10 : 0,
@@ -18885,10 +18943,19 @@ async function startServer() {
           avg_lead_time_days: Math.round(Number(r.avg_lead_time_days || 0) * 10) / 10,
           revenue_share_pct: totalGross > 0 ? Math.round((gross / totalGross) * 1000) / 10 : 0,
           booking_share_pct: totalBookings > 0 ? Math.round((bookings / totalBookings) * 1000) / 10 : 0,
-          // Receivables Phase 2 — per-channel outstanding
-          outstanding:          Math.round((outstandingByChannel[String(r.channel)]?.amount || 0) * 100) / 100,
-          open_invoice_count:   outstandingByChannel[String(r.channel)]?.invoices || 0,
+          // Receivables Phase 2 — per-partner outstanding (both OTA + AGENT)
+          outstanding:          Math.round((outstandingByChannel[outKey]?.amount || 0) * 100) / 100,
+          open_invoice_count:   outstandingByChannel[outKey]?.invoices || 0,
         };
+      });
+
+      // Re-sort: rows with bookings first (by net desc), then zero-booking
+      // rows alphabetically so the owner can scan all configured partners.
+      channels.sort((a, b) => {
+        if (a.bookings > 0 && b.bookings === 0) return -1;
+        if (a.bookings === 0 && b.bookings > 0) return 1;
+        if (a.bookings > 0) return b.net - a.net;
+        return (a.display_name || a.channel).localeCompare(b.display_name || b.channel);
       });
 
       // Strategic flags — what a senior partner would want surfaced
@@ -27796,7 +27863,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'receivables-part2-agent-dropdown-360-chip-csv-export',
+    commit_marker: 'ota-360-shows-all-configured-otas-plus-agents',
     code_features: [
       'subscription-billing',
       'read-only-mode',
