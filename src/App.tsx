@@ -17763,21 +17763,210 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
            Same content that used to live under Settings — iCal feeds,
            webhook activity, OTA credentials — just hoisted up. */
         <div className="space-y-5">
+          {/* ── HEADER ─────────────────────────────────────────────────
+              Plain-English subtitle so a non-technical hotel owner
+              immediately understands what this page does. */}
           <div>
             <h2 className="text-3xl font-bold font-serif text-[#1a1208]">🛰️ Channel Manager</h2>
             <p className="text-sm text-[#6b5d52] mt-1">
-              OTA integrations · iCal feeds (Booking.com / Airbnb / Vrbo / Agoda / MMT / Goibibo) · inbound webhook activity · API credentials.
-              Outbound availability distribution via iCal export (see Settings → iCal export URLs).
+              Where your bookings come from, and how much you keep from each one.
+              <span className="ml-1 text-[#9c8e85]">(OTA = Online Travel Agency — Booking.com, MakeMyTrip, Goibibo, Agoda, Airbnb, etc.)</span>
             </p>
+          </div>
+
+          {/* ── HOW IT WORKS — 3-step explainer ────────────────────────
+              Every section below maps to one of these steps. Once the
+              owner understands the flow they can predict what each
+              panel will show without reading the documentation. */}
+          <div className="bg-gradient-to-r from-amber-50 to-orange-50 p-6 rounded-[32px] border border-amber-200">
+            <p className="text-xs font-bold uppercase tracking-widest text-amber-900 mb-3">How OTAs work — in 60 seconds</p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="bg-white rounded-2xl p-4 border border-amber-100">
+                <div className="text-2xl mb-1">①&nbsp;🌐</div>
+                <p className="text-sm font-bold text-[#1a1208]">Guest books on an OTA</p>
+                <p className="text-[11px] text-[#6b5d52] mt-1">A traveller searches "hotels in Goa" on Booking.com, picks your room, and pays them.</p>
+              </div>
+              <div className="bg-white rounded-2xl p-4 border border-amber-100">
+                <div className="text-2xl mb-1">②&nbsp;📩</div>
+                <p className="text-sm font-bold text-[#1a1208]">OTA tells us instantly</p>
+                <p className="text-[11px] text-[#6b5d52] mt-1">The OTA sends the booking to us (via webhook or iCal). We block that room everywhere so it can't be double-sold.</p>
+              </div>
+              <div className="bg-white rounded-2xl p-4 border border-amber-100">
+                <div className="text-2xl mb-1">③&nbsp;💰</div>
+                <p className="text-sm font-bold text-[#1a1208]">OTA pays us (minus commission)</p>
+                <p className="text-[11px] text-[#6b5d52] mt-1">Once the guest checks out, the OTA sends us the money after keeping their commission (usually 15-22%).</p>
+              </div>
+            </div>
+          </div>
+
+          {/* ── KPI STRIP — at-a-glance health ─────────────────────────
+              Plain-language metrics. Computed entirely client-side from
+              data already in state — no extra fetches. */}
+          {(() => {
+            const enabledChannels = channelCredentials.filter((c: any) => c.is_enabled).length;
+            const totalChannels = channelCredentials.length;
+            const queuedCount = channelSyncQueue.filter((r: any) => r.status === 'queued' || r.status === 'failed').length;
+            const failedCount = channelSyncQueue.filter((r: any) => r.status === 'permanently_failed').length;
+            const totalNet = commissionSummary.reduce((s: number, r: any) => s + Number(r.net || 0), 0);
+            const totalCommission = commissionSummary.reduce((s: number, r: any) => s + Number(r.commission || 0), 0);
+            const lastWebhook = webhookLog[0]?.received_at;
+            return (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-white rounded-2xl p-4 border border-[#cc5a16]/10">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">OTAs Connected</p>
+                  <p className="text-2xl font-bold text-[#1a1208] mt-1">{enabledChannels}<span className="text-sm text-[#9c8e85] font-normal"> / {totalChannels}</span></p>
+                  <p className="text-[10px] text-[#6b5d52] mt-1">Currently sending bookings</p>
+                </div>
+                <div className="bg-white rounded-2xl p-4 border border-[#cc5a16]/10">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Earned in 30 days</p>
+                  <p className="text-2xl font-bold text-emerald-700 mt-1">₹{Math.round(totalNet).toLocaleString('en-IN')}</p>
+                  <p className="text-[10px] text-[#6b5d52] mt-1">After OTA commission</p>
+                </div>
+                <div className="bg-white rounded-2xl p-4 border border-[#cc5a16]/10">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">OTAs took</p>
+                  <p className="text-2xl font-bold text-red-700 mt-1">₹{Math.round(totalCommission).toLocaleString('en-IN')}</p>
+                  <p className="text-[10px] text-[#6b5d52] mt-1">Commission in last 30 days</p>
+                </div>
+                <div className="bg-white rounded-2xl p-4 border border-[#cc5a16]/10">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Pipeline Health</p>
+                  <p className={cn('text-2xl font-bold mt-1', failedCount > 0 ? 'text-red-700' : queuedCount > 0 ? 'text-amber-700' : 'text-emerald-700')}>
+                    {failedCount > 0 ? `${failedCount} stuck` : queuedCount > 0 ? `${queuedCount} sending` : 'All good ✓'}
+                  </p>
+                  <p className="text-[10px] text-[#6b5d52] mt-1">{lastWebhook ? `Last booking ${new Date(lastWebhook).toLocaleString()}` : 'No recent bookings'}</p>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ════════════════ LIVE RATE CARD ════════════════
+              THE headline view — answers "What rate will guests see on
+              each OTA, and how much will I actually keep?"
+
+              Pure client-side computation:
+                Final rate guest sees = base_rate × (1 - rate_plan.discount_pct/100)
+                Net to hotel          = final_rate × (1 - channel.commission_pct/100)
+
+              Each room category × each active rate plan × each enabled
+              channel = one cell showing both numbers. Colour-coded:
+              green = high margin, amber = medium, red = thin. */}
+          <div className="bg-white p-6 sm:p-8 rounded-[32px] border-2 border-emerald-200 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif text-[#1a1208]">💸 Live Rate Card — what each OTA will show</h3>
+                <p className="text-sm text-[#6b5d52] mt-1 max-w-3xl">
+                  For every room category, this shows the <strong>price the guest will see</strong> on each OTA, and the <strong>money you actually keep</strong> after their commission. Same room, same rate plan — different "take-home" depending on the channel.
+                </p>
+                <p className="text-[11px] text-[#9c8e85] mt-1 italic">Tip: the bigger the green number, the better that channel is for you. Push promotions there first.</p>
+              </div>
+            </div>
+            {(() => {
+              const activeChannels: any[] = [{ channel: 'DIRECT', label: '🏠 Direct', commission_pct: 0, note: 'Your own website / walk-in' }];
+              channelCredentials.forEach((c: any) => {
+                if (c.is_enabled) {
+                  const labels: Record<string, string> = { BOOKING: '🌐 Booking.com', MMT: '✈️ MakeMyTrip', GOIBIBO: '🧳 Goibibo', AGODA: '🏨 Agoda', EXPEDIA: '🌍 Expedia', AIRBNB: '🏠 Airbnb' };
+                  activeChannels.push({ channel: c.channel, label: labels[c.channel] || c.channel, commission_pct: Number(c.commission_pct || 0) });
+                }
+              });
+              const activePlans = ratePlans.filter((p: any) => p.is_active);
+              const categories = Array.from(new Set(hotelRooms.map((r: any) => r.category || r.room_type || 'Standard')));
+              if (hotelRooms.length === 0) {
+                return <p className="text-sm text-[#9c8e85] italic mt-2">Add rooms in the Rooms tab to see your Live Rate Card.</p>;
+              }
+              if (activePlans.length === 0) {
+                return <p className="text-sm text-[#9c8e85] italic mt-2">Add at least one rate plan below to see the rate card.</p>;
+              }
+              const colorFor = (netPct: number) =>
+                netPct >= 95 ? 'bg-emerald-50 border-emerald-200 text-emerald-900' :
+                netPct >= 85 ? 'bg-lime-50 border-lime-200 text-lime-900' :
+                netPct >= 78 ? 'bg-amber-50 border-amber-200 text-amber-900' :
+                              'bg-red-50 border-red-200 text-red-900';
+              return (
+                <div className="space-y-6">
+                  {categories.map((cat) => {
+                    const roomsInCat = hotelRooms.filter((r: any) => (r.category || r.room_type || 'Standard') === cat);
+                    const avgBase = roomsInCat.reduce((s: number, r: any) => s + Number(r.base_rate || 0), 0) / Math.max(1, roomsInCat.length);
+                    return (
+                      <div key={cat} className="border-2 border-[#f0e6d6] rounded-2xl overflow-hidden">
+                        <div className="bg-[#faf7f2] px-4 py-3 border-b border-[#f0e6d6] flex items-center justify-between gap-3 flex-wrap">
+                          <div>
+                            <p className="text-sm font-bold text-[#1a1208]">🛏️ {cat} <span className="text-xs font-normal text-[#9c8e85]">· {roomsInCat.length} room{roomsInCat.length !== 1 ? 's' : ''}</span></p>
+                            <p className="text-[10px] text-[#6b5d52] mt-0.5">Base rate: <span className="font-bold">₹{Math.round(avgBase).toLocaleString('en-IN')}</span> /night</p>
+                          </div>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs border-collapse">
+                            <thead>
+                              <tr className="bg-white">
+                                <th className="text-left px-3 py-2 border-b border-[#f0e6d6] sticky left-0 bg-white z-10 min-w-[160px]">Rate Plan</th>
+                                {activeChannels.map((ch) => (
+                                  <th key={ch.channel} className="text-center px-3 py-2 border-b border-[#f0e6d6] min-w-[140px]">
+                                    <div className="font-bold text-[#1a1208]">{ch.label}</div>
+                                    <div className="text-[9px] font-normal text-[#9c8e85] mt-0.5">
+                                      {ch.commission_pct > 0 ? `OTA keeps ${ch.commission_pct}%` : 'No commission'}
+                                    </div>
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {activePlans.map((plan: any) => {
+                                const planDiscount = Number(plan.discount_pct || 0);
+                                const guestPrice = Math.round(avgBase * (1 - planDiscount / 100));
+                                return (
+                                  <tr key={plan.id} className="border-t border-[#f0e6d6]">
+                                    <td className="px-3 py-3 sticky left-0 bg-white z-10 align-top">
+                                      <div className="font-mono font-bold text-[11px]">{plan.code}</div>
+                                      <div className="text-[10px] text-[#6b5d52]">{plan.name}</div>
+                                      <div className="text-[9px] text-[#9c8e85] mt-0.5">
+                                        {planDiscount > 0 ? `${planDiscount}% off base` : 'Base rate'}
+                                        {plan.is_refundable ? ' · Refundable' : ' · Non-refundable'}
+                                      </div>
+                                    </td>
+                                    {activeChannels.map((ch) => {
+                                      const netToHotel = Math.round(guestPrice * (1 - ch.commission_pct / 100));
+                                      const netPct = guestPrice > 0 ? (netToHotel / guestPrice) * 100 : 100;
+                                      const otaTakes = guestPrice - netToHotel;
+                                      return (
+                                        <td key={ch.channel} className={cn('px-3 py-3 text-center border-l border-[#f0e6d6]', colorFor(netPct))}>
+                                          <div className="text-[9px] uppercase tracking-wider opacity-70">Guest pays</div>
+                                          <div className="font-bold text-base">₹{guestPrice.toLocaleString('en-IN')}</div>
+                                          <div className="text-[9px] uppercase tracking-wider opacity-70 mt-1">You keep</div>
+                                          <div className="font-bold text-sm">₹{netToHotel.toLocaleString('en-IN')}</div>
+                                          {otaTakes > 0 && (
+                                            <div className="text-[9px] opacity-70 mt-0.5">(OTA: ₹{otaTakes.toLocaleString('en-IN')})</div>
+                                          )}
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div className="bg-[#faf7f2] rounded-2xl p-4 text-[11px] text-[#6b5d52] space-y-1">
+                    <p><strong>How to read this:</strong></p>
+                    <p>• <strong>Guest pays</strong> = the price shown on the OTA's website (same on all channels for the same plan).</p>
+                    <p>• <strong>You keep</strong> = your take-home after the OTA's commission.</p>
+                    <p>• <span className="inline-block w-3 h-3 bg-emerald-200 rounded mr-1 align-middle"></span>Green = great margin · <span className="inline-block w-3 h-3 bg-amber-200 rounded mr-1 align-middle"></span>Amber = OK · <span className="inline-block w-3 h-3 bg-red-200 rounded mr-1 align-middle"></span>Red = thin margin — consider raising the rate on that OTA.</p>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
             <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
               <div>
-                <h3 className="text-2xl font-bold font-serif">Inbound + Outbound Sync</h3>
+                <h3 className="text-2xl font-bold font-serif">🔗 How bookings reach us</h3>
                 <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
-                  <strong>iCal feeds</strong> below pull bookings from each OTA every 30 min — the practical real-world integration that works without partner approval.
-                  <strong className="ml-1">API credentials</strong> are stored at-rest encrypted (AES-256-GCM); inbound webhooks are HMAC-verified per channel.
+                  Two ways OTAs send us their bookings:
+                  <strong className="ml-1">iCal feeds</strong> (we check them every 30 minutes — works with every OTA, no setup needed on their side), and
+                  <strong className="ml-1">webhooks</strong> (instant — needs OTA API approval and an extranet key).
+                  <span className="block mt-1 text-[#9c8e85]">Your API keys are safely scrambled before being saved.</span>
                 </p>
               </div>
             </div>
@@ -17984,8 +18173,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
             <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
               <div>
-                <h3 className="text-2xl font-bold font-serif">Commission Summary <span className="text-xs font-normal text-[#9c8e85]">· last 30 days</span></h3>
-                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Gross revenue, commission paid, and net per OTA channel. Configure each channel's commission % when editing its API credentials above.</p>
+                <h3 className="text-2xl font-bold font-serif">💰 What each OTA cost you <span className="text-xs font-normal text-[#9c8e85]">· last 30 days</span></h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">For every channel: how much guests paid (gross), how much the OTA took (commission), and what you actually received (net). Set each OTA's commission % when you Edit its API credentials above.</p>
               </div>
               <button onClick={fetchCommissionSummary} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
             </div>
@@ -18031,8 +18220,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
             <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
               <div>
-                <h3 className="text-2xl font-bold font-serif">Rate Plans</h3>
-                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Standard codes OTAs recognise: <strong>BAR</strong> (Best Available Rate), <strong>NRF</strong> (Non-Refundable), <strong>LSTAY</strong> (Long Stay), <strong>MEMBER</strong> (Member). Used by webhook handlers to tag inbound bookings + by channel room mappings for OTA push.</p>
+                <h3 className="text-2xl font-bold font-serif">📝 Pricing options you offer</h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Different ways the same room can be sold. The four below are what every OTA recognises out of the box:
+                  <strong> BAR</strong> (the regular price, fully refundable),
+                  <strong> NRF</strong> (cheaper but no cancellation refund),
+                  <strong> LSTAY</strong> (discount for long stays),
+                  <strong> MEMBER</strong> (special price for loyalty members).
+                  You can add custom ones too — they'll show up in the Live Rate Card above.</p>
               </div>
               <button
                 onClick={() => setEditingRatePlan({ id: '', code: '', name: '', description: '', is_refundable: 1, discount_pct: 0, min_nights: 1, max_nights: null, display_order: 0, is_active: 1 })}
@@ -18089,8 +18283,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
             <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
               <div>
-                <h3 className="text-2xl font-bold font-serif">Outbound Sync Queue</h3>
-                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Pending and failed pushes to OTAs. Retries are automatic (30s → 6h backoff). After 5 attempts a row becomes <code>permanently_failed</code> and waits for your manual retry below.</p>
+                <h3 className="text-2xl font-bold font-serif">📤 Updates waiting to reach OTAs</h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">When you change a room's price or availability, we send the update to every OTA. If an OTA is slow or rejects it, we retry automatically (30 seconds, then 2 min, 10 min, 1 hour, 6 hours). After 5 tries it's marked "stuck" — you can then click <strong>Retry</strong> to try again, or <strong>Dismiss</strong> to give up. If everything is empty below, you're fully in sync.</p>
               </div>
               <button onClick={fetchChannelSyncQueue} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
             </div>
@@ -18150,8 +18344,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
             <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
               <div>
-                <h3 className="text-2xl font-bold font-serif">Reconciliation Reports <span className="text-xs font-normal text-[#9c8e85]">· daily 03:15 IST</span></h3>
-                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Compares local bookings against each OTA's reservation list (last 24h). Surfaces missing or duplicate bookings before they cause double-bookings.</p>
+                <h3 className="text-2xl font-bold font-serif">🔍 Daily double-check <span className="text-xs font-normal text-[#9c8e85]">· runs at 3:15 AM every night</span></h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Every night we ask each OTA "did we record every booking you sent us?" If anything is missing on either side, you'll see it here BEFORE it causes a double-booking. Click <strong>Run now</strong> if you want to check immediately.</p>
               </div>
               <div className="flex items-center gap-2">
                 <button onClick={runReconciliationNow} disabled={reconciliationRunning} className="px-3 py-1.5 rounded-xl bg-[#1a4a6f] text-white text-xs font-bold hover:bg-[#103352] disabled:opacity-50">{reconciliationRunning ? 'Running…' : 'Run now'}</button>
@@ -18209,8 +18403,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
             <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
               <div>
-                <h3 className="text-2xl font-bold font-serif">Inbound Webhook Security</h3>
-                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Per-channel source-IP allowlist (in addition to HMAC signature verification). Set <code>CHANNEL_IP_ALLOWLIST_BOOKING</code>, <code>CHANNEL_IP_ALLOWLIST_MMT</code>, etc. as env vars on the server with comma-separated CIDRs.</p>
+                <h3 className="text-2xl font-bold font-serif">🔒 OTA gatekeeper</h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">Extra security on top of the digital-signature check we already do. You can tell us "only accept messages from Booking.com if they come from these specific computer addresses" — that way even if someone steals an OTA's password, they still can't fake a booking. Showing "Open" below is fine for most hotels; switch to "Locked" only if your IT team wants extra protection.</p>
               </div>
               <button onClick={fetchChannelSecurityConfig} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
             </div>
