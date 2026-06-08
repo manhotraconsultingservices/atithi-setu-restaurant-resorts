@@ -18139,6 +18139,9 @@ async function startServer() {
         // when meal_plan_id is null/undefined the booking renders identically
         // to the LEGACY path (no matrix lookup, no extra-person line).
         meal_plan_id, extra_adults, extra_children_with_mattress, extra_children_no_mattress,
+        // Receivables Phase 2 — optional travel-agent attribution. When set,
+        // this booking rolls into that agent's statement + receivables aging.
+        agent_id,
       } = req.body || {};
       if (!guest_name || String(guest_name).trim().length === 0) {
         return res.status(400).json({ error: "Guest name is required." });
@@ -18209,13 +18212,15 @@ async function startServer() {
         `INSERT INTO room_bookings
          (id, room_id, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
           num_guests, check_in_date, check_out_date, status, booking_source, room_rate, total_amount, special_requests, booking_type,
-          meal_plan_id, meal_plan_snapshot, extra_adults, extra_children_with_mattress, extra_children_no_mattress)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          meal_plan_id, meal_plan_snapshot, extra_adults, extra_children_with_mattress, extra_children_no_mattress,
+          agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [bid, room_id, guest_name, guest_phone || null, guest_email || null,
          guest_id_proof || null, guest_nationality || null, guest_state || null,
          num_guests || 1, check_in_date, check_out_date, booking_source || 'DIRECT', rate, total,
          special_requests || null, bookingType,
-         meal_plan_id || null, mealPlanSnapshot, xpAdults, xpChildMat, xpChildNoMat]
+         meal_plan_id || null, mealPlanSnapshot, xpAdults, xpChildMat, xpChildNoMat,
+         agent_id || null]
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
@@ -18824,6 +18829,26 @@ async function startServer() {
         [from, today]
       ).catch(() => []);
 
+      // Receivables Phase 2 — per-channel outstanding (sum of unpaid
+      // partner_invoices rows). Joined into each channel's payload below.
+      const outRows: any[] = await tenantDb.query(
+        `SELECT partner_code,
+                COALESCE(SUM(net_due - net_received), 0) AS outstanding,
+                COUNT(*) AS open_invoices
+           FROM partner_invoices
+          WHERE partner_type = 'OTA'
+            AND status NOT IN ('PAID', 'WRITTEN_OFF')
+            AND (net_due - net_received) > 0
+          GROUP BY partner_code`
+      ).catch(() => []);
+      const outstandingByChannel: Record<string, { amount: number; invoices: number }> = {};
+      for (const r of outRows) {
+        outstandingByChannel[r.partner_code] = {
+          amount: Number(r.outstanding || 0),
+          invoices: Number(r.open_invoices || 0),
+        };
+      }
+
       // Compute derived metrics + shares in JS so the SQL stays readable.
       const totalGross    = channelRows.reduce((s, r) => s + Number(r.gross || 0), 0);
       const totalBookings = channelRows.reduce((s, r) => s + Number(r.bookings || 0), 0);
@@ -18860,6 +18885,9 @@ async function startServer() {
           avg_lead_time_days: Math.round(Number(r.avg_lead_time_days || 0) * 10) / 10,
           revenue_share_pct: totalGross > 0 ? Math.round((gross / totalGross) * 1000) / 10 : 0,
           booking_share_pct: totalBookings > 0 ? Math.round((bookings / totalBookings) * 1000) / 10 : 0,
+          // Receivables Phase 2 — per-channel outstanding
+          outstanding:          Math.round((outstandingByChannel[String(r.channel)]?.amount || 0) * 100) / 100,
+          open_invoice_count:   outstandingByChannel[String(r.channel)]?.invoices || 0,
         };
       });
 
@@ -20836,7 +20864,11 @@ async function startServer() {
         'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress',
       ];
       const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','check_in_date','check_out_date','room_rate','special_requests','status','booking_type',
-        'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress'];
+        'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress',
+        // Receivables Phase 2 — agent + booking_source editable post-create
+        // so owner can re-tag a misattributed booking. Not locked after
+        // check-in: tagging the right partner is a back-office concern.
+        'booking_source','agent_id'];
       const patch: any = {};
       for (const k of allow) if (k in (req.body || {})) patch[k] = req.body[k];
       if (Object.keys(patch).length === 0) return res.json(b);
@@ -27764,7 +27796,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'receivables-platform-agents-invoices-payments-aging',
+    commit_marker: 'receivables-part2-agent-dropdown-360-chip-csv-export',
     code_features: [
       'subscription-billing',
       'read-only-mode',

@@ -18101,6 +18101,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 <p className="text-[9px] text-[#9c8e85] uppercase font-bold">Cancellations</p>
                                 <p className="font-bold text-[#1a1208]">{c.cancellations} <span className="text-[10px] font-normal text-[#6b5d52]">({fmtPct(c.cancellation_rate)} rate)</span></p>
                               </div>
+                              {/* Receivables Phase 2 — outstanding chip per channel.
+                                  Click jumps to the Partner Statement modal for
+                                  this OTA so owner can drill in immediately. */}
+                              <div
+                                className={cn(
+                                  'rounded-xl px-3 py-2 col-span-2 cursor-pointer transition hover:scale-[1.01]',
+                                  (c.outstanding || 0) > 0 ? 'bg-rose-50 border border-rose-200' : 'bg-emerald-50 border border-emerald-200'
+                                )}
+                                onClick={() => openPartnerStatement('OTA', c.channel)}
+                                title="Click to view full statement"
+                              >
+                                <p className={cn('text-[9px] uppercase font-bold', (c.outstanding || 0) > 0 ? 'text-rose-800' : 'text-emerald-800')}>
+                                  Outstanding {(c.open_invoice_count || 0) > 0 ? `(${c.open_invoice_count} inv)` : ''}
+                                </p>
+                                <p className={cn('font-bold text-base', (c.outstanding || 0) > 0 ? 'text-rose-700' : 'text-emerald-700')}>
+                                  {(c.outstanding || 0) > 0 ? fmt(c.outstanding) : '✓ Settled'}
+                                </p>
+                              </div>
                             </div>
                             {/* Mini share bar */}
                             <div className="mt-3">
@@ -18198,13 +18216,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   Outstanding balance per partner, aged into Current / 30-60d / 60-90d / 90+d buckets. OTAs typically pay 30-60 days after the guest checks out; travel agents per their negotiated terms. Click any row to drill into the full statement.
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   onClick={autoGenerateInvoices}
                   disabled={autoGeneratingInvoices}
                   className="px-3 py-1.5 rounded-xl bg-rose-600 text-white text-xs font-bold hover:bg-rose-700 disabled:opacity-50"
                   title="Aggregate last month's checked-out OTA bookings into one invoice per channel. Idempotent."
                 >{autoGeneratingInvoices ? 'Generating…' : '⚡ Auto-generate last month'}</button>
+                {/* CSV export — pure client-side from the already-fetched
+                    aging payload. Owner downloads to share with accountant. */}
+                <button
+                  onClick={() => {
+                    if (!receivablesAging?.partners?.length) { alert('Nothing to export yet.'); return; }
+                    const headers = ['Partner Type','Partner Code','Partner Name','Invoice Count','Current (<30d)','30-60d','60-90d','90+d','Total Owed (INR)','Oldest Due'];
+                    const rows = receivablesAging.partners.map((p: any) => [
+                      p.partner_type, p.partner_code, p.partner_name || '',
+                      p.invoice_count, p.current, p.b30_60, p.b60_90, p.b90_plus, p.total,
+                      p.oldest_due || '',
+                    ]);
+                    const t = receivablesAging.totals || {};
+                    rows.push(['','','TOTAL', receivablesAging.invoice_count || 0,
+                      t.current || 0, t.b30_60 || 0, t.b60_90 || 0, t.b90_plus || 0, t.total || 0, '']);
+                    const escape = (v: any) => {
+                      const s = String(v ?? '');
+                      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+                    };
+                    const csv = [headers, ...rows].map(r => r.map(escape).join(',')).join('\n');
+                    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+                    const url  = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `receivables-aging-${receivablesAging.as_of || new Date().toISOString().slice(0,10)}.csv`;
+                    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-white border border-rose-300 text-rose-700 text-xs font-bold hover:bg-rose-50"
+                  title="Download aging report as CSV for your accountant"
+                >📥 Export CSV</button>
                 <button onClick={() => { fetchReceivablesAging(); fetchPartnerInvoices(); }} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
               </div>
             </div>
@@ -24679,6 +24727,48 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Special Requests</label>
                 <textarea value={editingBooking.special_requests || ''} onChange={e => setEditingBooking({...editingBooking, special_requests: e.target.value})} rows={2} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
+              </div>
+
+              {/* Booking source + agent — Phase 2 of receivables platform
+                  (9 Jun 2026). Source = OTA channel or direct/walk-in.
+                  Agent = optional tag to a travel agent / corporate /
+                  tour operator. Both can be set on the same booking
+                  (e.g., MMT booking through Cox & Kings). */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Booking Source</label>
+                  <select
+                    value={editingBooking.booking_source || 'DIRECT'}
+                    onChange={e => setEditingBooking({ ...editingBooking, booking_source: e.target.value })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  >
+                    <option value="DIRECT">🏠 Direct (our website / phone)</option>
+                    <option value="WALK_IN">🚶 Walk-in</option>
+                    <option value="BOOKING">🌐 Booking.com</option>
+                    <option value="MMT">✈️ MakeMyTrip</option>
+                    <option value="GOIBIBO">🧳 Goibibo</option>
+                    <option value="AGODA">🏨 Agoda</option>
+                    <option value="EXPEDIA">🌍 Expedia</option>
+                    <option value="AIRBNB">🏠 Airbnb</option>
+                    <option value="AGENT">🤝 Travel Agent / Corporate</option>
+                    <option value="OTHER">Other</option>
+                  </select>
+                  <p className="text-[9px] text-[#9c8e85] mt-1">Where this booking originated. Drives commission % and OTA 360°.</p>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Travel Agent <span className="text-[#9c8e85] font-normal">(optional)</span></label>
+                  <select
+                    value={editingBooking.agent_id || ''}
+                    onChange={e => setEditingBooking({ ...editingBooking, agent_id: e.target.value || null })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  >
+                    <option value="">— no agent —</option>
+                    {travelAgents.filter((a: any) => a.is_active).map((a: any) => (
+                      <option key={a.id} value={a.id}>{a.name} ({a.type}) — {Number(a.commission_pct||0).toFixed(1)}% comm</option>
+                    ))}
+                  </select>
+                  <p className="text-[9px] text-[#9c8e85] mt-1">{travelAgents.length === 0 ? 'Add agents in Channel Manager → 🤝 Travel Agents.' : 'Roll this booking into the chosen agent\'s statement & receivables.'}</p>
+                </div>
               </div>
 
               {/* REQ 1 — ID-proof documents. Only shown on existing bookings
