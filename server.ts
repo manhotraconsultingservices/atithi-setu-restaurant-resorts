@@ -11386,6 +11386,215 @@ async function startServer() {
     }
   });
 
+  // ════════════════════════════════════════════════════════════════════
+  // HR & PAYROLL — Employee directory (Phase 1 #131, 10 Jun 2026)
+  // ════════════════════════════════════════════════════════════════════
+  // Five endpoints surface attendance_staff with the extended HR
+  // fields (designation, dept, joining_date, PAN/Aadhaar/UAN/ESIC,
+  // bank, emergency contact, dob, gender, address, hr_status).
+  // List + detail + update + document upload + CSV export.
+  // All gated by requireTabAccess('HR_PAYROLL') so only roles with
+  // explicit access can view HR fields (which contain PII).
+  // Document upload reuses existing multer + /uploads pipeline.
+
+  // List all employees with HR field projection.
+  app.get("/api/restaurant/:id/hr/employees", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const statusFilter = String(req.query.status || '').toUpperCase().trim();
+      const q = String(req.query.q || '').trim().toLowerCase();
+      let sql = `SELECT id, name, role, phone, email, login_id,
+                        designation, department, joining_date, ctc,
+                        pan, aadhaar, uan, esic_number,
+                        bank_account, bank_ifsc, bank_name,
+                        emergency_contact_name, emergency_contact_phone,
+                        address, dob, gender, marital_status,
+                        hr_status, is_active, hourly_rate, payroll_id,
+                        joined_at, created_at
+                   FROM attendance_staff
+                  WHERE 1=1`;
+      const params: any[] = [];
+      if (statusFilter && ['ACTIVE','RESIGNED','TERMINATED','ON_HOLD'].includes(statusFilter)) {
+        sql += ` AND hr_status = ?`;
+        params.push(statusFilter);
+      }
+      sql += ` ORDER BY name`;
+      let rows: any[] = await db.query(sql, params).catch(() => []);
+      // Q-search is client-side after fetch — keeps the SQL simple
+      // and handles the multi-column "name OR phone OR email OR PAN"
+      // pattern in one place. Reasonable for staff lists (< 500 rows).
+      if (q) {
+        rows = rows.filter((r: any) => {
+          const hay = `${r.name || ''} ${r.phone || ''} ${r.email || ''} ${r.pan || ''} ${r.payroll_id || ''} ${r.designation || ''} ${r.department || ''}`.toLowerCase();
+          return hay.includes(q);
+        });
+      }
+      // Summary counts by hr_status for header chips.
+      const summary = rows.reduce((acc: Record<string, number>, r: any) => {
+        const k = r.hr_status || 'ACTIVE';
+        acc[k] = (acc[k] || 0) + 1;
+        return acc;
+      }, {});
+      res.json({ employees: rows, count: rows.length, summary });
+    } catch (err: any) {
+      console.error('hr/employees list error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to load employees' });
+    }
+  });
+
+  // Detail — staff row + salary structure history + recent payslips
+  // + employment-doc list. Single round-trip for the detail modal.
+  app.get("/api/restaurant/:id/hr/employees/:staffId", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const staff: any = await db.get(
+        "SELECT * FROM attendance_staff WHERE id = ?", [req.params.staffId]
+      );
+      if (!staff) return res.status(404).json({ error: 'Employee not found' });
+      const structures: any[] = await db.query(
+        "SELECT * FROM salary_structures WHERE staff_id = ? ORDER BY effective_from DESC",
+        [req.params.staffId]
+      ).catch(() => []);
+      const recentPayslips: any[] = await db.query(
+        `SELECT id, payslip_number, pay_period_start, pay_period_end,
+                gross_earnings, gross_deductions, net_pay, pdf_url, created_at
+           FROM payslips WHERE staff_id = ? ORDER BY pay_period_end DESC LIMIT 12`,
+        [req.params.staffId]
+      ).catch(() => []);
+      res.json({ employee: staff, salary_structures: structures, recent_payslips: recentPayslips });
+    } catch (err: any) {
+      console.error('hr/employees detail error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to load employee' });
+    }
+  });
+
+  // Update HR fields. Strictly the HR profile — NOT login fields
+  // (role / login_id / password). Those stay on the existing Staff
+  // Access endpoint to preserve the RBAC separation.
+  app.put("/api/restaurant/:id/hr/employees/:staffId", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const ALLOWED: Record<string, true> = {
+        name: true, phone: true, email: true,
+        designation: true, department: true, joining_date: true, ctc: true,
+        pan: true, aadhaar: true, uan: true, esic_number: true,
+        bank_account: true, bank_ifsc: true, bank_name: true,
+        emergency_contact_name: true, emergency_contact_phone: true,
+        address: true, dob: true, gender: true, marital_status: true,
+        hourly_rate: true, payroll_id: true, hr_status: true, notes: true,
+      };
+      const sets: string[] = [];
+      const params: any[] = [];
+      for (const [k, v] of Object.entries(b)) {
+        if (ALLOWED[k]) {
+          // Light validation — PAN format (5 letters + 4 digits + 1 letter),
+          // Aadhaar 12 digits, IFSC 4 letters + 0 + 6 chars. Reject only
+          // when input is non-empty AND malformed — empty string clears.
+          if (k === 'pan' && v && !/^[A-Z]{5}[0-9]{4}[A-Z]$/i.test(String(v).trim())) {
+            return res.status(400).json({ error: 'PAN must be 10 chars: 5 letters + 4 digits + 1 letter (e.g. ABCDE1234F).' });
+          }
+          if (k === 'aadhaar' && v && !/^\d{12}$/.test(String(v).replace(/\s/g, ''))) {
+            return res.status(400).json({ error: 'Aadhaar must be 12 digits.' });
+          }
+          if (k === 'bank_ifsc' && v && !/^[A-Z]{4}0[A-Z0-9]{6}$/i.test(String(v).trim())) {
+            return res.status(400).json({ error: 'IFSC must be 11 chars: 4 letters + 0 + 6 alphanumeric (e.g. HDFC0001234).' });
+          }
+          if (k === 'hr_status' && v && !['ACTIVE','RESIGNED','TERMINATED','ON_HOLD'].includes(String(v))) {
+            return res.status(400).json({ error: 'hr_status must be ACTIVE / RESIGNED / TERMINATED / ON_HOLD.' });
+          }
+          sets.push(`${k} = ?`);
+          params.push(v === '' ? null : v);
+        }
+      }
+      if (sets.length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
+      params.push(req.params.staffId);
+      await db.run(`UPDATE attendance_staff SET ${sets.join(', ')} WHERE id = ?`, params);
+      const updated = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [req.params.staffId]);
+      res.json(updated);
+    } catch (err: any) {
+      console.error('hr/employees update error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to update employee' });
+    }
+  });
+
+  // CSV export — same shape as the list endpoint, formatted for
+  // Excel consumption with BOM. Owner uses this for offline payroll
+  // reconciliation + statutory filing prep.
+  app.get("/api/restaurant/:id/hr/employees.csv", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT id, name, role, designation, department, hr_status,
+                joining_date, ctc, hourly_rate, payroll_id,
+                pan, aadhaar, uan, esic_number,
+                bank_account, bank_ifsc, bank_name,
+                phone, email, address, dob, gender, marital_status
+           FROM attendance_staff ORDER BY name`
+      ).catch(() => []);
+      const header = [
+        'ID','Name','Role','Designation','Department','HR Status',
+        'Joining Date','CTC','Hourly Rate','Payroll ID',
+        'PAN','Aadhaar','UAN','ESIC',
+        'Bank A/c','IFSC','Bank','Phone','Email','Address',
+        'DOB','Gender','Marital Status',
+      ];
+      const escape = (v: any) => {
+        const s = (v == null ? '' : String(v)).replace(/"/g, '""');
+        return /[",\n\r]/.test(s) ? `"${s}"` : s;
+      };
+      const lines = [header.join(',')];
+      for (const r of rows) {
+        lines.push([
+          r.id, r.name, r.role, r.designation, r.department, r.hr_status,
+          r.joining_date, r.ctc, r.hourly_rate, r.payroll_id,
+          r.pan, r.aadhaar, r.uan, r.esic_number,
+          r.bank_account, r.bank_ifsc, r.bank_name,
+          r.phone, r.email, r.address, r.dob, r.gender, r.marital_status,
+        ].map(escape).join(','));
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="employees-${new Date().toISOString().slice(0,10)}.csv"`);
+      // UTF-8 BOM so Excel renders ₹ + Devanagari without garbling
+      res.send('﻿' + lines.join('\n'));
+    } catch (err: any) {
+      console.error('hr/employees CSV error:', err);
+      res.status(500).json({ error: err?.message || 'CSV export failed' });
+    }
+  });
+
+  // Document upload (multipart). Reuses the existing multer pipeline
+  // and stores the resulting /uploads/<file> URL keyed by staff_id.
+  // We piggy-back on the existing `guest_documents` table pattern —
+  // for HR we'd ideally have a dedicated `hr_documents` table but
+  // Phase 1 stays minimal: docs are URLs on a JSON column.
+  // (Track as a Phase 2 follow-up if multi-doc-per-staff is needed.)
+  app.post("/api/restaurant/:id/hr/employees/:staffId/documents", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), idDocUpload.single('file'), async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      const url = `/uploads/${req.file.filename}`;
+      const docType = String(req.body?.doc_type || 'OTHER').toUpperCase();
+      const db = await getTenantDb(req.params.id);
+      // Store as a doc list in `notes` for now (JSON-encoded). Lean
+      // approach — proper hr_documents table is a Phase 2 follow-up.
+      const staff: any = await db.get("SELECT notes FROM attendance_staff WHERE id = ?", [req.params.staffId]);
+      let docs: any[] = [];
+      try {
+        const existing = JSON.parse(String(staff?.notes || '{}'));
+        docs = Array.isArray(existing.documents) ? existing.documents : [];
+      } catch { docs = []; }
+      docs.push({ url, type: docType, uploaded_at: new Date().toISOString(), original_name: req.file.originalname });
+      await db.run(
+        "UPDATE attendance_staff SET notes = ? WHERE id = ?",
+        [JSON.stringify({ documents: docs }), req.params.staffId]
+      );
+      res.json({ ok: true, url, doc_type: docType, total_docs: docs.length });
+    } catch (err: any) {
+      console.error('hr/employees document upload error:', err);
+      res.status(500).json({ error: err?.message || 'Upload failed' });
+    }
+  });
+
   // ── Phase 5: Credentials encrypted CRUD ────────────────────────────────
   // Per-tenant + per-channel credentials. AES-256-GCM at rest, master key
   // from ATITHI_CREDENTIAL_KEY env var. The owner-facing UI never displays
@@ -29641,7 +29850,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hr-p1-1-schema-central-pt-tds-seed',
+    commit_marker: 'hr-p1-2-employee-directory-crud',
     code_features: [
       'subscription-billing',
       'read-only-mode',

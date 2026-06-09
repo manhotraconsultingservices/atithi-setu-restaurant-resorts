@@ -10883,6 +10883,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'ROSTER',        label: 'Roster' },
               { id: 'TIMESHEET',     label: 'Timesheet' },
               { id: 'ATTENDANCE',    label: 'Attendance' },
+              { id: 'HR_PAYROLL',    label: 'HR & Payroll' },
               { id: 'FEEDBACK',      label: 'Feedback' },
               { id: 'SUBSCRIPTION',  label: 'Subscription' },
               { id: 'NOTIFICATIONS', label: 'Notifications' },
@@ -14380,6 +14381,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <RosterManagement restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'TIMESHEET' ? (
         <TimesheetDashboard restaurantId={restaurantId} token={token!} />
+      ) : activeTab === 'HR_PAYROLL' ? (
+        <HRPayrollModule restaurantId={restaurantId} token={token!} restaurant={restaurant} />
       ) : activeTab === 'REPORTS' ? (
         // Hotel-mode owners get hotel-focused KPIs (occupancy, ADR,
         // RevPAR, ancillary, guest rating) instead of restaurant
@@ -19778,6 +19781,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'ROSTER',            label: 'Roster',                  description: 'Drag-and-drop weekly shift planning, slot assignment.' },
               { id: 'TIMESHEET',         label: 'Timesheet',               description: 'Planned vs actual hours, payroll prep, overtime variance.' },
               { id: 'ATTENDANCE',        label: 'Attendance',              description: 'Clock-in / clock-out records, daily attendance report.' },
+              { id: 'HR_PAYROLL',        label: 'HR & Payroll',            description: 'Employee profile + salary structure + payslip + statutory (PF/ESI/TDS) + expenses + offer letters.' },
               { id: 'REPORTS',           label: 'Reports & Analytics',     description: 'MTD/YTD revenue, top items, peak-hour heatmap, cohort analysis.' },
               { id: 'FEEDBACK',          label: 'Feedback / Reviews',      description: 'Customer feedback responses, NPS, public review page.' },
               { id: 'NOTIFICATIONS',     label: 'Notifications',           description: 'WhatsApp / SMS / email template config, delivery logs.' },
@@ -43040,6 +43044,446 @@ function _rolePalette(role: string | undefined | null) {
 // "09:00–17:00" → "9-5p" (compact display in cramped cells)
 function _formatTimeRange(start: string, end: string): string {
   return `${start}–${end}`;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// HR & Payroll Module (Phase 1, 10 Jun 2026)
+// ════════════════════════════════════════════════════════════════════════
+// Top-level tab with sub-tabs. Phase 1 ships the Employees sub-tab
+// fully wired; subsequent commits will fill in Salary Structure /
+// Components / Payroll / Expenses / Offer Letters / Reports.
+function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const [subTab, setSubTab] = useState<'EMPLOYEES' | 'SALARY' | 'PAYROLL' | 'EXPENSES' | 'OFFERS' | 'REPORTS'>('EMPLOYEES');
+  const SUB_TABS: Array<{ id: typeof subTab; label: string; emoji: string; ready: boolean }> = [
+    { id: 'EMPLOYEES', label: 'Employees',         emoji: '👥', ready: true },
+    { id: 'SALARY',    label: 'Salary Structure',  emoji: '💰', ready: false },
+    { id: 'PAYROLL',   label: 'Payroll Runs',      emoji: '📋', ready: false },
+    { id: 'EXPENSES',  label: 'Expense Claims',    emoji: '🧾', ready: false },
+    { id: 'OFFERS',    label: 'Offer Letters',     emoji: '✉️', ready: false },
+    { id: 'REPORTS',   label: 'HR Reports',        emoji: '📊', ready: false },
+  ];
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-2xl font-bold text-[#1a1208]">HR &amp; Payroll</h2>
+        <p className="text-xs text-[#6b5d52] mt-1">
+          Employee directory, salary structure, payroll runs with statutory PF/ESI/PT/TDS,
+          expense reimbursement, and offer letters. Phase 1 MVP — additional surfaces
+          (statutory PDFs, self-service, leaves) ship in following commits.
+        </p>
+      </div>
+      <div className="flex items-center gap-1 overflow-x-auto bg-[#faf7f2] rounded-2xl p-1">
+        {SUB_TABS.map(t => (
+          <button
+            key={t.id}
+            onClick={() => t.ready && setSubTab(t.id)}
+            disabled={!t.ready}
+            className={cn(
+              'px-3 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors',
+              subTab === t.id ? 'bg-white text-[#cc5a16] shadow-sm' : 'text-[#6b5d52] hover:bg-white/60',
+              !t.ready && 'opacity-40 cursor-not-allowed',
+            )}
+            title={t.ready ? '' : 'Coming in next commit'}
+          >
+            {t.emoji} {t.label}
+            {!t.ready && <span className="ml-1 text-[9px]">(soon)</span>}
+          </button>
+        ))}
+      </div>
+      {subTab === 'EMPLOYEES' && <EmployeeDirectory restaurantId={restaurantId} token={token} restaurant={restaurant} />}
+      {subTab !== 'EMPLOYEES' && (
+        <div className="bg-white rounded-3xl border-2 border-dashed border-[#cc5a16]/20 p-12 text-center">
+          <p className="text-sm text-[#9c8e85] italic">This sub-tab ships in the next HR-Payroll commit.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Employee directory ─────────────────────────────────────────────
+// List + filter + search + Detail modal with full HR fields.
+// Hits the new GET/PUT /api/restaurant/:id/hr/employees endpoints.
+function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const [data, setData] = useState<{ employees: any[]; count: number; summary: Record<string, number> } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'RESIGNED' | 'TERMINATED' | 'ON_HOLD'>('ACTIVE');
+  const [query, setQuery] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const fetch = async () => {
+    if (!restaurantId) return;
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (statusFilter !== 'ALL') params.set('status', statusFilter);
+      if (query) params.set('q', query);
+      const res = await window.fetch(
+        `/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees?${params}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setData(await res.json());
+    } catch (err: any) { alert(err?.message || 'Failed to load employees'); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { fetch(); /* eslint-disable-line */ }, [restaurantId, statusFilter]);
+  useEffect(() => {
+    const t = window.setTimeout(() => fetch(), 250);   // debounce search
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line
+  }, [query]);
+
+  const STATUS_PILL: Record<string, string> = {
+    ACTIVE:     'bg-emerald-100 text-emerald-800',
+    RESIGNED:   'bg-amber-100 text-amber-800',
+    TERMINATED: 'bg-rose-100 text-rose-800',
+    ON_HOLD:    'bg-stone-100 text-stone-700',
+  };
+
+  return (
+    <>
+      <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-6 space-y-4">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <h3 className="text-xl font-bold text-[#1a1208]">👥 Employees</h3>
+            <p className="text-xs text-[#6b5d52] mt-0.5">
+              Full HR profile — PAN, Aadhaar, UAN, ESIC, bank, emergency contact. CSV export available.
+            </p>
+          </div>
+          <a
+            href={`/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees.csv?_=${Date.now()}`}
+            target="_blank"
+            rel="noreferrer"
+            className="px-3 py-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5"
+          >📥 Export CSV</a>
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          {(['ALL','ACTIVE','RESIGNED','TERMINATED','ON_HOLD'] as const).map(s => (
+            <button
+              key={s}
+              onClick={() => setStatusFilter(s)}
+              className={cn(
+                'px-3 py-1.5 rounded-xl text-xs font-bold border-2 transition-colors',
+                statusFilter === s ? 'border-[#cc5a16] bg-[#cc5a16]/5 text-[#cc5a16]' : 'border-transparent bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/5',
+              )}
+            >
+              {s === 'ALL' ? 'All' : s.replace('_', ' ')}
+              {data?.summary?.[s] != null && <span className="ml-1.5 text-[10px] opacity-70">({data.summary[s]})</span>}
+            </button>
+          ))}
+          <input
+            type="text"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search name, phone, email, PAN, payroll ID, designation, department…"
+            className="flex-1 min-w-[260px] bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none"
+          />
+        </div>
+
+        {loading && <p className="text-center text-sm text-[#9c8e85] py-8">Loading…</p>}
+        {!loading && data && data.employees.length === 0 && (
+          <div className="text-center text-sm text-[#9c8e85] py-12 bg-[#faf7f2] rounded-2xl">
+            No employees match these filters.
+          </div>
+        )}
+        {!loading && data && data.employees.length > 0 && (
+          <div className="overflow-x-auto rounded-2xl border border-[#f0e8dd]">
+            <table className="w-full text-sm min-w-[800px]">
+              <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                <tr>
+                  <th className="text-left px-3 py-2">Name</th>
+                  <th className="text-left px-3 py-2">Designation</th>
+                  <th className="text-left px-3 py-2">Department</th>
+                  <th className="text-left px-3 py-2">Role</th>
+                  <th className="text-left px-3 py-2">Joining</th>
+                  <th className="text-right px-3 py-2">CTC / Hourly</th>
+                  <th className="text-center px-3 py-2">HR status</th>
+                  <th className="text-center px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.employees.map(e => (
+                  <tr key={e.id} className="border-t border-[#f0e8dd] hover:bg-[#faf7f2]/60">
+                    <td className="px-3 py-2">
+                      <div className="font-semibold text-[#1a1208]">{e.name}</div>
+                      <div className="text-[10px] text-[#9c8e85]">{e.phone || '—'} {e.email ? `· ${e.email}` : ''}</div>
+                    </td>
+                    <td className="px-3 py-2 text-[#3d3128]">{e.designation || <span className="text-[#9c8e85] italic">—</span>}</td>
+                    <td className="px-3 py-2 text-[#3d3128]">{e.department || <span className="text-[#9c8e85] italic">—</span>}</td>
+                    <td className="px-3 py-2 text-[10px] uppercase tracking-widest">{e.role}</td>
+                    <td className="px-3 py-2 text-[11px]">{e.joining_date ? formatDateForTenant(e.joining_date, restaurant?.date_format) : <span className="text-[#9c8e85] italic">—</span>}</td>
+                    <td className="px-3 py-2 text-right font-mono text-[11px]">
+                      {e.ctc ? `₹${Number(e.ctc).toLocaleString('en-IN')}` : (e.hourly_rate ? `₹${Number(e.hourly_rate).toFixed(0)}/hr` : '—')}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold', STATUS_PILL[e.hr_status || 'ACTIVE'])}>
+                        {e.hr_status || 'ACTIVE'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <button onClick={() => setEditingId(e.id)} className="text-[#cc5a16] hover:underline text-[11px] font-bold">Edit HR profile</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      {editingId && (
+        <EmployeeDetailModal
+          restaurantId={restaurantId}
+          token={token}
+          staffId={editingId}
+          restaurant={restaurant}
+          onClose={() => setEditingId(null)}
+          onSaved={() => { setEditingId(null); fetch(); }}
+        />
+      )}
+    </>
+  );
+}
+
+// ── EmployeeDetailModal ────────────────────────────────────────────
+// Full HR field editor. Calls GET on mount for current state + history,
+// PUT on save. Validates PAN / Aadhaar / IFSC client-side before posting.
+function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose, onSaved }: {
+  restaurantId: string; token: string; staffId: string; restaurant: any;
+  onClose: () => void; onSaved: () => void;
+}) {
+  const [emp, setEmp] = useState<any | null>(null);
+  const [structures, setStructures] = useState<any[]>([]);
+  const [payslips, setPayslips] = useState<any[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.fetch(
+          `/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees/${encodeURIComponent(staffId)}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const j = await res.json();
+        setEmp(j.employee);
+        setStructures(j.salary_structures || []);
+        setPayslips(j.recent_payslips || []);
+      } catch (err: any) { alert(err?.message || 'Failed to load'); onClose(); }
+    })();
+    // eslint-disable-next-line
+  }, [staffId]);
+
+  if (!emp) {
+    return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+        <div className="bg-white rounded-3xl p-8 text-center text-sm text-[#9c8e85]">Loading…</div>
+      </div>
+    );
+  }
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await window.fetch(
+        `/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees/${encodeURIComponent(staffId)}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(emp),
+        }
+      );
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      onSaved();
+    } catch (err: any) { alert(err?.message || 'Save failed'); }
+    finally { setSaving(false); }
+  };
+
+  const setF = (k: string, v: any) => setEmp({ ...emp, [k]: v });
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl my-8">
+        <div className="sticky top-0 bg-white border-b border-[#cc5a16]/10 px-6 py-4 flex items-center justify-between rounded-t-3xl">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">HR profile</p>
+            <h2 className="text-xl font-bold text-[#1a1208]">{emp.name}</h2>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 rounded-full bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#3d3128]">×</button>
+        </div>
+        <div className="p-6 space-y-4">
+          {/* ── Identity ─────────────────────────────────────────── */}
+          <section>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Identity</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="Full name"            value={emp.name}            onChange={(v) => setF('name', v)} />
+              <Field label="Designation"          value={emp.designation || ''} onChange={(v) => setF('designation', v)} placeholder="e.g. Receptionist, Chef" />
+              <Field label="Department"           value={emp.department || ''}  onChange={(v) => setF('department', v)} placeholder="Front Office, F&B, Kitchen" />
+              <Field label="Payroll ID"           value={emp.payroll_id || ''}  onChange={(v) => setF('payroll_id', v)} placeholder="EMP-001" />
+              <Field label="Phone"                value={emp.phone || ''}       onChange={(v) => setF('phone', v)} />
+              <Field label="Email"                value={emp.email || ''}       onChange={(v) => setF('email', v)} type="email" />
+              <Field label="Joining date"         value={emp.joining_date || ''} onChange={(v) => setF('joining_date', v)} type="date" />
+              <Field label="Date of birth"        value={emp.dob || ''}         onChange={(v) => setF('dob', v)} type="date" />
+              <SelectField
+                label="HR status"
+                value={emp.hr_status || 'ACTIVE'}
+                onChange={(v) => setF('hr_status', v)}
+                options={[
+                  { value: 'ACTIVE',     label: 'Active' },
+                  { value: 'ON_HOLD',    label: 'On hold' },
+                  { value: 'RESIGNED',   label: 'Resigned' },
+                  { value: 'TERMINATED', label: 'Terminated' },
+                ]}
+              />
+              <SelectField
+                label="Gender"
+                value={emp.gender || ''}
+                onChange={(v) => setF('gender', v)}
+                options={[
+                  { value: '', label: '—' },
+                  { value: 'M', label: 'Male' },
+                  { value: 'F', label: 'Female' },
+                  { value: 'O', label: 'Other' },
+                ]}
+              />
+              <SelectField
+                label="Marital status"
+                value={emp.marital_status || ''}
+                onChange={(v) => setF('marital_status', v)}
+                options={[
+                  { value: '',           label: '—' },
+                  { value: 'SINGLE',     label: 'Single' },
+                  { value: 'MARRIED',    label: 'Married' },
+                  { value: 'DIVORCED',   label: 'Divorced' },
+                  { value: 'WIDOWED',    label: 'Widowed' },
+                ]}
+              />
+            </div>
+          </section>
+
+          {/* ── Compensation ─────────────────────────────────────── */}
+          <section>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Compensation</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="CTC (annual ₹)"  value={emp.ctc || ''}         onChange={(v) => setF('ctc', v)} type="number" />
+              <Field label="Hourly rate (₹/hr)" value={emp.hourly_rate || ''} onChange={(v) => setF('hourly_rate', v)} type="number" />
+            </div>
+          </section>
+
+          {/* ── Statutory IDs ────────────────────────────────────── */}
+          <section>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Statutory identifiers</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="PAN"     value={emp.pan || ''}         onChange={(v) => setF('pan', String(v).toUpperCase())} placeholder="ABCDE1234F" />
+              <Field label="Aadhaar" value={emp.aadhaar || ''}     onChange={(v) => setF('aadhaar', v)} placeholder="1234 5678 9012" />
+              <Field label="UAN (EPFO)" value={emp.uan || ''}      onChange={(v) => setF('uan', v)} placeholder="12-digit UAN" />
+              <Field label="ESIC number" value={emp.esic_number || ''} onChange={(v) => setF('esic_number', v)} />
+            </div>
+          </section>
+
+          {/* ── Bank ─────────────────────────────────────────────── */}
+          <section>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Bank (for salary transfer)</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="Account number" value={emp.bank_account || ''} onChange={(v) => setF('bank_account', v)} />
+              <Field label="IFSC"           value={emp.bank_ifsc || ''}    onChange={(v) => setF('bank_ifsc', String(v).toUpperCase())} placeholder="HDFC0001234" />
+              <Field label="Bank name"      value={emp.bank_name || ''}    onChange={(v) => setF('bank_name', v)} placeholder="HDFC Bank" />
+            </div>
+          </section>
+
+          {/* ── Address + emergency ─────────────────────────────── */}
+          <section>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Address &amp; emergency contact</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="sm:col-span-2">
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Address</label>
+                <textarea
+                  rows={2}
+                  value={emp.address || ''}
+                  onChange={e => setF('address', e.target.value)}
+                  className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none"
+                />
+              </div>
+              <Field label="Emergency contact name"  value={emp.emergency_contact_name || ''}  onChange={(v) => setF('emergency_contact_name', v)} />
+              <Field label="Emergency contact phone" value={emp.emergency_contact_phone || ''} onChange={(v) => setF('emergency_contact_phone', v)} />
+            </div>
+          </section>
+
+          {/* ── Salary structure history (read-only) ────────────── */}
+          {structures.length > 0 && (
+            <section>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Salary structure history</p>
+              <div className="text-[11px] bg-[#faf7f2] rounded-xl p-3 space-y-1">
+                {structures.slice(0, 5).map(s => (
+                  <div key={s.id} className="flex justify-between">
+                    <span className="text-[#6b5d52]">
+                      {formatDateForTenant(s.effective_from, restaurant?.date_format)}
+                      {s.effective_to ? ` → ${formatDateForTenant(s.effective_to, restaurant?.date_format)}` : ' → current'}
+                    </span>
+                    <span className="font-mono">₹{Number(s.gross_monthly).toLocaleString('en-IN')}/month</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* ── Recent payslips (read-only) ─────────────────────── */}
+          {payslips.length > 0 && (
+            <section>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Recent payslips</p>
+              <div className="text-[11px] bg-[#faf7f2] rounded-xl p-3 space-y-1 max-h-40 overflow-y-auto">
+                {payslips.map(p => (
+                  <div key={p.id} className="flex justify-between">
+                    <span className="text-[#6b5d52]">{p.payslip_number || p.id.slice(-8)}</span>
+                    <span className="font-mono">₹{Number(p.net_pay).toLocaleString('en-IN')}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+        <div className="sticky bottom-0 bg-white border-t border-[#cc5a16]/10 px-6 py-4 flex items-center justify-end gap-2 rounded-b-3xl">
+          <button onClick={onClose} className="px-4 py-2 rounded-xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Cancel</button>
+          <button
+            onClick={save}
+            disabled={saving}
+            className="px-5 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save HR profile'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Small wrappers to keep modal JSX terse.
+function Field({ label, value, onChange, type = 'text', placeholder }: { label: string; value: any; onChange: (v: any) => void; type?: string; placeholder?: string }) {
+  return (
+    <div>
+      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">{label}</label>
+      <input
+        type={type}
+        value={value}
+        onChange={e => onChange(type === 'number' ? (e.target.value === '' ? '' : Number(e.target.value)) : e.target.value)}
+        placeholder={placeholder}
+        className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none"
+      />
+    </div>
+  );
+}
+function SelectField({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: Array<{ value: string; label: string }> }) {
+  return (
+    <div>
+      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">{label}</label>
+      <select value={value} onChange={e => onChange(e.target.value)} className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none">
+        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </div>
+  );
 }
 
 function RosterManagement({ restaurantId, token }: { restaurantId: string; token: string }) {
