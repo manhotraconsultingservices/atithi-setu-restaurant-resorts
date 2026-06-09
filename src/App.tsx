@@ -45128,6 +45128,101 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
   // instead of opening in a new tab).
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
+  // Phase 3 — luxury-hotel polish (Taj/Marriott-grade typography +
+  // motion). Lazy-loads Playfair Display from Google Fonts the first
+  // time the public page mounts. Falls back to system serif if the
+  // CDN is unreachable so the page never blocks on font loading.
+  useEffect(() => {
+    const id = 'public-page-playfair-font';
+    if (document.getElementById(id)) return;
+    const link = document.createElement('link');
+    link.id   = id;
+    link.rel  = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&display=swap';
+    document.head.appendChild(link);
+    return () => { /* keep across navigations — no removal */ };
+  }, []);
+  // Family applied to every serif headline on the page via inline
+  // style. System fonts (Georgia, "Times New Roman") cover the fallback
+  // path when Google Fonts is blocked.
+  const serifStack = "'Playfair Display', Georgia, 'Times New Roman', serif";
+
+  // Per-category multi-image carousel state. Keyed by category id (or
+  // legacy room id). Defaults to 0 (first photo).
+  const [categoryPhotoIdx, setCategoryPhotoIdx] = useState<Record<string, number>>({});
+  const cyclePhoto = (key: string, total: number, dir: number) => {
+    setCategoryPhotoIdx(prev => {
+      const cur = prev[key] || 0;
+      return { ...prev, [key]: (cur + dir + total) % total };
+    });
+  };
+
+  // ICS / share helpers used on the confirmation (DONE) step.
+  const downloadIcs = () => {
+    if (!confirmation) return;
+    const ci  = String(confirmation.check_in_date || '').slice(0, 10).replace(/-/g, '');
+    const co  = String(confirmation.check_out_date || '').slice(0, 10).replace(/-/g, '');
+    const uid = `${confirmation.booking_id}@atithi-setu.com`;
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//Atithi-Setu//Booking Confirmation//EN',
+      'BEGIN:VEVENT',
+      `UID:${uid}`,
+      `SUMMARY:Stay at ${hotelInfo.name}`,
+      `DESCRIPTION:Booking reference: ${confirmation.booking_id}\\nGuest: ${confirmation.guest_name}`,
+      `DTSTART;VALUE=DATE:${ci}`,
+      `DTEND;VALUE=DATE:${co}`,
+      hotelInfo.hotel_full_address ? `LOCATION:${String(hotelInfo.hotel_full_address).replace(/\n/g, ', ')}` : '',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].filter(Boolean).join('\r\n');
+    const blob = new Blob([ics], { type: 'text/calendar' });
+    const url  = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${hotelInfo.name?.replace(/\s+/g, '-') || 'booking'}-${confirmation.booking_id}.ics`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+  // Tiny inline component — wraps a section in opacity-0 + translates
+  // it up slightly, then adds the ks-fade-in class when it enters the
+  // viewport. IntersectionObserver disconnects after first reveal.
+  // Respects prefers-reduced-motion via the CSS keyframe rule above.
+  const Reveal = ({ children, delay = 0 }: { children: React.ReactNode; delay?: number }) => {
+    const ref = useRef<HTMLDivElement | null>(null);
+    const [visible, setVisible] = useState(false);
+    useEffect(() => {
+      if (!ref.current || visible) return;
+      const obs = new IntersectionObserver(
+        (entries) => entries.forEach(e => { if (e.isIntersecting) { setVisible(true); obs.disconnect(); } }),
+        { rootMargin: '0px 0px -80px 0px', threshold: 0.05 }
+      );
+      obs.observe(ref.current);
+      return () => obs.disconnect();
+    }, [visible]);
+    return (
+      <div
+        ref={ref}
+        className={visible ? 'ks-fade-in' : ''}
+        style={{ opacity: visible ? undefined : 0, animationDelay: visible ? `${delay}ms` : undefined }}
+      >
+        {children}
+      </div>
+    );
+  };
+  const sharePage = async () => {
+    const slug = hotelInfo.booking_slug || resolvedTenantId;
+    const url  = `${window.location.origin}/book/${slug}`;
+    const title = `Stay at ${hotelInfo.name}`;
+    const text  = `Book directly with ${hotelInfo.name} — best rate, no commission.`;
+    if (navigator.share) {
+      try { await navigator.share({ title, text, url }); return; } catch { /* fall through */ }
+    }
+    try { await navigator.clipboard?.writeText(url); alert('Link copied to clipboard!'); }
+    catch { window.prompt('Copy this link:', url); }
+  };
+
   return (
     <div
       className="min-h-screen bg-white text-[#1a1208]"
@@ -45140,6 +45235,25 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
         ['--brand-secondary' as any]: brandSecondary,
       }}
     >
+      {/* Phase 3 — keyframes for hero Ken Burns zoom + scroll-fade
+          reveal. Embedded as a style block so we don't have to touch
+          the Tailwind config. Vendor-prefix-free; modern browsers
+          handle it natively. */}
+      <style>{`
+        @keyframes ks-kenburns {
+          0%   { transform: scale(1.05) translate3d(-1%, -0.5%, 0); }
+          100% { transform: scale(1.18) translate3d(1%, 1%, 0); }
+        }
+        .ks-hero-bg { animation: ks-kenburns 30s ease-in-out infinite alternate; }
+        @keyframes ks-fadeup {
+          0%   { opacity: 0; transform: translateY(24px); }
+          100% { opacity: 1; transform: translateY(0); }
+        }
+        .ks-fade-in { animation: ks-fadeup 0.8s ease-out forwards; }
+        @media (prefers-reduced-motion: reduce) {
+          .ks-hero-bg, .ks-fade-in { animation: none !important; }
+        }
+      `}</style>
       {step === 'LANDING' ? (
         <>
           {/* ── Sticky top nav ───────────────────────────────────── */}
@@ -45167,26 +45281,33 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
           </nav>
 
           {/* ── Hero ─────────────────────────────────────────────── */}
-          <section className="relative">
-            <div
-              className="h-[55vh] sm:h-[70vh] bg-cover bg-center relative"
-              style={{
-                backgroundImage: hero
-                  ? `linear-gradient(to bottom, rgba(0,0,0,0.25), rgba(0,0,0,0.55)), url(${hero})`
-                  : 'linear-gradient(135deg, #cc5a16, #a84612)',
-              }}
-            >
+          <section className="relative overflow-hidden">
+            {/* Backdrop image animates with a slow Ken Burns zoom; the
+                gradient overlay is a separate layer so the animation
+                doesn't move the dark vignette away from the text. */}
+            <div className="h-[55vh] sm:h-[75vh] relative">
+              {hero ? (
+                <>
+                  <div
+                    className="absolute inset-0 bg-cover bg-center ks-hero-bg"
+                    style={{ backgroundImage: `url(${hero})` }}
+                  />
+                  <div className="absolute inset-0" style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.25), rgba(0,0,0,0.6))' }} />
+                </>
+              ) : (
+                <div className="absolute inset-0" style={{ background: `linear-gradient(135deg, ${brandPrimary}, ${brandSecondary})` }} />
+              )}
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center text-white px-4">
                 {hotelInfo.hotel_property_type && (
-                  <p className="text-[10px] sm:text-xs uppercase tracking-[0.3em] opacity-90 mb-2">
+                  <p className="text-[10px] sm:text-xs uppercase tracking-[0.4em] opacity-90 mb-3">
                     {String(hotelInfo.hotel_property_type).toLowerCase().replace(/_/g, ' ')}
                   </p>
                 )}
-                <h1 className="text-3xl sm:text-5xl lg:text-6xl font-serif font-bold drop-shadow-lg">{hotelInfo.name}</h1>
+                <h1 className="text-4xl sm:text-6xl lg:text-7xl font-bold drop-shadow-lg leading-tight" style={{ fontFamily: serifStack, letterSpacing: '0.01em' }}>{hotelInfo.name}</h1>
                 {hotelInfo.hotel_star_rating > 0 && (
-                  <p className="text-xl sm:text-2xl mt-2">{'★'.repeat(Math.min(5, Math.max(1, hotelInfo.hotel_star_rating)))}</p>
+                  <p className="text-xl sm:text-2xl mt-3 tracking-widest" style={{ color: '#f5d27a' }}>{'★'.repeat(Math.min(5, Math.max(1, hotelInfo.hotel_star_rating)))}</p>
                 )}
-                <p className="text-sm sm:text-base mt-3 opacity-95">{[hotelInfo.city, hotelInfo.state].filter(Boolean).join(' · ')}</p>
+                <p className="text-sm sm:text-base mt-4 opacity-95 tracking-wide">{[hotelInfo.city, hotelInfo.state].filter(Boolean).join(' · ')}</p>
               </div>
             </div>
 
@@ -45260,6 +45381,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
 
           {/* ── About ────────────────────────────────────────────── */}
           {hotelInfo.hotel_description && (
+            <Reveal>
             <section className="max-w-5xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
               <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-3" style={{ color: brandPrimary }}>About the property</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
@@ -45271,28 +45393,65 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 )}
               </div>
             </section>
+            </Reveal>
           )}
 
           {/* ── Room categories ──────────────────────────────────── */}
           {hotelInfo.room_types?.length > 0 && (
+            <Reveal>
             <section className="bg-[#faf7f2] py-12 sm:py-16">
               <div className="max-w-6xl mx-auto px-4 sm:px-6">
                 <div className="text-center mb-8">
                   <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>Choose your room</p>
-                  <h2 className="text-3xl sm:text-4xl font-serif font-bold">Our accommodations</h2>
+                  <h2 className="text-3xl sm:text-5xl font-bold" style={{ fontFamily: serifStack, letterSpacing: '0.01em' }}>Our accommodations</h2>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                   {hotelInfo.room_types.map((t: any) => {
-                    const photo = t.gallery?.[0]?.image_url || t.image_url;
+                    // Build the photo carousel — prefer per-category
+                    // gallery uploads, fall back to the single
+                    // image_url. Owner can add up to ~10 photos per
+                    // category in Settings → Public Booking Page.
+                    const photos: string[] = (() => {
+                      const gallery = Array.isArray(t.gallery) ? t.gallery.map((g: any) => g.image_url).filter(Boolean) : [];
+                      if (gallery.length > 0) return gallery;
+                      return t.image_url ? [t.image_url] : [];
+                    })();
+                    const idx = categoryPhotoIdx[t.id] || 0;
+                    const currentPhoto = photos[Math.min(idx, photos.length - 1)];
                     const amenityChips = (t.amenities || '').split(/[,;]/).map((s: string) => s.trim()).filter(Boolean).slice(0, 3);
                     return (
                       <div key={t.id} className="bg-white rounded-3xl shadow-md overflow-hidden hover:shadow-xl transition-all flex flex-col">
-                        <div
-                          className="aspect-video bg-cover bg-center"
-                          style={{ backgroundImage: photo ? `url(${photo})` : 'linear-gradient(135deg, #faf7f2, #f0e6d6)' }}
-                        />
+                        <div className="aspect-video relative group">
+                          <div
+                            className="absolute inset-0 bg-cover bg-center transition-all duration-500"
+                            style={{ backgroundImage: currentPhoto ? `url(${currentPhoto})` : 'linear-gradient(135deg, #faf7f2, #f0e6d6)' }}
+                          />
+                          {photos.length > 1 && (
+                            <>
+                              <button
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); cyclePhoto(t.id, photos.length, -1); }}
+                                className="absolute left-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-white/70 hover:bg-white text-lg shadow opacity-0 group-hover:opacity-100 transition-opacity"
+                                aria-label="Previous photo"
+                              >‹</button>
+                              <button
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); cyclePhoto(t.id, photos.length, 1); }}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-white/70 hover:bg-white text-lg shadow opacity-0 group-hover:opacity-100 transition-opacity"
+                                aria-label="Next photo"
+                              >›</button>
+                              <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/40">
+                                {photos.map((_p, i) => (
+                                  <span
+                                    key={i}
+                                    className="w-1.5 h-1.5 rounded-full transition-all"
+                                    style={{ background: i === idx ? '#ffffff' : 'rgba(255,255,255,0.4)' }}
+                                  />
+                                ))}
+                              </div>
+                            </>
+                          )}
+                        </div>
                         <div className="p-5 flex flex-col flex-1">
-                          <h3 className="text-xl font-serif font-bold">{t.name}</h3>
+                          <h3 className="text-xl font-bold" style={{ fontFamily: serifStack }}>{t.name}</h3>
                           <p className="text-xs text-[#9c8e85] mt-0.5">Sleeps {t.capacity}</p>
                           {t.description && <p className="text-[13px] text-[#6b5d52] mt-2 line-clamp-2">{t.description}</p>}
                           {amenityChips.length > 0 && (
@@ -45330,14 +45489,16 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 </div>
               </div>
             </section>
+            </Reveal>
           )}
 
           {/* ── Amenities grid ───────────────────────────────────── */}
           {hotelInfo.amenities?.length > 0 && (
+            <Reveal>
             <section className="max-w-5xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
               <div className="text-center mb-8">
                 <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>What's included</p>
-                <h2 className="text-3xl sm:text-4xl font-serif font-bold">Amenities</h2>
+                <h2 className="text-3xl sm:text-5xl font-bold" style={{ fontFamily: serifStack, letterSpacing: '0.01em' }}>Amenities</h2>
               </div>
               <div className="grid grid-cols-3 sm:grid-cols-5 gap-4">
                 {hotelInfo.amenities.map((a: any) => (
@@ -45348,15 +45509,17 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 ))}
               </div>
             </section>
+            </Reveal>
           )}
 
           {/* ── Property gallery ─────────────────────────────────── */}
           {hotelInfo.property_gallery?.length > 0 && (
+            <Reveal>
             <section className="bg-[#faf7f2] py-12 sm:py-16">
               <div className="max-w-6xl mx-auto px-4 sm:px-6">
                 <div className="text-center mb-8">
                   <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>Gallery</p>
-                  <h2 className="text-3xl sm:text-4xl font-serif font-bold">A glimpse of the property</h2>
+                  <h2 className="text-3xl sm:text-5xl font-bold" style={{ fontFamily: serifStack, letterSpacing: '0.01em' }}>A glimpse of the property</h2>
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                   {hotelInfo.property_gallery.map((g: any, idx: number) => (
@@ -45371,14 +45534,16 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 </div>
               </div>
             </section>
+            </Reveal>
           )}
 
           {/* ── Location ─────────────────────────────────────────── */}
           {(hotelInfo.hotel_full_address || hotelInfo.hotel_map_url || hotelInfo.hotel_phone) && (
+            <Reveal>
             <section className="max-w-5xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
               <div className="text-center mb-8">
                 <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>Find us</p>
-                <h2 className="text-3xl sm:text-4xl font-serif font-bold">Location & contact</h2>
+                <h2 className="text-3xl sm:text-5xl font-bold" style={{ fontFamily: serifStack, letterSpacing: '0.01em' }}>Location & contact</h2>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {hotelInfo.hotel_map_url && (
@@ -45414,9 +45579,11 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 </div>
               </div>
             </section>
+            </Reveal>
           )}
 
           {/* ── Cancellation policy ─────────────────────────────── */}
+          <Reveal>
           <section className="max-w-3xl mx-auto px-4 sm:px-6 py-12">
             <div className="bg-[#faf7f2] border-l-4 rounded-r-2xl p-6" style={{ borderLeftColor: brandPrimary }}>
               <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>Cancellation policy</p>
@@ -45425,11 +45592,12 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
               </p>
             </div>
           </section>
+          </Reveal>
 
           {/* ── Footer ──────────────────────────────────────────── */}
           <footer className="border-t border-stone-200 py-6 mt-8 text-center">
             <p className="text-[11px] text-[#9c8e85]">
-              Powered by <a href="https://atithi-setu.com" target="_blank" rel="noopener noreferrer" className="text-[#cc5a16] font-bold hover:underline">Atithi-Setu</a>
+              Powered by <a href="https://atithi-setu.com" target="_blank" rel="noopener noreferrer" className="font-bold hover:underline" style={{ color: brandPrimary }}>Atithi-Setu</a>
               {' · '}Direct booking · No commission added
             </p>
           </footer>
@@ -45527,7 +45695,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                           )}
                           <div className="flex-1 p-5 flex flex-col sm:flex-row justify-between gap-3">
                             <div className="min-w-0 flex-1">
-                              <h3 className="text-lg font-serif font-bold text-[#1a1208]">{name}</h3>
+                              <h3 className="text-xl font-bold text-[#1a1208]" style={{ fontFamily: serifStack }}>{name}</h3>
                               <div className="flex items-center gap-2 mt-1 flex-wrap">
                                 {left > 0 && (
                                   <span
@@ -45620,18 +45788,42 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
             <div className="w-14 h-14 rounded-full bg-emerald-50 flex items-center justify-center mx-auto mb-3">
               <Check size={30} className="text-emerald-600" />
             </div>
-            <h1 className="text-xl font-serif font-bold text-[#1a1208] mb-1">Booking confirmed!</h1>
+            <h1 className="text-2xl font-bold text-[#1a1208] mb-1" style={{ fontFamily: serifStack }}>Booking confirmed</h1>
             <p className="text-sm text-[#6b5d52] mb-3">{confirmation.confirmation_message}</p>
             <div className="bg-[#faf7f2] rounded-2xl p-3 text-sm text-left space-y-1">
               <div className="flex justify-between"><span className="text-[#6b5d52]">Reference</span><span className="font-mono text-[11px]">{confirmation.booking_id}</span></div>
-              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-in</span>{confirmation.check_in_date}</div>
-              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-out</span>{confirmation.check_out_date}</div>
-              <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-in</span>{String(confirmation.check_in_date).slice(0, 10)}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-out</span>{String(confirmation.check_out_date).slice(0, 10)}</div>
+              <div className="flex justify-between pt-1 mt-1 border-t" style={{ borderTopColor: `${brandPrimary}1a` }}>
                 <span className="text-[#6b5d52] font-bold">Total</span>
-                <strong className="font-mono text-[#cc5a16]">{hotelInfo.currency_symbol}{Number(confirmation.total_amount).toLocaleString('en-IN')}</strong>
+                <strong className="font-mono" style={{ color: brandPrimary }}>{hotelInfo.currency_symbol}{Number(confirmation.total_amount).toLocaleString('en-IN')}</strong>
               </div>
             </div>
+            {/* Phase 3 — calendar download + share link. Helps guests
+                remember the booking and brings the property word-of-
+                mouth referrals. */}
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button
+                onClick={downloadIcs}
+                className="px-3 py-2.5 rounded-2xl text-xs font-bold border-2 transition-colors"
+                style={{ borderColor: brandPrimary, color: brandPrimary, background: 'transparent' }}
+                onMouseEnter={e => { e.currentTarget.style.background = `${brandPrimary}15`; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+              >📅 Add to calendar</button>
+              <button
+                onClick={sharePage}
+                className="px-3 py-2.5 rounded-2xl text-xs font-bold border-2 transition-colors"
+                style={{ borderColor: brandPrimary, color: brandPrimary, background: 'transparent' }}
+                onMouseEnter={e => { e.currentTarget.style.background = `${brandPrimary}15`; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+              >🔗 Share property</button>
+            </div>
             <p className="text-[11px] text-[#9c8e85] mt-4">A confirmation will arrive at your email. You'll also receive an online check-in link 3 days before arrival.</p>
+            {hotelInfo.hotel_cancellation_policy_text && (
+              <p className="text-[10px] text-[#9c8e85] mt-3 px-2 leading-relaxed">
+                <strong className="text-[#6b5d52]">Cancellation:</strong> {hotelInfo.hotel_cancellation_policy_text}
+              </p>
+            )}
           </div>
         )}
 
