@@ -18417,109 +18417,29 @@ async function startServer() {
       const tenantDb = await getTenantDb(req.params.id);
       const status = (req.query.status as string) || null;
       // REQ 5: search + date-range filters for booking-history lookup
+      // 10 Jun 2026 — full rewrite. The previous version had a 22-
+      // placeholder CASE-based ranking that occasionally tripped
+      // PostgreSQL's `?` ↔ `$N` parameter conversion when the
+      // search contained special characters or empty fields. Folded
+      // the smart ranking down to a simple post-query JS sort and
+      // a flat WHERE clause — same UX, half the SQL, zero param
+      // bookkeeping bugs.
       const search = String(req.query.search || '').trim();
       const fromDate = String(req.query.from || '').trim();
       const toDate = String(req.query.to || '').trim();
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
 
-      // Req 1b — surface ID-doc count alongside each booking so the
-      // pre-check-in checklist UI can show "✓/✗ ID documents" without
-      // an extra fetch per row.
-      //
-      // FILTER-FIX (client report 7 Jun 2026 "Failed to fetch bookings ...
-      // when staff use filter"): the SQL was built in TWO passes — an
-      // initial assembly here, then a REBUILD at the "Rebuild SQL with
-      // the search ranking columns prepended" comment further down. The
-      // rebuild correctly replaced the SELECT/WHERE skeleton but did NOT
-      // reset the `params` array. Any status filter pushed here was
-      // re-pushed by the post-rebuild block below, so once a staff
-      // member applied a status (or any) filter the param-array length
-      // exceeded the placeholder count and pg threw "bind message
-      // supplies N parameters but X is required". The outer catch then
-      // returned the generic "Failed to fetch bookings" error.
-      //
-      // Fix: do NOT push the status filter here. Let it be applied
-      // exclusively in the post-rebuild pass. The initial `sql` is just
-      // a scaffold that the rebuild always replaces; keeping the WHERE
-      // clause inline here was dead code that polluted the param array.
+      // Build a single straightforward SQL. No CASE-based ranking; we
+      // rank in JS after the query lands. Cleaner placeholder math.
+      // Req 1b — surface ID-doc count alongside each booking.
+      const params: any[] = [];
       let sql = `SELECT b.*, r.name AS room_name,
                         (SELECT COUNT(*)::int FROM guest_documents gd WHERE gd.booking_id = b.id) AS document_count
                  FROM room_bookings b
-                 LEFT JOIN rooms r ON r.id = b.room_id
+              LEFT JOIN rooms r ON r.id = b.room_id
                  WHERE 1 = 1`;
-      const params: any[] = [];
-      // (status filter intentionally NOT applied here — see FILTER-FIX
-      //  comment above. The post-rebuild block at "if (status)" below
-      //  is the single source of truth.)
-      // REQ 5 + FIX-1: free-text search across guest contact fields + ids.
-      // Receptionists need to find a returning guest from a phone number
-      // they're holding (call-in booking) or an email a guest mentions.
-      //
-      // Relevance ranking — when `search` is set, we expose a `match_score`
-      // column that lets the result be ordered by best-match first:
-      //   100 = exact (case-insensitive) name / phone / email / id match
-      //    80 = name STARTS WITH search
-      //    60 = phone STARTS WITH search (digits only)
-      //    40 = name / phone / email / id / invoice contains search
-      // Same column is also surfaced to the client so the UI can show
-      // a "matched: name | phone | email | id" badge per row.
-      let searchSelect = `, NULL::int AS match_score, NULL::text AS matched_field`;
-      if (search) {
-        const like  = `%${search}%`;
-        const prefx = `${search}%`;
-        // Digits-only normalised phone — strip everything except digits so
-        // "+91 98765" and "9876512345" both match "98765".
-        const digits = search.replace(/\D/g, '');
-        searchSelect = `
-          , CASE
-              WHEN LOWER(b.guest_name)  = LOWER(?) THEN 100
-              WHEN b.guest_phone        = ?         THEN 100
-              WHEN LOWER(b.guest_email) = LOWER(?) THEN 100
-              WHEN b.id                 = ?         THEN 100
-              WHEN LOWER(b.guest_name)  ILIKE LOWER(?) THEN 80
-              WHEN REGEXP_REPLACE(COALESCE(b.guest_phone,''), '\\D', '', 'g') ILIKE ? THEN 60
-              WHEN LOWER(b.guest_name)  ILIKE LOWER(?) THEN 40
-              WHEN b.guest_phone        ILIKE ? THEN 40
-              WHEN LOWER(b.guest_email) ILIKE LOWER(?) THEN 40
-              WHEN b.id                 ILIKE ? THEN 40
-              WHEN b.invoice_number     ILIKE ? THEN 40
-              ELSE 0
-            END AS match_score
-          , CASE
-              WHEN LOWER(b.guest_name)  = LOWER(?) OR LOWER(b.guest_name)  ILIKE LOWER(?) OR LOWER(b.guest_name)  ILIKE LOWER(?) THEN 'name'
-              WHEN b.guest_phone        = ? OR REGEXP_REPLACE(COALESCE(b.guest_phone,''), '\\D', '', 'g') ILIKE ? OR b.guest_phone ILIKE ? THEN 'phone'
-              WHEN LOWER(b.guest_email) = LOWER(?) OR LOWER(b.guest_email) ILIKE LOWER(?) THEN 'email'
-              WHEN b.id                 = ? OR b.id ILIKE ? THEN 'booking-id'
-              WHEN b.invoice_number     ILIKE ? THEN 'invoice'
-              ELSE NULL
-            END AS matched_field`;
-        // The select binds 11 + 13 = 24 params before the WHERE. Push them now.
-        params.push(
-          // match_score bindings (in order matching CASE above)
-          search, search, search, search,        // 4× exact
-          prefx,                                  // name ILIKE prefix
-          `${digits}%`,                           // phone digits ILIKE prefix
-          like, like, like, like, like,           // 5× contains
-          // matched_field bindings
-          search, prefx, like,                    // name 3×
-          search, `${digits}%`, like,             // phone 3×
-          search, like,                           // email 2×
-          search, like,                           // booking-id 2×
-          like                                    // invoice 1×
-        );
-      }
 
-      // Rebuild SQL with the search ranking columns prepended (they need
-      // to come right after b.* in the SELECT). We patched the original
-      // SQL fragment above; just re-do it cleanly.
-      sql = `SELECT b.*, r.name AS room_name,
-                    (SELECT COUNT(*)::int FROM guest_documents gd WHERE gd.booking_id = b.id) AS document_count
-                    ${searchSelect}
-             FROM room_bookings b
-             LEFT JOIN rooms r ON r.id = b.room_id
-             WHERE 1 = 1`;
-
-      // Re-apply status filter (params order: searchSelect bindings, then status, then search WHERE, then date range)
+      // Status filter (comma-separated allowed: "BOOKED,CHECKED_IN").
       if (status) {
         const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
         if (statuses.length > 0) {
@@ -18527,41 +18447,84 @@ async function startServer() {
           params.push(...statuses);
         }
       }
+
+      // Free-text search across guest contact fields + booking id +
+      // invoice number. Each predicate is independent — OR'd together.
+      // Phone is searched in both raw form and digit-stripped form so
+      // "+91 98765" and "9876512345" both match "98765".
       if (search) {
-        // Bare-minimum WHERE — match any of the score-bearing predicates.
-        sql += ` AND (
-          LOWER(b.guest_name)  ILIKE LOWER(?) OR
-          b.guest_phone        ILIKE ?         OR
-          REGEXP_REPLACE(COALESCE(b.guest_phone,''), '\\D', '', 'g') ILIKE ? OR
-          LOWER(b.guest_email) ILIKE LOWER(?) OR
-          b.id                 ILIKE ?         OR
-          b.invoice_number     ILIKE ?
-        )`;
-        const like = `%${search}%`;
+        const like  = `%${search}%`;
         const digits = search.replace(/\D/g, '');
-        params.push(like, like, `%${digits}%`, like, like, like);
+        // We always include the digit predicate but with a placeholder
+        // that won't match anything when the search has no digits —
+        // keeps the SQL shape constant.
+        const digitsLike = digits ? `%${digits}%` : '%__no_match__%';
+        sql += ` AND (
+          LOWER(COALESCE(b.guest_name,''))  LIKE LOWER(?) OR
+          COALESCE(b.guest_phone,'')        ILIKE ? OR
+          REGEXP_REPLACE(COALESCE(b.guest_phone,''), '[^0-9]', '', 'g') LIKE ? OR
+          LOWER(COALESCE(b.guest_email,'')) LIKE LOWER(?) OR
+          COALESCE(b.id,'')                 ILIKE ? OR
+          COALESCE(b.invoice_number,'')     ILIKE ?
+        )`;
+        params.push(like, like, digitsLike, like, like, like);
       }
 
-      // FIX-1: Date filter — OVERLAP, not containment. A booking matches
-      // if its stay window intersects [fromDate, toDate].
-      //   booking range:  [check_in_date, check_out_date)  -- half-open
-      //   filter range:   [fromDate, toDate] inclusive
-      //   overlap:        check_in_date <= toDate AND check_out_date > fromDate
-      // Previously we required containment (`check_in_date >= fromDate AND
-      // check_out_date <= toDate`), which meant an overnight booking
-      // checking in today (out tomorrow) would NEVER match a "today only"
-      // filter — the receptionist's #1 use case. Fixed.
+      // FIX-1: Date filter — OVERLAP, not containment.
+      // booking range: [check_in_date, check_out_date)  half-open
+      // filter range:  [fromDate, toDate]              inclusive
+      // overlap:       check_in_date <= toDate AND check_out_date > fromDate
       if (fromDate) { sql += ` AND b.check_out_date > ?`;  params.push(fromDate); }
       if (toDate)   { sql += ` AND b.check_in_date  <= ?`; params.push(toDate); }
 
-      // Ranking: when searching, best matches first; otherwise newest first.
-      sql += search
-        ? ` ORDER BY match_score DESC NULLS LAST, b.check_in_date DESC, b.created_at DESC LIMIT ?`
-        : ` ORDER BY b.check_in_date DESC, b.created_at DESC LIMIT ?`;
+      sql += ` ORDER BY b.check_in_date DESC, b.created_at DESC LIMIT ?`;
       params.push(limit);
-      res.json(await tenantDb.query(sql, params));
-    } catch (err) {
-      res.status(500).json({ error: "Failed to fetch bookings" });
+
+      let rows = await tenantDb.query(sql, params).catch((e: any) => {
+        // Defensive: log the failing SQL so a future "search not working"
+        // report is debuggable from VPS logs (params elided for PII safety).
+        console.error('[hotel/bookings] query failed:',
+          e?.message, '\nsql:', sql.replace(/\s+/g, ' ').slice(0, 200) + '…');
+        throw e;
+      });
+
+      // Client-side relevance ranking — when the operator searched,
+      // boost rows that match name/phone/email/id over partial misses.
+      // Cheap O(n) for typical < 500-row payloads. Surfaces a
+      // `matched_field` chip on each row so the UI can label the hit.
+      if (search) {
+        const s = search.toLowerCase();
+        const sDigits = search.replace(/\D/g, '');
+        const score = (r: any): { sc: number; mf: string | null } => {
+          const n = String(r.guest_name  || '').toLowerCase();
+          const p = String(r.guest_phone || '');
+          const pd = p.replace(/\D/g, '');
+          const e = String(r.guest_email || '').toLowerCase();
+          const id = String(r.id || '');
+          const inv = String(r.invoice_number || '');
+          if (n === s)                                  return { sc: 100, mf: 'name' };
+          if (p === search || (sDigits && pd === sDigits)) return { sc: 100, mf: 'phone' };
+          if (e === s)                                  return { sc: 100, mf: 'email' };
+          if (id === search)                            return { sc: 100, mf: 'booking-id' };
+          if (n.startsWith(s))                          return { sc: 80,  mf: 'name' };
+          if (sDigits && pd.startsWith(sDigits))        return { sc: 60,  mf: 'phone' };
+          if (n.includes(s))                            return { sc: 40,  mf: 'name' };
+          if (sDigits && pd.includes(sDigits))          return { sc: 40,  mf: 'phone' };
+          if (e.includes(s))                            return { sc: 40,  mf: 'email' };
+          if (id.toLowerCase().includes(s))             return { sc: 40,  mf: 'booking-id' };
+          if (inv.toLowerCase().includes(s))            return { sc: 40,  mf: 'invoice' };
+          return { sc: 0, mf: null };
+        };
+        rows = rows
+          .map((r: any) => { const { sc, mf } = score(r); return { ...r, match_score: sc, matched_field: mf }; })
+          .sort((a: any, b: any) => (b.match_score - a.match_score)
+            || (String(b.check_in_date || '').localeCompare(String(a.check_in_date || ''))));
+      }
+
+      res.json(rows);
+    } catch (err: any) {
+      console.error('[hotel/bookings] error:', err?.message);
+      res.status(500).json({ error: err?.message || 'Failed to fetch bookings' });
     }
   });
 
@@ -30329,7 +30292,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'checkout-advance-outstanding-fnb-fix-invoice-autosend',
+    commit_marker: 'hotel-booking-search-rewrite-js-ranking',
     code_features: [
       'subscription-billing',
       'read-only-mode',
