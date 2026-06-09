@@ -1739,6 +1739,21 @@ async function postOrderToFolio(
     folioId = ensured.folioId;
     resolvedBookingId = resolvedBookingId || ensured.bookingId;
   }
+  // BA-FIX-1 (C3, 11 Jun 2026) — fallback when order has NO room_id
+  // but does have booking_id (e.g. restaurant POS sends a charge-to-
+  // room order with just the booking reference). Find the booking's
+  // room and run ensureFolioForRoom on that room. Previously this
+  // returned ok:false → order silently DELETE'd by the atomic guard.
+  if (!folioId && order.booking_id) {
+    const b: any = await tenantDb.get(
+      "SELECT room_id FROM room_bookings WHERE id = ?", [order.booking_id]
+    );
+    if (b?.room_id) {
+      const ensured = await ensureFolioForRoom(restaurantId, b.room_id);
+      folioId = ensured.folioId;
+      resolvedBookingId = resolvedBookingId || ensured.bookingId;
+    }
+  }
   if (!folioId) {
     return { ok: false, reason: 'no-open-folio-for-room-or-booking' };
   }
@@ -22791,11 +22806,26 @@ async function startServer() {
         });
       }
 
+      // BA-FIX-3 (H1, 11 Jun 2026) — atomic check-in transition.
+      // Previously two simultaneous "Check In" clicks from front-
+      // desk staff could both pass the status guard (line above) →
+      // both UPDATEs land → second silently overwrites first
+      // (idempotent on the outcome, but folio_payments / perks /
+      // notifications fire twice). The conditional UPDATE here
+      // makes the transition atomic: only the first BOOKED → IN
+      // flip succeeds; the second sees CHECKED_IN and skips
+      // downstream side effects via a duplicate-detection log.
       const now = new Date().toISOString();
-      await tenantDb.run(
-        "UPDATE room_bookings SET status = 'CHECKED_IN', actual_checkin_at = ? WHERE id = ?",
+      const flipResult = await tenantDb.run(
+        "UPDATE room_bookings SET status = 'CHECKED_IN', actual_checkin_at = ? WHERE id = ? AND status = 'BOOKED'",
         [now, req.params.bookingId]
       );
+      if (!flipResult || flipResult.changes === 0) {
+        // Either the booking is already CHECKED_IN (concurrent click)
+        // or status moved past BOOKED. Return the current state idempotently.
+        const current: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+        return res.json({ booking: current, folio_id: null, perk: { applies: false, type: null, message: '' }, idempotent: true });
+      }
       await tenantDb.run("UPDATE rooms SET status = 'OCCUPIED' WHERE id = ?", [b.room_id]);
 
       // ── REQ 1: lock every existing ID-proof document for this booking ──
@@ -23349,7 +23379,44 @@ async function startServer() {
           );
           const invoiceDate = folio.settled_at || folio.created_at || new Date().toISOString();
           const settledDate = new Date(invoiceDate);
-          const invNum = `INV-${settledDate.getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
+          // BA-FIX-4 (H4, 11 Jun 2026) — persist invoice_number on the
+          // folio to prevent collision. Earlier formula
+          // (INV-YYYY-<last6chars-of-folio-id>) could theoretically
+          // collide if two folios shared the last-6 of their id (rare
+          // but real for high-volume tenants). Use the existing
+          // sequences table + getNextTenantSequence helper that
+          // already powers the restaurant invoice numbering. Reads
+          // existing invoice_number first — only generates new if
+          // never set, so reprints keep the same number.
+          let invNum: string = folio.invoice_number || '';
+          if (!invNum) {
+            try {
+              const seq = await getNextTenantSequence(tenantDb, `hotel-invoice-${settledDate.getFullYear()}`);
+              invNum = `INV-${settledDate.getFullYear()}-${String(seq).padStart(5, '0')}`;
+            } catch {
+              // Fallback to old scheme if sequences table is unavailable
+              invNum = `INV-${settledDate.getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
+            }
+            // Persist on the folio row so subsequent reprints / sends
+            // return the same number. Idempotent on retry.
+            try {
+              await tenantDb.run(
+                "UPDATE folios SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?",
+                [invNum, folio.id]
+              );
+            } catch (e) {
+              // Column may not exist on older tenant schemas — add it.
+              try {
+                await tenantDb.exec(
+                  "ALTER TABLE folios ADD COLUMN IF NOT EXISTS invoice_number TEXT"
+                );
+                await tenantDb.run(
+                  "UPDATE folios SET invoice_number = COALESCE(invoice_number, ?) WHERE id = ?",
+                  [invNum, folio.id]
+                );
+              } catch { /* truly unrecoverable; log and move on */ }
+            }
+          }
 
           const pdf = await generateInvoicePdf({
             hotel: { name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number, phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined, fssai: hotel.fssai_license_number || null, fssaiValidUntil: hotel.fssai_license_valid_until || null },
@@ -30292,7 +30359,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hotel-booking-search-rewrite-js-ranking',
+    commit_marker: 'ba-quickwins-fnb-nullroom-checkin-lock-invseq',
     code_features: [
       'subscription-billing',
       'read-only-mode',
