@@ -45992,19 +45992,21 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                     {/* Auto-fix suggestion — bump rooms up to fit. The
                         biggest typical room sleeps 4, so dividing the
                         party by 4 gives the minimum room count needed. */}
-                    {(((searchParams.adults||0)+(searchParams.children||0)) > 2) && (
+                    {(((searchParams.adults||0)+(searchParams.children||0)) > 4) && (
                       <button
                         type="button"
                         onClick={() => {
+                          // Most rooms accommodate up to 4 (base 2 + 2 extras).
+                          // Suggest the minimum room count needed to split the party.
                           const total = (searchParams.adults||0) + (searchParams.children||0);
-                          const suggested = Math.min(9, Math.max(searchParams.rooms + 1, Math.ceil(total / 2)));
+                          const suggested = Math.min(9, Math.max(searchParams.rooms + 1, Math.ceil(total / 4)));
                           setSearchParams(p => ({ ...p, rooms: suggested }));
                           setTimeout(runSearch, 0);
                         }}
                         className="px-4 py-2 rounded-2xl text-white text-xs font-bold"
                         style={{ background: brandPrimary }}
                       >
-                        Try {Math.min(9, Math.max(searchParams.rooms + 1, Math.ceil(((searchParams.adults||0)+(searchParams.children||0)) / 2)))} rooms
+                        Try {Math.min(9, Math.max(searchParams.rooms + 1, Math.ceil(((searchParams.adults||0)+(searchParams.children||0)) / 4)))} rooms
                       </button>
                     )}
                     <p className="text-[10px] text-[#9c8e85]">Or pick different dates, or contact the property directly.</p>
@@ -46055,8 +46057,8 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                                     </span>
                                   )}
                                   {r.capacity && (
-                                    <span className="text-[10px] text-[#9c8e85]">
-                                      Sleeps {r.capacity} per room
+                                    <span className="text-[10px] text-[#9c8e85]" title={`Base ${r.capacity} adults + up to 2 extras`}>
+                                      Sleeps up to {Number(r.capacity) + 2} per room
                                     </span>
                                   )}
                                   {/* Extra-adult chip — only when the

@@ -20315,9 +20315,17 @@ async function startServer() {
       // check uses PER-ROOM occupancy (not total guests across all
       // rooms) so a couple booking 2 rooms for a 4-person party
       // correctly matches standard 2-cap rooms.
+      //
+      // capacity is BASELINE capacity (typically 2 adults, included
+      // in the matrix rate). Extras up to MAX_EXTRAS_PER_ROOM beyond
+      // baseline are allowed — they attract extra_person_charges
+      // per night. So a capacity=2 room can sleep up to 4 people
+      // (2 base + 2 extras with extra-adult charges applied).
+      const MAX_EXTRAS_PER_ROOM = 2;
+      const effectiveMaxOcc = (cap: number) => Math.max(1, Number(cap || 0)) + MAX_EXTRAS_PER_ROOM;
       const results: any[] = [];
       for (const r of rooms) {
-        const fits = Number(r.capacity || 0) >= perRoomOcc;
+        const fits = effectiveMaxOcc(r.capacity) >= perRoomOcc;
         const blocked = r.status === 'MAINTENANCE' || r.status === 'BLOCKED';
         const conflict = conflictByRoom[r.id];
         if (!fits || blocked || conflict) continue;  // public page shows only available
@@ -20613,15 +20621,19 @@ async function startServer() {
       // ── Sleeper-capacity check ───────────────────────────────────
       // First room defines the capacity contract — every room in the
       // category has the same `capacity` so checking one is enough.
-      // If guest's total occupancy > capacity, ask them to pick a
-      // bigger category or add another room.
+      // capacity is BASELINE (2 adults included in base rate).
+      // Extras up to MAX_EXTRAS_PER_ROOM beyond baseline are allowed
+      // and attract extra_person_charges per night. Same constant as
+      // in the public availability endpoint above — keep in sync.
+      const MAX_EXTRAS_PER_ROOM_BOOK = 2;
       const probeRoom: any = await tenantDb.get(
         "SELECT capacity FROM rooms WHERE id = ?", [candidate_rooms[0]]
       );
       const capacity = Math.max(1, Number(probeRoom?.capacity || 2));
-      if (total_occupants > capacity) {
+      const effectiveMax = capacity + MAX_EXTRAS_PER_ROOM_BOOK;
+      if (total_occupants > effectiveMax) {
         return res.status(400).json({
-          error: `This category sleeps ${capacity} per room. ${adults} adult${adults===1?'':'s'} + ${children} child${children===1?'':'ren'} exceeds it. Try a bigger room or add another room to the booking.`,
+          error: `This category sleeps up to ${effectiveMax} per room (${capacity} base + ${MAX_EXTRAS_PER_ROOM_BOOK} with extras). ${adults} adult${adults===1?'':'s'} + ${children} child${children===1?'':'ren'} exceeds it. Try a bigger room or add another room to the booking.`,
         });
       }
 
@@ -28814,7 +28826,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'availability-per-room-occupancy-search-fix',
+    commit_marker: 'availability-baseline-capacity-plus-extras',
     code_features: [
       'subscription-billing',
       'read-only-mode',
