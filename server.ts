@@ -28286,7 +28286,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-page-phase3-playfair-kenburns-carousel-fade-ics',
+    commit_marker: 'public-page-hotfix-rules-of-hooks-violation-white-screen',
     code_features: [
       'subscription-billing',
       'read-only-mode',

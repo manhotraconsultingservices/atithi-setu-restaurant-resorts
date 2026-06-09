@@ -45091,6 +45091,30 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     finally { setSubmitting(false); }
   };
 
+  // ─── Hooks must live ABOVE the early returns ─────────────────────
+  // React's Rules of Hooks: every hook must be called in the same
+  // order on every render. If we declared these AFTER the
+  //   if (!hotelInfo) return <spinner>
+  // early return, the loading render would call N hooks and the
+  // loaded render would call N+3 — React throws "Rendered more hooks
+  // than during the previous render" and the whole page goes blank.
+  //
+  // Lightbox index for the property gallery (Phase 2).
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  // Per-category photo-carousel index (Phase 3 multi-image).
+  const [categoryPhotoIdx, setCategoryPhotoIdx] = useState<Record<string, number>>({});
+  // Lazy-load Playfair Display (Phase 3). Falls back to system serif
+  // if the CDN is unreachable.
+  useEffect(() => {
+    const id = 'public-page-playfair-font';
+    if (document.getElementById(id)) return;
+    const link = document.createElement('link');
+    link.id   = id;
+    link.rel  = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&display=swap';
+    document.head.appendChild(link);
+  }, []);
+
   if (error && !hotelInfo) {
     return (
       <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center p-6">
@@ -45124,32 +45148,13 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
   // Atithi-Setu orange when the owner hasn't set anything.
   const brandPrimary   = hotelInfo.brand_primary_color   || '#cc5a16';
   const brandSecondary = hotelInfo.brand_secondary_color || '#a84612';
-  // Lightbox state for the property gallery (Taj-style overlay viewer
-  // instead of opening in a new tab).
-  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
-
-  // Phase 3 — luxury-hotel polish (Taj/Marriott-grade typography +
-  // motion). Lazy-loads Playfair Display from Google Fonts the first
-  // time the public page mounts. Falls back to system serif if the
-  // CDN is unreachable so the page never blocks on font loading.
-  useEffect(() => {
-    const id = 'public-page-playfair-font';
-    if (document.getElementById(id)) return;
-    const link = document.createElement('link');
-    link.id   = id;
-    link.rel  = 'stylesheet';
-    link.href = 'https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&display=swap';
-    document.head.appendChild(link);
-    return () => { /* keep across navigations — no removal */ };
-  }, []);
   // Family applied to every serif headline on the page via inline
   // style. System fonts (Georgia, "Times New Roman") cover the fallback
-  // path when Google Fonts is blocked.
+  // path when Google Fonts is blocked. The Playfair Display link tag
+  // is injected by a useEffect above (placed before the early returns
+  // to satisfy Rules of Hooks).
   const serifStack = "'Playfair Display', Georgia, 'Times New Roman', serif";
 
-  // Per-category multi-image carousel state. Keyed by category id (or
-  // legacy room id). Defaults to 0 (first photo).
-  const [categoryPhotoIdx, setCategoryPhotoIdx] = useState<Record<string, number>>({});
   const cyclePhoto = (key: string, total: number, dir: number) => {
     setCategoryPhotoIdx(prev => {
       const cur = prev[key] || 0;
