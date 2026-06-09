@@ -453,22 +453,72 @@ export function buildNotificationContent(
           `<p style="color:#9c8e85">Ref: ${data.requestId}</p>`,
       };
 
-    case 'BOOKING_CREATED':
+    case 'BOOKING_CREATED': {
+      // Guest-facing confirmation. When the tenant has configured a
+      // UPI VPA and the booking has a payable amount, append a "Pay
+      // via UPI" section with a deep link that opens the guest's UPI
+      // app pre-filled with the booking amount. No payment gateway,
+      // no commission — owner gets the full ₹ directly.
+      const amount = Number(data.totalAmount || data.amount || 0);
+      const upiVpa = String(data.upiVpa || '').trim();
+      const upiPayeeName = String(data.upiPayeeName || r).trim();
+      const hasUpi = !!upiVpa && amount > 0;
+      // RFC 3986 + NPCI UPI: upi://pay?pa=...&pn=...&am=...&cu=INR&tn=...
+      const upiLink = hasUpi
+        ? `upi://pay?pa=${encodeURIComponent(upiVpa)}` +
+          `&pn=${encodeURIComponent(upiPayeeName)}` +
+          `&am=${amount.toFixed(2)}` +
+          `&cu=INR` +
+          `&tn=${encodeURIComponent(`Booking ${data.bookingId}`)}`
+        : '';
+      const currencySymbol = data.currencySymbol || '₹';
+      const totalLine = amount > 0
+        ? `Amount: ${currencySymbol}${amount.toLocaleString('en-IN')}\n`
+        : '';
+      const totalHtml = amount > 0
+        ? `<p>Total: <strong style="color:#cc5a16">${currencySymbol}${amount.toLocaleString('en-IN')}</strong></p>`
+        : '';
       return {
-        subject: `📅 New booking — ${data.guestName} — ${r}`,
+        subject: `📅 Booking confirmed — ${data.guestName} — ${r}`,
         text:
-          `📅 *New booking*\n` +
+          `📅 *Booking confirmed*\n` +
           `Guest: ${data.guestName}\n` +
           `Check-in: ${data.checkIn}\n` +
           `Check-out: ${data.checkOut}\n` +
-          `Ref: ${data.bookingId}`,
+          totalLine +
+          `Ref: ${data.bookingId}` +
+          (hasUpi
+            ? `\n\n💰 Pay direct (UPI — no gateway fee):\n${upiLink}\n` +
+              `Open this link on your phone and your UPI app (GPay / PhonePe / Paytm) will open with the amount pre-filled.`
+            : ''),
         html:
-          `<h2 style="color:#cc5a16">📅 New booking</h2>` +
-          `<p>Guest: <strong>${data.guestName}</strong></p>` +
-          `<p>Check-in: ${data.checkIn}</p>` +
-          `<p>Check-out: ${data.checkOut}</p>` +
-          `<p style="color:#9c8e85">Ref: ${data.bookingId}</p>`,
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#cc5a16;margin-top:0">📅 Booking confirmed</h2>` +
+          `<p>Thank you, <strong>${data.guestName}</strong> — we've got your reservation locked in.</p>` +
+          `<div style="background:#faf7f2;padding:16px;border-radius:8px;margin:16px 0">` +
+          `<p style="margin:0 0 4px 0"><strong>Your stay</strong></p>` +
+          `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Guest: <strong>${data.guestName}</strong></p>` +
+          `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Check-in: ${data.checkIn}</p>` +
+          `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Check-out: ${data.checkOut}</p>` +
+          (data.mealPlan ? `<p style="margin:2px 0;color:#6b5d52;font-size:14px">Plan: ${data.mealPlan}</p>` : '') +
+          totalHtml +
+          `<p style="margin:2px 0;color:#9c8e85;font-size:12px">Ref: ${data.bookingId}</p>` +
+          `</div>` +
+          (hasUpi ? (
+            `<div style="border-top:2px dashed #cc5a16;padding-top:16px;margin-top:16px">` +
+            `<h3 style="color:#cc5a16;margin-top:0">💰 Pay direct via UPI</h3>` +
+            `<p style="color:#6b5d52;font-size:14px;margin:0 0 12px 0">Tap the button below on your phone — your UPI app (Google Pay / PhonePe / Paytm) will open with <strong>${currencySymbol}${amount.toLocaleString('en-IN')}</strong> pre-filled. No gateway fees, the amount goes straight to the property.</p>` +
+            `<p style="text-align:center;margin:16px 0">` +
+            `<a href="${upiLink}" style="background:#cc5a16;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block">Pay ${currencySymbol}${amount.toLocaleString('en-IN')} via UPI</a>` +
+            `</p>` +
+            `<p style="color:#9c8e85;font-size:12px;text-align:center;margin:4px 0">Or copy this UPI link: <code style="background:#faf7f2;padding:2px 6px;border-radius:4px;font-size:11px">${upiLink}</code></p>` +
+            `<p style="color:#9c8e85;font-size:12px;text-align:center;margin:8px 0">Payee: ${upiPayeeName} · UPI ID: <strong>${upiVpa}</strong></p>` +
+            `</div>`
+          ) : '') +
+          `<p style="color:#6b5d52;font-size:13px;margin-top:16px">See you soon at <strong>${r}</strong>!</p>` +
+          `</div>`,
       };
+    }
 
     /* ── Sprint P2-G — Pre-arrival email (T-3 days from check-in) ──── */
 

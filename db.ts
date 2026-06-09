@@ -424,7 +424,17 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS free_adults_per_room       INT DEFAULT 2;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS max_extra_adults_per_room  INT DEFAULT 2;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS free_child_age_max         INT DEFAULT 5;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS max_children_per_room      INT DEFAULT 2
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS max_children_per_room      INT DEFAULT 2;
+    -- UPI direct-payment (10 Jun 2026). Owner configures their UPI
+    -- VPA (Virtual Payment Address) like "myhotel@okhdfc" and the
+    -- payee name shown in the guest's UPI app. Every confirmation
+    -- email then includes a "Pay via UPI" link of the shape
+    --   upi://pay?pa=<vpa>&pn=<name>&am=<amount>&cu=INR&tn=<note>
+    -- which opens the guest's UPI app with the booking amount
+    -- pre-filled — no gateway, no commission. Leave VPA blank to
+    -- disable the feature for a tenant.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS upi_vpa          TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS upi_payee_name   TEXT
   `);
   await centralDb.exec(
     `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`

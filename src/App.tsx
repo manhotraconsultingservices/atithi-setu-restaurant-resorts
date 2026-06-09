@@ -9534,6 +9534,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         max_extra_adults_per_room: occ.max_extra_adults_per_room,
         free_child_age_max:        occ.free_child_age_max,
         max_children_per_room:     occ.max_children_per_room,
+        upi_vpa:                   (propertyProfile as any).upi_vpa,
+        upi_payee_name:            (propertyProfile as any).upi_payee_name,
       };
       await hotelApi('/property-profile', { method: 'PATCH', body: JSON.stringify(body) });
       setPropertyProfileSaved(true);
@@ -19981,6 +19983,58 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     );
                   })()}
                 </div>
+
+                {/* ── UPI direct-payment ─────────────────────────────
+                    Owner enters their UPI VPA and payee name. Every
+                    booking confirmation email then gets a "Pay via
+                    UPI" button that opens the guest's UPI app with
+                    the booking amount pre-filled. No payment gateway,
+                    no commission — guest pays the property directly.
+                    Leave VPA blank to disable. */}
+                <div className="p-3 rounded-2xl bg-[#faf7f2]/70 border border-[#e8d8c4] space-y-3">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">UPI direct payment</p>
+                    <p className="text-[10px] text-[#9c8e85] mt-0.5">
+                      Guest sees a "Pay via UPI" button in their booking confirmation email. Tapping it opens
+                      their UPI app (GPay / PhonePe / Paytm) with the amount pre-filled. No gateway, no commission —
+                      the full ₹ goes straight to your bank account.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">UPI VPA (UPI ID)</label>
+                      <input
+                        value={(propertyProfile as any).upi_vpa || ''}
+                        onChange={e => setPropertyProfile({ ...(propertyProfile as any), upi_vpa: e.target.value.trim().toLowerCase() })}
+                        placeholder="myhotel@okhdfc"
+                        pattern="^[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}$"
+                        className="w-full bg-white border-none rounded-2xl px-3 py-2.5 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20"
+                      />
+                      <p className="text-[10px] text-[#9c8e85] mt-1">Format: <code>username@bank</code>. Find this in your UPI app (BHIM / GPay → Profile → Your UPI IDs).</p>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payee name (shown in UPI app)</label>
+                      <input
+                        value={(propertyProfile as any).upi_payee_name || ''}
+                        onChange={e => setPropertyProfile({ ...(propertyProfile as any), upi_payee_name: e.target.value })}
+                        placeholder="Vivek's Cafe"
+                        maxLength={80}
+                        className="w-full bg-white border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                      />
+                      <p className="text-[10px] text-[#9c8e85] mt-1">What the guest will see as the payee — usually your property name.</p>
+                    </div>
+                  </div>
+                  {(propertyProfile as any).upi_vpa && (
+                    <div className="text-[11px] text-[#3d3128] bg-white rounded-xl p-2.5 border border-[#e8d8c4]">
+                      <strong>Preview UPI link:</strong>{' '}
+                      <code className="font-mono text-[10px] break-all">
+                        upi://pay?pa={encodeURIComponent((propertyProfile as any).upi_vpa)}&pn={encodeURIComponent((propertyProfile as any).upi_payee_name || 'Property')}&am=2400.00&cu=INR&tn=Booking%20BK-...
+                      </code>
+                      <p className="text-[10px] text-[#9c8e85] mt-1">This is what guests will see in their confirmation email (amount + booking ID auto-filled).</p>
+                    </div>
+                  )}
+                </div>
+
                 {/* Description */}
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">About the property</label>
@@ -45215,6 +45269,12 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
   // Selected meal plan PER category (keyed by category_id). Empty
   // means "use the cheapest" — backend resolves on POST.
   const [mealPlanByCat, setMealPlanByCat] = useState<Record<string, string>>({});
+  // GUEST-step server-side preview — full line-item breakdown
+  // (room subtotal + extras + GST). Driven by the same backend
+  // function the booking POST uses, so what the guest sees here IS
+  // what they'll be charged. `null` = not fetched yet.
+  const [previewPlan, setPreviewPlan] = useState<any | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   // Whether the Rooms-&-Guests popover is open in the search widget.
   const [occOpen, setOccOpen] = useState(false);
   const [searchResults, setSearchResults] = useState<any[] | null>(null);
@@ -45283,6 +45343,38 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     })();
     return () => { cancelled = true; };
   }, [tenantId]);
+
+  // ── GUEST-step server-side estimate ─────────────────────────────
+  // When the guest lands on the GUEST step (or changes meal plan /
+  // adults / children), call the booking-preview endpoint which
+  // runs the SAME math as the booking POST. Replaces the lossy
+  // client-side multiply-rate-by-rooms estimate.
+  useEffect(() => {
+    if (step !== 'GUEST' || !pickedRoom) { setPreviewPlan(null); return; }
+    const catId = pickedRoom.category_id;
+    if (!catId) { setPreviewPlan(null); return; }
+    let cancelled = false;
+    setPreviewLoading(true);
+    const selectedPlanId = mealPlanByCat[catId] || '';
+    const qs = new URLSearchParams({
+      room_type_id: catId,
+      start: searchParams.start,
+      end:   searchParams.end,
+      rooms: String(searchParams.rooms),
+      adults: String(searchParams.adults),
+      children: String(searchParams.children),
+      child_ages: searchParams.child_ages.join(','),
+    });
+    if (selectedPlanId) qs.set('meal_plan_id', selectedPlanId);
+    fetch(`/api/public/restaurant/${encodeURIComponent(resolvedTenantId)}/hotel/booking-preview?${qs.toString()}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(p => { if (!cancelled) setPreviewPlan(p); })
+      .catch(() => { if (!cancelled) setPreviewPlan(null); })
+      .finally(() => { if (!cancelled) setPreviewLoading(false); });
+    return () => { cancelled = true; };
+  }, [step, pickedRoom, mealPlanByCat, searchParams.start, searchParams.end,
+      searchParams.rooms, searchParams.adults, searchParams.children,
+      searchParams.child_ages.join(','), resolvedTenantId]);
 
   const runSearch = async () => {
     setSearching(true);
@@ -46265,38 +46357,25 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
 
         {/* STEP 3: GUEST DETAILS */}
         {step === 'GUEST' && pickedRoom && (() => {
-          // ── Estimated total — chosen meal plan × nights × num_rooms.
-          // Handles three sources of truth in priority order:
-          //   1. category-shape (new) + meal plan picked  →
-          //        plan.per_night_rate × nights × num_rooms
-          //   2. category-shape (new) without explicit plan →
-          //        starting_from_total × num_rooms  (cheapest plan)
-          //   3. legacy room-shape  →  total_rate × num_rooms
-          // Server is authoritative — the actual amount lands on
-          // confirmation.total_amount after the POST. This is a
-          // pre-submit estimate so the guest knows what's coming.
+          // Server-driven estimate — `previewPlan` is the result of
+          // /hotel/booking-preview which runs the SAME math as the
+          // booking POST. So what the guest sees here IS what they'll
+          // be charged. Falls back gracefully while the fetch is in
+          // flight (previewLoading) or if the API errored.
           const isCategory = !!pickedRoom.category_id;
-          const planObj    = isCategory
-            ? (pickedRoom.meal_plans || []).find((mp: any) => mp.meal_plan_id === mealPlanByCat[pickedRoom.category_id])
-            : null;
-          const nights = Math.max(1, pickedRoom.nights || 1);
-          const rooms  = Math.max(1, searchParams.rooms || 1);
-          let estPerRoom: number;
-          if (planObj) {
-            estPerRoom = Number(planObj.per_night_rate || 0) * nights;
-          } else if (isCategory) {
-            estPerRoom = Number(pickedRoom.starting_from_total || 0);
-          } else {
-            estPerRoom = Number(pickedRoom.total_rate || 0);
-          }
-          const estTotal = estPerRoom * rooms;
-          const displayName = isCategory
-            ? (pickedRoom.category_name || 'Room')
-            : (pickedRoom.name || 'Room');
+          const displayName = isCategory ? (pickedRoom.category_name || 'Room') : (pickedRoom.name || 'Room');
+          const planLabel = previewPlan?.meal_plan_label || (
+            isCategory
+              ? (pickedRoom.meal_plans || []).find((mp: any) => mp.meal_plan_id === mealPlanByCat[pickedRoom.category_id])
+              : null
+          );
+          const planLabelText = typeof planLabel === 'string'
+            ? planLabel
+            : (planLabel ? `${planLabel.code} — ${planLabel.name}` : null);
           return (
           <form onSubmit={submitBooking} className="bg-white rounded-3xl shadow-sm p-5 space-y-3">
             <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Your details</p>
-            <div className="bg-[#faf7f2] rounded-2xl p-3 text-sm">
+            <div className="bg-[#faf7f2] rounded-2xl p-3 text-sm space-y-0.5">
               <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{displayName}</strong></div>
               <div className="flex justify-between"><span className="text-[#6b5d52]">Dates</span>{searchParams.start} → {searchParams.end}</div>
               <div className="flex justify-between"><span className="text-[#6b5d52]">Rooms</span>{searchParams.rooms}</div>
@@ -46304,22 +46383,60 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
               {searchParams.children > 0 && (
                 <div className="flex justify-between"><span className="text-[#6b5d52]">Children</span>{searchParams.children}{searchParams.child_ages.length > 0 ? ` (${searchParams.child_ages.join(', ')} yr)` : ''}</div>
               )}
-              {planObj && (
-                <div className="flex justify-between"><span className="text-[#6b5d52]">Plan</span>{planObj.code} — {planObj.name}</div>
+              {planLabelText && (
+                <div className="flex justify-between"><span className="text-[#6b5d52]">Plan</span>{planLabelText}</div>
               )}
-              <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
-                <span className="text-[#6b5d52] font-bold">Estimated total</span>
-                <strong className="font-mono text-[#cc5a16]">{hotelInfo.currency_symbol}{Number.isFinite(estTotal) ? estTotal.toLocaleString('en-IN') : '—'}</strong>
-              </div>
-              {rooms > 1 && (
-                <p className="text-[10px] text-[#9c8e85] mt-0.5 text-right">
-                  {rooms} rooms × {hotelInfo.currency_symbol}{Number.isFinite(estPerRoom) ? estPerRoom.toLocaleString('en-IN') : '—'}
-                </p>
+
+              {/* ── Server-driven line-item breakdown ─────────────
+                  Read straight from previewPlan (the same math the
+                  booking POST will apply). Shows the guest exactly
+                  why the total is what it is — no surprises. */}
+              {previewLoading && (
+                <p className="text-[11px] text-[#9c8e85] pt-2 text-right italic">Calculating…</p>
               )}
-              <p className="text-[10px] text-[#9c8e85] mt-0.5 text-right">
-                {Number(hotelInfo.rates_include_gst) === 0 ? '+ GST as applicable' : 'Includes all taxes'}
-                {searchParams.adults > 2 ? ` · ${searchParams.adults - 2} extra adult${searchParams.adults - 2 === 1 ? '' : 's'} priced separately` : ''}
-              </p>
+              {previewPlan && previewPlan.ok && (
+                <>
+                  <div className="pt-2 mt-1 border-t border-[#cc5a16]/10 space-y-0.5">
+                    <div className="flex justify-between">
+                      <span className="text-[#6b5d52]">Room rate ({previewPlan.nights} night{previewPlan.nights === 1 ? '' : 's'} × {previewPlan.rooms} room{previewPlan.rooms === 1 ? '' : 's'})</span>
+                      <span className="font-mono">{hotelInfo.currency_symbol}{Number(previewPlan.room_subtotal).toLocaleString('en-IN')}</span>
+                    </div>
+                    {previewPlan.extra_adults > 0 && (
+                      <div className="flex justify-between">
+                        <span className="text-[#6b5d52]">
+                          {searchParams.adults} adults · {previewPlan.free_adults_total} free + <strong>{previewPlan.extra_adults} extra</strong>
+                        </span>
+                        <span className="font-mono text-[#cc5a16]">+{hotelInfo.currency_symbol}{Number(previewPlan.extras_subtotal).toLocaleString('en-IN')}</span>
+                      </div>
+                    )}
+                    {previewPlan.extra_adults === 0 && searchParams.adults > 0 && (
+                      <div className="flex justify-between text-[11px] text-emerald-700">
+                        <span>{searchParams.adults} adult{searchParams.adults === 1 ? '' : 's'} · all included free</span>
+                        <span className="font-mono">—</span>
+                      </div>
+                    )}
+                    {previewPlan.extra_children_with_mattress > 0 && (
+                      <div className="flex justify-between text-[11px] text-[#6b5d52]">
+                        <span>{previewPlan.extra_children_with_mattress} child{previewPlan.extra_children_with_mattress === 1 ? '' : 'ren'} (with mattress)</span>
+                        <span className="font-mono">included in extras</span>
+                      </div>
+                    )}
+                  </div>
+                  {previewPlan.gst_amount > 0 && (
+                    <div className="flex justify-between text-[11px] text-[#6b5d52]">
+                      <span>GST ({previewPlan.gst_pct}%){previewPlan.rates_include_gst === 1 ? ' · included' : ''}</span>
+                      <span className="font-mono">{hotelInfo.currency_symbol}{Number(previewPlan.gst_amount).toLocaleString('en-IN')}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between pt-1 mt-1 border-t-2 border-[#cc5a16]/30">
+                    <span className="text-[#6b5d52] font-bold">Total payable</span>
+                    <strong className="font-mono text-[#cc5a16] text-base">{hotelInfo.currency_symbol}{Number(previewPlan.grand_total).toLocaleString('en-IN')}</strong>
+                  </div>
+                </>
+              )}
+              {previewPlan && previewPlan.ok === false && (
+                <p className="text-[11px] text-rose-600 pt-2 italic">{previewPlan.error || 'Could not calculate estimate.'}</p>
+              )}
             </div>
             <div>
               <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Full name *</label>
@@ -46376,6 +46493,30 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 <strong className="font-mono" style={{ color: brandPrimary }}>{hotelInfo.currency_symbol}{Number(confirmation.total_amount).toLocaleString('en-IN')}</strong>
               </div>
             </div>
+            {/* ── UPI direct-pay CTA — only when the tenant configured
+                a VPA. Tap on mobile = UPI app opens with amount pre-
+                filled; on desktop guests get the link they can copy
+                or scan from the confirmation email instead. */}
+            {confirmation.upi_payment_link && (
+              <div className="mt-4 p-4 rounded-2xl border-2 border-dashed" style={{ borderColor: brandPrimary, background: `${brandPrimary}08` }}>
+                <p className="text-[11px] font-bold uppercase tracking-widest mb-1" style={{ color: brandPrimary }}>💰 Pay direct via UPI</p>
+                <p className="text-[11px] text-[#6b5d52] mb-3">
+                  Tap below on your phone — your UPI app opens with <strong>{hotelInfo.currency_symbol}{Number(confirmation.total_amount).toLocaleString('en-IN')}</strong> pre-filled. No gateway fees.
+                </p>
+                <a
+                  href={confirmation.upi_payment_link}
+                  className="block w-full text-center px-5 py-3 rounded-2xl text-white text-sm font-bold transition-colors"
+                  style={{ background: brandPrimary }}
+                  onMouseEnter={e => (e.currentTarget.style.background = brandSecondary)}
+                  onMouseLeave={e => (e.currentTarget.style.background = brandPrimary)}
+                >
+                  Pay {hotelInfo.currency_symbol}{Number(confirmation.total_amount).toLocaleString('en-IN')} via UPI
+                </a>
+                <p className="text-[10px] text-[#9c8e85] text-center mt-2">
+                  Payee: <strong>{confirmation.upi_payee_name}</strong> · UPI ID: <strong className="font-mono">{confirmation.upi_vpa}</strong>
+                </p>
+              </div>
+            )}
             {/* Phase 3 — calendar download + share link. Helps guests
                 remember the booking and brings the property word-of-
                 mouth referrals. */}

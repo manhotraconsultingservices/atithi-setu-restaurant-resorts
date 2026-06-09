@@ -20548,6 +20548,151 @@ async function startServer() {
     }
   });
 
+  // Public booking PREVIEW — same input shape as the create endpoint
+  // but doesn't actually create a booking. Returns the full price
+  // breakdown so the GUEST-step recap can show "Room rate ₹X +
+  // extra adults ₹Y + GST ₹Z = Total ₹T" without surprises at
+  // confirmation. Reuses computeBookingTotalWithExtras() (the same
+  // function the booking-create endpoint uses), so what the guest
+  // sees here IS what they'll be charged.
+  app.get("/api/public/restaurant/:id/hotel/booking-preview", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const room_type_id = String(req.query.room_type_id || '');
+      const start  = String(req.query.start  || '');
+      const end    = String(req.query.end    || '');
+      const reqRooms    = Math.max(1, Math.min(9, Number(req.query.rooms)    || 1));
+      const reqAdults   = Math.max(1, Number(req.query.adults)   || 0);
+      const reqChildren = Math.max(0, Number(req.query.children) || 0);
+      const meal_plan_id = req.query.meal_plan_id ? String(req.query.meal_plan_id) : null;
+      const child_ages   = String(req.query.child_ages || '').split(',').filter(Boolean).map(s => Number(s) || 0);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+        return res.status(400).json({ error: 'start and end must be YYYY-MM-DD' });
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      const occPolicy = resolveOccupancyPolicy(check.restaurant);
+      const ratesIncGst: 0 | 1 = (check.restaurant?.rates_include_gst == null
+        || Number(check.restaurant.rates_include_gst) === 1) ? 1 : 0;
+      const taxCfg = await loadHotelTaxConfig(req.params.id);
+
+      // Resolve meal plan: caller-picked, or cheapest in matrix for
+      // the category × dates. Matches the booking-create endpoint's
+      // resolution logic.
+      let resolved_meal_plan_id = meal_plan_id;
+      let meal_plan_label: string | null = null;
+      if (!resolved_meal_plan_id && room_type_id) {
+        const cheapest: any = await tenantDb.get(
+          `SELECT mp.id, mp.code, mp.name
+             FROM room_tariffs rt
+             JOIN meal_plans mp     ON mp.id = rt.meal_plan_id AND mp.is_active = 1
+             JOIN season_periods sp ON sp.season_id = rt.season_id
+            WHERE rt.room_type_id = ? AND sp.start_date <= ? AND sp.end_date >= ?
+            GROUP BY mp.id, mp.code, mp.name
+            ORDER BY MIN(rt.rate) ASC LIMIT 1`,
+          [room_type_id, end, start]
+        ).catch(() => null);
+        if (cheapest) {
+          resolved_meal_plan_id = cheapest.id;
+          meal_plan_label = `${cheapest.code} — ${cheapest.name}`;
+        }
+      } else if (resolved_meal_plan_id) {
+        const mp: any = await tenantDb.get("SELECT code, name FROM meal_plans WHERE id = ?", [resolved_meal_plan_id]).catch(() => null);
+        if (mp) meal_plan_label = `${mp.code} — ${mp.name}`;
+      }
+
+      // Pick a representative room from the category for the math.
+      // Per-room math is identical across rooms in the same category
+      // (matrix is keyed by room_type_id), so one is enough.
+      let probeRoomId: string | null = null;
+      if (room_type_id) {
+        const probe: any = await tenantDb.get(
+          "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name LIMIT 1",
+          [room_type_id]
+        );
+        probeRoomId = probe?.id || null;
+      }
+      if (!probeRoomId) return res.status(400).json({ error: 'room_type_id is required and must have at least one room' });
+
+      // Extras driven by the tenant's occupancy policy. Note: extras
+      // are TOTAL across the entire booking, matching the booking-
+      // create endpoint's semantics.
+      const extra_adults = Math.max(0, reqAdults - (occPolicy.free_adults_per_room * reqRooms));
+      const childWithMattress = child_ages.filter(a => a > occPolicy.free_child_age_max).length;
+      const childNoMattress   = child_ages.filter(a => a <= occPolicy.free_child_age_max).length
+                                + Math.max(0, reqChildren - child_ages.length);  // children without ages → defaulted
+
+      // Per-room price (one room's share). The booking-create endpoint
+      // applies extras ONCE per booking (totals math), so we mirror.
+      const breakdown = await computeBookingTotalWithExtras(
+        req.params.id, probeRoomId, start, end,
+        { mealPlanId: resolved_meal_plan_id,
+          extraAdults: extra_adults,
+          extraChildrenWithMattress: childWithMattress,
+          extraChildrenNoMattress: childNoMattress }
+      ).catch(() => null) as any;
+      if (!breakdown) {
+        return res.json({
+          ok: false,
+          error: 'Could not compute estimate — check the tariff matrix is configured for this category.',
+        });
+      }
+
+      const baseTotal = Number(breakdown.base_total || 0);   // single room's base × nights
+      const extrasTotal = Number(breakdown.extras_total || 0);
+
+      // For multi-room: base × num_rooms, extras applied ONCE
+      // (matches the booking-create endpoint's behavior).
+      const baseAcrossRooms = baseTotal * reqRooms;
+      const subtotal = baseAcrossRooms + extrasTotal;
+
+      // Compute GST. In INCLUSIVE mode, subtotal IS the gross — extract
+      // GST out of it for display. In EXCLUSIVE mode, add GST on top.
+      // GST slab is determined by per-night base rate (Indian convention).
+      const perNightBase = breakdown.per_night?.[0]?.base_rate || 0;
+      const gstPct = gstRateForTariff(perNightBase, taxCfg);
+      let net = subtotal;
+      let gst = 0;
+      let grandTotal = subtotal;
+      if (ratesIncGst === 1) {
+        const bd = rateBreakdown(subtotal, gstPct, 1);
+        net = bd.net; gst = bd.gst; grandTotal = bd.gross;
+      } else {
+        const bd = rateBreakdown(subtotal, gstPct, 0);
+        net = bd.net; gst = bd.gst; grandTotal = bd.gross;
+      }
+
+      res.json({
+        ok: true,
+        rooms: reqRooms,
+        adults: reqAdults,
+        children: reqChildren,
+        nights: breakdown.per_night?.length || 0,
+        meal_plan_id: resolved_meal_plan_id,
+        meal_plan_label,
+        // Line items the UI renders in the recap.
+        per_night_rate:     Math.round(perNightBase),                  // single room, one night
+        room_subtotal:      Math.round(baseAcrossRooms * 100) / 100,   // base × nights × rooms
+        extra_adults:       extra_adults,
+        extra_children_with_mattress: childWithMattress,
+        extra_children_no_mattress:   childNoMattress,
+        extras_subtotal:    Math.round(extrasTotal * 100) / 100,
+        // Tax breakdown.
+        net_amount:         net,
+        gst_pct:            gstPct,
+        gst_amount:         gst,
+        grand_total:        grandTotal,
+        rates_include_gst:  ratesIncGst,
+        // For the line "5 adults · 4 free + 1 extra".
+        free_adults_total:  occPolicy.free_adults_per_room * reqRooms,
+        occupancy_policy:   occPolicy,
+      });
+    } catch (err: any) {
+      console.error('booking-preview error:', err);
+      res.status(500).json({ error: err?.message || 'Preview failed' });
+    }
+  });
+
   // Public booking creation. Anyone can hit this — basic rate-limit-
   // friendly fields-only; status starts BOOKED, booking_source set to
   // 'DIRECT_WEB' so reports can attribute revenue.
@@ -20836,7 +20981,22 @@ async function startServer() {
         // Notifications + OTA fan-out per room (each room creates one
         // record in channel_sync_log; OTAs see independent inventory
         // decrements — important because rooms are independent units).
-        try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date, source: 'DIRECT_WEB', mealPlan: meal_plan_snapshot }); } catch {}
+        // Pass UPI VPA + booking amount so the email template can
+        // render a "Pay via UPI" deep link with the amount pre-filled.
+        try {
+          await triggerNotification(req.params.id, 'BOOKING_CREATED', {
+            bookingId: bid,
+            guestName: guest_name,
+            checkIn: check_in_date,
+            checkOut: check_out_date,
+            source: 'DIRECT_WEB',
+            mealPlan: meal_plan_snapshot,
+            totalAmount: totalForCustomer,
+            currencySymbol: check.restaurant?.currency_symbol || '₹',
+            upiVpa: check.restaurant?.upi_vpa || '',
+            upiPayeeName: check.restaurant?.upi_payee_name || check.restaurant?.name || '',
+          });
+        } catch {}
         try { await logChannelSync(req.params.id, row, 'BOOKING_CREATED'); } catch {}
       }
 
@@ -20850,6 +21010,22 @@ async function startServer() {
         } catch {}
       }
 
+      // Build a UPI deep link if the owner has configured a VPA.
+      // The confirmation page renders this as a "Pay via UPI" button
+      // that opens the guest's UPI app pre-filled with the amount.
+      // Empty string when UPI isn't configured — frontend hides the
+      // button in that case.
+      const upiVpa = String(check.restaurant?.upi_vpa || '').trim();
+      const upiPayeeName = String(check.restaurant?.upi_payee_name || check.restaurant?.name || '').trim();
+      const upiTotal = Math.round(grandTotal * 100) / 100;
+      const upi_payment_link = upiVpa && upiTotal > 0
+        ? `upi://pay?pa=${encodeURIComponent(upiVpa)}` +
+          `&pn=${encodeURIComponent(upiPayeeName)}` +
+          `&am=${upiTotal.toFixed(2)}` +
+          `&cu=INR` +
+          `&tn=${encodeURIComponent(`Booking ${createdBookings[0].id}`)}`
+        : '';
+
       // Return shape stays backwards-compatible for single-room
       // callers (booking_id + total_amount on the root). Multi-room
       // callers also get group_id + bookings[] for navigation.
@@ -20859,7 +21035,7 @@ async function startServer() {
         guest_name: headline.guest_name,
         check_in_date: headline.check_in_date,
         check_out_date: headline.check_out_date,
-        total_amount: Math.round(grandTotal * 100) / 100,
+        total_amount: upiTotal,
         num_rooms,
         adults,
         children,
@@ -20869,6 +21045,9 @@ async function startServer() {
         bookings: createdBookings.map(b => ({
           id: b.id, room_id: b.room_id, total_amount: b.total_amount,
         })),
+        upi_payment_link,
+        upi_payee_name: upiPayeeName,
+        upi_vpa: upiVpa,
         confirmation_message: isGroup
           ? `${num_rooms} rooms confirmed for ${guest_name}.`
           : `Booking confirmed for ${guest_name}.`,
@@ -22881,6 +23060,10 @@ async function startServer() {
       // clamps + applies defaults, so Settings UI always gets sane
       // values even on first-time tenants.
       occupancy_policy:             resolveOccupancyPolicy(r),
+      // UPI direct-payment configuration. Empty `upi_vpa` disables
+      // the "Pay via UPI" link in confirmation emails for this tenant.
+      upi_vpa:                      r?.upi_vpa || '',
+      upi_payee_name:               r?.upi_payee_name || '',
     });
   });
 
@@ -22969,6 +23152,23 @@ async function startServer() {
     const maxExtras   = occClamp(b.max_extra_adults_per_room, 0, 16);
     const freeChildAge = occClamp(b.free_child_age_max,       0, 17);
     const maxChildren = occClamp(b.max_children_per_room,     0, 16);
+    // UPI VPA validation — RBI/NPCI format: identifier @ handle
+    // e.g. "mybusiness@okhdfc", "owner.name@upi". Lenient regex,
+    // server-side just sanity-checks before storing.
+    const UPI_RE = /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$/;
+    let upiVpa: string | null | undefined;
+    if (b.upi_vpa != null) {
+      const raw = String(b.upi_vpa || '').trim();
+      if (raw === '') upiVpa = null;             // explicit clear
+      else if (!UPI_RE.test(raw)) {
+        return res.status(400).json({ error: 'UPI VPA must look like "username@bank" (letters, digits, dots, dashes, underscores).' });
+      } else upiVpa = raw;
+    }
+    let upiPayee: string | null | undefined;
+    if (b.upi_payee_name != null) {
+      const raw = String(b.upi_payee_name || '').trim().slice(0, 80);
+      upiPayee = raw === '' ? null : raw;
+    }
     try {
       await centralDb.run(
         `UPDATE restaurants SET
@@ -22991,7 +23191,9 @@ async function startServer() {
             free_adults_per_room      = ${freeAdults    === undefined ? 'free_adults_per_room'      : '?'},
             max_extra_adults_per_room = ${maxExtras     === undefined ? 'max_extra_adults_per_room' : '?'},
             free_child_age_max        = ${freeChildAge  === undefined ? 'free_child_age_max'        : '?'},
-            max_children_per_room     = ${maxChildren   === undefined ? 'max_children_per_room'     : '?'}
+            max_children_per_room     = ${maxChildren   === undefined ? 'max_children_per_room'     : '?'},
+            upi_vpa                   = ${upiVpa        === undefined ? 'upi_vpa'                   : '?'},
+            upi_payee_name            = ${upiPayee      === undefined ? 'upi_payee_name'            : '?'}
           WHERE id = ?`,
         [slug, b.hero_image_url ?? null, b.hotel_logo_url ?? null,
          b.hotel_description ?? null, b.hotel_full_address ?? null,
@@ -23005,6 +23207,8 @@ async function startServer() {
          ...(maxExtras      === undefined ? [] : [maxExtras]),
          ...(freeChildAge   === undefined ? [] : [freeChildAge]),
          ...(maxChildren    === undefined ? [] : [maxChildren]),
+         ...(upiVpa         === undefined ? [] : [upiVpa]),
+         ...(upiPayee       === undefined ? [] : [upiPayee]),
          req.params.id]
       );
       res.json({ ok: true });
@@ -28916,7 +29120,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'configurable-occupancy-policy-per-tenant',
+    commit_marker: 'booking-preview-extras-math-upi-payment-link',
     code_features: [
       'subscription-billing',
       'read-only-mode',
