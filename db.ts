@@ -718,6 +718,109 @@ export async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_perm_audit_restaurant
       ON permission_audit_log (restaurant_id, changed_at DESC);
   `);
+
+  // ════════════════════════════════════════════════════════════════════
+  // HR & PAYROLL — central statutory rule tables (Phase 1, 10 Jun 2026)
+  // ════════════════════════════════════════════════════════════════════
+  // Both tables are CENTRAL because rules are identical across every
+  // tenant (Indian govt sets them). Tenants pick which regime / state
+  // to apply via `statutory_config` (per-tenant, in tenant DB).
+  //
+  // `central_pt_slabs` — Professional Tax slabs per state. Lookup by
+  //   state + (monthly gross). Some states (Maharashtra) levy an extra
+  //   "Feb top-up" — captured via `extra_month` (1-12) + `extra_amount`.
+  //
+  // `central_tds_slabs` — Income-tax slabs per regime (OLD/NEW) per
+  //   financial year (1 Apr → 31 Mar). Lookup by FY + regime + taxable
+  //   annual income; first matching row applies. Rates as percent.
+  //
+  // Per-FY rows ensure historical payroll runs remain reproducible
+  // even after the govt changes slabs in the annual budget.
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS central_pt_slabs (
+      id                SERIAL PRIMARY KEY,
+      state_code        TEXT NOT NULL,         -- 'MH', 'KA', 'WB', 'TN', ...
+      min_gross         NUMERIC NOT NULL,      -- inclusive
+      max_gross         NUMERIC,               -- inclusive; NULL = +∞
+      amount            NUMERIC NOT NULL,      -- monthly PT amount
+      extra_month       INT,                   -- e.g. 2 for Maharashtra Feb top-up
+      extra_amount      NUMERIC DEFAULT 0,
+      effective_from    DATE NOT NULL,
+      effective_to      DATE,                  -- NULL = current
+      notes             TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_central_pt_state ON central_pt_slabs (state_code, effective_from);
+
+    CREATE TABLE IF NOT EXISTS central_tds_slabs (
+      id                SERIAL PRIMARY KEY,
+      fy                TEXT NOT NULL,         -- '2025-26' (1 Apr 2025 → 31 Mar 2026)
+      regime            TEXT NOT NULL,         -- 'OLD' | 'NEW'
+      min_income        NUMERIC NOT NULL,      -- inclusive
+      max_income        NUMERIC,               -- inclusive; NULL = +∞
+      rate_pct          NUMERIC NOT NULL,      -- percentage as a number (e.g. 5, 20, 30)
+      base_tax          NUMERIC DEFAULT 0,     -- cumulative tax up to min_income
+      surcharge_pct     NUMERIC DEFAULT 0,
+      cess_pct          NUMERIC DEFAULT 4,     -- Health + Education cess (default 4%)
+      notes             TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_central_tds_fy ON central_tds_slabs (fy, regime, min_income);
+  `);
+
+  // ── Seed PT slabs for the three most common states tenants use ───
+  // Maharashtra (MH):
+  //   ≤ 7,500    → ₹0
+  //   7,501-10,000 → ₹175
+  //   ≥ 10,001   → ₹200 + ₹300 Feb top-up
+  // Karnataka (KA):
+  //   ≤ 24,999   → ₹0
+  //   ≥ 25,000   → ₹200
+  // West Bengal (WB):
+  //   ≤ 10,000   → ₹0; 10,001-15,000 → ₹110; 15,001-25,000 → ₹130;
+  //   25,001-40,000 → ₹150; ≥ 40,001 → ₹200
+  // Effective 1 Apr 2025 — current at time of writing.
+  await centralDb.exec(`
+    INSERT INTO central_pt_slabs (state_code, min_gross, max_gross, amount, extra_month, extra_amount, effective_from, notes) VALUES
+      ('MH',     0,   7500,   0,    NULL, 0,   '2025-04-01', 'Maharashtra zero band'),
+      ('MH',  7501,  10000, 175,    NULL, 0,   '2025-04-01', 'Maharashtra mid band'),
+      ('MH', 10001,   NULL, 200,       2, 300, '2025-04-01', 'Maharashtra high band + Feb extra'),
+      ('KA',     0,  24999,   0,    NULL, 0,   '2025-04-01', 'Karnataka zero band'),
+      ('KA', 25000,   NULL, 200,    NULL, 0,   '2025-04-01', 'Karnataka standard'),
+      ('WB',     0,  10000,   0,    NULL, 0,   '2025-04-01', 'WB zero band'),
+      ('WB', 10001,  15000, 110,    NULL, 0,   '2025-04-01', 'WB band 1'),
+      ('WB', 15001,  25000, 130,    NULL, 0,   '2025-04-01', 'WB band 2'),
+      ('WB', 25001,  40000, 150,    NULL, 0,   '2025-04-01', 'WB band 3'),
+      ('WB', 40001,   NULL, 200,    NULL, 0,   '2025-04-01', 'WB band 4')
+    ON CONFLICT DO NOTHING;
+  `).catch(() => {});  // ON CONFLICT not strict (no UNIQUE) — but tolerant
+
+  // ── Seed TDS slabs for FY 2025-26 (current Indian tax year) ──────
+  // OLD regime (with exemptions / 80C etc):
+  //   ≤ 2.5 L    → 0%
+  //   2.5-5 L    → 5%
+  //   5-10 L     → 20%
+  //   > 10 L     → 30%
+  // NEW regime (default from FY 2023-24, no exemptions):
+  //   ≤ 3 L      → 0%
+  //   3-7 L      → 5%
+  //   7-10 L     → 10%
+  //   10-12 L    → 15%
+  //   12-15 L    → 20%
+  //   > 15 L     → 30%
+  // Cess 4% applies on all. Surcharge starts at 50L+ (handled in code).
+  await centralDb.exec(`
+    INSERT INTO central_tds_slabs (fy, regime, min_income, max_income, rate_pct, base_tax, cess_pct) VALUES
+      ('2025-26','OLD',       0,  250000,  0,        0, 4),
+      ('2025-26','OLD',  250001,  500000,  5,        0, 4),
+      ('2025-26','OLD',  500001, 1000000, 20,    12500, 4),
+      ('2025-26','OLD', 1000001,    NULL, 30,   112500, 4),
+      ('2025-26','NEW',       0,  300000,  0,        0, 4),
+      ('2025-26','NEW',  300001,  700000,  5,        0, 4),
+      ('2025-26','NEW',  700001, 1000000, 10,    20000, 4),
+      ('2025-26','NEW', 1000001, 1200000, 15,    50000, 4),
+      ('2025-26','NEW', 1200001, 1500000, 20,    80000, 4),
+      ('2025-26','NEW', 1500001,    NULL, 30,   140000, 4)
+    ON CONFLICT DO NOTHING;
+  `).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -952,6 +1055,33 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS payroll_id TEXT;
     ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS joined_at DATE;
     ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS notes TEXT;
+    -- HR-P1-1 (10 Jun 2026): full HR profile fields.
+    -- hr_status is separate from is_active because login (is_active=0)
+    -- and HR lifecycle (RESIGNED/TERMINATED) are different concerns:
+    -- a resigned employee may still need login access for Form 16
+    -- download or expense settlement after their last working day.
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS designation TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS department  TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS joining_date DATE;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS ctc          NUMERIC;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS pan          TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS aadhaar      TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS uan          TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS esic_number  TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS bank_account TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS bank_ifsc    TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS bank_name    TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS emergency_contact_name  TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS emergency_contact_phone TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS address       TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS dob           DATE;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS gender        TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS marital_status TEXT;
+    ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS hr_status     TEXT DEFAULT 'ACTIVE';
+    -- Backfill: any pre-existing row with NULL hr_status flips to ACTIVE,
+    -- and joining_date defaults to joined_at if present.
+    UPDATE attendance_staff SET hr_status = 'ACTIVE' WHERE hr_status IS NULL;
+    UPDATE attendance_staff SET joining_date = joined_at WHERE joining_date IS NULL AND joined_at IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS reservation_day_config (
       config_date DATE PRIMARY KEY,
@@ -2019,6 +2149,220 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec(`ALTER TABLE timesheet_day ADD COLUMN IF NOT EXISTS hourly_rate_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await db.exec(`ALTER TABLE timesheet_day ADD COLUMN IF NOT EXISTS pay_amount DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_timesheet_status ON timesheet_day (status, shift_date)`).catch(() => {});
+
+  // ════════════════════════════════════════════════════════════════════
+  // HR & PAYROLL — tenant-scoped tables (Phase 1, 10 Jun 2026)
+  // ════════════════════════════════════════════════════════════════════
+  // Salary structure is VERSIONED — every change creates a new row and
+  // closes the previous via effective_to. Lets us reproduce a year-old
+  // payroll run exactly even after a salary revision.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS salary_structures (
+      id                      TEXT PRIMARY KEY,
+      staff_id                TEXT NOT NULL,
+      effective_from          DATE NOT NULL,
+      effective_to            DATE,                          -- NULL = current
+      gross_monthly           NUMERIC NOT NULL DEFAULT 0,
+      basic                   NUMERIC DEFAULT 0,
+      hra                     NUMERIC DEFAULT 0,
+      special                 NUMERIC DEFAULT 0,
+      conveyance              NUMERIC DEFAULT 0,
+      medical                 NUMERIC DEFAULT 0,
+      other_allowances        NUMERIC DEFAULT 0,
+      employer_pf_included    INT DEFAULT 1,                 -- 1 = employer PF is on top, 0 = bundled into gross
+      tds_regime              TEXT DEFAULT 'NEW',            -- OLD | NEW — per-employee declaration
+      section_80c_declared    NUMERIC DEFAULT 0,             -- annual 80C declaration (for OLD regime TDS)
+      hra_exemption_declared  NUMERIC DEFAULT 0,             -- annual HRA exemption (for OLD regime TDS)
+      notes                   TEXT,
+      created_by              TEXT,
+      created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_salary_structures_staff
+      ON salary_structures (staff_id, effective_from DESC);
+  `).catch(() => {});
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS salary_components (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,
+      type          TEXT NOT NULL,        -- EARNING | DEDUCTION | STATUTORY
+      calc_basis    TEXT NOT NULL,        -- FIXED | PCT_GROSS | PCT_BASIC | FORMULA
+      value         NUMERIC DEFAULT 0,    -- fixed amount or pct
+      formula       TEXT,                 -- free-form for FORMULA basis (eval'd in code)
+      display_order INT DEFAULT 0,
+      is_active     INT DEFAULT 1,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `).catch(() => {});
+
+  // Payroll-run anchor — UNIQUE(year, month) is the idempotency contract.
+  // Concurrent triggers to "create December 2026 run" collapse to one row.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS payroll_runs (
+      id                    TEXT PRIMARY KEY,
+      year                  INT NOT NULL,
+      month                 INT NOT NULL,                  -- 1-12
+      period_start          DATE NOT NULL,                 -- usually month-1
+      period_end            DATE NOT NULL,                 -- usually month-end
+      status                TEXT DEFAULT 'DRAFT',          -- DRAFT | PROCESSING | APPROVED | LOCKED | PAID
+      computed_at           TIMESTAMP,
+      approved_by           TEXT,
+      approved_at           TIMESTAMP,
+      paid_at               TIMESTAMP,
+      total_gross           NUMERIC DEFAULT 0,
+      total_deductions      NUMERIC DEFAULT 0,
+      total_net             NUMERIC DEFAULT 0,
+      employee_count        INT DEFAULT 0,
+      notes                 TEXT,
+      created_by            TEXT,
+      created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (year, month)
+    );
+  `).catch(() => {});
+
+  // One payslip per (run, staff). Snapshot columns freeze the inputs
+  // at compute time so the payslip is reproducible even after staff
+  // master / structure edits. Audit gold-standard.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS payslips (
+      id                              TEXT PRIMARY KEY,
+      payroll_run_id                  TEXT NOT NULL,
+      staff_id                        TEXT NOT NULL,
+      payslip_number                  TEXT,                 -- PSLIP-2026-12-0001 etc
+      staff_snapshot                  TEXT,                 -- JSON of attendance_staff fields at compute time
+      structure_snapshot              TEXT,                 -- JSON of salary_structures row
+      line_items                      TEXT,                 -- JSON [{label,type,amount}]
+      gross_earnings                  NUMERIC DEFAULT 0,
+      gross_deductions                NUMERIC DEFAULT 0,
+      net_pay                         NUMERIC DEFAULT 0,
+      work_days                       INT DEFAULT 0,
+      paid_days                       INT DEFAULT 0,
+      lop_days                        INT DEFAULT 0,
+      pf_employee                     NUMERIC DEFAULT 0,
+      pf_employer_eps                 NUMERIC DEFAULT 0,
+      pf_employer_epf                 NUMERIC DEFAULT 0,
+      esi_employee                    NUMERIC DEFAULT 0,
+      esi_employer                    NUMERIC DEFAULT 0,
+      professional_tax                NUMERIC DEFAULT 0,
+      tds                             NUMERIC DEFAULT 0,
+      voluntary_deductions            NUMERIC DEFAULT 0,
+      pay_period_start                DATE,
+      pay_period_end                  DATE,
+      pdf_url                         TEXT,
+      email_sent_at                   TIMESTAMP,
+      acknowledged_at                 TIMESTAMP,            -- guest tapped 'mark as read' in self-service
+      created_at                      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (payroll_run_id, staff_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_payslips_staff ON payslips (staff_id, pay_period_end DESC);
+  `).catch(() => {});
+
+  // Expense claim header + line items. Approval chain modelled as
+  // discrete fields (manager_approved_by/at, hr_approved_by/at) so
+  // we can audit each step. `reimburse_with_payroll_run_id` ties
+  // an approved claim into the next payroll run as a deduction-
+  // reversal line item (negative entry → adds to net pay).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS expense_claims (
+      id                              TEXT PRIMARY KEY,
+      staff_id                        TEXT NOT NULL,
+      claim_number                    TEXT,                 -- CLAIM-2026-0001
+      claim_date                      DATE DEFAULT CURRENT_DATE,
+      total_amount                    NUMERIC DEFAULT 0,
+      status                          TEXT DEFAULT 'DRAFT', -- DRAFT | SUBMITTED | MANAGER_APPROVED | HR_APPROVED | REJECTED | REIMBURSED
+      submitted_at                    TIMESTAMP,
+      manager_approved_by             TEXT,
+      manager_approved_at             TIMESTAMP,
+      hr_approved_by                  TEXT,
+      hr_approved_at                  TIMESTAMP,
+      rejected_by                     TEXT,
+      rejected_at                     TIMESTAMP,
+      rejected_reason                 TEXT,
+      reimburse_with_payroll_run_id   TEXT,                 -- FK → payroll_runs, NULL until attached
+      reimbursed_at                   TIMESTAMP,
+      notes                           TEXT,
+      created_at                      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_expense_claims_staff_status
+      ON expense_claims (staff_id, status, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS expense_claim_items (
+      id            TEXT PRIMARY KEY,
+      claim_id      TEXT NOT NULL,
+      category      TEXT,                                  -- TRAVEL | FOOD | TELECOM | OFFICE_SUPPLIES | OTHER
+      description   TEXT,
+      amount        NUMERIC DEFAULT 0,
+      expense_date  DATE,
+      receipt_url   TEXT,                                  -- /uploads/<file> from multer
+      gst_amount    NUMERIC DEFAULT 0,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_expense_items_claim ON expense_claim_items (claim_id);
+  `).catch(() => {});
+
+  // Offer letters table — issued BEFORE the candidate is an employee,
+  // so candidate_email/phone live on this row (no attendance_staff
+  // record yet). On acceptance, an attendance_staff row is created
+  // and linked via `created_staff_id`.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS offer_letter_templates (
+      id            TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,
+      body_html     TEXT,                                  -- handlebars-style placeholders
+      is_default    INT DEFAULT 0,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS offer_letters (
+      id                  TEXT PRIMARY KEY,
+      offer_number        TEXT,                             -- OFFER-2026-0001
+      candidate_name      TEXT NOT NULL,
+      candidate_email     TEXT,
+      candidate_phone     TEXT,
+      designation         TEXT,
+      department          TEXT,
+      ctc                 NUMERIC,
+      ctc_breakup         TEXT,                             -- JSON
+      joining_date        DATE,
+      template_id         TEXT,
+      pdf_url             TEXT,
+      signed_pdf_url      TEXT,
+      status              TEXT DEFAULT 'DRAFT',             -- DRAFT | SENT | ACCEPTED | DECLINED | EXPIRED
+      sent_at             TIMESTAMP,
+      accepted_at         TIMESTAMP,
+      declined_at         TIMESTAMP,
+      expires_at          DATE,
+      created_staff_id    TEXT,                             -- attendance_staff.id once accepted
+      created_by          TEXT,
+      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_offer_letters_status ON offer_letters (status, created_at DESC);
+  `).catch(() => {});
+
+  // Singleton table — one row per tenant holds the statutory toggles.
+  // First read creates the default row idempotently in the GET handler.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS statutory_config (
+      id                    TEXT PRIMARY KEY DEFAULT 'SINGLETON',
+      pf_enabled            INT DEFAULT 0,
+      esi_enabled           INT DEFAULT 0,
+      pt_state              TEXT,                          -- 'MH' | 'KA' | 'WB' | ...
+      pt_slabs              TEXT,                          -- JSON override of central_pt_slabs (NULL = use central)
+      tds_regime_default    TEXT DEFAULT 'NEW',            -- OLD | NEW
+      pf_wage_ceiling       NUMERIC DEFAULT 15000,
+      esi_wage_ceiling      NUMERIC DEFAULT 21000,
+      pan_employer          TEXT,
+      tan_employer          TEXT,
+      pf_estab_code         TEXT,                          -- EPFO Establishment Code
+      esi_employer_code     TEXT,
+      financial_year        TEXT DEFAULT '2025-26',
+      notes                 TEXT,
+      updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `).catch(() => {});
 
   // Cache stores the init promise (set by getTenantDb above); we return
   // the resolved DbInterface here. No need to re-cache.
