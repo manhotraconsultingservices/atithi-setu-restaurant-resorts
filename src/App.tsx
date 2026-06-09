@@ -18058,7 +18058,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   const p = ota360Data.portfolio || {};
                   const fmt = (n: number) => `₹${Math.round(Number(n || 0)).toLocaleString('en-IN')}`;
                   const fmtPct = (n: number) => `${Number(n || 0).toFixed(1)}%`;
-                  const labels: Record<string, string> = { BOOKING: '🌐 Booking.com', MMT: '✈️ MakeMyTrip', GOIBIBO: '🧳 Goibibo', AGODA: '🏨 Agoda', EXPEDIA: '🌍 Expedia', AIRBNB: '🏠 Airbnb', DIRECT: '🏠 Direct', WALK_IN: '🚶 Walk-in' };
+                  const labels: Record<string, string> = { BOOKING: '🌐 Booking.com', MMT: '✈️ MakeMyTrip', GOIBIBO: '🧳 Goibibo', AGODA: '🏨 Agoda', EXPEDIA: '🌍 Expedia', AIRBNB: '🏠 Airbnb', DIRECT: '🏠 Direct', DIRECT_WEB: '🌐 Direct (Website)', WALK_IN: '🚶 Walk-in', WALKIN: '🚶 Walk-in' };
                   // For OTA channels: use emoji-prefixed friendly label.
                   // For AGENTs: server already resolves their display_name
                   // from travel_agents.name; prefix with 🤝 so it's visually

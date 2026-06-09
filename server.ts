@@ -2602,24 +2602,59 @@ async function logChannelSync(
   extra?: Record<string, any>,
 ): Promise<void> {
   try {
+    // Normalise the source channel. "Direct" attribution covers
+    // anything that didn't come from a paid distribution channel:
+    // walk-in, phone, the public booking URL (DIRECT / DIRECT_WEB /
+    // WALKIN / WALK_IN / blank).
     const channel = String(booking.booking_source || 'DIRECT').toUpperCase();
-    const isDirect = channel === 'DIRECT' || channel === 'WALKIN' || channel === '';
-    const status = isDirect ? 'skipped_direct' : 'queued';
-    const payload = JSON.stringify({
+    const directSet = new Set(['DIRECT', 'DIRECT_WEB', 'WALKIN', 'WALK_IN', '']);
+    const isDirect = directSet.has(channel);
+
+    const tenantDb = await getTenantDb(restaurantId);
+    const payloadBase = {
       booking_id: booking.id,
-      channel,
+      source_channel: channel,
       event: eventType,
       status: booking.status,
       check_in: booking.check_in_date,
       check_out: booking.check_out_date,
       ...(extra || {}),
-    });
-    const tenantDb = await getTenantDb(restaurantId);
+    };
+
+    // ── 1. Audit row for the SOURCE channel ─────────────────────────
+    // Direct bookings don't need an outbound push to their own
+    // "channel" — we just keep the audit trail. OTA-sourced
+    // bookings also skip a self-push (the OTA already knows). Both
+    // get status='skipped_direct' (for direct) or 'audit' (for OTA).
     await tenantDb.run(
       `INSERT INTO channel_sync_log (booking_id, channel, event_type, status, payload)
        VALUES (?, ?, ?, ?, ?)`,
-      [booking.id, channel, eventType, status, payload]
+      [booking.id, channel, eventType, isDirect ? 'skipped_direct' : 'audit',
+       JSON.stringify({ ...payloadBase, role: 'source' })]
     );
+
+    // ── 2. Fan-out to OTHER enabled OTAs ────────────────────────────
+    // "When inventory changes here, every OTHER distribution channel
+    // must learn about it." Read the enabled channel_credentials and
+    // enqueue one outbound row per channel (excluding the source).
+    // The queue worker (cron */5 * * * *) pushes these through
+    // adapter.pushBookingUpdate() with exponential backoff. The iCal
+    // export endpoint already covers OTAs that poll us — this is the
+    // push-side complement that closes the loop for channels with
+    // partner API integration.
+    const enabledOtas: any[] = await tenantDb.query(
+      "SELECT channel FROM channel_credentials WHERE is_enabled = 1"
+    ).catch(() => []);
+    for (const c of enabledOtas) {
+      const targetChannel = String(c.channel || '').toUpperCase();
+      if (!targetChannel || targetChannel === channel) continue; // skip source
+      await tenantDb.run(
+        `INSERT INTO channel_sync_log (booking_id, channel, event_type, status, payload)
+         VALUES (?, ?, ?, ?, ?)`,
+        [booking.id, targetChannel, eventType, 'queued',
+         JSON.stringify({ ...payloadBase, role: 'fanout', target_channel: targetChannel })]
+      ).catch((err: any) => console.warn(`[channel-sync] fanout to ${targetChannel} failed:`, err?.message));
+    }
   } catch (e) {
     console.warn('[channel-sync] log failed:', e);
   }
@@ -19038,7 +19073,8 @@ async function startServer() {
     const map: Record<string, string> = {
       BOOKING: 'Booking.com', MMT: 'MakeMyTrip', GOIBIBO: 'Goibibo',
       AGODA: 'Agoda', EXPEDIA: 'Expedia', AIRBNB: 'Airbnb',
-      DIRECT: 'Direct', WALK_IN: 'Walk-in',
+      DIRECT: 'Direct', DIRECT_WEB: 'Direct (Website)',
+      WALK_IN: 'Walk-in', WALKIN: 'Walk-in',
     };
     return map[code] || code;
   };
@@ -20295,18 +20331,23 @@ async function startServer() {
       const plan = await computeRoomTotal(req.params.id, room_id, check_in_date, check_out_date);
       const firstRate = plan.nights[0]?.rate || 0;
 
+      // Direct bookings have 0% commission by definition — commission_amount=0,
+      // net_amount=total so the 360 dashboard rolls them up with correct
+      // net revenue (not 0 as it was before).
       await tenantDb.run(
         `INSERT INTO room_bookings
          (id, room_id, guest_name, guest_phone, guest_email,
           num_guests, check_in_date, check_out_date, status, booking_source,
-          room_rate, total_amount, special_requests, booking_type)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', 'DIRECT_WEB', ?, ?, ?, 'OVERNIGHT')`,
+          room_rate, total_amount, special_requests, booking_type,
+          commission_pct, commission_amount, net_amount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', 'DIRECT_WEB', ?, ?, ?, 'OVERNIGHT', 0, 0, ?)`,
         [bid, room_id,
          String(guest_name).trim(),
          String(guest_phone).trim(),
          String(guest_email).trim(),
          num_guests || 1, check_in_date, check_out_date,
-         firstRate, plan.total, special_requests || null]
+         firstRate, plan.total, special_requests || null,
+         plan.total]
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date, source: 'DIRECT_WEB' }); } catch {}
@@ -28286,7 +28327,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-page-hotfix-rules-of-hooks-violation-white-screen',
+    commit_marker: 'public-booking-fanout-ota-net-revenue-direct-web-label',
     code_features: [
       'subscription-billing',
       'read-only-mode',
