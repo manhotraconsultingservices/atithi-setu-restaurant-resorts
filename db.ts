@@ -362,10 +362,34 @@ export async function initDb() {
     -- as the pre-populated default for the editable "Service Charge %"
     -- field on every invoice / postpaid session. Staff can override per
     -- invoice when the customer pushes back. 0 = no default.
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS service_charge_percent DOUBLE PRECISION DEFAULT 0
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS service_charge_percent DOUBLE PRECISION DEFAULT 0;
+    -- ─── Public Booking Page profile (9 Jun 2026) ────────────────────
+    -- Premium guest-facing direct booking page (Marriott / Taj / Lemon
+    -- Tree-grade). Each tenant gets a friendly /book/<slug> URL plus
+    -- rich brand collateral (hero, photos, description, address, map,
+    -- amenities, cancellation policy) for the public landing page.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS booking_slug         TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hero_image_url       TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_logo_url       TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_description    TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_full_address   TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_phone          TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_email          TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_map_url        TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_star_rating    INT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_property_type  TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_cancellation_policy_text TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_amenities_json TEXT
   `);
   await centralDb.exec(
     `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`
+  ).catch(() => {});
+  await centralDb.exec(
+    // Partial unique index — only enforces uniqueness when slug is set, so
+    // tenants without a slug coexist freely (NULL is excluded from the
+    // uniqueness constraint per the WHERE clause).
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_restaurants_booking_slug
+       ON restaurants (booking_slug) WHERE booking_slug IS NOT NULL`
   ).catch(() => {});
 
   // Phase B1 — owner-defined brand groupings.

@@ -9481,6 +9481,97 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
 
+  // ─── Public booking page profile + galleries (9 Jun 2026) ─────
+  // Owner-side state for the new "🌐 Public Booking Page" Settings
+  // sub-section. Backed by /property-profile + /property-gallery +
+  // /room-types/:id/gallery endpoints shipped in the same commit.
+  const [propertyProfile, setPropertyProfile] = useState<any>(null);
+  const [propertyGallery, setPropertyGallery] = useState<any[]>([]);
+  const [roomTypeGalleries, setRoomTypeGalleries] = useState<Record<string, any[]>>({});
+  const [amenityLibrary, setAmenityLibrary] = useState<any[]>([]);
+  const [propertyProfileSaving, setPropertyProfileSaving] = useState(false);
+  const [propertyProfileSaved, setPropertyProfileSaved] = useState(false);
+  const fetchPropertyProfile = async () => {
+    if (!isHotelEnabled) return;
+    try { setPropertyProfile(await hotelApi('/property-profile')); }
+    catch { setPropertyProfile(null); }
+  };
+  const fetchPropertyGallery = async () => {
+    if (!isHotelEnabled) return;
+    try { setPropertyGallery(await hotelApi('/property-gallery')); }
+    catch { setPropertyGallery([]); }
+  };
+  const fetchAmenityLibrary = async () => {
+    try {
+      const res = await fetch('/api/public/amenity-library');
+      if (res.ok) {
+        const data = await res.json();
+        setAmenityLibrary(Array.isArray(data?.amenities) ? data.amenities : []);
+      }
+    } catch { setAmenityLibrary([]); }
+  };
+  const fetchRoomTypeGallery = async (typeId: string) => {
+    if (!isHotelEnabled) return;
+    try {
+      const data = await hotelApi(`/room-types/${encodeURIComponent(typeId)}/gallery`);
+      setRoomTypeGalleries(prev => ({ ...prev, [typeId]: Array.isArray(data) ? data : [] }));
+    } catch { setRoomTypeGalleries(prev => ({ ...prev, [typeId]: [] })); }
+  };
+  const savePropertyProfile = async () => {
+    if (!propertyProfile) return;
+    setPropertyProfileSaving(true);
+    setPropertyProfileSaved(false);
+    try {
+      await hotelApi('/property-profile', { method: 'PATCH', body: JSON.stringify(propertyProfile) });
+      setPropertyProfileSaved(true);
+      setTimeout(() => setPropertyProfileSaved(false), 2500);
+    } catch (err: any) {
+      alert(err?.message || 'Save failed');
+    } finally { setPropertyProfileSaving(false); }
+  };
+  // Upload helpers — uses the hotel-scoped image upload endpoint.
+  // Multipart; returns a /uploads/<file> URL persisted via the
+  // property-profile or gallery POST that follows.
+  const uploadImage = async (file: File): Promise<string> => {
+    if (!restaurantId) throw new Error('no tenant context');
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(`/api/restaurant/${restaurantId}/hotel/upload-image`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    });
+    if (!res.ok) throw new Error('upload failed');
+    const { url } = await res.json();
+    if (!url) throw new Error('upload returned no url');
+    return url;
+  };
+  const addPropertyGalleryImage = async (file: File) => {
+    try {
+      const url = await uploadImage(file);
+      await hotelApi('/property-gallery', { method: 'POST', body: JSON.stringify({ image_url: url, display_order: propertyGallery.length }) });
+      await fetchPropertyGallery();
+    } catch (e: any) { alert(e?.message || 'Upload failed'); }
+  };
+  const deletePropertyGalleryImage = async (id: string) => {
+    if (!window.confirm('Remove this photo from the public gallery?')) return;
+    try { await hotelApi(`/property-gallery/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchPropertyGallery(); }
+    catch (e: any) { alert(e?.message || 'Delete failed'); }
+  };
+  const addRoomTypeGalleryImage = async (typeId: string, file: File) => {
+    try {
+      const url = await uploadImage(file);
+      const existing = roomTypeGalleries[typeId] || [];
+      await hotelApi(`/room-types/${encodeURIComponent(typeId)}/gallery`, { method: 'POST', body: JSON.stringify({ image_url: url, display_order: existing.length }) });
+      await fetchRoomTypeGallery(typeId);
+    } catch (e: any) { alert(e?.message || 'Upload failed'); }
+  };
+  const deleteRoomTypeGalleryImage = async (typeId: string, imageId: string) => {
+    if (!window.confirm('Remove this photo from the category gallery?')) return;
+    try { await hotelApi(`/room-types/${encodeURIComponent(typeId)}/gallery/${encodeURIComponent(imageId)}`, { method: 'DELETE' }); await fetchRoomTypeGallery(typeId); }
+    catch (e: any) { alert(e?.message || 'Delete failed'); }
+  };
+
   const toggleHotelModule = async (enabled: boolean) => {
     setHotelLoading(true); setHotelError('');
     try {
@@ -10073,7 +10164,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
-    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchTariff(); }
+    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchTariff(); fetchPropertyProfile(); fetchPropertyGallery(); fetchAmenityLibrary(); }
     if (activeTab === 'STAFF_ACCESS') { fetchStaffAccess(); fetchPermAuditLog(); fetchManageableTenants(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
@@ -19675,6 +19766,287 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             )}
           </div>
+
+          {/* ── 🌐 Public Booking Page (9 Jun 2026) ───────────────
+              Controls everything a guest sees on the /book/<slug>
+              landing page: friendly URL slug, hero image, brand
+              description, address + contact + map link, star rating,
+              property type, photo gallery, curated amenities,
+              cancellation policy. Only relevant when the Hotel module
+              is on. */}
+          {isHotelEnabled && propertyProfile && (
+            <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm relative overflow-hidden">
+              <div className="absolute top-0 left-0 right-0 h-[3px] bg-emerald-500"></div>
+              <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
+                <h3 className="text-2xl font-bold font-serif">🌐 Public Booking Page</h3>
+                {propertyProfile.booking_slug && (
+                  <a
+                    href={`/book/${propertyProfile.booking_slug}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
+                  >Preview page ↗</a>
+                )}
+              </div>
+              <p className="text-xs text-[#6b5d52] mb-5">
+                Everything below shows up on your public direct-booking page at <strong>erp.atithi-setu.com/book/&lt;slug&gt;</strong>. Direct bookings have <strong>0% commission</strong> — every guest you convert here is pure margin.
+              </p>
+
+              <div className="space-y-4">
+                {/* Slug */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    Friendly URL slug
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-[#9c8e85] whitespace-nowrap">/book/</span>
+                    <input
+                      type="text"
+                      value={propertyProfile.booking_slug || ''}
+                      onChange={e => setPropertyProfile({ ...propertyProfile, booking_slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
+                      placeholder="vivekscafe"
+                      className="flex-1 bg-[#faf7f2] border-none rounded-2xl px-3 py-2 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                    {propertyProfile.booking_slug && (
+                      <button
+                        type="button"
+                        onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/book/${propertyProfile.booking_slug}`); alert('Copied!'); }}
+                        className="px-3 py-2 rounded-xl bg-[#faf7f2] text-xs font-bold hover:bg-[#f0e6d6]"
+                      >📋 Copy link</button>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Lowercase letters, digits, dashes. 3-50 chars. Must be unique across all Atithi-Setu properties.</p>
+                </div>
+
+                {/* Hero image */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Hero image (1920x800 recommended)</label>
+                  <div className="flex items-center gap-3">
+                    {propertyProfile.hero_image_url && (
+                      <img src={propertyProfile.hero_image_url} alt="hero" className="w-32 h-20 object-cover rounded-xl shadow-sm" />
+                    )}
+                    <input
+                      type="file" accept="image/*"
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0]; if (!f) return;
+                        try { const url = await uploadImage(f); setPropertyProfile({ ...propertyProfile, hero_image_url: url }); }
+                        catch (err: any) { alert(err?.message || 'Upload failed'); }
+                      }}
+                      className="text-xs text-[#6b5d52] file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-[#cc5a16] file:text-white file:font-bold file:cursor-pointer"
+                    />
+                    {propertyProfile.hero_image_url && (
+                      <button onClick={() => setPropertyProfile({ ...propertyProfile, hero_image_url: '' })} className="text-[10px] text-red-600 hover:underline">Remove</button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Property type + star rating */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Property type</label>
+                    <select
+                      value={propertyProfile.hotel_property_type || ''}
+                      onChange={e => setPropertyProfile({ ...propertyProfile, hotel_property_type: e.target.value })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    >
+                      <option value="">— pick one —</option>
+                      <option value="BOUTIQUE">Boutique</option>
+                      <option value="RESORT">Resort</option>
+                      <option value="BUSINESS">Business</option>
+                      <option value="HERITAGE">Heritage</option>
+                      <option value="HOMESTAY">Homestay</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Star rating (1-5)</label>
+                    <input
+                      type="number" min={1} max={5}
+                      value={propertyProfile.hotel_star_rating || ''}
+                      onChange={e => setPropertyProfile({ ...propertyProfile, hotel_star_rating: e.target.value === '' ? null : Number(e.target.value) })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                  </div>
+                </div>
+
+                {/* Description */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">About the property</label>
+                  <textarea
+                    rows={4}
+                    value={propertyProfile.hotel_description || ''}
+                    onChange={e => setPropertyProfile({ ...propertyProfile, hotel_description: e.target.value })}
+                    placeholder="Describe the vibe, history, what makes you special. 2-4 paragraphs."
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                  />
+                </div>
+
+                {/* Address + phone + email */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Full address</label>
+                  <textarea
+                    rows={2}
+                    value={propertyProfile.hotel_full_address || ''}
+                    onChange={e => setPropertyProfile({ ...propertyProfile, hotel_full_address: e.target.value })}
+                    placeholder="123 Beach Road, Anjuna, North Goa - 403509"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone</label>
+                    <input
+                      value={propertyProfile.hotel_phone || ''}
+                      onChange={e => setPropertyProfile({ ...propertyProfile, hotel_phone: e.target.value })}
+                      placeholder="+91 9876543210"
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Email</label>
+                    <input
+                      type="email"
+                      value={propertyProfile.hotel_email || ''}
+                      onChange={e => setPropertyProfile({ ...propertyProfile, hotel_email: e.target.value })}
+                      placeholder="hello@yourhotel.com"
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                  </div>
+                </div>
+
+                {/* Google Maps URL */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Google Maps URL or embed link</label>
+                  <input
+                    value={propertyProfile.hotel_map_url || ''}
+                    onChange={e => setPropertyProfile({ ...propertyProfile, hotel_map_url: e.target.value })}
+                    placeholder="https://www.google.com/maps/embed?pb=..."
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20"
+                  />
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Go to Google Maps → search your property → Share → Embed a map → copy the <code>src</code> URL. Or paste any maps.google.com link — guests will see it as a "Open in Maps" button.</p>
+                </div>
+
+                {/* Amenities checkbox grid */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Amenities (pick what you offer)</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {amenityLibrary.map(a => {
+                      const selected = (propertyProfile.hotel_amenity_keys || []).includes(a.key);
+                      return (
+                        <label key={a.key} className={cn(
+                          'flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer border-2 text-xs',
+                          selected ? 'border-[#cc5a16] bg-[#cc5a16]/5' : 'border-[#faf7f2] bg-[#faf7f2] hover:border-[#cc5a16]/30'
+                        )}>
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={e => {
+                              const prev: string[] = propertyProfile.hotel_amenity_keys || [];
+                              const next = e.target.checked ? [...prev, a.key] : prev.filter(k => k !== a.key);
+                              setPropertyProfile({ ...propertyProfile, hotel_amenity_keys: next });
+                            }}
+                            className="w-3 h-3"
+                          />
+                          <span>{a.icon}</span>
+                          <span className="font-bold">{a.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Cancellation policy text */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Cancellation policy (in plain English)</label>
+                  <textarea
+                    rows={3}
+                    value={propertyProfile.hotel_cancellation_policy_text || ''}
+                    onChange={e => setPropertyProfile({ ...propertyProfile, hotel_cancellation_policy_text: e.target.value })}
+                    placeholder="Free cancellation up to 7 days before check-in. 50% refund within 7 days. No refund within 48 hours."
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                  />
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Leave blank to auto-generate from your refund-days settings below.</p>
+                </div>
+
+                {/* Save */}
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    onClick={savePropertyProfile}
+                    disabled={propertyProfileSaving}
+                    className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50"
+                  >{propertyProfileSaving ? 'Saving…' : 'Save public page'}</button>
+                  {propertyProfileSaved && <span className="text-xs font-bold text-emerald-600">✓ Saved</span>}
+                </div>
+              </div>
+
+              {/* ── Property gallery ───────────────────────────── */}
+              <div className="mt-8 pt-6 border-t border-[#f0e6d6]">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Property gallery ({propertyGallery.length} photos)</p>
+                <p className="text-[10px] text-[#9c8e85] mb-3">Add up to ~10 lifestyle / property photos. First photo is used as the secondary image in the "About" section if no other photos exist.</p>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                  {propertyGallery.map(g => (
+                    <div key={g.id} className="relative aspect-square rounded-xl overflow-hidden bg-[#faf7f2] group">
+                      <img src={g.image_url} alt="" className="w-full h-full object-cover" />
+                      <button
+                        onClick={() => deletePropertyGalleryImage(g.id)}
+                        className="absolute top-1 right-1 w-6 h-6 rounded-full bg-red-600 text-white text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Remove"
+                      >×</button>
+                    </div>
+                  ))}
+                  <label className="aspect-square rounded-xl border-2 border-dashed border-[#cc5a16]/30 flex flex-col items-center justify-center cursor-pointer hover:bg-[#cc5a16]/5">
+                    <span className="text-2xl mb-1">+</span>
+                    <span className="text-[10px] text-[#9c8e85]">Add photo</span>
+                    <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) addPropertyGalleryImage(f); }} />
+                  </label>
+                </div>
+              </div>
+
+              {/* ── Per-room-type gallery ─────────────────────── */}
+              {hotelRooms.length > 0 && (
+                <div className="mt-8 pt-6 border-t border-[#f0e6d6]">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Per-category photo galleries</p>
+                  <p className="text-[10px] text-[#9c8e85] mb-3">Each room category can have its own gallery (in addition to the single thumbnail set in the Rooms tab). First photo is used as the card image on the public page.</p>
+                  {(() => {
+                    // Unique room types from hotelRooms
+                    const seen: Record<string, { id: string; name: string }> = {};
+                    hotelRooms.forEach((r: any) => {
+                      if (r.type_id && !seen[r.type_id]) seen[r.type_id] = { id: r.type_id, name: r.type || r.category || r.type_id };
+                    });
+                    return Object.values(seen);
+                  })().map(rt => {
+                    const photos = roomTypeGalleries[rt.id] || [];
+                    return (
+                      <div key={rt.id} className="bg-[#faf7f2] rounded-2xl p-3 mb-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-sm font-bold">{rt.name} <span className="text-[10px] font-normal text-[#9c8e85]">· {photos.length} photo{photos.length === 1 ? '' : 's'}</span></p>
+                          <button
+                            onClick={() => fetchRoomTypeGallery(rt.id)}
+                            className="text-[10px] text-[#6b5d52] hover:text-[#cc5a16] hover:underline"
+                          >↻ Refresh</button>
+                        </div>
+                        <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+                          {photos.map(p => (
+                            <div key={p.id} className="relative aspect-square rounded-lg overflow-hidden bg-white group">
+                              <img src={p.image_url} alt="" className="w-full h-full object-cover" />
+                              <button
+                                onClick={() => deleteRoomTypeGalleryImage(rt.id, p.id)}
+                                className="absolute top-1 right-1 w-5 h-5 rounded-full bg-red-600 text-white text-[10px] opacity-0 group-hover:opacity-100 transition-opacity"
+                                title="Remove"
+                              >×</button>
+                            </div>
+                          ))}
+                          <label className="aspect-square rounded-lg border border-dashed border-[#cc5a16]/30 flex items-center justify-center cursor-pointer hover:bg-white">
+                            <span className="text-lg">+</span>
+                            <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) addRoomTypeGalleryImage(rt.id, f); }} />
+                          </label>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* ── Hotel Rules — per-tenant business rules (Phase H1) ──
               Only rendered when the Hotel module is active. Every field
@@ -36099,6 +36471,20 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
                     {seedingTariffFor === r.id ? 'Seeding…' : '⚡ Seed BCG Tariff'}
                   </button>
                 )}
+                {/* Quick link to the public booking page — works for both
+                    slug-based and id-based URLs (the route resolver tries
+                    slug first, falls back to id). */}
+                {(r.property_type === 'HOTEL' || r.property_type === 'BOTH') && (
+                  <a
+                    href={`/book/${r.booking_slug || r.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open this property's public booking page in a new tab"
+                    className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-100"
+                  >
+                    🌐 View public page
+                  </a>
+                )}
               </div>
             </div>
           ))}
@@ -44327,19 +44713,64 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [confirmation, setConfirmation] = useState<any>(null);
 
+  // Tenant resolution — accept either a raw tenant id (RESTO-1003) or a
+  // friendly slug (vivekscafe). Try id first; on 404 fall back to slug
+  // resolver. Cached in sessionStorage so repeat visits skip the hop.
+  const [resolvedTenantId, setResolvedTenantId] = useState<string>(tenantId);
   useEffect(() => {
+    let cancelled = false;
     (async () => {
+      const cacheKey = `book-slug-${tenantId}`;
+      const cached = sessionStorage.getItem(cacheKey);
+      const tryId = cached || tenantId;
       try {
-        const res = await fetch(`/api/public/restaurant/${tenantId}/hotel`);
+        let res = await fetch(`/api/public/restaurant/${encodeURIComponent(tryId)}/hotel`);
+        if (res.status === 404 && tryId === tenantId) {
+          // Maybe it's a slug — try the resolver.
+          const r2 = await fetch(`/api/public/restaurant/by-slug/${encodeURIComponent(tenantId)}`);
+          if (r2.ok) {
+            const { tenantId: realId } = await r2.json();
+            if (realId) {
+              sessionStorage.setItem(cacheKey, realId);
+              res = await fetch(`/api/public/restaurant/${encodeURIComponent(realId)}/hotel`);
+              if (!cancelled) setResolvedTenantId(realId);
+            }
+          }
+        } else if (cached && !cancelled) {
+          setResolvedTenantId(cached);
+        }
         if (!res.ok) {
           const e = await res.json().catch(() => ({}));
           throw new Error(e.error || `HTTP ${res.status}`);
         }
-        setHotelInfo(await res.json());
+        const info = await res.json();
+        if (cancelled) return;
+        setHotelInfo(info);
+        // Fire-and-forget: fetch "starting from" rate per category for
+        // the default date range so room cards show real prices.
+        const today = new Date().toISOString().slice(0, 10);
+        const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+        const realTenant = sessionStorage.getItem(cacheKey) || tenantId;
+        for (const rt of (info.room_types || [])) {
+          fetch(`/api/public/restaurant/${encodeURIComponent(realTenant)}/hotel/rate-preview?room_type_id=${encodeURIComponent(rt.id)}&start=${today}&end=${tomorrow}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(rp => {
+              if (cancelled || !rp) return;
+              setHotelInfo((prev: any) => {
+                if (!prev) return prev;
+                return {
+                  ...prev,
+                  room_types: prev.room_types.map((x: any) => x.id === rt.id ? { ...x, starting_from_rate: rp.starting_from_rate, cheapest_meal_plan_label: rp.cheapest_meal_plan_label } : x),
+                };
+              });
+            })
+            .catch(() => {});
+        }
       } catch (err: any) {
-        setError(err?.message || 'Property not found');
+        if (!cancelled) setError(err?.message || 'Property not found');
       }
     })();
+    return () => { cancelled = true; };
   }, [tenantId]);
 
   const runSearch = async () => {
@@ -44349,7 +44780,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
       const qs = new URLSearchParams({
         start: searchParams.start, end: searchParams.end, guests: String(searchParams.guests),
       });
-      const res = await fetch(`/api/public/restaurant/${tenantId}/hotel/availability?${qs.toString()}`);
+      const res = await fetch(`/api/public/restaurant/${encodeURIComponent(resolvedTenantId)}/hotel/availability?${qs.toString()}`);
       const data = await res.json();
       setSearchResults(Array.isArray(data?.rooms) ? data.rooms : []);
     } catch (err: any) { alert(err?.message || 'Search failed'); }
@@ -44361,7 +44792,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     if (!pickedRoom) return;
     setSubmitting(true);
     try {
-      const res = await fetch(`/api/public/restaurant/${tenantId}/hotel/booking`, {
+      const res = await fetch(`/api/public/restaurant/${encodeURIComponent(resolvedTenantId)}/hotel/booking`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -44401,48 +44832,286 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     );
   }
 
-  return (
-    <div className="min-h-screen bg-[#faf7f2]">
-      <div className="max-w-2xl mx-auto p-4 sm:p-8">
-        {/* Header */}
-        <div className="bg-white rounded-3xl shadow-md overflow-hidden mb-5 border-t-[3px] border-[#cc5a16]">
-          <div className="px-6 py-5 flex items-center gap-4">
-            {hotelInfo.logo_url && (
-              <img src={hotelInfo.logo_url} alt="" className="w-14 h-14 rounded-2xl object-contain bg-[#faf7f2]" />
-            )}
-            <div className="flex-1 min-w-0">
-              <h1 className="text-xl sm:text-2xl font-serif font-bold text-[#1a1208]">{hotelInfo.name}</h1>
-              <p className="text-xs text-[#6b5d52]">{[hotelInfo.city, hotelInfo.state].filter(Boolean).join(' · ')}</p>
-            </div>
-          </div>
-        </div>
+  // Helper: scroll booking-widget into view; used by hero CTAs + room cards.
+  const scrollToBook = (typeId?: string) => {
+    if (typeId) sessionStorage.setItem('book-prefilled-type', typeId);
+    const el = document.getElementById('book-widget');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else setStep('SEARCH');
+  };
+  const hero = hotelInfo.hero_image_url || hotelInfo.property_gallery?.[0]?.image_url || hotelInfo.room_types?.[0]?.image_url;
 
-        {/* STEP 1: LANDING */}
-        {step === 'LANDING' && (
-          <div className="space-y-5">
-            {hotelInfo.room_types?.length > 0 && (
-              <div className="space-y-3">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Our rooms</p>
-                {hotelInfo.room_types.map((t: any) => (
-                  <div key={t.id} className="bg-white rounded-3xl shadow-sm overflow-hidden">
-                    {t.image_url && <div className="h-40 bg-cover bg-center" style={{ backgroundImage: `url(${t.image_url})` }} />}
-                    <div className="p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <h3 className="text-lg font-serif font-bold text-[#1a1208]">{t.name}</h3>
-                        <p className="text-base font-bold font-mono text-[#cc5a16] shrink-0">{hotelInfo.currency_symbol}{Number(t.base_rate).toLocaleString('en-IN')}<span className="text-[10px] font-normal text-[#9c8e85]">/night</span></p>
+  return (
+    <div className="min-h-screen bg-white text-[#1a1208]">
+      {step === 'LANDING' ? (
+        <>
+          {/* ── Sticky top nav ───────────────────────────────────── */}
+          <nav className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-stone-200">
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                {hotelInfo.logo_url && (
+                  <img src={hotelInfo.logo_url} alt="" className="w-10 h-10 rounded-xl object-contain bg-[#faf7f2]" />
+                )}
+                <div className="min-w-0">
+                  <p className="text-sm sm:text-base font-serif font-bold truncate">{hotelInfo.name}</p>
+                  <p className="text-[10px] text-[#9c8e85] truncate">{[hotelInfo.city, hotelInfo.state].filter(Boolean).join(' · ')}</p>
+                </div>
+              </div>
+              <button onClick={() => scrollToBook()} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs sm:text-sm font-bold hover:bg-[#a84612] shadow-sm">
+                Book now
+              </button>
+            </div>
+          </nav>
+
+          {/* ── Hero ─────────────────────────────────────────────── */}
+          <section className="relative">
+            <div
+              className="h-[55vh] sm:h-[70vh] bg-cover bg-center relative"
+              style={{
+                backgroundImage: hero
+                  ? `linear-gradient(to bottom, rgba(0,0,0,0.25), rgba(0,0,0,0.55)), url(${hero})`
+                  : 'linear-gradient(135deg, #cc5a16, #a84612)',
+              }}
+            >
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-center text-white px-4">
+                {hotelInfo.hotel_property_type && (
+                  <p className="text-[10px] sm:text-xs uppercase tracking-[0.3em] opacity-90 mb-2">
+                    {String(hotelInfo.hotel_property_type).toLowerCase().replace(/_/g, ' ')}
+                  </p>
+                )}
+                <h1 className="text-3xl sm:text-5xl lg:text-6xl font-serif font-bold drop-shadow-lg">{hotelInfo.name}</h1>
+                {hotelInfo.hotel_star_rating > 0 && (
+                  <p className="text-xl sm:text-2xl mt-2">{'★'.repeat(Math.min(5, Math.max(1, hotelInfo.hotel_star_rating)))}</p>
+                )}
+                <p className="text-sm sm:text-base mt-3 opacity-95">{[hotelInfo.city, hotelInfo.state].filter(Boolean).join(' · ')}</p>
+              </div>
+            </div>
+
+            {/* Glassmorphic booking widget overlapping hero bottom */}
+            <div id="book-widget" className="max-w-4xl mx-auto px-4 -mt-12 sm:-mt-16 relative z-10">
+              <div className="bg-white/95 backdrop-blur rounded-3xl shadow-2xl border border-white p-4 sm:p-5">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in</label>
+                    <input
+                      required type="date" min={new Date().toISOString().slice(0, 10)}
+                      value={searchParams.start}
+                      onChange={e => setSearchParams(p => ({ ...p, start: e.target.value, end: p.end <= e.target.value ? new Date(new Date(e.target.value).getTime() + 86400000).toISOString().slice(0, 10) : p.end }))}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm focus:ring-2 ring-[#cc5a16]/30 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out</label>
+                    <input
+                      required type="date" min={searchParams.start || new Date().toISOString().slice(0, 10)}
+                      value={searchParams.end}
+                      onChange={e => setSearchParams(p => ({ ...p, end: e.target.value }))}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm focus:ring-2 ring-[#cc5a16]/30 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
+                    <input
+                      type="number" min={1} max={10}
+                      value={searchParams.guests}
+                      onChange={e => setSearchParams(p => ({ ...p, guests: Math.max(1, Number(e.target.value) || 1) }))}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm focus:ring-2 ring-[#cc5a16]/30 outline-none"
+                    />
+                  </div>
+                  <button onClick={() => { runSearch(); setStep('SEARCH'); }} disabled={searching} className="px-5 py-3 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-60 shadow-md">
+                    {searching ? 'Searching…' : '🔍 Check availability'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* ── About ────────────────────────────────────────────── */}
+          {hotelInfo.hotel_description && (
+            <section className="max-w-5xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
+              <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-3">About the property</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
+                <div className="text-[15px] leading-relaxed text-[#3d3128] whitespace-pre-line">
+                  {hotelInfo.hotel_description}
+                </div>
+                {hotelInfo.property_gallery?.[1]?.image_url && (
+                  <img src={hotelInfo.property_gallery[1].image_url} alt="" className="w-full h-72 object-cover rounded-3xl shadow-md" />
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* ── Room categories ──────────────────────────────────── */}
+          {hotelInfo.room_types?.length > 0 && (
+            <section className="bg-[#faf7f2] py-12 sm:py-16">
+              <div className="max-w-6xl mx-auto px-4 sm:px-6">
+                <div className="text-center mb-8">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">Choose your room</p>
+                  <h2 className="text-3xl sm:text-4xl font-serif font-bold">Our accommodations</h2>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {hotelInfo.room_types.map((t: any) => {
+                    const photo = t.gallery?.[0]?.image_url || t.image_url;
+                    const amenityChips = (t.amenities || '').split(/[,;]/).map((s: string) => s.trim()).filter(Boolean).slice(0, 3);
+                    return (
+                      <div key={t.id} className="bg-white rounded-3xl shadow-md overflow-hidden hover:shadow-xl transition-all flex flex-col">
+                        <div
+                          className="aspect-video bg-cover bg-center"
+                          style={{ backgroundImage: photo ? `url(${photo})` : 'linear-gradient(135deg, #faf7f2, #f0e6d6)' }}
+                        />
+                        <div className="p-5 flex flex-col flex-1">
+                          <h3 className="text-xl font-serif font-bold">{t.name}</h3>
+                          <p className="text-xs text-[#9c8e85] mt-0.5">Sleeps {t.capacity}</p>
+                          {t.description && <p className="text-[13px] text-[#6b5d52] mt-2 line-clamp-2">{t.description}</p>}
+                          {amenityChips.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mt-3">
+                              {amenityChips.map((a: string, i: number) => (
+                                <span key={i} className="text-[10px] bg-[#faf7f2] text-[#6b5d52] px-2 py-1 rounded-full">{a}</span>
+                              ))}
+                            </div>
+                          )}
+                          <div className="mt-auto pt-4 flex items-end justify-between gap-3">
+                            <div>
+                              <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Starts at</p>
+                              <p className="text-xl font-bold font-mono text-[#cc5a16]">
+                                {hotelInfo.currency_symbol}{Number(t.starting_from_rate ?? t.base_rate ?? 0).toLocaleString('en-IN')}
+                                <span className="text-[10px] font-normal text-[#9c8e85] ml-0.5">/night</span>
+                              </p>
+                              {t.cheapest_meal_plan_label && (
+                                <p className="text-[9px] text-[#9c8e85] italic">{t.cheapest_meal_plan_label}</p>
+                              )}
+                            </div>
+                            <button onClick={() => scrollToBook(t.id)} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] shadow-sm">
+                              Book →
+                            </button>
+                          </div>
+                        </div>
                       </div>
-                      {t.description && <p className="text-[12px] text-[#6b5d52] mt-1">{t.description}</p>}
-                      <p className="text-[10px] text-[#9c8e85] mt-1">Sleeps {t.capacity} · {t.amenities || 'Standard amenities'}</p>
-                    </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* ── Amenities grid ───────────────────────────────────── */}
+          {hotelInfo.amenities?.length > 0 && (
+            <section className="max-w-5xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
+              <div className="text-center mb-8">
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">What's included</p>
+                <h2 className="text-3xl sm:text-4xl font-serif font-bold">Amenities</h2>
+              </div>
+              <div className="grid grid-cols-3 sm:grid-cols-5 gap-4">
+                {hotelInfo.amenities.map((a: any) => (
+                  <div key={a.key} className="text-center p-4 rounded-2xl hover:bg-[#faf7f2] transition-all">
+                    <div className="text-3xl mb-2">{a.icon}</div>
+                    <p className="text-[11px] font-bold text-[#3d3128]">{a.label}</p>
                   </div>
                 ))}
               </div>
-            )}
-            <button onClick={() => setStep('SEARCH')} className="w-full px-5 py-4 rounded-2xl bg-[#cc5a16] text-white font-bold hover:bg-[#a84612] shadow-md">
-              🔍 Check Availability
-            </button>
-          </div>
-        )}
+            </section>
+          )}
+
+          {/* ── Property gallery ─────────────────────────────────── */}
+          {hotelInfo.property_gallery?.length > 0 && (
+            <section className="bg-[#faf7f2] py-12 sm:py-16">
+              <div className="max-w-6xl mx-auto px-4 sm:px-6">
+                <div className="text-center mb-8">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">Gallery</p>
+                  <h2 className="text-3xl sm:text-4xl font-serif font-bold">A glimpse of the property</h2>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                  {hotelInfo.property_gallery.map((g: any) => (
+                    <div
+                      key={g.id}
+                      className="aspect-square bg-cover bg-center rounded-2xl cursor-pointer hover:scale-[1.02] transition-all shadow-sm"
+                      style={{ backgroundImage: `url(${g.image_url})` }}
+                      onClick={() => window.open(g.image_url, '_blank')}
+                      title={g.caption || ''}
+                    />
+                  ))}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* ── Location ─────────────────────────────────────────── */}
+          {(hotelInfo.hotel_full_address || hotelInfo.hotel_map_url || hotelInfo.hotel_phone) && (
+            <section className="max-w-5xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
+              <div className="text-center mb-8">
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">Find us</p>
+                <h2 className="text-3xl sm:text-4xl font-serif font-bold">Location & contact</h2>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {hotelInfo.hotel_map_url && (
+                  <div className="rounded-3xl overflow-hidden shadow-md aspect-[4/3] bg-stone-100">
+                    {/^https?:\/\/(www\.)?google\.[a-z.]+\/maps\/embed/i.test(hotelInfo.hotel_map_url) ? (
+                      <iframe src={hotelInfo.hotel_map_url} className="w-full h-full border-0" loading="lazy" />
+                    ) : (
+                      <a href={hotelInfo.hotel_map_url} target="_blank" rel="noopener noreferrer" className="flex items-center justify-center h-full text-[#cc5a16] underline">
+                        📍 Open in Google Maps
+                      </a>
+                    )}
+                  </div>
+                )}
+                <div className="bg-[#faf7f2] rounded-3xl p-6 sm:p-8">
+                  {hotelInfo.hotel_full_address && (
+                    <div className="mb-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Address</p>
+                      <p className="text-sm text-[#3d3128] mt-1 whitespace-pre-line">{hotelInfo.hotel_full_address}</p>
+                    </div>
+                  )}
+                  {hotelInfo.hotel_phone && (
+                    <div className="mb-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Phone</p>
+                      <a href={`tel:${hotelInfo.hotel_phone}`} className="text-sm text-[#cc5a16] font-bold hover:underline">{hotelInfo.hotel_phone}</a>
+                    </div>
+                  )}
+                  {hotelInfo.hotel_email && (
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Email</p>
+                      <a href={`mailto:${hotelInfo.hotel_email}`} className="text-sm text-[#cc5a16] font-bold hover:underline break-all">{hotelInfo.hotel_email}</a>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* ── Cancellation policy ─────────────────────────────── */}
+          <section className="max-w-3xl mx-auto px-4 sm:px-6 py-12">
+            <div className="bg-[#faf7f2] border-l-4 border-[#cc5a16] rounded-r-2xl p-6">
+              <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">Cancellation policy</p>
+              <p className="text-sm text-[#3d3128] leading-relaxed whitespace-pre-line">
+                {hotelInfo.hotel_cancellation_policy_text || hotelInfo.cancellation_policy_fallback}
+              </p>
+            </div>
+          </section>
+
+          {/* ── Footer ──────────────────────────────────────────── */}
+          <footer className="border-t border-stone-200 py-6 mt-8 text-center">
+            <p className="text-[11px] text-[#9c8e85]">
+              Powered by <a href="https://atithi-setu.com" target="_blank" rel="noopener noreferrer" className="text-[#cc5a16] font-bold hover:underline">Atithi-Setu</a>
+              {' · '}Direct booking · No commission added
+            </p>
+          </footer>
+        </>
+      ) : (
+        // ── Inline 3-step booking flow (SEARCH / GUEST / DONE) ──
+        <div className="min-h-screen bg-[#faf7f2]">
+          <div className="max-w-2xl mx-auto p-4 sm:p-8">
+            {/* Compact header with back-to-landing link */}
+            <div className="bg-white rounded-3xl shadow-md overflow-hidden mb-5 border-t-[3px] border-[#cc5a16]">
+              <div className="px-6 py-5 flex items-center gap-4">
+                {hotelInfo.logo_url && (
+                  <img src={hotelInfo.logo_url} alt="" className="w-14 h-14 rounded-2xl object-contain bg-[#faf7f2]" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <button onClick={() => setStep('LANDING')} className="text-[10px] text-[#9c8e85] hover:text-[#cc5a16] hover:underline">← Back to property page</button>
+                  <h1 className="text-xl sm:text-2xl font-serif font-bold text-[#1a1208]">{hotelInfo.name}</h1>
+                </div>
+              </div>
+            </div>
 
         {/* STEP 2: SEARCH */}
         {step === 'SEARCH' && (
@@ -44590,8 +45259,10 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
           </div>
         )}
 
-        <p className="text-center text-[10px] text-[#9c8e85] mt-6">Powered by Atithi-Setu · Direct booking, no commission</p>
-      </div>
+            <p className="text-center text-[10px] text-[#9c8e85] mt-6">Powered by Atithi-Setu · Direct booking, no commission</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

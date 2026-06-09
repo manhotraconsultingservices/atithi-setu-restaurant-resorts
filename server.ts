@@ -818,6 +818,35 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_partner_payments_invoice
       ON partner_payments (allocated_to_invoice_id);
 
+    -- ─── Public Booking Page galleries (9 Jun 2026) ──────────────────
+    -- Marriott / Taj / Lemon Tree-grade direct booking page needs rich
+    -- imagery. The single image_url on room_types is kept for the card
+    -- thumbnail; these two tables let owners attach up to ~10 photos
+    -- per category (room_type_gallery_images) and ~10 property-level
+    -- photos (property_gallery_images) for the public landing page.
+    CREATE TABLE IF NOT EXISTS property_gallery_images (
+      id            TEXT PRIMARY KEY,
+      image_url     TEXT NOT NULL,
+      caption       TEXT,
+      display_order INT DEFAULT 0,
+      is_active     INT DEFAULT 1,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_property_gallery_order
+      ON property_gallery_images (display_order);
+
+    CREATE TABLE IF NOT EXISTS room_type_gallery_images (
+      id            TEXT PRIMARY KEY,
+      room_type_id  TEXT NOT NULL,
+      image_url     TEXT NOT NULL,
+      caption       TEXT,
+      display_order INT DEFAULT 0,
+      is_active     INT DEFAULT 1,
+      created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_room_type_gallery_type
+      ON room_type_gallery_images (room_type_id, display_order);
+
     -- Sprint P2-H — Yield management rules.
     -- Owner-defined occupancy-triggered multipliers. Example:
     --   "When occupancy >= 80%, multiply rate by 1.25 (+25%)"
@@ -19928,6 +19957,48 @@ async function startServer() {
   // No-auth endpoints powering a direct-booking page guests can use
   // without staff intervention. Bypasses OTA commissions.
 
+  // Curated amenity library used by both the owner-side Settings UI
+  // and the guest-facing public page (so the same key resolves to the
+  // same icon + label everywhere). Public — no PII risk.
+  const AMENITY_LIBRARY = [
+    { key: 'WIFI',       label: 'Free WiFi',          icon: '📶' },
+    { key: 'AC',         label: 'Air Conditioning',   icon: '❄️' },
+    { key: 'POOL',       label: 'Swimming Pool',      icon: '🏊' },
+    { key: 'RESTAURANT', label: 'Restaurant',         icon: '🍽️' },
+    { key: 'PARKING',    label: 'Free Parking',       icon: '🚗' },
+    { key: 'GYM',        label: 'Gym',                icon: '🏋️' },
+    { key: 'SPA',        label: 'Spa',                icon: '💆' },
+    { key: 'PET',        label: 'Pet Friendly',       icon: '🐾' },
+    { key: 'GARDEN',     label: 'Garden',             icon: '🌳' },
+    { key: 'BREAKFAST',  label: 'Breakfast Included', icon: '🥐' },
+    { key: 'BAR',        label: 'Bar / Lounge',       icon: '🍷' },
+    { key: 'TV',         label: 'TV',                 icon: '📺' },
+    { key: 'LAUNDRY',    label: 'Laundry',            icon: '👕' },
+    { key: 'SHUTTLE',    label: 'Airport Shuttle',    icon: '🚐' },
+    { key: 'WHEELCHAIR', label: 'Wheelchair Access',  icon: '♿' },
+  ];
+  app.get("/api/public/amenity-library", (_req: Request, res: Response) => {
+    res.json({ amenities: AMENITY_LIBRARY });
+  });
+
+  // Slug → tenantId resolver. Mounted before /:id/hotel so /by-slug
+  // doesn't shadow it. Used by the public page when a guest visits
+  // /book/<friendly-slug> instead of /book/<raw-id>.
+  app.get("/api/public/restaurant/by-slug/:slug", async (req: Request, res: Response) => {
+    const slug = String(req.params.slug || '').toLowerCase().trim();
+    if (!slug) return res.status(400).json({ error: 'slug required' });
+    try {
+      const r: any = await centralDb.get(
+        "SELECT id, name FROM restaurants WHERE booking_slug = ? LIMIT 1",
+        [slug]
+      );
+      if (!r) return res.status(404).json({ error: 'slug not found' });
+      res.json({ tenantId: r.id, name: r.name });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'slug lookup failed' });
+    }
+  });
+
   // Hotel info card for the landing page.
   app.get("/api/public/restaurant/:id/hotel", async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
@@ -19937,25 +20008,110 @@ async function startServer() {
       const roomTypes: any[] = await tenantDb.query(
         "SELECT id, name, description, base_rate, capacity, amenities, image_url FROM room_types WHERE is_active = 1 ORDER BY display_order, name"
       );
+      // Attach per-category gallery photos.
+      for (const rt of roomTypes) {
+        rt.gallery = await tenantDb.query(
+          "SELECT id, image_url, caption FROM room_type_gallery_images WHERE room_type_id = ? AND is_active = 1 ORDER BY display_order, id",
+          [rt.id]
+        ).catch(() => []);
+      }
+      // Property-level gallery.
+      const propertyGallery: any[] = await tenantDb.query(
+        "SELECT id, image_url, caption FROM property_gallery_images WHERE is_active = 1 ORDER BY display_order, id"
+      ).catch(() => []);
       // Always offer a fallback bucket for untagged rooms with their own
       // base_rate range — so a tenant who hasn't created types can still
       // accept direct bookings.
       const untagged: any[] = await tenantDb.query(
         "SELECT id, name, type, capacity, base_rate, amenities FROM rooms WHERE type_id IS NULL AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name LIMIT 20"
       );
+      // Resolve amenity keys to {key,label,icon} for the frontend.
+      let amenityKeys: string[] = [];
+      try { amenityKeys = JSON.parse(check.restaurant?.hotel_amenities_json || '[]'); }
+      catch { amenityKeys = []; }
+      const amenities = AMENITY_LIBRARY.filter(a => amenityKeys.includes(a.key));
       res.json({
         id: req.params.id,
+        booking_slug: check.restaurant?.booking_slug,
         name: check.restaurant?.name,
         city: check.restaurant?.city,
         state: check.restaurant?.state,
         phone: check.restaurant?.phone,
-        logo_url: check.restaurant?.logo_url,
+        logo_url: check.restaurant?.hotel_logo_url || check.restaurant?.logo_url,
         currency_symbol: check.restaurant?.currency_symbol || '₹',
+        // Public Booking Page profile fields
+        hero_image_url:                check.restaurant?.hero_image_url,
+        hotel_description:             check.restaurant?.hotel_description,
+        hotel_full_address:            check.restaurant?.hotel_full_address,
+        hotel_phone:                   check.restaurant?.hotel_phone,
+        hotel_email:                   check.restaurant?.hotel_email,
+        hotel_map_url:                 check.restaurant?.hotel_map_url,
+        hotel_star_rating:             check.restaurant?.hotel_star_rating,
+        hotel_property_type:           check.restaurant?.hotel_property_type,
+        hotel_cancellation_policy_text:check.restaurant?.hotel_cancellation_policy_text,
+        // Fallback cancellation text computed from the numeric refund policy
+        // so a tenant that hasn't written one still surfaces something.
+        cancellation_policy_fallback:
+          `Free cancellation up to ${check.restaurant?.hotel_refund_full_days ?? 7} days before check-in. ` +
+          `${Math.round((check.restaurant?.hotel_refund_partial_pct ?? 50))}% refund if cancelled inside that window.`,
+        amenities,
+        property_gallery: propertyGallery,
         room_types: roomTypes,
         untagged_rooms: untagged,
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to load hotel info" });
+    }
+  });
+
+  // "Starting from ₹X" helper — picks the cheapest meal plan in the
+  // matrix for a given room category + date range, returns the per-
+  // night rate so card displays can show "Starts at ₹2,000". Reuses
+  // computeBookingTotalWithExtras() across all active meal plans.
+  app.get("/api/public/restaurant/:id/hotel/rate-preview", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const room_type_id = String(req.query.room_type_id || '');
+      const start = String(req.query.start || new Date().toISOString().slice(0, 10));
+      const end   = String(req.query.end   || new Date(Date.now() + 86400000).toISOString().slice(0, 10));
+      if (!room_type_id) return res.status(400).json({ error: 'room_type_id required' });
+      const tenantDb = await getTenantDb(req.params.id);
+      // Pick one representative room for this category to feed the resolver.
+      const room: any = await tenantDb.get(
+        "SELECT id, base_rate FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY base_rate LIMIT 1",
+        [room_type_id]
+      );
+      if (!room) return res.json({ starting_from_rate: null, note: 'no rooms available' });
+      const mealPlans: any[] = await tenantDb.query(
+        "SELECT id, label FROM meal_plans WHERE is_active = 1"
+      ).catch(() => []);
+      // Compute per-night for each meal plan; pick the minimum.
+      const nights = Math.max(1, Math.ceil((new Date(end).getTime() - new Date(start).getTime()) / 86400000));
+      let cheapest: { rate: number; meal_plan_id: string | null; meal_plan_label: string } | null = null;
+      const candidates = mealPlans.length > 0 ? mealPlans : [{ id: null, label: 'Room Only' }];
+      for (const mp of candidates) {
+        try {
+          const breakdown: any = await computeBookingTotalWithExtras(req.params.id, room.id, start, end, {
+            mealPlanId: mp.id, extraAdults: 0, extraChildrenWithMattress: 0, extraChildrenNoMattress: 0,
+            bookingType: 'OVERNIGHT',
+          });
+          const perNight = Number(breakdown.total || 0) / nights;
+          if (!cheapest || perNight < cheapest.rate) {
+            cheapest = { rate: Math.round(perNight), meal_plan_id: mp.id, meal_plan_label: mp.label };
+          }
+        } catch { /* missing matrix entry — skip this plan */ }
+      }
+      // Final fallback: room.base_rate.
+      if (!cheapest) cheapest = { rate: Number(room.base_rate || 0), meal_plan_id: null, meal_plan_label: 'Base rate' };
+      res.json({
+        starting_from_rate: cheapest.rate,
+        cheapest_meal_plan_id: cheapest.meal_plan_id,
+        cheapest_meal_plan_label: cheapest.meal_plan_label,
+        nights, start, end,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'rate preview failed' });
     }
   });
 
@@ -22037,6 +22193,165 @@ async function startServer() {
       console.error("Update hotel settings error:", err);
       res.status(500).json({ error: "Failed to update hotel settings" });
     }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // ─── PUBLIC BOOKING PAGE — Property profile + galleries (9 Jun 2026)
+  // ════════════════════════════════════════════════════════════════════
+  // Owner-side CRUD for the rich content rendered on the guest-facing
+  // /book/<slug> landing page. All endpoints SETTINGS-tab-gated so
+  // marketing-team staff can manage content without full admin rights.
+
+  // GET the current property profile (mostly read from the restaurants
+  // table; convenient single endpoint so the UI doesn't have to know
+  // which columns live where).
+  app.get("/api/restaurant/:id/hotel/property-profile", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const r: any = check.restaurant;
+    let amenityKeys: string[] = [];
+    try { amenityKeys = JSON.parse(r?.hotel_amenities_json || '[]'); } catch {}
+    res.json({
+      booking_slug:                 r?.booking_slug || '',
+      hero_image_url:               r?.hero_image_url || '',
+      hotel_logo_url:               r?.hotel_logo_url || '',
+      hotel_description:            r?.hotel_description || '',
+      hotel_full_address:           r?.hotel_full_address || '',
+      hotel_phone:                  r?.hotel_phone || '',
+      hotel_email:                  r?.hotel_email || '',
+      hotel_map_url:                r?.hotel_map_url || '',
+      hotel_star_rating:            r?.hotel_star_rating || null,
+      hotel_property_type:          r?.hotel_property_type || '',
+      hotel_cancellation_policy_text: r?.hotel_cancellation_policy_text || '',
+      hotel_amenity_keys:           amenityKeys,
+    });
+  });
+
+  // PATCH the property profile. Slug uniqueness is enforced via the
+  // partial unique index; we surface a friendly 409 when it trips.
+  app.patch("/api/restaurant/:id/hotel/property-profile", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    if (req.user?.restaurantId !== req.params.id
+        && req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const b = req.body || {};
+    // Slug — validate regex; suggest from name on empty submit if first save.
+    let slug: string | null = null;
+    if (b.booking_slug != null) {
+      const raw = String(b.booking_slug || '').toLowerCase().trim();
+      if (raw === '') slug = null;
+      else if (!/^[a-z0-9][a-z0-9-]{2,49}$/.test(raw)) {
+        return res.status(400).json({ error: 'slug must be 3-50 chars: lowercase letters, digits, dashes; cannot start with dash' });
+      } else slug = raw;
+    }
+    const star = b.hotel_star_rating == null || b.hotel_star_rating === ''
+      ? null
+      : Math.max(1, Math.min(5, Math.floor(Number(b.hotel_star_rating) || 0)));
+    const ptype = b.hotel_property_type == null || b.hotel_property_type === ''
+      ? null
+      : String(b.hotel_property_type).toUpperCase().trim();
+    // Validate amenities — accept only known keys.
+    let amenityJson: string | null = null;
+    if (b.hotel_amenity_keys != null) {
+      const known = new Set(AMENITY_LIBRARY.map(a => a.key));
+      const filtered = (Array.isArray(b.hotel_amenity_keys) ? b.hotel_amenity_keys : [])
+        .map((k: any) => String(k).toUpperCase())
+        .filter((k: string) => known.has(k));
+      amenityJson = JSON.stringify(filtered);
+    }
+    try {
+      await centralDb.run(
+        `UPDATE restaurants SET
+            booking_slug = COALESCE(?, booking_slug),
+            hero_image_url = COALESCE(?, hero_image_url),
+            hotel_logo_url = COALESCE(?, hotel_logo_url),
+            hotel_description = COALESCE(?, hotel_description),
+            hotel_full_address = COALESCE(?, hotel_full_address),
+            hotel_phone = COALESCE(?, hotel_phone),
+            hotel_email = COALESCE(?, hotel_email),
+            hotel_map_url = COALESCE(?, hotel_map_url),
+            hotel_star_rating = COALESCE(?, hotel_star_rating),
+            hotel_property_type = COALESCE(?, hotel_property_type),
+            hotel_cancellation_policy_text = COALESCE(?, hotel_cancellation_policy_text),
+            hotel_amenities_json = COALESCE(?, hotel_amenities_json)
+          WHERE id = ?`,
+        [slug, b.hero_image_url ?? null, b.hotel_logo_url ?? null,
+         b.hotel_description ?? null, b.hotel_full_address ?? null,
+         b.hotel_phone ?? null, b.hotel_email ?? null, b.hotel_map_url ?? null,
+         star, ptype, b.hotel_cancellation_policy_text ?? null, amenityJson,
+         req.params.id]
+      );
+      res.json({ ok: true });
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (/duplicate key|unique/i.test(msg)) {
+        return res.status(409).json({ error: 'slug_taken', message: 'That URL slug is already used by another property. Pick another.' });
+      }
+      res.status(500).json({ error: err?.message || 'property profile update failed' });
+    }
+  });
+
+  // ─── Property-level gallery CRUD ─────────────────────────────────
+  app.get("/api/restaurant/:id/hotel/property-gallery", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const db = await getTenantDb(req.params.id);
+    const rows = await db.query("SELECT * FROM property_gallery_images WHERE is_active = 1 ORDER BY display_order, created_at").catch(() => []);
+    res.json(rows);
+  });
+  app.post("/api/restaurant/:id/hotel/property-gallery", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const b = req.body || {};
+    if (!b.image_url) return res.status(400).json({ error: 'image_url required' });
+    const db = await getTenantDb(req.params.id);
+    const id = `PG-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    await db.run(
+      "INSERT INTO property_gallery_images (id, image_url, caption, display_order, is_active) VALUES (?, ?, ?, ?, 1)",
+      [id, b.image_url, b.caption || null, Math.max(0, Number(b.display_order) || 0)]
+    );
+    res.json({ ok: true, id });
+  });
+  app.delete("/api/restaurant/:id/hotel/property-gallery/:imageId", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const db = await getTenantDb(req.params.id);
+    await db.run("UPDATE property_gallery_images SET is_active = 0 WHERE id = ?", [req.params.imageId]);
+    res.json({ ok: true });
+  });
+
+  // ─── Per-room-type gallery CRUD ──────────────────────────────────
+  app.get("/api/restaurant/:id/hotel/room-types/:typeId/gallery", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const db = await getTenantDb(req.params.id);
+    const rows = await db.query(
+      "SELECT * FROM room_type_gallery_images WHERE room_type_id = ? AND is_active = 1 ORDER BY display_order, created_at",
+      [req.params.typeId]
+    ).catch(() => []);
+    res.json(rows);
+  });
+  app.post("/api/restaurant/:id/hotel/room-types/:typeId/gallery", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const b = req.body || {};
+    if (!b.image_url) return res.status(400).json({ error: 'image_url required' });
+    const db = await getTenantDb(req.params.id);
+    const id = `RTG-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    await db.run(
+      "INSERT INTO room_type_gallery_images (id, room_type_id, image_url, caption, display_order, is_active) VALUES (?, ?, ?, ?, ?, 1)",
+      [id, req.params.typeId, b.image_url, b.caption || null, Math.max(0, Number(b.display_order) || 0)]
+    );
+    res.json({ ok: true, id });
+  });
+  app.delete("/api/restaurant/:id/hotel/room-types/:typeId/gallery/:imageId", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const db = await getTenantDb(req.params.id);
+    await db.run("UPDATE room_type_gallery_images SET is_active = 0 WHERE id = ?", [req.params.imageId]);
+    res.json({ ok: true });
   });
 
   // ─── FOLIOS — list + view + settle (Phase 3) ─────────────────────────────
@@ -26036,6 +26351,20 @@ async function startServer() {
     }
   });
 
+  // Generic image upload for hotel property gallery + room-type galleries.
+  // Hotel-staff gated. Same multer/disk pipeline as logo & watermark uploads;
+  // returns the public /uploads/<filename> URL that the property-profile
+  // PATCH or gallery POST will persist. SETTINGS-tab-access enforced so
+  // marketing-team staff (not just full admins) can upload photos.
+  app.post("/api/restaurant/:id/hotel/upload-image", authenticate, hotelStaff, requireTabAccess('SETTINGS'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'no file provided' });
+      res.json({ success: true, url: `/uploads/${req.file.filename}` });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'upload failed' });
+    }
+  });
+
   // Bookings: Public — get reservation config for next 60 days (for calendar view)
   app.get("/api/public/restaurants/:id/reservation-config", async (req: Request, res: Response) => {
     try {
@@ -27863,7 +28192,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ota-360-shows-all-configured-otas-plus-agents',
+    commit_marker: 'public-booking-page-premium-redesign-with-slug-galleries',
     code_features: [
       'subscription-billing',
       'read-only-mode',
