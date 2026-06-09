@@ -45109,11 +45109,30 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
   const [step, setStep] = useState<'LANDING' | 'SEARCH' | 'GUEST' | 'DONE'>('LANDING');
   const [hotelInfo, setHotelInfo] = useState<any>(null);
   const [error, setError] = useState('');
+  // ── Marriott-style occupancy state ─────────────────────────────
+  // Three independent counters (rooms / adults / children) replace
+  // the single "guests" field. Default to 1 room × 2 adults so the
+  // common case (couple) needs zero clicks before searching.
+  // child_ages is sized to the number of children and populated by
+  // the popover when the guest opens it; defaults to 10 yrs each
+  // (above the typical 5-yr free threshold).
   const [searchParams, setSearchParams] = useState({
     start: new Date().toISOString().slice(0, 10),
     end: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
-    guests: 1,
+    rooms: 1,
+    adults: 2,
+    children: 0,
+    child_ages: [] as number[],
+    // Legacy — kept for the availability endpoint's guest filter;
+    // backend treats num_guests as a sleep-capacity hint, not a
+    // billing input. Derived from adults+children below.
+    guests: 2,
   });
+  // Selected meal plan PER category (keyed by category_id). Empty
+  // means "use the cheapest" — backend resolves on POST.
+  const [mealPlanByCat, setMealPlanByCat] = useState<Record<string, string>>({});
+  // Whether the Rooms-&-Guests popover is open in the search widget.
+  const [occOpen, setOccOpen] = useState(false);
   const [searchResults, setSearchResults] = useState<any[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [pickedRoom, setPickedRoom] = useState<any | null>(null);
@@ -45185,8 +45204,13 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     setSearching(true);
     setSearchResults(null);
     try {
+      // Availability endpoint uses `guests` as a sleep-capacity filter
+      // (rooms whose capacity < guests are hidden). We send the
+      // per-room occupancy (adults + children) so the filter matches
+      // what the guest will sleep in ONE room.
+      const perRoomOcc = Math.max(1, (searchParams.adults || 0) + (searchParams.children || 0));
       const qs = new URLSearchParams({
-        start: searchParams.start, end: searchParams.end, guests: String(searchParams.guests),
+        start: searchParams.start, end: searchParams.end, guests: String(perRoomOcc),
       });
       const res = await fetch(`/api/public/restaurant/${encodeURIComponent(resolvedTenantId)}/hotel/availability?${qs.toString()}`);
       const data = await res.json();
@@ -45210,13 +45234,25 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
       //   • a flat room record (legacy fallback) with id field
       // Send room_type_id when we have a category; the server picks
       // any vacant room in the category and tags the booking with it.
+      // The booking payload now ships the full Marriott-shape:
+      //   num_rooms, adults, children, child_ages → backend creates
+      //   N bookings sharing a group_id and prices each room with
+      //   the chosen meal plan + extra-person charges.
+      const catId = pickedRoom.category_id || null;
+      const selectedPlanId = catId ? mealPlanByCat[catId] : '';
       const bookingPayload: any = {
         guest_name: guest.name.trim(),
         guest_phone: guest.phone.trim(),
         guest_email: guest.email.trim(),
         check_in_date: searchParams.start,
         check_out_date: searchParams.end,
-        num_guests: searchParams.guests,
+        num_rooms:    searchParams.rooms,
+        adults:       searchParams.adults,
+        children:     searchParams.children,
+        child_ages:   searchParams.child_ages,
+        // Back-compat for older listeners.
+        num_guests:   (searchParams.adults || 0) + (searchParams.children || 0),
+        meal_plan_id: selectedPlanId || null,
         special_requests: guest.special_requests.trim() || null,
       };
       if (pickedRoom.category_id) bookingPayload.room_type_id = pickedRoom.category_id;
@@ -45481,17 +45517,111 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                       className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm focus:ring-2 ring-[#cc5a16]/30 outline-none"
                     />
                   </div>
-                  <div>
-                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
-                    <input
-                      type="number" min={1} max={10}
-                      value={searchParams.guests}
-                      onChange={e => setSearchParams(p => ({ ...p, guests: Math.max(1, Number(e.target.value) || 1) }))}
-                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm focus:ring-2 ring-[#cc5a16]/30 outline-none"
-                    />
+                  {/* ── Marriott-style Rooms / Adults / Children picker ──
+                      Single trigger button shows the summary; clicking
+                      opens a popover with three steppers. Per-child age
+                      pickers appear below the Children stepper so the
+                      backend can apply the right child-rate band. */}
+                  <div className="relative">
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Rooms &amp; Guests</label>
+                    <button
+                      type="button"
+                      onClick={() => setOccOpen(o => !o)}
+                      className="w-full bg-[#faf7f2] rounded-2xl px-3 py-3 text-sm text-left flex items-center justify-between gap-2"
+                    >
+                      <span>
+                        {searchParams.rooms} room{searchParams.rooms === 1 ? '' : 's'} ·{' '}
+                        {searchParams.adults} adult{searchParams.adults === 1 ? '' : 's'}
+                        {searchParams.children > 0 ? ` · ${searchParams.children} child${searchParams.children === 1 ? '' : 'ren'}` : ''}
+                      </span>
+                      <ChevronDown size={14} className={cn('transition-transform', occOpen && 'rotate-180')} />
+                    </button>
+                    {occOpen && (
+                      <div className="absolute z-30 mt-2 left-0 right-0 sm:right-auto sm:w-80 bg-white rounded-2xl shadow-2xl border border-[#f0e8dd] p-4 space-y-3">
+                        {[
+                          { key: 'rooms',    label: 'Rooms',    min: 1, max: 9, sub: 'Each room is priced + booked separately.' },
+                          { key: 'adults',   label: 'Adults',   min: 1, max: 16, sub: 'Ages 13 and above.' },
+                          { key: 'children', label: 'Children', min: 0, max: 8,  sub: 'Ages 0-12. Rate depends on age.' },
+                        ].map(row => (
+                          <div key={row.key} className="flex items-center justify-between">
+                            <div>
+                              <div className="text-sm font-bold text-[#1a1208]">{row.label}</div>
+                              <div className="text-[10px] text-[#9c8e85]">{row.sub}</div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setSearchParams(p => {
+                                  const cur = (p as any)[row.key] as number;
+                                  const next = Math.max(row.min, cur - 1);
+                                  const out: any = { ...p, [row.key]: next };
+                                  if (row.key === 'children') {
+                                    out.child_ages = (p.child_ages || []).slice(0, next);
+                                  }
+                                  return out;
+                                })}
+                                disabled={((searchParams as any)[row.key] as number) <= row.min}
+                                className="w-8 h-8 rounded-full border border-[#e0d4c6] flex items-center justify-center text-[#6b5d52] hover:bg-[#faf7f2] disabled:opacity-30 disabled:cursor-not-allowed"
+                              >–</button>
+                              <span className="w-6 text-center text-sm font-bold tabular-nums">
+                                {(searchParams as any)[row.key]}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setSearchParams(p => {
+                                  const cur = (p as any)[row.key] as number;
+                                  const next = Math.min(row.max, cur + 1);
+                                  const out: any = { ...p, [row.key]: next };
+                                  if (row.key === 'children') {
+                                    const ages = [...(p.child_ages || [])];
+                                    while (ages.length < next) ages.push(10);    // default child age
+                                    out.child_ages = ages;
+                                  }
+                                  return out;
+                                })}
+                                disabled={((searchParams as any)[row.key] as number) >= row.max}
+                                className="w-8 h-8 rounded-full border border-[#e0d4c6] flex items-center justify-center text-[#6b5d52] hover:bg-[#faf7f2] disabled:opacity-30 disabled:cursor-not-allowed"
+                              >+</button>
+                            </div>
+                          </div>
+                        ))}
+                        {searchParams.children > 0 && (
+                          <div className="pt-2 border-t border-[#f0e8dd]">
+                            <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Child ages</div>
+                            <div className="grid grid-cols-3 gap-2">
+                              {Array.from({ length: searchParams.children }).map((_, i) => (
+                                <div key={i}>
+                                  <label className="block text-[10px] text-[#6b5d52]">Child {i+1}</label>
+                                  <select
+                                    value={searchParams.child_ages[i] ?? 10}
+                                    onChange={e => setSearchParams(p => {
+                                      const ages = [...p.child_ages];
+                                      ages[i] = Number(e.target.value);
+                                      return { ...p, child_ages: ages };
+                                    })}
+                                    className="w-full bg-[#faf7f2] rounded-xl px-2 py-1.5 text-xs outline-none"
+                                  >
+                                    {Array.from({ length: 13 }).map((_, age) => (
+                                      <option key={age} value={age}>{age} yr{age === 1 ? '' : 's'}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              ))}
+                            </div>
+                            <p className="text-[10px] text-[#9c8e85] mt-2">Under 5 typically free; 5-12 at child rate.</p>
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setOccOpen(false)}
+                          className="w-full px-3 py-2 rounded-xl text-white text-xs font-bold mt-1"
+                          style={{ background: brandPrimary }}
+                        >Apply</button>
+                      </div>
+                    )}
                   </div>
                   <button
-                    onClick={() => { runSearch(); setStep('SEARCH'); }}
+                    onClick={() => { setOccOpen(false); runSearch(); setStep('SEARCH'); }}
                     disabled={searching}
                     className="px-5 py-3 rounded-2xl text-white text-sm font-bold disabled:opacity-60 shadow-md transition-colors"
                     style={{ background: brandPrimary }}
@@ -45800,14 +45930,37 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                   />
                 </div>
               </div>
-              <div>
-                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
-                <input
-                  type="number" min={1} max={10}
-                  value={searchParams.guests}
-                  onChange={e => setSearchParams(p => ({ ...p, guests: Math.max(1, Number(e.target.value) || 1) }))}
-                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                />
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { key: 'rooms',    label: 'Rooms',    min: 1, max: 9 },
+                  { key: 'adults',   label: 'Adults',   min: 1, max: 16 },
+                  { key: 'children', label: 'Children', min: 0, max: 8 },
+                ].map(row => (
+                  <div key={row.key}>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">{row.label}</label>
+                    <div className="flex items-center justify-between bg-[#faf7f2] rounded-2xl px-2 py-1.5">
+                      <button type="button" onClick={() => setSearchParams(p => {
+                        const cur = (p as any)[row.key] as number;
+                        const next = Math.max(row.min, cur - 1);
+                        const out: any = { ...p, [row.key]: next };
+                        if (row.key === 'children') out.child_ages = (p.child_ages || []).slice(0, next);
+                        return out;
+                      })} className="w-6 h-6 rounded-full text-[#6b5d52] hover:bg-white">–</button>
+                      <span className="text-sm font-bold tabular-nums">{(searchParams as any)[row.key]}</span>
+                      <button type="button" onClick={() => setSearchParams(p => {
+                        const cur = (p as any)[row.key] as number;
+                        const next = Math.min(row.max, cur + 1);
+                        const out: any = { ...p, [row.key]: next };
+                        if (row.key === 'children') {
+                          const ages = [...(p.child_ages || [])];
+                          while (ages.length < next) ages.push(10);
+                          out.child_ages = ages;
+                        }
+                        return out;
+                      })} className="w-6 h-6 rounded-full text-[#6b5d52] hover:bg-white">+</button>
+                    </div>
+                  </div>
+                ))}
               </div>
               <button onClick={runSearch} disabled={searching} className="w-full px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-60">
                 {searching ? 'Searching…' : 'Show available rooms'}
@@ -45834,11 +45987,16 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                     const left      = isCategory ? r.rooms_available     : 1;
                     const amenities = isCategory ? r.category_amenities  : r.amenities;
                     const description = isCategory ? r.category_description : '';
+                    const mealPlans: any[] = isCategory ? (r.meal_plans || []) : [];
+                    const selectedPlanId = isCategory ? (mealPlanByCat[r.category_id] || (mealPlans[0]?.meal_plan_id ?? '')) : '';
+                    const selectedPlan = mealPlans.find((mp: any) => mp.meal_plan_id === selectedPlanId);
+                    const effectivePerNight = selectedPlan ? selectedPlan.per_night_rate : perNight;
+                    const nightsCount = r.nights || 1;
+                    const effectiveTotal = selectedPlan ? selectedPlan.per_night_rate * nightsCount : total;
                     return (
-                      <button
+                      <div
                         key={isCategory ? r.category_id : r.id}
-                        onClick={() => { setPickedRoom(r); setStep('GUEST'); }}
-                        className="block w-full text-left bg-white rounded-3xl shadow-sm hover:shadow-md transition-all overflow-hidden border border-transparent group"
+                        className="block w-full bg-white rounded-3xl shadow-sm hover:shadow-md transition-all overflow-hidden border border-transparent"
                         style={{ borderColor: 'transparent' }}
                         onMouseEnter={e => (e.currentTarget.style.borderColor = `${brandPrimary}50`)}
                         onMouseLeave={e => (e.currentTarget.style.borderColor = 'transparent')}
@@ -45847,38 +46005,103 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                           {image && (
                             <div className="w-full sm:w-44 aspect-[16/9] sm:aspect-square bg-cover bg-center shrink-0" style={{ backgroundImage: `url(${image})` }} />
                           )}
-                          <div className="flex-1 p-5 flex flex-col sm:flex-row justify-between gap-3">
-                            <div className="min-w-0 flex-1">
-                              <h3 className="text-xl font-bold text-[#1a1208]" style={{ fontFamily: serifStack }}>{name}</h3>
-                              <div className="flex items-center gap-2 mt-1 flex-wrap">
-                                {left > 0 && (
-                                  <span
-                                    className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full"
-                                    style={{ background: `${brandPrimary}15`, color: brandPrimary }}
-                                  >
-                                    {left} room{left === 1 ? '' : 's'} left
-                                  </span>
-                                )}
-                                {r.capacity && <span className="text-[10px] text-[#9c8e85]">Sleeps {r.capacity}</span>}
+                          <div className="flex-1 p-5 flex flex-col gap-3">
+                            <div className="flex flex-col sm:flex-row justify-between gap-3">
+                              <div className="min-w-0 flex-1">
+                                <h3 className="text-xl font-bold text-[#1a1208]" style={{ fontFamily: serifStack }}>{name}</h3>
+                                <div className="flex items-center gap-2 mt-1 flex-wrap">
+                                  {left > 0 && (
+                                    <span
+                                      className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full"
+                                      style={{ background: `${brandPrimary}15`, color: brandPrimary }}
+                                    >
+                                      {left} room{left === 1 ? '' : 's'} left
+                                    </span>
+                                  )}
+                                  {r.capacity && <span className="text-[10px] text-[#9c8e85]">Sleeps {r.capacity}</span>}
+                                </div>
+                                {description && <p className="text-[12px] text-[#6b5d52] mt-2 line-clamp-2">{description}</p>}
+                                {amenities && <p className="text-[10px] text-[#9c8e85] mt-1 line-clamp-1">{amenities}</p>}
                               </div>
-                              {description && <p className="text-[12px] text-[#6b5d52] mt-2 line-clamp-2">{description}</p>}
-                              {amenities && <p className="text-[10px] text-[#9c8e85] mt-1 line-clamp-1">{amenities}</p>}
+                              <div className="text-right shrink-0 self-start sm:self-center">
+                                <p className="text-[9px] uppercase tracking-widest text-[#9c8e85]">{isCategory ? 'From' : 'Total'}</p>
+                                <p className="text-2xl font-bold font-mono" style={{ color: brandPrimary }}>
+                                  {hotelInfo.currency_symbol}{Number(effectivePerNight).toLocaleString('en-IN')}
+                                  <span className="text-[10px] font-normal text-[#9c8e85] ml-0.5">/night</span>
+                                </p>
+                                <p className="text-[10px] text-[#9c8e85]">{nightsCount}n total · {hotelInfo.currency_symbol}{Number(effectiveTotal).toLocaleString('en-IN')}</p>
+                                <p className="text-[9px] text-[#9c8e85]">
+                                  {Number(hotelInfo.rates_include_gst) === 0 ? '+ GST as applicable' : 'Includes all taxes'}
+                                </p>
+                              </div>
                             </div>
-                            <div className="text-right shrink-0 self-end sm:self-center">
-                              <p className="text-[9px] uppercase tracking-widest text-[#9c8e85]">{isCategory ? 'Starts from' : 'Total'}</p>
-                              <p className="text-2xl font-bold font-mono" style={{ color: brandPrimary }}>
-                                {hotelInfo.currency_symbol}{Number(perNight).toLocaleString('en-IN')}
-                                <span className="text-[10px] font-normal text-[#9c8e85] ml-0.5">/night</span>
-                              </p>
-                              <p className="text-[10px] text-[#9c8e85]">{r.nights}n total · {hotelInfo.currency_symbol}{Number(total).toLocaleString('en-IN')}</p>
-                              <p className="text-[9px] text-[#9c8e85]">
-                                {Number(hotelInfo.rates_include_gst) === 0 ? '+ GST as applicable' : 'Includes all taxes'}
-                              </p>
-                              <span className="inline-block mt-2 text-[10px] font-bold uppercase tracking-widest" style={{ color: brandPrimary }}>Book →</span>
+
+                            {/* ── Meal plan strip ─────────────────────────
+                                Marriott / Booking.com style: each plan is
+                                a radio "card" with code + meals included
+                                + per-night price. Tapping a card updates
+                                the displayed total above. Selected plan
+                                travels with the booking POST. */}
+                            {mealPlans.length > 0 && (
+                              <div className="border-t border-[#f0e8dd] pt-3">
+                                <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Choose your rate plan</p>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                  {mealPlans.map(mp => {
+                                    const isSel = mp.meal_plan_id === selectedPlanId;
+                                    const mealHint = mp.meals_included && mp.meals_included.length
+                                      ? mp.meals_included.map((m: string) => m === 'breakfast' ? '🥐' : m === 'lunch' ? '🍱' : '🍽️').join(' ')
+                                      : 'Room only';
+                                    return (
+                                      <button
+                                        key={mp.meal_plan_id}
+                                        type="button"
+                                        onClick={() => setMealPlanByCat(prev => ({ ...prev, [r.category_id]: mp.meal_plan_id }))}
+                                        className="rounded-2xl p-3 text-left border-2 transition-all"
+                                        style={{
+                                          borderColor: isSel ? brandPrimary : '#f0e8dd',
+                                          background:  isSel ? `${brandPrimary}08` : 'white',
+                                        }}
+                                      >
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: isSel ? brandPrimary : '#6b5d52' }}>
+                                            {mp.code}
+                                          </span>
+                                          {isSel && <Check size={12} style={{ color: brandPrimary }} />}
+                                        </div>
+                                        <div className="text-[11px] font-bold text-[#1a1208] mt-0.5 truncate">{mp.name}</div>
+                                        <div className="text-[10px] text-[#9c8e85] mt-0.5">{mealHint}</div>
+                                        <div className="text-[12px] font-mono mt-1" style={{ color: brandPrimary }}>
+                                          {hotelInfo.currency_symbol}{Number(mp.per_night_rate).toLocaleString('en-IN')}<span className="text-[9px] text-[#9c8e85]">/night</span>
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="flex items-center justify-end pt-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  // Seed meal-plan selection if guest didn't tap one explicitly
+                                  if (isCategory && mealPlans.length > 0 && !mealPlanByCat[r.category_id]) {
+                                    setMealPlanByCat(prev => ({ ...prev, [r.category_id]: mealPlans[0].meal_plan_id }));
+                                  }
+                                  setPickedRoom(r);
+                                  setStep('GUEST');
+                                }}
+                                className="px-5 py-2 rounded-xl text-white text-sm font-bold shadow-sm transition-colors"
+                                style={{ background: brandPrimary }}
+                                onMouseEnter={e => (e.currentTarget.style.background = brandSecondary)}
+                                onMouseLeave={e => (e.currentTarget.style.background = brandPrimary)}
+                              >
+                                Book {searchParams.rooms > 1 ? `${searchParams.rooms} rooms` : 'this room'} →
+                              </button>
                             </div>
                           </div>
                         </div>
-                      </button>
+                      </div>
                     );
                   })
                 )}
@@ -45896,7 +46119,19 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
             <div className="bg-[#faf7f2] rounded-2xl p-3 text-sm">
               <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{pickedRoom.name}</strong></div>
               <div className="flex justify-between"><span className="text-[#6b5d52]">Dates</span>{searchParams.start} → {searchParams.end}</div>
-              <div className="flex justify-between"><span className="text-[#6b5d52]">Guests</span>{searchParams.guests}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Rooms</span>{searchParams.rooms}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Adults</span>{searchParams.adults}</div>
+              {searchParams.children > 0 && (
+                <div className="flex justify-between"><span className="text-[#6b5d52]">Children</span>{searchParams.children}{searchParams.child_ages.length > 0 ? ` (${searchParams.child_ages.join(', ')} yr)` : ''}</div>
+              )}
+              {pickedRoom?.category_id && mealPlanByCat[pickedRoom.category_id] && (
+                (() => {
+                  const plan = (pickedRoom.meal_plans || []).find((mp: any) => mp.meal_plan_id === mealPlanByCat[pickedRoom.category_id]);
+                  return plan ? (
+                    <div className="flex justify-between"><span className="text-[#6b5d52]">Plan</span>{plan.code} — {plan.name}</div>
+                  ) : null;
+                })()
+              )}
               <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
                 <span className="text-[#6b5d52] font-bold">Total</span>
                 <strong className="font-mono text-[#cc5a16]">{hotelInfo.currency_symbol}{Number(pickedRoom.total_rate).toLocaleString('en-IN')}</strong>

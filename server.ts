@@ -20338,6 +20338,64 @@ async function startServer() {
         }
       }
       const categories = Object.values(byCat).sort((a: any, b: any) => (a.starting_from_rate || 0) - (b.starting_from_rate || 0));
+
+      // Phase B (Marriott-grade) — surface every meal plan per category
+      // so the guest sees a rate-plan radio strip ("Room Only", "Bed +
+      // Breakfast", "Half Board", "All Inclusive") instead of one
+      // mystery "starting from" number. We query the room_tariffs
+      // matrix joined with meal_plans, scoped to seasons that overlap
+      // the requested date range — this matches the existing
+      // rate-preview endpoint's logic but expands "MIN" → all rows.
+      try {
+        const tenantDb = await getTenantDb(req.params.id);
+        for (const c of categories as any[]) {
+          if (!c.category_id) { c.meal_plans = []; continue; }
+          const rows: any[] = await tenantDb.query(
+            `SELECT mp.id          AS mp_id,
+                    mp.code        AS mp_code,
+                    mp.name        AS mp_name,
+                    mp.includes_breakfast,
+                    mp.includes_lunch,
+                    mp.includes_dinner,
+                    MIN(rt.rate)   AS min_rate
+               FROM room_tariffs rt
+               JOIN meal_plans mp     ON mp.id = rt.meal_plan_id AND mp.is_active = 1
+               JOIN season_periods sp ON sp.season_id = rt.season_id
+              WHERE rt.room_type_id = ?
+                AND sp.start_date <= ?
+                AND sp.end_date   >= ?
+              GROUP BY mp.id, mp.code, mp.name, mp.includes_breakfast,
+                       mp.includes_lunch, mp.includes_dinner
+              ORDER BY min_rate ASC`,
+            [c.category_id, end, start]
+          );
+          c.meal_plans = rows.map(r => {
+            const baseRate = Number(r.min_rate || 0);
+            // Gross up when tenant prices exclusive of GST (so the
+            // displayed plan price matches the customer-paid amount
+            // they'll see on the confirmation page).
+            let perNight = baseRate;
+            if (ratesIncGst === 0 && taxCfg) {
+              perNight = rateBreakdown(baseRate, gstRateForTariff(baseRate, taxCfg), 0).gross;
+            }
+            const meals: string[] = [];
+            if (r.includes_breakfast) meals.push('breakfast');
+            if (r.includes_lunch)     meals.push('lunch');
+            if (r.includes_dinner)    meals.push('dinner');
+            return {
+              meal_plan_id:  r.mp_id,
+              code:          r.mp_code,                  // EP / CP / MAP / AP
+              name:          r.mp_name,
+              per_night_rate: Math.round(perNight),
+              meals_included: meals,                     // ['breakfast', 'dinner', ...]
+            };
+          });
+        }
+      } catch {
+        // Matrix not configured for this tenant — leave meal_plans empty.
+        for (const c of categories as any[]) if (!c.meal_plans) c.meal_plans = [];
+      }
+
       res.json({ start, end, guests, categories, rooms: results,
                  rates_include_gst: ratesIncGst });
     } catch (err) {
@@ -20353,10 +20411,24 @@ async function startServer() {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
+      const b = req.body || {};
       const {
         room_id: rawRoomId, room_type_id, guest_name, guest_phone, guest_email,
-        check_in_date, check_out_date, num_guests, special_requests,
-      } = req.body || {};
+        check_in_date, check_out_date, special_requests,
+        // ── Marriott-style booking shape ──────────────────────────
+        //   num_rooms — 1..9 rooms in one transaction
+        //   adults    — adults per room
+        //   children  — children per room (with optional child_ages)
+        //   meal_plan_id — guest picks EP / CP / MAP / AP per category
+        // num_guests retained as a fallback so the previous JSON shape
+        // (mobile apps mid-rollout) still works.
+        num_rooms: rawNumRooms,
+        adults: rawAdults,
+        children: rawChildren,
+        child_ages,
+        meal_plan_id,
+        num_guests,
+      } = b;
       if (!guest_name || !String(guest_name).trim()) {
         return res.status(400).json({ error: "Name is required." });
       }
@@ -20367,18 +20439,82 @@ async function startServer() {
         return res.status(400).json({ error: "Email is required so we can confirm your booking." });
       }
 
-      // Category-first booking — the redesigned public page sends
-      // room_type_id (category) instead of a specific room. We pick
-      // any vacant room in that category for the dates. This way the
-      // guest never sees room numbers on the listing.
-      let room_id = rawRoomId;
       const tenantDb = await getTenantDb(req.params.id);
-      if (!room_id && room_type_id) {
+      const ratesIncGst: 0 | 1 = (check.restaurant?.rates_include_gst == null
+        || Number(check.restaurant.rates_include_gst) === 1) ? 1 : 0;
+      const taxCfg = ratesIncGst === 0 ? await loadHotelTaxConfig(req.params.id) : null;
+
+      // ── Normalise occupancy ─────────────────────────────────────
+      // Marriott pattern: each room has its own adults/children; for
+      // simplicity we apply the same headcount to every room in the
+      // booking (typical for "Family of 4 wants 2 rooms" use case).
+      const num_rooms = Math.max(1, Math.min(9, Number(rawNumRooms) || 1));
+      let adults    = Math.max(1, Number(rawAdults || 0));
+      let children  = Math.max(0, Number(rawChildren || 0));
+      // Back-compat: if caller still sends num_guests but no adults,
+      // treat num_guests as the adult count.
+      if (!rawAdults && num_guests) adults = Math.max(1, Number(num_guests));
+      const total_occupants = adults + children;
+
+      // ── Meal plan resolution ────────────────────────────────────
+      // Validate the picked meal plan exists + is active. If the guest
+      // didn't choose one, fall back to the cheapest plan in the
+      // matrix for the requested category & dates (matches the
+      // rate-preview endpoint logic — gives the guest the best
+      // possible price by default).
+      let resolved_meal_plan_id: string | null = null;
+      let meal_plan_snapshot: string | null = null;
+      if (meal_plan_id) {
+        const mp: any = await tenantDb.get(
+          "SELECT id, code, name FROM meal_plans WHERE id = ? AND is_active = 1",
+          [meal_plan_id]
+        );
+        if (!mp) return res.status(400).json({ error: 'Selected meal plan is not available.' });
+        resolved_meal_plan_id = mp.id;
+        meal_plan_snapshot = mp.code && mp.name ? `${mp.code} — ${mp.name}` : (mp.name || mp.code);
+      } else if (room_type_id) {
+        // Auto-pick cheapest plan in the matrix for the category +
+        // date range. Same query the public availability + rate-
+        // preview endpoints use for "Starts from ₹X".
+        try {
+          const cheapest: any = await tenantDb.get(
+            `SELECT mp.id, mp.code, mp.name
+               FROM room_tariffs rt
+               JOIN meal_plans mp     ON mp.id = rt.meal_plan_id AND mp.is_active = 1
+               JOIN season_periods sp ON sp.season_id = rt.season_id
+              WHERE rt.room_type_id = ?
+                AND sp.start_date <= ?
+                AND sp.end_date   >= ?
+              GROUP BY mp.id, mp.code, mp.name
+              ORDER BY MIN(rt.rate) ASC
+              LIMIT 1`,
+            [room_type_id, check_out_date, check_in_date]
+          );
+          if (cheapest) {
+            resolved_meal_plan_id = cheapest.id;
+            meal_plan_snapshot = cheapest.code && cheapest.name
+              ? `${cheapest.code} — ${cheapest.name}`
+              : (cheapest.name || cheapest.code);
+          }
+        } catch { /* matrix empty / no matrix mode — leave null, falls to base_rate */ }
+      }
+
+      // ── Room picking (category-first, multi-room) ────────────────
+      // Build the candidate pool ONCE then assign N rooms inside the
+      // loop so we never hand the same room to two bookings in the
+      // same transaction. Conflict check filters bookings + holds
+      // that overlap the requested dates.
+      const candidate_rooms: string[] = [];
+      if (rawRoomId) {
+        if (num_rooms > 1) {
+          return res.status(400).json({ error: 'Cannot book multiple rooms when room_id is fixed. Send room_type_id instead.' });
+        }
+        candidate_rooms.push(String(rawRoomId));
+      } else if (room_type_id) {
         const candidates: any[] = await tenantDb.query(
           "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
           [room_type_id]
         );
-        // Filter against overlapping bookings + holds.
         const bConf: any[] = await tenantDb.query(
           `SELECT room_id FROM room_bookings WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND check_in_date < ? AND check_out_date > ?`,
           [check_out_date, check_in_date]
@@ -20388,70 +20524,205 @@ async function startServer() {
           [check_out_date, check_in_date]
         );
         const taken = new Set<string>([...bConf, ...hConf].map((r: any) => r.room_id));
-        const pick = candidates.find((c: any) => !taken.has(c.id));
-        if (!pick) return res.status(409).json({ error: 'No rooms available in this category for these dates.' });
-        room_id = pick.id;
-      }
-      if (!room_id) return res.status(400).json({ error: 'room_type_id or room_id is required' });
-
-      const v = await validateBookingRequest(req.params.id, {
-        room_id, check_in_date, check_out_date,
-        booking_type: 'OVERNIGHT', num_guests: num_guests || 1,
-      });
-      if (!v.ok) return res.status(v.status).json({ error: v.error });
-
-      const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-      const plan = await computeRoomTotal(req.params.id, room_id, check_in_date, check_out_date);
-      // Honour the tenant's `rates_include_gst` flag. In exclusive mode
-      // the matrix rate is pre-tax — gross it up per-night so total_amount
-      // reflects what the customer will pay. Folio settlement extracts
-      // GST inclusively from total_amount (gross), so the original net
-      // rate is recovered correctly at invoice time. No folio change needed.
-      const ratesIncGst: 0 | 1 = (check.restaurant?.rates_include_gst == null
-        || Number(check.restaurant.rates_include_gst) === 1) ? 1 : 0;
-      let firstRate = plan.nights[0]?.rate || 0;
-      let totalForCustomer = plan.total;
-      if (ratesIncGst === 0 && plan.nights.length > 0) {
-        const cfg = await loadHotelTaxConfig(req.params.id);
-        let gross = 0;
-        for (const n of plan.nights) {
-          const pct = gstRateForTariff(n.rate, cfg);
-          gross += rateBreakdown(n.rate, pct, 0).gross;
+        for (const c of candidates) {
+          if (!taken.has(c.id)) candidate_rooms.push(c.id);
+          if (candidate_rooms.length >= num_rooms) break;
         }
-        totalForCustomer = Math.round(gross * 100) / 100;
-        const firstPct = gstRateForTariff(firstRate, cfg);
-        firstRate = rateBreakdown(firstRate, firstPct, 0).gross;
+        if (candidate_rooms.length < num_rooms) {
+          return res.status(409).json({
+            error: `Only ${candidate_rooms.length} room${candidate_rooms.length === 1 ? '' : 's'} available in this category for these dates (you requested ${num_rooms}).`,
+          });
+        }
+      } else {
+        return res.status(400).json({ error: 'room_type_id or room_id is required' });
       }
 
-      // Direct bookings have 0% commission by definition — commission_amount=0,
-      // net_amount=total so the 360 dashboard rolls them up with correct
-      // net revenue (not 0 as it was before).
-      await tenantDb.run(
-        `INSERT INTO room_bookings
-         (id, room_id, guest_name, guest_phone, guest_email,
-          num_guests, check_in_date, check_out_date, status, booking_source,
-          room_rate, total_amount, special_requests, booking_type,
-          commission_pct, commission_amount, net_amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', 'DIRECT_WEB', ?, ?, ?, 'OVERNIGHT', 0, 0, ?)`,
-        [bid, room_id,
-         String(guest_name).trim(),
-         String(guest_phone).trim(),
-         String(guest_email).trim(),
-         num_guests || 1, check_in_date, check_out_date,
-         firstRate, totalForCustomer, special_requests || null,
-         totalForCustomer]
+      // ── Sleeper-capacity check ───────────────────────────────────
+      // First room defines the capacity contract — every room in the
+      // category has the same `capacity` so checking one is enough.
+      // If guest's total occupancy > capacity, ask them to pick a
+      // bigger category or add another room.
+      const probeRoom: any = await tenantDb.get(
+        "SELECT capacity FROM rooms WHERE id = ?", [candidate_rooms[0]]
       );
-      const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
-      try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date, source: 'DIRECT_WEB' }); } catch {}
-      try { await logChannelSync(req.params.id, row, 'BOOKING_CREATED'); } catch {}
-      // Return minimal confirmation — no PII beyond what they typed in.
+      const capacity = Math.max(1, Number(probeRoom?.capacity || 2));
+      if (total_occupants > capacity) {
+        return res.status(400).json({
+          error: `This category sleeps ${capacity} per room. ${adults} adult${adults===1?'':'s'} + ${children} child${children===1?'':'ren'} exceeds it. Try a bigger room or add another room to the booking.`,
+        });
+      }
+
+      // ── Extra-person split for matrix tariffs ────────────────────
+      // The tenant's tariff is calibrated for a baseline of 2 adults
+      // per room (common across Indian hotels). Anyone beyond that
+      // adds an extra_person charge from the extra_person_charges
+      // table — computeBookingTotalWithExtras() handles the lookup
+      // by (person_type × season × meal_plan).
+      //
+      // Convention:
+      //   • adults beyond 2          → extra_adults
+      //   • children with mattress   → child_ages > 5
+      //   • children no mattress     → child_ages ≤ 5  (typically free)
+      const BASELINE_ADULTS = 2;
+      const extra_adults = Math.max(0, adults - BASELINE_ADULTS);
+      const ages = Array.isArray(child_ages) ? child_ages.map((a: any) => Number(a) || 0) : [];
+      const childWithMattress = ages.filter((a: number) => a > 5).length;
+      const childNoMattress   = ages.filter((a: number) => a <= 5).length;
+      // If caller sent children but no ages, default to "with mattress"
+      // (paid). Owner-side configuration of the extra_person_charges
+      // table determines the actual price (often 50 % for 5-12 yr,
+      // free under 5).
+      const extra_children_with_mattress = ages.length > 0 ? childWithMattress : children;
+      const extra_children_no_mattress   = ages.length > 0 ? childNoMattress   : 0;
+
+      // ── Multi-room transactional create ──────────────────────────
+      // All rooms share a group_id so they can be checked-in together,
+      // cancelled together, and rolled into a consolidated invoice on
+      // checkout. Reuses the existing room_booking_groups + group_id
+      // pattern shipped under task #19 "C2 — Group bookings".
+      const isGroup = num_rooms > 1;
+      const groupId = isGroup ? `RBG-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}` : null;
+      const groupName = isGroup ? `${String(guest_name).trim()} · ${num_rooms} rooms` : null;
+      if (isGroup) {
+        try {
+          await tenantDb.run(
+            `INSERT INTO room_booking_groups
+             (id, name, contact_name, contact_phone, contact_email,
+              check_in_date, check_out_date, num_rooms, status, group_total_amount)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', 0)`,
+            [groupId, groupName, String(guest_name).trim(),
+             String(guest_phone).trim(), String(guest_email).trim(),
+             check_in_date, check_out_date, num_rooms]
+          );
+        } catch { /* table may not exist in older deployments — keep going, just link via group_id */ }
+      }
+
+      const createdBookings: any[] = [];
+      let grandTotal = 0;
+      const bookingTime = Date.now();
+      for (let i = 0; i < num_rooms; i++) {
+        const room_id = candidate_rooms[i];
+        const v = await validateBookingRequest(req.params.id, {
+          room_id, check_in_date, check_out_date,
+          booking_type: 'OVERNIGHT', num_guests: total_occupants || 1,
+        });
+        if (!v.ok) return res.status(v.status).json({ error: v.error });
+
+        // ── Rate computation per room ──────────────────────────────
+        // computeBookingTotalWithExtras honours meal_plan_id +
+        // extra-person charges via the matrix; falls through to
+        // computeRoomTotal (base rate) when matrix is empty.
+        // Signature: (restId, roomId, ci, co, { mealPlanId, extraAdults, ... })
+        let breakdown: any;
+        try {
+          breakdown = await computeBookingTotalWithExtras(
+            req.params.id, room_id, check_in_date, check_out_date,
+            { mealPlanId: resolved_meal_plan_id || null,
+              extraAdults: extra_adults,
+              extraChildrenWithMattress: extra_children_with_mattress,
+              extraChildrenNoMattress: extra_children_no_mattress }
+          );
+        } catch (err) {
+          // Fallback to plain room rate if matrix function blows up.
+          const plain = await computeRoomTotal(req.params.id, room_id, check_in_date, check_out_date);
+          breakdown = {
+            base_total: plain.total,
+            extras_total: 0,
+            total: plain.total,
+            per_night: plain.nights.map(n => ({ date: n.date, base_rate: n.rate, extras: 0, source: n.source })),
+          };
+        }
+        const computedTotal = Number(breakdown.total ?? 0);
+
+        // Gross up if rates are stored exclusive of GST.
+        let firstRate = breakdown.per_night?.[0]?.base_rate || 0;
+        let totalForCustomer = computedTotal;
+        if (ratesIncGst === 0 && taxCfg && breakdown.per_night?.length > 0) {
+          let gross = 0;
+          for (const n of breakdown.per_night) {
+            const pct = gstRateForTariff(n.base_rate, taxCfg);
+            gross += rateBreakdown(n.base_rate, pct, 0).gross;
+            if (n.extras > 0) {
+              gross += rateBreakdown(n.extras, pct, 0).gross;
+            }
+          }
+          totalForCustomer = Math.round(gross * 100) / 100;
+          const firstPct = gstRateForTariff(firstRate, taxCfg);
+          firstRate = rateBreakdown(firstRate, firstPct, 0).gross;
+        }
+
+        // Generate a unique id per room. Add the loop index so two
+        // rooms booked in the same millisecond don't clash.
+        const bid = `BK-${bookingTime}-${i}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+        await tenantDb.run(
+          `INSERT INTO room_bookings
+           (id, room_id, guest_name, guest_phone, guest_email,
+            num_guests, check_in_date, check_out_date, status, booking_source,
+            room_rate, total_amount, special_requests, booking_type,
+            commission_pct, commission_amount, net_amount,
+            group_id, group_name,
+            meal_plan_id, meal_plan_snapshot,
+            extra_adults, extra_children_with_mattress, extra_children_no_mattress)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', 'DIRECT_WEB',
+                   ?, ?, ?, 'OVERNIGHT',
+                   0, 0, ?,
+                   ?, ?,
+                   ?, ?,
+                   ?, ?, ?)`,
+          [bid, room_id,
+           String(guest_name).trim(),
+           String(guest_phone).trim(),
+           String(guest_email).trim(),
+           total_occupants || 1, check_in_date, check_out_date,
+           firstRate, totalForCustomer, special_requests || null,
+           totalForCustomer,
+           groupId, groupName,
+           resolved_meal_plan_id, meal_plan_snapshot,
+           extra_adults, extra_children_with_mattress, extra_children_no_mattress]
+        );
+        const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
+        createdBookings.push(row);
+        grandTotal += totalForCustomer;
+
+        // Notifications + OTA fan-out per room (each room creates one
+        // record in channel_sync_log; OTAs see independent inventory
+        // decrements — important because rooms are independent units).
+        try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date, source: 'DIRECT_WEB', mealPlan: meal_plan_snapshot }); } catch {}
+        try { await logChannelSync(req.params.id, row, 'BOOKING_CREATED'); } catch {}
+      }
+
+      // Patch the group's total once all rooms are in.
+      if (isGroup && groupId) {
+        try {
+          await tenantDb.run(
+            "UPDATE room_booking_groups SET group_total_amount = ? WHERE id = ?",
+            [Math.round(grandTotal * 100) / 100, groupId]
+          );
+        } catch {}
+      }
+
+      // Return shape stays backwards-compatible for single-room
+      // callers (booking_id + total_amount on the root). Multi-room
+      // callers also get group_id + bookings[] for navigation.
+      const headline = createdBookings[0];
       res.status(201).json({
-        booking_id: bid,
-        guest_name: row.guest_name,
-        check_in_date: row.check_in_date,
-        check_out_date: row.check_out_date,
-        total_amount: row.total_amount,
-        confirmation_message: `Booking confirmed for ${guest_name}.`,
+        booking_id: headline.id,
+        guest_name: headline.guest_name,
+        check_in_date: headline.check_in_date,
+        check_out_date: headline.check_out_date,
+        total_amount: Math.round(grandTotal * 100) / 100,
+        num_rooms,
+        adults,
+        children,
+        meal_plan_id: resolved_meal_plan_id,
+        meal_plan_label: meal_plan_snapshot,
+        group_id: groupId,
+        bookings: createdBookings.map(b => ({
+          id: b.id, room_id: b.room_id, total_amount: b.total_amount,
+        })),
+        confirmation_message: isGroup
+          ? `${num_rooms} rooms confirmed for ${guest_name}.`
+          : `Booking confirmed for ${guest_name}.`,
       });
     } catch (err: any) {
       console.error("public booking error:", err);
@@ -20860,16 +21131,33 @@ async function startServer() {
       const dtend = ci === co
         ? new Date(new Date(b.check_in_date).getTime() + 86400000).toISOString().slice(0, 10).replace(/-/g, '')
         : co;
+      // Pull the meal-plan code out of the snapshot ("CP — Continental
+      // Plan" → "CP") so it appears compactly in the SUMMARY. Channel
+      // managers / iCal subscribers (Booking.com, Airbnb, Expedia)
+      // surface SUMMARY in their backoffice — putting the rate-plan
+      // there lets the OTA-side staff identify what bundle the guest
+      // booked at a glance.
+      const planCode = (b.meal_plan_snapshot || '').split('—')[0].trim();
+      const planSuffix = planCode ? ` · ${planCode}` : '';
+      const adultsStr = b.extra_adults && b.extra_adults > 0
+        ? ` · +${b.extra_adults} adult${b.extra_adults === 1 ? '' : 's'}` : '';
+      const childStr  = ((b.extra_children_with_mattress || 0) + (b.extra_children_no_mattress || 0)) > 0
+        ? ` · +${(b.extra_children_with_mattress||0) + (b.extra_children_no_mattress||0)} child` : '';
       lines.push(
         'BEGIN:VEVENT',
         `UID:atithi-${b.id}@atithi-setu.com`,
         `DTSTAMP:${nowStamp}`,
         `DTSTART;VALUE=DATE:${ci}`,
         `DTEND;VALUE=DATE:${dtend}`,
-        `SUMMARY:${escapeIcal(`${b.guest_name || 'Guest'}${b.room_name ? ` · ${b.room_name}` : ''}`)}`,
-        `DESCRIPTION:${escapeIcal(`Booking ${b.id}${b.guest_phone ? ` · ${b.guest_phone}` : ''}${b.booking_source ? ` · via ${b.booking_source}` : ''} · ${b.status}`)}`,
+        `SUMMARY:${escapeIcal(`${b.guest_name || 'Guest'}${b.room_name ? ` · ${b.room_name}` : ''}${planSuffix}`)}`,
+        `DESCRIPTION:${escapeIcal(`Booking ${b.id}${b.guest_phone ? ` · ${b.guest_phone}` : ''}${b.booking_source ? ` · via ${b.booking_source}` : ''}${b.meal_plan_snapshot ? ` · ${b.meal_plan_snapshot}` : ''}${adultsStr}${childStr} · ${b.status}`)}`,
         `STATUS:${b.status === 'CHECKED_OUT' ? 'CONFIRMED' : 'CONFIRMED'}`,
         b.room_name ? `LOCATION:${escapeIcal(`${propertyName} · ${b.room_name}`)}` : `LOCATION:${escapeIcal(propertyName)}`,
+        // X-properties — OTAs / channel managers that parse these get
+        // structured access to the rate-plan + occupancy without
+        // having to regex-scrape SUMMARY/DESCRIPTION.
+        ...(b.meal_plan_snapshot ? [`X-ATITHI-MEAL-PLAN:${escapeIcal(b.meal_plan_snapshot)}`] : []),
+        ...(b.booking_source     ? [`X-ATITHI-SOURCE:${escapeIcal(String(b.booking_source))}`] : []),
         'END:VEVENT'
       );
     }
@@ -28453,7 +28741,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'tenant-date-format-and-gst-inclusive-exclusive-toggle',
+    commit_marker: 'public-booking-rooms-adults-children-meal-plan-multi-room',
     code_features: [
       'subscription-billing',
       'read-only-mode',
