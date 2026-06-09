@@ -19772,6 +19772,62 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <input type="number" min={1} max={5} value={propertyProfile.hotel_star_rating || ''} onChange={e => setPropertyProfile({ ...propertyProfile, hotel_star_rating: e.target.value === '' ? null : Number(e.target.value) })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
                   </div>
                 </div>
+                {/* Brand colours — feeds the public page CSS variables.
+                    Two side-by-side colour pickers + hex inputs with live
+                    swatch preview so the owner can see exactly what's
+                    going to render. Leave blank to fall back to the
+                    Atithi-Setu default orange. */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Brand colours</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Primary (buttons, accents)</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color"
+                          value={propertyProfile.brand_primary_color || '#cc5a16'}
+                          onChange={e => setPropertyProfile({ ...propertyProfile, brand_primary_color: e.target.value })}
+                          className="w-10 h-10 rounded-lg cursor-pointer border-2 border-[#faf7f2]"
+                        />
+                        <input
+                          type="text"
+                          value={propertyProfile.brand_primary_color || ''}
+                          onChange={e => setPropertyProfile({ ...propertyProfile, brand_primary_color: e.target.value.toLowerCase() })}
+                          placeholder="#cc5a16"
+                          pattern="^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$"
+                          className="flex-1 bg-[#faf7f2] border-none rounded-2xl px-3 py-2 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Secondary (hover state)</label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color"
+                          value={propertyProfile.brand_secondary_color || '#a84612'}
+                          onChange={e => setPropertyProfile({ ...propertyProfile, brand_secondary_color: e.target.value })}
+                          className="w-10 h-10 rounded-lg cursor-pointer border-2 border-[#faf7f2]"
+                        />
+                        <input
+                          type="text"
+                          value={propertyProfile.brand_secondary_color || ''}
+                          onChange={e => setPropertyProfile({ ...propertyProfile, brand_secondary_color: e.target.value.toLowerCase() })}
+                          placeholder="#a84612"
+                          pattern="^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$"
+                          className="flex-1 bg-[#faf7f2] border-none rounded-2xl px-3 py-2 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  {/* Live preview swatch — shows owner exactly what their
+                      brand button will look like on the public page. */}
+                  <div className="mt-2 flex items-center gap-2 text-[10px] text-[#9c8e85]">
+                    <span>Preview:</span>
+                    <button type="button" disabled className="px-3 py-1.5 rounded-xl text-white text-xs font-bold" style={{ background: propertyProfile.brand_primary_color || '#cc5a16' }}>Book now</button>
+                    <button type="button" disabled className="px-3 py-1.5 rounded-xl text-white text-xs font-bold" style={{ background: propertyProfile.brand_secondary_color || '#a84612' }}>Hover</button>
+                    <span className="ml-auto text-[10px] text-[#9c8e85]">Default Atithi-Setu orange if blank.</span>
+                  </div>
+                </div>
                 {/* Description */}
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">About the property</label>
@@ -44991,7 +45047,12 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
       });
       const res = await fetch(`/api/public/restaurant/${encodeURIComponent(resolvedTenantId)}/hotel/availability?${qs.toString()}`);
       const data = await res.json();
-      setSearchResults(Array.isArray(data?.rooms) ? data.rooms : []);
+      // Prefer category-grouped results (Taj/Marriott UX — no room
+      // numbers exposed to guests). Falls back to flattened rooms[]
+      // for any tenant where the backend hasn't been upgraded yet.
+      setSearchResults(Array.isArray(data?.categories) && data.categories.length > 0
+        ? data.categories
+        : (Array.isArray(data?.rooms) ? data.rooms : []));
     } catch (err: any) { alert(err?.message || 'Search failed'); }
     finally { setSearching(false); }
   };
@@ -45001,19 +45062,26 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     if (!pickedRoom) return;
     setSubmitting(true);
     try {
+      // pickedRoom may be EITHER:
+      //   • a category record (new path) with category_id field
+      //   • a flat room record (legacy fallback) with id field
+      // Send room_type_id when we have a category; the server picks
+      // any vacant room in the category and tags the booking with it.
+      const bookingPayload: any = {
+        guest_name: guest.name.trim(),
+        guest_phone: guest.phone.trim(),
+        guest_email: guest.email.trim(),
+        check_in_date: searchParams.start,
+        check_out_date: searchParams.end,
+        num_guests: searchParams.guests,
+        special_requests: guest.special_requests.trim() || null,
+      };
+      if (pickedRoom.category_id) bookingPayload.room_type_id = pickedRoom.category_id;
+      else                        bookingPayload.room_id      = pickedRoom.id;
       const res = await fetch(`/api/public/restaurant/${encodeURIComponent(resolvedTenantId)}/hotel/booking`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          room_id: pickedRoom.id,
-          guest_name: guest.name.trim(),
-          guest_phone: guest.phone.trim(),
-          guest_email: guest.email.trim(),
-          check_in_date: searchParams.start,
-          check_out_date: searchParams.end,
-          num_guests: searchParams.guests,
-          special_requests: guest.special_requests.trim() || null,
-        }),
+        body: JSON.stringify(bookingPayload),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -45049,9 +45117,29 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     else setStep('SEARCH');
   };
   const hero = hotelInfo.hero_image_url || hotelInfo.property_gallery?.[0]?.image_url || hotelInfo.room_types?.[0]?.image_url;
+  // Brand theming — the tenant configures these in Settings → Public
+  // Booking Page. We bind them to CSS variables on the wrapper so every
+  // accent (button, badge, eyebrow, border) follows the property's
+  // brand instead of the platform's default orange. Fallback to the
+  // Atithi-Setu orange when the owner hasn't set anything.
+  const brandPrimary   = hotelInfo.brand_primary_color   || '#cc5a16';
+  const brandSecondary = hotelInfo.brand_secondary_color || '#a84612';
+  // Lightbox state for the property gallery (Taj-style overlay viewer
+  // instead of opening in a new tab).
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   return (
-    <div className="min-h-screen bg-white text-[#1a1208]">
+    <div
+      className="min-h-screen bg-white text-[#1a1208]"
+      style={{
+        // CSS variables let any descendant use brand colours via
+        // var(--brand-primary). The constants brandPrimary /
+        // brandSecondary above are the same values, used for inline
+        // styles where Tailwind's JIT can't pick up dynamic colours.
+        ['--brand-primary' as any]:   brandPrimary,
+        ['--brand-secondary' as any]: brandSecondary,
+      }}
+    >
       {step === 'LANDING' ? (
         <>
           {/* ── Sticky top nav ───────────────────────────────────── */}
@@ -45066,7 +45154,13 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                   <p className="text-[10px] text-[#9c8e85] truncate">{[hotelInfo.city, hotelInfo.state].filter(Boolean).join(' · ')}</p>
                 </div>
               </div>
-              <button onClick={() => scrollToBook()} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs sm:text-sm font-bold hover:bg-[#a84612] shadow-sm">
+              <button
+                onClick={() => scrollToBook()}
+                className="px-4 py-2 rounded-xl text-white text-xs sm:text-sm font-bold shadow-sm transition-colors"
+                style={{ background: brandPrimary }}
+                onMouseEnter={e => (e.currentTarget.style.background = brandSecondary)}
+                onMouseLeave={e => (e.currentTarget.style.background = brandPrimary)}
+              >
                 Book now
               </button>
             </div>
@@ -45127,7 +45221,14 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                       className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-3 text-sm focus:ring-2 ring-[#cc5a16]/30 outline-none"
                     />
                   </div>
-                  <button onClick={() => { runSearch(); setStep('SEARCH'); }} disabled={searching} className="px-5 py-3 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-60 shadow-md">
+                  <button
+                    onClick={() => { runSearch(); setStep('SEARCH'); }}
+                    disabled={searching}
+                    className="px-5 py-3 rounded-2xl text-white text-sm font-bold disabled:opacity-60 shadow-md transition-colors"
+                    style={{ background: brandPrimary }}
+                    onMouseEnter={e => { if (!searching) e.currentTarget.style.background = brandSecondary; }}
+                    onMouseLeave={e => { if (!searching) e.currentTarget.style.background = brandPrimary; }}
+                  >
                     {searching ? 'Searching…' : '🔍 Check availability'}
                   </button>
                 </div>
@@ -45135,10 +45236,32 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
             </div>
           </section>
 
+          {/* ── Trust strip — sits between the hero/booking widget and
+              About. Reinforces direct-booking advantages (0% commission,
+              best rate, free cancellation, instant confirmation) in
+              Marriott / Taj fashion. Brand-coloured accent dots tie
+              into the property's identity. */}
+          <section className="max-w-6xl mx-auto px-4 sm:px-6 pt-16 pb-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+              {[
+                { icon: '💰', title: 'Best rate guarantee',  blurb: 'Lower than every OTA' },
+                { icon: '✓',  title: 'Free cancellation',    blurb: 'Up to 7 days before stay' },
+                { icon: '⚡', title: 'Instant confirmation', blurb: 'Booking ID in seconds' },
+                { icon: '🤝', title: 'Direct support',       blurb: 'Talk to the property, not a call centre' },
+              ].map((t, i) => (
+                <div key={i} className="p-3">
+                  <div className="text-2xl mb-1" style={{ color: brandPrimary }}>{t.icon}</div>
+                  <p className="text-xs font-bold text-[#1a1208]">{t.title}</p>
+                  <p className="text-[10px] text-[#6b5d52] mt-0.5">{t.blurb}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
           {/* ── About ────────────────────────────────────────────── */}
           {hotelInfo.hotel_description && (
             <section className="max-w-5xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
-              <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-3">About the property</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-3" style={{ color: brandPrimary }}>About the property</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
                 <div className="text-[15px] leading-relaxed text-[#3d3128] whitespace-pre-line">
                   {hotelInfo.hotel_description}
@@ -45155,7 +45278,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
             <section className="bg-[#faf7f2] py-12 sm:py-16">
               <div className="max-w-6xl mx-auto px-4 sm:px-6">
                 <div className="text-center mb-8">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">Choose your room</p>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>Choose your room</p>
                   <h2 className="text-3xl sm:text-4xl font-serif font-bold">Our accommodations</h2>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -45182,7 +45305,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                           <div className="mt-auto pt-4 flex items-end justify-between gap-3">
                             <div>
                               <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Starts at</p>
-                              <p className="text-xl font-bold font-mono text-[#cc5a16]">
+                              <p className="text-xl font-bold font-mono" style={{ color: brandPrimary }}>
                                 {hotelInfo.currency_symbol}{Number(t.starting_from_rate ?? t.base_rate ?? 0).toLocaleString('en-IN')}
                                 <span className="text-[10px] font-normal text-[#9c8e85] ml-0.5">/night</span>
                               </p>
@@ -45190,7 +45313,13 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                                 <p className="text-[9px] text-[#9c8e85] italic">{t.cheapest_meal_plan_label}</p>
                               )}
                             </div>
-                            <button onClick={() => scrollToBook(t.id)} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] shadow-sm">
+                            <button
+                              onClick={() => scrollToBook(t.id)}
+                              className="px-4 py-2 rounded-xl text-white text-sm font-bold shadow-sm transition-colors"
+                              style={{ background: brandPrimary }}
+                              onMouseEnter={e => (e.currentTarget.style.background = brandSecondary)}
+                              onMouseLeave={e => (e.currentTarget.style.background = brandPrimary)}
+                            >
                               Book →
                             </button>
                           </div>
@@ -45207,7 +45336,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
           {hotelInfo.amenities?.length > 0 && (
             <section className="max-w-5xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
               <div className="text-center mb-8">
-                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">What's included</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>What's included</p>
                 <h2 className="text-3xl sm:text-4xl font-serif font-bold">Amenities</h2>
               </div>
               <div className="grid grid-cols-3 sm:grid-cols-5 gap-4">
@@ -45226,16 +45355,16 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
             <section className="bg-[#faf7f2] py-12 sm:py-16">
               <div className="max-w-6xl mx-auto px-4 sm:px-6">
                 <div className="text-center mb-8">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">Gallery</p>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>Gallery</p>
                   <h2 className="text-3xl sm:text-4xl font-serif font-bold">A glimpse of the property</h2>
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                  {hotelInfo.property_gallery.map((g: any) => (
+                  {hotelInfo.property_gallery.map((g: any, idx: number) => (
                     <div
                       key={g.id}
                       className="aspect-square bg-cover bg-center rounded-2xl cursor-pointer hover:scale-[1.02] transition-all shadow-sm"
                       style={{ backgroundImage: `url(${g.image_url})` }}
-                      onClick={() => window.open(g.image_url, '_blank')}
+                      onClick={() => setLightboxIndex(idx)}
                       title={g.caption || ''}
                     />
                   ))}
@@ -45248,7 +45377,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
           {(hotelInfo.hotel_full_address || hotelInfo.hotel_map_url || hotelInfo.hotel_phone) && (
             <section className="max-w-5xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
               <div className="text-center mb-8">
-                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">Find us</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>Find us</p>
                 <h2 className="text-3xl sm:text-4xl font-serif font-bold">Location & contact</h2>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -45257,7 +45386,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                     {/^https?:\/\/(www\.)?google\.[a-z.]+\/maps\/embed/i.test(hotelInfo.hotel_map_url) ? (
                       <iframe src={hotelInfo.hotel_map_url} className="w-full h-full border-0" loading="lazy" />
                     ) : (
-                      <a href={hotelInfo.hotel_map_url} target="_blank" rel="noopener noreferrer" className="flex items-center justify-center h-full text-[#cc5a16] underline">
+                      <a href={hotelInfo.hotel_map_url} target="_blank" rel="noopener noreferrer" className="flex items-center justify-center h-full underline" style={{ color: brandPrimary }}>
                         📍 Open in Google Maps
                       </a>
                     )}
@@ -45289,8 +45418,8 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
 
           {/* ── Cancellation policy ─────────────────────────────── */}
           <section className="max-w-3xl mx-auto px-4 sm:px-6 py-12">
-            <div className="bg-[#faf7f2] border-l-4 border-[#cc5a16] rounded-r-2xl p-6">
-              <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#cc5a16] mb-2">Cancellation policy</p>
+            <div className="bg-[#faf7f2] border-l-4 rounded-r-2xl p-6" style={{ borderLeftColor: brandPrimary }}>
+              <p className="text-[10px] font-bold uppercase tracking-[0.3em] mb-2" style={{ color: brandPrimary }}>Cancellation policy</p>
               <p className="text-sm text-[#3d3128] leading-relaxed whitespace-pre-line">
                 {hotelInfo.hotel_cancellation_policy_text || hotelInfo.cancellation_policy_fallback}
               </p>
@@ -45370,25 +45499,63 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                     No rooms available for these dates. Try a different range or contact the property.
                   </div>
                 ) : (
-                  searchResults.map(r => (
-                    <button
-                      key={r.id}
-                      onClick={() => { setPickedRoom(r); setStep('GUEST'); }}
-                      className="block w-full text-left bg-white rounded-3xl shadow-sm hover:shadow-md transition-all p-5 border border-transparent hover:border-[#cc5a16]/30"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <h3 className="font-bold text-[#1a1208]">{r.name}</h3>
-                          <p className="text-[10px] text-[#9c8e85]">{r.type || 'Standard'} · Sleeps {r.capacity}</p>
-                          {r.amenities && <p className="text-[10px] text-[#6b5d52] mt-1 line-clamp-2">{r.amenities}</p>}
+                  searchResults.map((r: any) => {
+                    // Two response shapes are handled here:
+                    //   • category record (new):   { category_id, category_name, rooms_available, starting_from_rate, starting_from_total, category_image }
+                    //   • room record (legacy):    { id, name, total_rate, base_rate, image_url }
+                    // Detect by presence of `category_id`.
+                    const isCategory = !!r.category_id;
+                    const name      = isCategory ? r.category_name : (r.type || r.name);
+                    const total     = isCategory ? r.starting_from_total : r.total_rate;
+                    const perNight  = isCategory ? r.starting_from_rate  : r.base_rate;
+                    const image     = isCategory ? r.category_image      : r.image_url;
+                    const left      = isCategory ? r.rooms_available     : 1;
+                    const amenities = isCategory ? r.category_amenities  : r.amenities;
+                    const description = isCategory ? r.category_description : '';
+                    return (
+                      <button
+                        key={isCategory ? r.category_id : r.id}
+                        onClick={() => { setPickedRoom(r); setStep('GUEST'); }}
+                        className="block w-full text-left bg-white rounded-3xl shadow-sm hover:shadow-md transition-all overflow-hidden border border-transparent group"
+                        style={{ borderColor: 'transparent' }}
+                        onMouseEnter={e => (e.currentTarget.style.borderColor = `${brandPrimary}50`)}
+                        onMouseLeave={e => (e.currentTarget.style.borderColor = 'transparent')}
+                      >
+                        <div className="flex flex-col sm:flex-row gap-0">
+                          {image && (
+                            <div className="w-full sm:w-44 aspect-[16/9] sm:aspect-square bg-cover bg-center shrink-0" style={{ backgroundImage: `url(${image})` }} />
+                          )}
+                          <div className="flex-1 p-5 flex flex-col sm:flex-row justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <h3 className="text-lg font-serif font-bold text-[#1a1208]">{name}</h3>
+                              <div className="flex items-center gap-2 mt-1 flex-wrap">
+                                {left > 0 && (
+                                  <span
+                                    className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full"
+                                    style={{ background: `${brandPrimary}15`, color: brandPrimary }}
+                                  >
+                                    {left} room{left === 1 ? '' : 's'} left
+                                  </span>
+                                )}
+                                {r.capacity && <span className="text-[10px] text-[#9c8e85]">Sleeps {r.capacity}</span>}
+                              </div>
+                              {description && <p className="text-[12px] text-[#6b5d52] mt-2 line-clamp-2">{description}</p>}
+                              {amenities && <p className="text-[10px] text-[#9c8e85] mt-1 line-clamp-1">{amenities}</p>}
+                            </div>
+                            <div className="text-right shrink-0 self-end sm:self-center">
+                              <p className="text-[9px] uppercase tracking-widest text-[#9c8e85]">{isCategory ? 'Starts from' : 'Total'}</p>
+                              <p className="text-2xl font-bold font-mono" style={{ color: brandPrimary }}>
+                                {hotelInfo.currency_symbol}{Number(perNight).toLocaleString('en-IN')}
+                                <span className="text-[10px] font-normal text-[#9c8e85] ml-0.5">/night</span>
+                              </p>
+                              <p className="text-[10px] text-[#9c8e85]">{r.nights}n total · {hotelInfo.currency_symbol}{Number(total).toLocaleString('en-IN')}</p>
+                              <span className="inline-block mt-2 text-[10px] font-bold uppercase tracking-widest" style={{ color: brandPrimary }}>Book →</span>
+                            </div>
+                          </div>
                         </div>
-                        <div className="text-right shrink-0">
-                          <p className="text-lg font-bold font-mono text-[#cc5a16]">{hotelInfo.currency_symbol}{Number(r.total_rate).toLocaleString('en-IN')}</p>
-                          <p className="text-[10px] text-[#9c8e85]">{r.nights}n total · {hotelInfo.currency_symbol}{Number(r.base_rate).toLocaleString('en-IN')}/night</p>
-                        </div>
-                      </div>
-                    </button>
-                  ))
+                      </button>
+                    );
+                  })
                 )}
               </div>
             )}
@@ -45470,6 +45637,49 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
 
             <p className="text-center text-[10px] text-[#9c8e85] mt-6">Powered by Atithi-Setu · Direct booking, no commission</p>
           </div>
+        </div>
+      )}
+
+      {/* ── Property gallery lightbox overlay ───────────────────
+          Taj-style full-screen image viewer. Click backdrop /
+          press Esc / use arrows to navigate. Replaces the old
+          "open in new tab" UX. */}
+      {lightboxIndex != null && hotelInfo.property_gallery?.[lightboxIndex] && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center p-4"
+          onClick={() => setLightboxIndex(null)}
+        >
+          <button
+            onClick={(e) => { e.stopPropagation(); setLightboxIndex(null); }}
+            className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 text-white text-xl"
+            aria-label="Close"
+          >×</button>
+          {lightboxIndex > 0 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setLightboxIndex(lightboxIndex - 1); }}
+              className="absolute left-4 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 text-white text-2xl"
+              aria-label="Previous"
+            >‹</button>
+          )}
+          {lightboxIndex < (hotelInfo.property_gallery.length - 1) && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setLightboxIndex(lightboxIndex + 1); }}
+              className="absolute right-4 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 text-white text-2xl"
+              aria-label="Next"
+            >›</button>
+          )}
+          <img
+            src={hotelInfo.property_gallery[lightboxIndex].image_url}
+            alt={hotelInfo.property_gallery[lightboxIndex].caption || ''}
+            className="max-w-[90vw] max-h-[85vh] rounded-2xl shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+          {hotelInfo.property_gallery[lightboxIndex].caption && (
+            <p className="absolute bottom-6 left-1/2 -translate-x-1/2 text-white text-sm bg-black/50 px-4 py-2 rounded-full">
+              {hotelInfo.property_gallery[lightboxIndex].caption}
+            </p>
+          )}
+          <p className="absolute bottom-2 left-4 text-white/60 text-xs">{lightboxIndex + 1} / {hotelInfo.property_gallery.length}</p>
         </div>
       )}
     </div>

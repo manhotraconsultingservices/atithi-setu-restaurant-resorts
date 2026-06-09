@@ -379,7 +379,14 @@ export async function initDb() {
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_star_rating    INT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_property_type  TEXT;
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_cancellation_policy_text TEXT;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_amenities_json TEXT
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS hotel_amenities_json TEXT;
+    -- Brand identity for the public booking page (Taj / Marriott-grade)
+    -- — per-property colour theming. Frontend reads these and binds
+    -- to CSS variables so every accent (buttons, links, badges,
+    -- borders) follows the property's brand instead of the platform
+    -- default orange. Defaults preserved when columns are NULL.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS brand_primary_color   TEXT;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS brand_secondary_color TEXT
   `);
   await centralDb.exec(
     `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`

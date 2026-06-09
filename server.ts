@@ -20049,6 +20049,9 @@ async function startServer() {
         hotel_star_rating:             check.restaurant?.hotel_star_rating,
         hotel_property_type:           check.restaurant?.hotel_property_type,
         hotel_cancellation_policy_text:check.restaurant?.hotel_cancellation_policy_text,
+        // Brand identity colours (CSS variables on the public page)
+        brand_primary_color:           check.restaurant?.brand_primary_color   || null,
+        brand_secondary_color:         check.restaurant?.brand_secondary_color || null,
         // Fallback cancellation text computed from the numeric refund policy
         // so a tenant that hasn't written one still surfaces something.
         cancellation_policy_fallback:
@@ -20196,7 +20199,38 @@ async function startServer() {
         });
       }
       results.sort((a, b) => a.total_rate - b.total_rate);
-      res.json({ start, end, guests, rooms: results });
+
+      // Category-level rollup — taj/marriott-grade public listing
+      // should NEVER expose individual room numbers. We surface
+      // "<category> · X rooms available · starts at Rs Y" cards
+      // instead. The frontend uses `categories[]`; the legacy
+      // `rooms[]` array is kept for any pre-redesign integrations.
+      const byCat: Record<string, any> = {};
+      for (const r of results) {
+        const key = r.type_id || 'UNTAGGED';
+        if (!byCat[key]) {
+          byCat[key] = {
+            category_id:           r.type_id || null,
+            category_name:         r.type || 'Standard Room',
+            category_description:  r.description || '',
+            category_image:        r.image_url || null,
+            category_amenities:    r.amenities || '',
+            capacity:              r.capacity,
+            rooms_available:       0,
+            starting_from_rate:    null,        // per-night
+            starting_from_total:   null,        // for the date range
+            nights:                r.nights,
+          };
+        }
+        byCat[key].rooms_available += 1;
+        const perNight = r.nights > 0 ? r.total_rate / r.nights : r.total_rate;
+        if (byCat[key].starting_from_rate == null || perNight < byCat[key].starting_from_rate) {
+          byCat[key].starting_from_rate  = Math.round(perNight);
+          byCat[key].starting_from_total = Math.round(r.total_rate);
+        }
+      }
+      const categories = Object.values(byCat).sort((a: any, b: any) => (a.starting_from_rate || 0) - (b.starting_from_rate || 0));
+      res.json({ start, end, guests, categories, rooms: results });
     } catch (err) {
       console.error("public availability error:", err);
       res.status(500).json({ error: "Failed to search rooms" });
@@ -20211,7 +20245,7 @@ async function startServer() {
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const {
-        room_id, guest_name, guest_phone, guest_email,
+        room_id: rawRoomId, room_type_id, guest_name, guest_phone, guest_email,
         check_in_date, check_out_date, num_guests, special_requests,
       } = req.body || {};
       if (!guest_name || !String(guest_name).trim()) {
@@ -20223,13 +20257,40 @@ async function startServer() {
       if (!guest_email || !String(guest_email).trim()) {
         return res.status(400).json({ error: "Email is required so we can confirm your booking." });
       }
+
+      // Category-first booking — the redesigned public page sends
+      // room_type_id (category) instead of a specific room. We pick
+      // any vacant room in that category for the dates. This way the
+      // guest never sees room numbers on the listing.
+      let room_id = rawRoomId;
+      const tenantDb = await getTenantDb(req.params.id);
+      if (!room_id && room_type_id) {
+        const candidates: any[] = await tenantDb.query(
+          "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
+          [room_type_id]
+        );
+        // Filter against overlapping bookings + holds.
+        const bConf: any[] = await tenantDb.query(
+          `SELECT room_id FROM room_bookings WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND check_in_date < ? AND check_out_date > ?`,
+          [check_out_date, check_in_date]
+        );
+        const hConf: any[] = await tenantDb.query(
+          `SELECT room_id FROM room_holds WHERE start_date < ? AND end_date > ?`,
+          [check_out_date, check_in_date]
+        );
+        const taken = new Set<string>([...bConf, ...hConf].map((r: any) => r.room_id));
+        const pick = candidates.find((c: any) => !taken.has(c.id));
+        if (!pick) return res.status(409).json({ error: 'No rooms available in this category for these dates.' });
+        room_id = pick.id;
+      }
+      if (!room_id) return res.status(400).json({ error: 'room_type_id or room_id is required' });
+
       const v = await validateBookingRequest(req.params.id, {
         room_id, check_in_date, check_out_date,
         booking_type: 'OVERNIGHT', num_guests: num_guests || 1,
       });
       if (!v.ok) return res.status(v.status).json({ error: v.error });
 
-      const tenantDb = await getTenantDb(req.params.id);
       const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const plan = await computeRoomTotal(req.params.id, room_id, check_in_date, check_out_date);
       const firstRate = plan.nights[0]?.rate || 0;
@@ -22236,6 +22297,8 @@ async function startServer() {
       hotel_property_type:          r?.hotel_property_type || '',
       hotel_cancellation_policy_text: r?.hotel_cancellation_policy_text || '',
       hotel_amenity_keys:           amenityKeys,
+      brand_primary_color:          r?.brand_primary_color   || '',
+      brand_secondary_color:        r?.brand_secondary_color || '',
     });
   });
 
@@ -22273,6 +22336,21 @@ async function startServer() {
         .filter((k: string) => known.has(k));
       amenityJson = JSON.stringify(filtered);
     }
+    // Validate brand colours — must be hex (#rrggbb or #rgb).
+    const hexRe = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
+    const validateHex = (v: any) => {
+      if (v == null) return undefined;            // not provided → don't update
+      if (v === '') return null;                  // explicit clear
+      if (!hexRe.test(String(v))) throw new Error(`Invalid hex colour: ${v}`);
+      return String(v).toLowerCase();
+    };
+    let brandPrimary: any, brandSecondary: any;
+    try {
+      brandPrimary   = validateHex(b.brand_primary_color);
+      brandSecondary = validateHex(b.brand_secondary_color);
+    } catch (e: any) {
+      return res.status(400).json({ error: e?.message || 'invalid colour' });
+    }
     try {
       await centralDb.run(
         `UPDATE restaurants SET
@@ -22287,12 +22365,16 @@ async function startServer() {
             hotel_star_rating = COALESCE(?, hotel_star_rating),
             hotel_property_type = COALESCE(?, hotel_property_type),
             hotel_cancellation_policy_text = COALESCE(?, hotel_cancellation_policy_text),
-            hotel_amenities_json = COALESCE(?, hotel_amenities_json)
+            hotel_amenities_json = COALESCE(?, hotel_amenities_json),
+            brand_primary_color   = ${brandPrimary   === undefined ? 'brand_primary_color'   : '?'},
+            brand_secondary_color = ${brandSecondary === undefined ? 'brand_secondary_color' : '?'}
           WHERE id = ?`,
         [slug, b.hero_image_url ?? null, b.hotel_logo_url ?? null,
          b.hotel_description ?? null, b.hotel_full_address ?? null,
          b.hotel_phone ?? null, b.hotel_email ?? null, b.hotel_map_url ?? null,
          star, ptype, b.hotel_cancellation_policy_text ?? null, amenityJson,
+         ...(brandPrimary   === undefined ? [] : [brandPrimary]),
+         ...(brandSecondary === undefined ? [] : [brandSecondary]),
          req.params.id]
       );
       res.json({ ok: true });
@@ -28204,7 +28286,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-booking-page-promoted-to-top-level-tab',
+    commit_marker: 'public-page-taj-grade-brand-theming-categorized-search',
     code_features: [
       'subscription-billing',
       'read-only-mode',
