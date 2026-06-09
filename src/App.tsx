@@ -10158,6 +10158,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await openCancelBookingModal(b);
   };
 
+  // ── Send payment link to guest (email / WhatsApp) ────────────────
+  // Wraps the new POST .../send-payment-link endpoint. Shows a
+  // confirmation when sent so staff knows the guest got it (vs the
+  // older "fire-and-forget" pattern that left them guessing). Uses
+  // ephemeral state so the chip in the row can flash a green tick.
+  const [paylinkBusy, setPaylinkBusy] = useState<string | null>(null);
+  const sendPayLink = async (bookingId: string, channel: 'EMAIL' | 'WHATSAPP') => {
+    setPaylinkBusy(`${bookingId}|${channel}`);
+    try {
+      const r: any = await hotelApi(
+        `/bookings/${encodeURIComponent(bookingId)}/send-payment-link`,
+        { method: 'POST', body: JSON.stringify({ channel }) }
+      );
+      const sym = (restaurant as any)?.currency_symbol || '₹';
+      const target = channel === 'EMAIL' ? r.guest_email : r.guest_phone;
+      alert(`✓ Payment link sent via ${channel} to ${target}\n\nAmount: ${sym}${Number(r.amount || 0).toLocaleString('en-IN')}\n${r.upi_link ? 'UPI link included in the message.' : 'No UPI VPA configured — guest will pay at the front desk.'}`);
+    } catch (e: any) {
+      alert(e?.message || 'Failed to send payment link');
+    } finally { setPaylinkBusy(null); }
+  };
+
   // Phase H1 — manual re-sync to channel manager. Today this is a
   // log-only operation; a follow-up commit will wire the actual OTA
   // push. Useful when an OTA gets out of sync (rare but real — guests
@@ -17287,6 +17308,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <th className="text-left px-4 py-3">Dates</th>
                     <th className="text-left px-4 py-3">Status</th>
                     <th className="text-right px-4 py-3">Total</th>
+                    <th className="text-center px-4 py-3">Pay link</th>
                     <th className="text-right px-4 py-3">Actions</th>
                   </tr>
                 </thead>
@@ -17336,6 +17358,38 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           >{lcStyle.label}</span>
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>
+                        <td className="px-4 py-3 text-center">
+                          {/* Pay-link send buttons — only on bookings
+                              that aren't fully settled. Each button
+                              hits the new send-payment-link endpoint
+                              which builds the folio breakup + UPI
+                              deep link and emails / WhatsApps it
+                              with the amount pre-filled. */}
+                          {b.status !== 'CANCELLED' && Number(b.total_amount || 0) > 0 ? (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                disabled={paylinkBusy === `${b.id}|EMAIL` || !b.guest_email}
+                                onClick={() => sendPayLink(b.id, 'EMAIL')}
+                                title={b.guest_email ? `Email payment link to ${b.guest_email}` : 'No email on file'}
+                                className="px-2 py-1 rounded-md border border-[#cc5a16]/20 text-[#cc5a16] hover:bg-[#cc5a16]/10 text-[11px] disabled:opacity-30 disabled:cursor-not-allowed"
+                              >
+                                {paylinkBusy === `${b.id}|EMAIL` ? '…' : '📧'}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={paylinkBusy === `${b.id}|WHATSAPP` || !b.guest_phone}
+                                onClick={() => sendPayLink(b.id, 'WHATSAPP')}
+                                title={b.guest_phone ? `WhatsApp payment link to ${b.guest_phone}` : 'No phone on file'}
+                                className="px-2 py-1 rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-[11px] disabled:opacity-30 disabled:cursor-not-allowed"
+                              >
+                                {paylinkBusy === `${b.id}|WHATSAPP` ? '…' : '💬'}
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-[#9c8e85]">—</span>
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-right">
                           <div className="flex items-center justify-end gap-1.5 flex-wrap">
                             {/* UI-1 / CHK-1 — Edit button: ONLY on BOOKED rows.

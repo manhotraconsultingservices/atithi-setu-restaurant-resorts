@@ -1801,6 +1801,192 @@ async function reverseOrderFolioPosting(
   return { ok: true, reversed_count: reversed, folio_id: order.folio_id };
 }
 
+/**
+ * Build a guest-facing payment-link payload for a booking. Combines:
+ *   • current folio breakup (one row per entry_type, totals + GST)
+ *   • UPI direct-payment link (built from restaurants.upi_vpa)
+ *   • plain-text + HTML versions ready for email/WhatsApp send
+ *
+ * Falls back to `room_bookings.total_amount` when no folio exists yet
+ * (e.g. payment link sent before check-in for upfront collection).
+ *
+ * Caller decides delivery channel (EMAIL / WHATSAPP / SMS).
+ */
+async function buildHotelPaymentLinkPayload(
+  restaurantId: string,
+  bookingId: string,
+): Promise<{
+  amount:        number;
+  upi_link:      string;
+  upi_vpa:       string;
+  upi_payee:     string;
+  currency:      string;
+  guest_name:    string;
+  guest_email:   string;
+  guest_phone:   string;
+  check_in_date: string;
+  check_out_date:string;
+  property_name: string;
+  breakup:       Array<{ label: string; amount: number; qty?: number }>;
+  has_folio:     boolean;
+  ok:            boolean;
+  reason?:       string;
+}> {
+  const restaurant: any = await centralDb.get(
+    "SELECT * FROM restaurants WHERE id = ?", [restaurantId]
+  );
+  const tenantDb = await getTenantDb(restaurantId);
+  const booking: any = await tenantDb.get(
+    "SELECT * FROM room_bookings WHERE id = ?", [bookingId]
+  );
+  if (!booking) {
+    return {
+      amount: 0, upi_link: '', upi_vpa: '', upi_payee: '',
+      currency: '₹', guest_name: '', guest_email: '', guest_phone: '',
+      check_in_date: '', check_out_date: '', property_name: '',
+      breakup: [], has_folio: false, ok: false, reason: 'Booking not found',
+    };
+  }
+  // Locate the open folio for this booking (or the most-recent one
+  // if already settled). Folio total is the source of truth — the
+  // bookings.total_amount is just the initial room-charge total.
+  const folio: any = await tenantDb.get(
+    "SELECT * FROM folios WHERE booking_id = ? ORDER BY created_at DESC LIMIT 1",
+    [bookingId]
+  );
+  const breakup: Array<{ label: string; amount: number; qty?: number }> = [];
+  let grandTotal = Number(booking.total_amount || 0);
+  if (folio?.id) {
+    // Group folio entries by entry_type for a clean breakup.
+    //   ROOM_CHARGE      → "Room charges"
+    //   SERVICE_CHARGE   → "Service charge"
+    //   F_AND_B          → "Food & beverage"
+    //   SERVICE          → "Hotel services" (housekeeping, laundry, spa…)
+    //   ADJUSTMENT       → "Adjustments"
+    //   DISCOUNT         → "Discount" (negative)
+    //   PAYMENT          → skipped — payments aren't charges
+    const rows: any[] = await tenantDb.query(
+      "SELECT entry_type, SUM(amount) AS amount, SUM(gst_amount) AS gst, COUNT(*) AS qty FROM folio_entries WHERE folio_id = ? AND entry_type NOT IN ('PAYMENT') GROUP BY entry_type ORDER BY MIN(created_at)",
+      [folio.id]
+    ).catch(() => []);
+    const LABELS: Record<string, string> = {
+      ROOM_CHARGE:    'Room charges',
+      SERVICE_CHARGE: 'Service charge',
+      F_AND_B:        'Food & beverage',
+      SERVICE:        'Hotel services',
+      ADJUSTMENT:     'Adjustments',
+      DISCOUNT:       'Discount',
+      TAX:            'Tax',
+      EXTRA_PERSON:   'Extra-person charges',
+    };
+    let runningGst = 0;
+    let subtotal = 0;
+    for (const r of rows) {
+      const amt = Number(r.amount || 0);
+      const gst = Number(r.gst || 0);
+      const label = LABELS[String(r.entry_type)] || String(r.entry_type || 'Other');
+      breakup.push({ label, amount: Math.round(amt * 100) / 100, qty: Number(r.qty || 0) });
+      subtotal += amt;
+      runningGst += gst;
+    }
+    if (runningGst > 0) {
+      breakup.push({ label: 'GST', amount: Math.round(runningGst * 100) / 100 });
+    }
+    // grand_total on the folio is source-of-truth (includes round-off
+    // adjustments). Falls back to subtotal + GST if not yet recomputed.
+    grandTotal = Number(folio.grand_total || (subtotal + runningGst));
+  } else {
+    breakup.push({ label: 'Room booking', amount: grandTotal });
+  }
+
+  const upiVpa = String(restaurant?.upi_vpa || '').trim();
+  const upiPayee = String(restaurant?.upi_payee_name || restaurant?.name || '').trim();
+  const currency = restaurant?.currency_symbol || '₹';
+  const upi_link = upiVpa && grandTotal > 0
+    ? `upi://pay?pa=${encodeURIComponent(upiVpa)}` +
+      `&pn=${encodeURIComponent(upiPayee)}` +
+      `&am=${grandTotal.toFixed(2)}` +
+      `&cu=INR` +
+      `&tn=${encodeURIComponent(`Booking ${bookingId}`)}`
+    : '';
+
+  return {
+    amount: Math.round(grandTotal * 100) / 100,
+    upi_link, upi_vpa: upiVpa, upi_payee: upiPayee, currency,
+    guest_name: booking.guest_name || '',
+    guest_email: booking.guest_email || '',
+    guest_phone: booking.guest_phone || '',
+    check_in_date: String(booking.check_in_date || '').slice(0, 10),
+    check_out_date: String(booking.check_out_date || '').slice(0, 10),
+    property_name: restaurant?.name || 'Property',
+    breakup,
+    has_folio: !!folio?.id,
+    ok: true,
+  };
+}
+
+/**
+ * Render the payment-link payload as text / HTML / WhatsApp message.
+ * Same surface as the BOOKING_CREATED template, but driven by the
+ * folio breakup. Pure formatter — no I/O.
+ */
+function renderPaymentLinkMessage(p: Awaited<ReturnType<typeof buildHotelPaymentLinkPayload>>): {
+  subject: string;
+  text:    string;
+  html:    string;
+  wa:      string;     // WhatsApp message (plain text + the upi:// link inline)
+} {
+  const c = p.currency;
+  const fmt = (n: number) => `${c}${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const breakupTextLines = p.breakup.map(b => `  • ${b.label}: ${fmt(b.amount)}`).join('\n');
+  const breakupHtmlRows = p.breakup.map(b =>
+    `<tr><td style="padding:4px 8px;color:#6b5d52;font-size:13px">${b.label}</td>` +
+    `<td style="padding:4px 8px;text-align:right;font-family:monospace">${fmt(b.amount)}</td></tr>`
+  ).join('');
+  const hasUpi = !!p.upi_link;
+  const subject = `💳 Payment link · ${p.property_name} · ${fmt(p.amount)}`;
+  const text =
+    `Hello ${p.guest_name || 'Guest'},\n\n` +
+    `Here's the payment summary for your stay at ${p.property_name}:\n\n` +
+    `Booking ${p.check_in_date} → ${p.check_out_date}\n\n` +
+    `Breakup:\n${breakupTextLines}\n\n` +
+    `TOTAL: ${fmt(p.amount)}\n\n` +
+    (hasUpi
+      ? `Pay direct via UPI — no gateway fees:\n${p.upi_link}\n` +
+        `Open this link on your phone and your UPI app (GPay / PhonePe / Paytm) will open with ${fmt(p.amount)} pre-filled. Payee: ${p.upi_payee}.\n\n`
+      : '') +
+    `— ${p.property_name}`;
+  const html =
+    `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+    `<h2 style="color:#cc5a16;margin-top:0">💳 Payment link · ${p.property_name}</h2>` +
+    `<p>Hello <strong>${p.guest_name || 'Guest'}</strong>,</p>` +
+    `<p style="color:#6b5d52">Here's the payment summary for your stay <strong>${p.check_in_date} → ${p.check_out_date}</strong>:</p>` +
+    `<table style="width:100%;border-collapse:collapse;margin:12px 0;background:#faf7f2;border-radius:8px;overflow:hidden">` +
+    breakupHtmlRows +
+    `<tr style="border-top:2px solid #cc5a16"><td style="padding:8px;font-weight:bold;color:#1a1208">Total</td>` +
+    `<td style="padding:8px;text-align:right;font-family:monospace;font-weight:bold;color:#cc5a16;font-size:16px">${fmt(p.amount)}</td></tr>` +
+    `</table>` +
+    (hasUpi ? (
+      `<div style="border-top:2px dashed #cc5a16;padding-top:16px;margin-top:16px;text-align:center">` +
+      `<h3 style="color:#cc5a16;margin-top:0">💰 Pay direct via UPI</h3>` +
+      `<p style="color:#6b5d52;font-size:13px;margin:0 0 12px 0">Tap below on your phone — your UPI app opens with <strong>${fmt(p.amount)}</strong> pre-filled. No gateway fees.</p>` +
+      `<p style="margin:16px 0"><a href="${p.upi_link}" style="background:#cc5a16;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block">Pay ${fmt(p.amount)} via UPI</a></p>` +
+      `<p style="color:#9c8e85;font-size:11px;margin:6px 0">Payee: ${p.upi_payee} · UPI ID: <strong>${p.upi_vpa}</strong></p>` +
+      `</div>`
+    ) : (
+      `<p style="color:#9c8e85;font-size:12px;margin-top:16px">Pay at the front desk on check-out.</p>`
+    )) +
+    `<p style="color:#6b5d52;font-size:13px;margin-top:16px">— ${p.property_name}</p>` +
+    `</div>`;
+  const wa =
+    `*Payment summary · ${p.property_name}*\n\n` +
+    `${p.guest_name || 'Guest'}, ${p.check_in_date} → ${p.check_out_date}\n\n` +
+    breakupTextLines + '\n' +
+    `*TOTAL: ${fmt(p.amount)}*` +
+    (hasUpi ? `\n\n💰 Pay via UPI:\n${p.upi_link}` : '\n\nPay at front desk on check-out.');
+  return { subject, text, html, wa };
+}
+
 async function recomputeFolioTotals(tenantDb: DbInterface, folioId: string): Promise<void> {
   const sums: any = await tenantDb.get(
     `SELECT COALESCE(SUM(amount), 0) AS subtotal, COALESCE(SUM(gst_amount), 0) AS gst
@@ -22327,6 +22513,23 @@ async function startServer() {
       }
 
       try { await triggerNotification(req.params.id, 'GUEST_CHECKED_IN', { bookingId: b.id, guestName: b.guest_name, roomId: b.room_id }); } catch {}
+
+      // ── Auto-send payment link on check-in ───────────────────────
+      // Build the payload + send via email (if guest has an email on
+      // file) so the guest can pay via UPI from their phone right
+      // after checking in. Fire-and-forget — never blocks the check-
+      // in response. WhatsApp send is skipped here because some
+      // hotels are deliberate about T&Cs around messaging guests.
+      (async () => {
+        try {
+          const payload = await buildHotelPaymentLinkPayload(req.params.id, req.params.bookingId);
+          if (payload.ok && payload.amount > 0 && payload.guest_email) {
+            const msg = renderPaymentLinkMessage(payload);
+            await sendEmail(payload.guest_email, msg.subject, msg.text, msg.html);
+          }
+        } catch (e) { console.warn('[hotel-checkin] auto payment-link failed:', e); }
+      })();
+
       res.json({
         booking: await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]),
         folio_id: folio?.id || null,
@@ -22335,6 +22538,88 @@ async function startServer() {
     } catch (err: any) {
       console.error("checkin error:", err);
       res.status(500).json({ error: "Failed to check in" });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // ─── Send payment link to guest (manual + auto) ───────────────────
+  // ════════════════════════════════════════════════════════════════════
+  // Staff-triggered: from a booking row, the folio modal, or via cron.
+  // Body shape:
+  //   { channel: 'EMAIL' | 'WHATSAPP' | 'BOTH',
+  //     override_amount?: number,  // for partial-pay / deposit collection
+  //     override_email?: string,   // route to a different email
+  //     override_phone?: string }  // route to a different WhatsApp number
+  // Returns { ok, sent: ['EMAIL', 'WHATSAPP'], amount, upi_link, breakup }
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/send-payment-link", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const payload = await buildHotelPaymentLinkPayload(req.params.id, req.params.bookingId);
+      if (!payload.ok) return res.status(404).json({ error: payload.reason || 'Booking not found' });
+      if (payload.amount <= 0) return res.status(400).json({ error: 'Booking has no amount due.' });
+
+      // Allow staff to override the amount (e.g. asking for a 50%
+      // deposit before check-in). Rebuild the upi_link with the new
+      // amount; leave the breakup alone since the breakup explains
+      // the FULL bill — the override is just "pay this much now".
+      const override = Number(req.body?.override_amount || 0);
+      if (override > 0 && override < payload.amount) {
+        payload.amount = Math.round(override * 100) / 100;
+        if (payload.upi_vpa) {
+          payload.upi_link = `upi://pay?pa=${encodeURIComponent(payload.upi_vpa)}` +
+            `&pn=${encodeURIComponent(payload.upi_payee)}` +
+            `&am=${payload.amount.toFixed(2)}` +
+            `&cu=INR` +
+            `&tn=${encodeURIComponent(`Booking ${req.params.bookingId} (partial)`)}`;
+        }
+      }
+
+      const channel = String(req.body?.channel || 'EMAIL').toUpperCase();
+      const overrideEmail = String(req.body?.override_email || '').trim();
+      const overridePhone = String(req.body?.override_phone || '').trim();
+      const targetEmail = overrideEmail || payload.guest_email;
+      const targetPhone = overridePhone || payload.guest_phone;
+      const msg = renderPaymentLinkMessage(payload);
+      const sent: string[] = [];
+      const errors: string[] = [];
+
+      if (channel === 'EMAIL' || channel === 'BOTH') {
+        if (!targetEmail) {
+          errors.push('No email on file for this guest.');
+        } else {
+          const ok = await sendEmail(targetEmail, msg.subject, msg.text, msg.html);
+          if (ok) sent.push('EMAIL'); else errors.push('Email send failed.');
+        }
+      }
+      if (channel === 'WHATSAPP' || channel === 'BOTH') {
+        if (!targetPhone) {
+          errors.push('No phone on file for this guest.');
+        } else {
+          try { await sendWhatsApp(targetPhone, msg.wa); sent.push('WHATSAPP'); }
+          catch (e: any) { errors.push(`WhatsApp send failed: ${e?.message || ''}`); }
+        }
+      }
+
+      if (sent.length === 0) {
+        return res.status(400).json({
+          ok: false,
+          error: errors.length ? errors.join(' ') : 'No delivery channel matched.',
+        });
+      }
+      res.json({
+        ok:        true,
+        sent,
+        errors:    errors.length ? errors : undefined,
+        amount:    payload.amount,
+        upi_link:  payload.upi_link,
+        breakup:   payload.breakup,
+        guest_email: targetEmail,
+        guest_phone: targetPhone,
+      });
+    } catch (err: any) {
+      console.error('send-payment-link error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to send payment link' });
     }
   });
 
@@ -22598,6 +22883,34 @@ async function startServer() {
       }
 
       try { await triggerNotification(req.params.id, 'GUEST_CHECKED_OUT', { bookingId: b.id, guestName: b.guest_name, roomId: b.room_id }); } catch {}
+
+      // ── Final-bill payment link on check-out ─────────────────────
+      // If the folio finished settled BUT has a payment outstanding
+      // (loyalty waive / partial-pay flow), email the guest a UPI
+      // link for the residual. Skips when folio is fully paid.
+      (async () => {
+        try {
+          if (!b.guest_email) return;
+          const grandTotal = Number((settled as any)?.grand_total || 0);
+          const totalPaid  = Number((settled as any)?.total_paid  || grandTotal);
+          const due = Math.max(0, grandTotal - totalPaid);
+          if (due <= 0.01) return;
+          const payload = await buildHotelPaymentLinkPayload(req.params.id, req.params.bookingId);
+          if (!payload.ok || payload.amount <= 0) return;
+          // Override amount to the residual due (not the full folio).
+          payload.amount = Math.round(due * 100) / 100;
+          if (payload.upi_vpa) {
+            payload.upi_link = `upi://pay?pa=${encodeURIComponent(payload.upi_vpa)}` +
+              `&pn=${encodeURIComponent(payload.upi_payee)}` +
+              `&am=${payload.amount.toFixed(2)}` +
+              `&cu=INR` +
+              `&tn=${encodeURIComponent(`Booking ${b.id} (balance)`)}`;
+          }
+          const msg = renderPaymentLinkMessage(payload);
+          await sendEmail(b.guest_email, msg.subject, msg.text, msg.html);
+        } catch (e) { console.warn('[hotel-checkout] auto payment-link failed:', e); }
+      })();
+
       res.json({
         booking: await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]),
         folio: settled,
@@ -29328,7 +29641,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'outstanding-payments-per-booking-report-sortable',
+    commit_marker: 'send-payment-link-email-whatsapp-with-breakup',
     code_features: [
       'subscription-billing',
       'read-only-mode',
