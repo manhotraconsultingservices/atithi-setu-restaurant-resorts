@@ -1308,6 +1308,45 @@ function gstRateForTariff(tariff: number, cfg?: HotelTaxConfig): number {
   return slab3Rate;
 }
 
+/**
+ * Break a stored matrix rate down into {net, gst, gross} based on the
+ * tenant's `rates_include_gst` flag.
+ *
+ *   ratesIncludeGst = 1 (default / current behaviour) — matrix rate IS
+ *     the gross customer-paid amount. GST is extracted FROM it.
+ *       net   = rate / (1 + gstPct/100)
+ *       gst   = rate − net
+ *       gross = rate
+ *
+ *   ratesIncludeGst = 0 (Marriott / global standard) — matrix rate is
+ *     pre-tax. GST is added ON TOP.
+ *       net   = rate
+ *       gst   = rate * gstPct/100
+ *       gross = rate + gst
+ *
+ * The GST slab is determined from the stored rate either way (Indian
+ * convention: slab applies to the published room rate). All three
+ * values are rounded to 2 decimals using banker-friendly cent rounding.
+ */
+function rateBreakdown(
+  rate: number,
+  gstPct: number,
+  ratesIncludeGst: 0 | 1,
+): { net: number; gst: number; gross: number; gstPct: number } {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  if (ratesIncludeGst === 0) {
+    const net   = r2(rate);
+    const gst   = r2(rate * gstPct / 100);
+    const gross = r2(net + gst);
+    return { net, gst, gross, gstPct };
+  }
+  // Inclusive — extract GST out of the stored rate.
+  const net   = r2(rate / (1 + gstPct / 100));
+  const gross = r2(rate);
+  const gst   = r2(gross - net);
+  return { net, gst, gross, gstPct };
+}
+
 // Create a folio for a booking and seed ROOM_CHARGE entries for each
 // night. Phase H2: when the tenant configured a hotel service charge,
 // add a separate SERVICE_CHARGE row per night so the line is auditable
@@ -20088,6 +20127,14 @@ async function startServer() {
         // Brand identity colours (CSS variables on the public page)
         brand_primary_color:           check.restaurant?.brand_primary_color   || null,
         brand_secondary_color:         check.restaurant?.brand_secondary_color || null,
+        // Display + pricing prefs the public page needs:
+        //   • date_format       — format every date column / picker
+        //                         (booking summary, confirmation, calendar)
+        //   • rates_include_gst — show prices as "₹2000" if inclusive
+        //                         vs "₹2000 + taxes" if exclusive
+        date_format:                   check.restaurant?.date_format        || 'DD-MMM-YYYY',
+        rates_include_gst:             check.restaurant?.rates_include_gst == null
+          ? 1 : Number(check.restaurant.rates_include_gst),
         // Fallback cancellation text computed from the numeric refund policy
         // so a tenant that hasn't written one still surfaces something.
         cancellation_policy_fallback:
@@ -20155,11 +20202,21 @@ async function startServer() {
       // Final fallback: room.base_rate (used when tenant hasn't set up
       // any matrix entries OR no season period covers the date range).
       if (!cheapest) cheapest = { rate: Number(room.base_rate || 0), meal_plan_id: null, meal_plan_label: 'Base rate' };
+      // Gross up if tenant publishes pre-tax rates (rates_include_gst=0)
+      const ratesIncGst: 0 | 1 = (check.restaurant?.rates_include_gst == null
+        || Number(check.restaurant.rates_include_gst) === 1) ? 1 : 0;
+      let displayRate = cheapest.rate;
+      if (ratesIncGst === 0) {
+        const cfg = await loadHotelTaxConfig(req.params.id);
+        const pct = gstRateForTariff(cheapest.rate, cfg);
+        displayRate = Math.round(rateBreakdown(cheapest.rate, pct, 0).gross);
+      }
       res.json({
-        starting_from_rate: cheapest.rate,
+        starting_from_rate: displayRate,
         cheapest_meal_plan_id: cheapest.meal_plan_id,
         cheapest_meal_plan_label: cheapest.meal_plan_label,
         nights, start, end,
+        rates_include_gst: ratesIncGst,
       });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'rate preview failed' });
@@ -20212,6 +20269,13 @@ async function startServer() {
           conflictByRoom[c.room_id] = end0;
         }
       }
+      // Honour tenant's rates_include_gst flag — when exclusive, every
+      // displayed rate (per-room + category card) is grossed up so the
+      // guest sees the actual amount they'll pay, not the pre-tax base.
+      const ratesIncGst: 0 | 1 = (check.restaurant?.rates_include_gst == null
+        || Number(check.restaurant.rates_include_gst) === 1) ? 1 : 0;
+      const taxCfg = ratesIncGst === 0 ? await loadHotelTaxConfig(req.params.id) : null;
+
       // Compute rate-plan total for each available room.
       const results: any[] = [];
       for (const r of rooms) {
@@ -20220,6 +20284,14 @@ async function startServer() {
         const conflict = conflictByRoom[r.id];
         if (!fits || blocked || conflict) continue;  // public page shows only available
         const plan = await computeRoomTotal(req.params.id, r.id, start, end);
+        let displayTotal = plan.total;
+        if (ratesIncGst === 0 && taxCfg && plan.nights.length > 0) {
+          let g = 0;
+          for (const n of plan.nights) {
+            g += rateBreakdown(n.rate, gstRateForTariff(n.rate, taxCfg), 0).gross;
+          }
+          displayTotal = Math.round(g * 100) / 100;
+        }
         results.push({
           id: r.id,
           name: r.name,
@@ -20230,7 +20302,7 @@ async function startServer() {
           image_url: r.type_image_url,
           description: r.type_description,
           amenities: r.amenities,
-          total_rate: plan.total,
+          total_rate: displayTotal,
           nights: plan.nights.length,
         });
       }
@@ -20266,7 +20338,8 @@ async function startServer() {
         }
       }
       const categories = Object.values(byCat).sort((a: any, b: any) => (a.starting_from_rate || 0) - (b.starting_from_rate || 0));
-      res.json({ start, end, guests, categories, rooms: results });
+      res.json({ start, end, guests, categories, rooms: results,
+                 rates_include_gst: ratesIncGst });
     } catch (err) {
       console.error("public availability error:", err);
       res.status(500).json({ error: "Failed to search rooms" });
@@ -20329,7 +20402,26 @@ async function startServer() {
 
       const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const plan = await computeRoomTotal(req.params.id, room_id, check_in_date, check_out_date);
-      const firstRate = plan.nights[0]?.rate || 0;
+      // Honour the tenant's `rates_include_gst` flag. In exclusive mode
+      // the matrix rate is pre-tax — gross it up per-night so total_amount
+      // reflects what the customer will pay. Folio settlement extracts
+      // GST inclusively from total_amount (gross), so the original net
+      // rate is recovered correctly at invoice time. No folio change needed.
+      const ratesIncGst: 0 | 1 = (check.restaurant?.rates_include_gst == null
+        || Number(check.restaurant.rates_include_gst) === 1) ? 1 : 0;
+      let firstRate = plan.nights[0]?.rate || 0;
+      let totalForCustomer = plan.total;
+      if (ratesIncGst === 0 && plan.nights.length > 0) {
+        const cfg = await loadHotelTaxConfig(req.params.id);
+        let gross = 0;
+        for (const n of plan.nights) {
+          const pct = gstRateForTariff(n.rate, cfg);
+          gross += rateBreakdown(n.rate, pct, 0).gross;
+        }
+        totalForCustomer = Math.round(gross * 100) / 100;
+        const firstPct = gstRateForTariff(firstRate, cfg);
+        firstRate = rateBreakdown(firstRate, firstPct, 0).gross;
+      }
 
       // Direct bookings have 0% commission by definition — commission_amount=0,
       // net_amount=total so the 360 dashboard rolls them up with correct
@@ -20346,8 +20438,8 @@ async function startServer() {
          String(guest_phone).trim(),
          String(guest_email).trim(),
          num_guests || 1, check_in_date, check_out_date,
-         firstRate, plan.total, special_requests || null,
-         plan.total]
+         firstRate, totalForCustomer, special_requests || null,
+         totalForCustomer]
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date, source: 'DIRECT_WEB' }); } catch {}
@@ -20407,6 +20499,9 @@ async function startServer() {
         hotel_name: check.restaurant?.name,
         // Surface existing values so the guest only updates what's missing
         special_requests: b.special_requests || '',
+        // Display preference — so the online check-in page formats dates
+        // in the property's preferred style (matches confirmation email).
+        date_format: check.restaurant?.date_format || 'DD-MMM-YYYY',
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to load check-in form" });
@@ -22340,6 +22435,10 @@ async function startServer() {
       hotel_amenity_keys:           amenityKeys,
       brand_primary_color:          r?.brand_primary_color   || '',
       brand_secondary_color:        r?.brand_secondary_color || '',
+      // Display + pricing preferences. Defaults match the column defaults
+      // so any tenant that hasn't toggled them yet sees a sensible value.
+      date_format:                  r?.date_format        || 'DD-MMM-YYYY',
+      rates_include_gst:            r?.rates_include_gst == null ? 1 : Number(r.rates_include_gst),
     });
   });
 
@@ -22392,6 +22491,29 @@ async function startServer() {
     } catch (e: any) {
       return res.status(400).json({ error: e?.message || 'invalid colour' });
     }
+    // Display + pricing prefs. Date format must be one of the supported
+    // tokens — anything else is rejected to avoid arbitrary user strings
+    // ending up on UI surfaces. rates_include_gst is normalised to 0/1.
+    const ALLOWED_DATE_FORMATS = new Set([
+      'DD-MM-YYYY', 'DD-MM-YY', 'DD-MMM-YYYY',
+      'YYYY-MM-DD', 'MM/DD/YYYY', 'DD/MM/YYYY',
+    ]);
+    let dateFormat: string | undefined;
+    if (b.date_format != null) {
+      const f = String(b.date_format || '').trim();
+      if (!ALLOWED_DATE_FORMATS.has(f)) {
+        return res.status(400).json({
+          error: 'date_format must be one of: ' + Array.from(ALLOWED_DATE_FORMATS).join(', '),
+        });
+      }
+      dateFormat = f;
+    }
+    let ratesIncGst: 0 | 1 | undefined;
+    if (b.rates_include_gst != null) {
+      ratesIncGst = (b.rates_include_gst === true
+        || String(b.rates_include_gst) === '1'
+        || String(b.rates_include_gst).toLowerCase() === 'true') ? 1 : 0;
+    }
     try {
       await centralDb.run(
         `UPDATE restaurants SET
@@ -22408,7 +22530,9 @@ async function startServer() {
             hotel_cancellation_policy_text = COALESCE(?, hotel_cancellation_policy_text),
             hotel_amenities_json = COALESCE(?, hotel_amenities_json),
             brand_primary_color   = ${brandPrimary   === undefined ? 'brand_primary_color'   : '?'},
-            brand_secondary_color = ${brandSecondary === undefined ? 'brand_secondary_color' : '?'}
+            brand_secondary_color = ${brandSecondary === undefined ? 'brand_secondary_color' : '?'},
+            date_format           = ${dateFormat     === undefined ? 'date_format'           : '?'},
+            rates_include_gst     = ${ratesIncGst    === undefined ? 'rates_include_gst'     : '?'}
           WHERE id = ?`,
         [slug, b.hero_image_url ?? null, b.hotel_logo_url ?? null,
          b.hotel_description ?? null, b.hotel_full_address ?? null,
@@ -22416,6 +22540,8 @@ async function startServer() {
          star, ptype, b.hotel_cancellation_policy_text ?? null, amenityJson,
          ...(brandPrimary   === undefined ? [] : [brandPrimary]),
          ...(brandSecondary === undefined ? [] : [brandSecondary]),
+         ...(dateFormat     === undefined ? [] : [dateFormat]),
+         ...(ratesIncGst    === undefined ? [] : [ratesIncGst]),
          req.params.id]
       );
       res.json({ ok: true });
@@ -28327,7 +28453,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-booking-fanout-ota-net-revenue-direct-web-label',
+    commit_marker: 'tenant-date-format-and-gst-inclusive-exclusive-toggle',
     code_features: [
       'subscription-billing',
       'read-only-mode',

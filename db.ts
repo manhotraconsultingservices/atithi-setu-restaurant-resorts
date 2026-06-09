@@ -386,7 +386,23 @@ export async function initDb() {
     -- borders) follows the property's brand instead of the platform
     -- default orange. Defaults preserved when columns are NULL.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS brand_primary_color   TEXT;
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS brand_secondary_color TEXT
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS brand_secondary_color TEXT;
+    -- Tenant-configurable display + pricing preferences (9 Jun 2026).
+    --   date_format          — how dates render on every table column,
+    --                          confirmation page, calendar header etc.
+    --                          One of: DD-MM-YYYY | DD-MM-YY |
+    --                          DD-MMM-YYYY | YYYY-MM-DD | MM/DD/YYYY |
+    --                          DD/MM/YYYY. Default DD-MMM-YYYY because
+    --                          "09-Jun-2026" is unambiguous (no order
+    --                          confusion between DD-MM and MM-DD).
+    --   rates_include_gst    — INT (0/1) controlling how matrix rates
+    --                          are interpreted. 1 = inclusive (current
+    --                          default, GST extracted from the stated
+    --                          rate). 0 = exclusive (Marriott / global
+    --                          standard, GST added on top). Drives
+    --                          net-room-rate vs gross calculation.
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS date_format       TEXT DEFAULT 'DD-MMM-YYYY';
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS rates_include_gst INT  DEFAULT 1
   `);
   await centralDb.exec(
     `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`

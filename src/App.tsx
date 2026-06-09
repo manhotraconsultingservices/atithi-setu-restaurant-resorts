@@ -16893,7 +16893,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="py-2 pr-3 font-bold text-[#1a1208]">{g.name || '(unnamed)'}</td>
                             <td className="py-2 pr-3 text-[#3d3128]">{g.contact_name || '—'}<br/><span className="text-[10px] text-[#9c8e85]">{g.contact_phone || g.contact_email || ''}</span></td>
                             <td className="py-2 pr-3 text-[#3d3128] text-[11px]">
-                              {g.check_in_date ? new Date(g.check_in_date).toLocaleDateString('en-IN') : '—'} →<br/>
+                              {g.check_in_date ? formatDateForTenant(g.check_in_date, restaurant?.date_format) : '—'} →<br/>
                               {g.check_out_date ? new Date(g.check_out_date).toLocaleDateString('en-IN') : '—'}
                             </td>
                             <td className="py-2 pr-3 text-right font-mono">{g.booking_count || 0}<br/><span className="text-[10px] text-emerald-700">{g.checked_in_count || 0} in</span> · <span className="text-[10px] text-[#9c8e85]">{g.checked_out_count || 0} out</span></td>
@@ -17247,8 +17247,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         </td>
                         <td className="px-4 py-3 text-[#3d3128]">{b.room_name || b.room_id}</td>
                         <td className="px-4 py-3 text-xs text-[#3d3128]">
-                          {new Date(b.check_in_date).toLocaleDateString('en-IN')} →<br />
-                          {new Date(b.check_out_date).toLocaleDateString('en-IN')}
+                          {formatDateForTenant(b.check_in_date, restaurant?.date_format)} →<br />
+                          {formatDateForTenant(b.check_out_date, restaurant?.date_format)}
                         </td>
                         <td className="px-4 py-3">
                           <span
@@ -19193,7 +19193,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <td className="px-4 py-3 font-semibold text-[#1a1208]">{f.guest_name || '—'}</td>
                       <td className="px-4 py-3 text-[#3d3128]">{f.room_name || f.room_id}</td>
                       <td className="px-4 py-3 text-xs text-[#3d3128]">
-                        {f.check_in_date && new Date(f.check_in_date).toLocaleDateString('en-IN')}<br />
+                        {f.check_in_date && formatDateForTenant(f.check_in_date, restaurant?.date_format)}<br />
                         {f.check_out_date && new Date(f.check_out_date).toLocaleDateString('en-IN')}
                       </td>
                       <td className="px-4 py-3">
@@ -19273,8 +19273,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <td className="px-4 py-3 text-[#3d3128]">{b.guest_nationality}</td>
                       <td className="px-4 py-3 text-[#3d3128]">{b.room_name || b.room_id}</td>
                       <td className="px-4 py-3 text-xs text-[#3d3128]">
-                        {new Date(b.check_in_date).toLocaleDateString('en-IN')} →<br />
-                        {new Date(b.check_out_date).toLocaleDateString('en-IN')}
+                        {formatDateForTenant(b.check_in_date, restaurant?.date_format)} →<br />
+                        {formatDateForTenant(b.check_out_date, restaurant?.date_format)}
                       </td>
                       <td className="px-4 py-3 text-center">
                         {Number(b.form_c_submissions) > 0
@@ -19826,6 +19826,75 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <button type="button" disabled className="px-3 py-1.5 rounded-xl text-white text-xs font-bold" style={{ background: propertyProfile.brand_primary_color || '#cc5a16' }}>Book now</button>
                     <button type="button" disabled className="px-3 py-1.5 rounded-xl text-white text-xs font-bold" style={{ background: propertyProfile.brand_secondary_color || '#a84612' }}>Hover</button>
                     <span className="ml-auto text-[10px] text-[#9c8e85]">Default Atithi-Setu orange if blank.</span>
+                  </div>
+                </div>
+                {/* ── Display + pricing preferences ─────────────────────
+                    Date format applies everywhere the system shows a
+                    date (booking lists, calendar header, folio,
+                    invoice PDF, confirmation page, OTA dashboard).
+                    GST mode controls whether the matrix rate is read
+                    as inclusive (current default — current customers'
+                    rates already include GST) or exclusive (matrix
+                    rate is the net room rate; GST is added on top).
+                ──────────────────────────────────────────────────── */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 rounded-2xl bg-[#faf7f2]/70 border border-[#e8d8c4]">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Date format
+                      <span className="ml-2 font-normal normal-case tracking-normal text-[#9c8e85]">— how dates appear everywhere</span>
+                    </label>
+                    <select
+                      value={propertyProfile.date_format || 'DD-MMM-YYYY'}
+                      onChange={e => setPropertyProfile({ ...propertyProfile, date_format: e.target.value })}
+                      className="w-full bg-white border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    >
+                      <option value="DD-MMM-YYYY">DD-MMM-YYYY  →  09-Jun-2026  (recommended, unambiguous)</option>
+                      <option value="DD-MM-YYYY">DD-MM-YYYY  →  09-06-2026</option>
+                      <option value="DD-MM-YY">DD-MM-YY  →  09-06-26</option>
+                      <option value="YYYY-MM-DD">YYYY-MM-DD  →  2026-06-09  (ISO)</option>
+                      <option value="DD/MM/YYYY">DD/MM/YYYY  →  09/06/2026  (UK)</option>
+                      <option value="MM/DD/YYYY">MM/DD/YYYY  →  06/09/2026  (US)</option>
+                    </select>
+                    <p className="text-[10px] text-[#9c8e85] mt-1">
+                      Preview: <strong>{formatDateForTenant(new Date(), propertyProfile.date_format)}</strong>
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Room rate pricing model</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPropertyProfile({ ...propertyProfile, rates_include_gst: 1 })}
+                        className={cn(
+                          'rounded-2xl px-3 py-2.5 text-xs font-bold border-2 transition-all text-left',
+                          (propertyProfile.rates_include_gst == null || Number(propertyProfile.rates_include_gst) === 1)
+                            ? 'border-[#cc5a16] bg-[#cc5a16]/5 text-[#3d3128]'
+                            : 'border-[#faf7f2] bg-white text-[#6b5d52] hover:border-[#cc5a16]/30'
+                        )}
+                      >
+                        Rates include GST
+                        <div className="font-normal text-[10px] text-[#6b5d52] mt-0.5">
+                          Matrix rate IS what guests pay. System extracts GST to compute net room revenue.
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPropertyProfile({ ...propertyProfile, rates_include_gst: 0 })}
+                        className={cn(
+                          'rounded-2xl px-3 py-2.5 text-xs font-bold border-2 transition-all text-left',
+                          Number(propertyProfile.rates_include_gst) === 0
+                            ? 'border-[#cc5a16] bg-[#cc5a16]/5 text-[#3d3128]'
+                            : 'border-[#faf7f2] bg-white text-[#6b5d52] hover:border-[#cc5a16]/30'
+                        )}
+                      >
+                        Rates exclude GST
+                        <div className="font-normal text-[10px] text-[#6b5d52] mt-0.5">
+                          Matrix rate is pre-tax (Marriott / global). System adds GST on top when guests check out.
+                        </div>
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-[#9c8e85] mt-1.5">
+                      Used for public-page price display + cross-channel net room rate calculation.
+                    </p>
                   </div>
                 </div>
                 {/* Description */}
@@ -25790,7 +25859,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
               <div className="bg-[#faf7f2] rounded-2xl p-4 mb-4 text-sm">
                 <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Room</span><span className="font-semibold">{checkoutBooking.room_name || checkoutBooking.room_id}</span></div>
-                <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Dates</span><span>{new Date(checkoutBooking.check_in_date).toLocaleDateString('en-IN')} → {new Date(checkoutBooking.check_out_date).toLocaleDateString('en-IN')}</span></div>
+                <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Dates</span><span>{formatDateForTenant(checkoutBooking.check_in_date, restaurant?.date_format)} → {formatDateForTenant(checkoutBooking.check_out_date, restaurant?.date_format)}</span></div>
                 <p className="text-[10px] text-[#9c8e85] mt-2">Folio totals will include room nights + completed service charges.</p>
               </div>
 
@@ -42351,6 +42420,80 @@ function useTenantFormatter(restaurant: any) {
   }, [restaurant?.currency_symbol, restaurant?.locale]);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Tenant-configurable date display
+// ════════════════════════════════════════════════════════════════════
+// The owner picks one of 6 formats in Hotel Settings → Display:
+//
+//   DD-MM-YYYY     09-06-2026
+//   DD-MM-YY       09-06-26
+//   DD-MMM-YYYY    09-Jun-2026   (default — unambiguous, no DMY/MDY confusion)
+//   YYYY-MM-DD     2026-06-09    (ISO)
+//   MM/DD/YYYY     06/09/2026    (US)
+//   DD/MM/YYYY     09/06/2026    (UK / continental)
+//
+// All date-bearing UI surfaces should funnel through formatDateForTenant
+// so that flipping the toggle in Settings re-renders every column at
+// once. Pure function — safe to call outside React.
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'] as const;
+
+function formatDateForTenant(
+  value: string | Date | null | undefined,
+  format: string | null | undefined,
+): string {
+  if (value == null || value === '') return '';
+  let d: Date;
+  if (value instanceof Date) d = value;
+  else {
+    const s = String(value);
+    // Accept YYYY-MM-DD, full ISO, or anything Date() can parse.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) d = new Date(s + 'T00:00:00');
+    else d = new Date(s);
+  }
+  if (isNaN(d.getTime())) return String(value);
+  const yyyy = String(d.getFullYear());
+  const yy   = yyyy.slice(-2);
+  const mm   = String(d.getMonth() + 1).padStart(2, '0');
+  const mmm  = MONTHS_SHORT[d.getMonth()];
+  const dd   = String(d.getDate()).padStart(2, '0');
+  switch (format || 'DD-MMM-YYYY') {
+    case 'DD-MM-YYYY':   return `${dd}-${mm}-${yyyy}`;
+    case 'DD-MM-YY':     return `${dd}-${mm}-${yy}`;
+    case 'YYYY-MM-DD':   return `${yyyy}-${mm}-${dd}`;
+    case 'MM/DD/YYYY':   return `${mm}/${dd}/${yyyy}`;
+    case 'DD/MM/YYYY':   return `${dd}/${mm}/${yyyy}`;
+    case 'DD-MMM-YYYY':
+    default:             return `${dd}-${mmm}-${yyyy}`;
+  }
+}
+
+// Hook variant — binds the tenant's configured format so callers can
+// just do `fmt(date)`. Memoised on the restaurant object so a Settings
+// change propagates across the tree on the next render.
+function useTenantDateFormatter(restaurant: any) {
+  const format = restaurant?.date_format || 'DD-MMM-YYYY';
+  return useMemo(
+    () => (value: string | Date | null | undefined) => formatDateForTenant(value, format),
+    [format],
+  );
+}
+
+// Placeholder string shown in date INPUT helper labels so a user typing
+// a date into a text field knows the expected shape. The native HTML5
+// <input type="date"> picker is locale-driven and ignores this — it's
+// only for the supplementary text fields we render alongside.
+function dateFormatPlaceholder(format: string | null | undefined): string {
+  switch (format || 'DD-MMM-YYYY') {
+    case 'DD-MM-YYYY':   return 'DD-MM-YYYY';
+    case 'DD-MM-YY':     return 'DD-MM-YY';
+    case 'YYYY-MM-DD':   return 'YYYY-MM-DD';
+    case 'MM/DD/YYYY':   return 'MM/DD/YYYY';
+    case 'DD/MM/YYYY':   return 'DD/MM/YYYY';
+    case 'DD-MMM-YYYY':
+    default:             return 'DD-MMM-YYYY';
+  }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // RosterManagement (Phase 3) — weekly / bi-weekly / monthly shift grid
 // ════════════════════════════════════════════════════════════════════════════
@@ -44849,7 +44992,7 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
           <h1 className="text-xl font-serif font-bold text-[#1a1208] mb-1">All set, {info?.guest_name}!</h1>
           <p className="text-sm text-[#6b5d52]">
             Your details are saved. The front desk will have everything ready when you arrive on{' '}
-            <strong>{info?.check_in_date ? new Date(info.check_in_date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short' }) : ''}</strong>.
+            <strong>{info?.check_in_date ? formatDateForTenant(info.check_in_date, info?.date_format) : ''}</strong>.
           </p>
           <p className="text-[11px] text-[#9c8e85] mt-4">Safe travels!</p>
         </div>
@@ -44868,8 +45011,8 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
             <p className="text-xs text-[#6b5d52] mt-1">{info?.hotel_name}</p>
             <div className="mt-3 bg-[#faf7f2] rounded-2xl p-3 text-[12px] text-[#3d3128] space-y-0.5">
               <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{info?.room_name || '—'}</strong></div>
-              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-in</span>{info?.check_in_date ? new Date(info.check_in_date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' }) : '—'}</div>
-              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-out</span>{info?.check_out_date ? new Date(info.check_out_date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' }) : '—'}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-in</span>{info?.check_in_date ? formatDateForTenant(info.check_in_date, info?.date_format) : '—'}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-out</span>{info?.check_out_date ? formatDateForTenant(info.check_out_date, info?.date_format) : '—'}</div>
               <div className="flex justify-between"><span className="text-[#6b5d52]">Guests</span>{info?.num_guests || 1}</div>
             </div>
           </div>
@@ -45473,6 +45616,12 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                                 {hotelInfo.currency_symbol}{Number(t.starting_from_rate ?? t.base_rate ?? 0).toLocaleString('en-IN')}
                                 <span className="text-[10px] font-normal text-[#9c8e85] ml-0.5">/night</span>
                               </p>
+                              {/* Inclusive-of-GST hint so guests know what
+                                  the displayed price means. Owner toggles
+                                  this from Settings → Public Page. */}
+                              <p className="text-[9px] text-[#9c8e85]">
+                                {Number(hotelInfo.rates_include_gst) === 0 ? '+ GST as applicable' : 'Includes all taxes'}
+                              </p>
                               {t.cheapest_meal_plan_label && (
                                 <p className="text-[9px] text-[#9c8e85] italic">{t.cheapest_meal_plan_label}</p>
                               )}
@@ -45722,6 +45871,9 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                                 <span className="text-[10px] font-normal text-[#9c8e85] ml-0.5">/night</span>
                               </p>
                               <p className="text-[10px] text-[#9c8e85]">{r.nights}n total · {hotelInfo.currency_symbol}{Number(total).toLocaleString('en-IN')}</p>
+                              <p className="text-[9px] text-[#9c8e85]">
+                                {Number(hotelInfo.rates_include_gst) === 0 ? '+ GST as applicable' : 'Includes all taxes'}
+                              </p>
                               <span className="inline-block mt-2 text-[10px] font-bold uppercase tracking-widest" style={{ color: brandPrimary }}>Book →</span>
                             </div>
                           </div>
@@ -45797,8 +45949,8 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
             <p className="text-sm text-[#6b5d52] mb-3">{confirmation.confirmation_message}</p>
             <div className="bg-[#faf7f2] rounded-2xl p-3 text-sm text-left space-y-1">
               <div className="flex justify-between"><span className="text-[#6b5d52]">Reference</span><span className="font-mono text-[11px]">{confirmation.booking_id}</span></div>
-              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-in</span>{String(confirmation.check_in_date).slice(0, 10)}</div>
-              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-out</span>{String(confirmation.check_out_date).slice(0, 10)}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-in</span>{formatDateForTenant(confirmation.check_in_date, hotelInfo?.date_format)}</div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Check-out</span>{formatDateForTenant(confirmation.check_out_date, hotelInfo?.date_format)}</div>
               <div className="flex justify-between pt-1 mt-1 border-t" style={{ borderTopColor: `${brandPrimary}1a` }}>
                 <span className="text-[#6b5d52] font-bold">Total</span>
                 <strong className="font-mono" style={{ color: brandPrimary }}>{hotelInfo.currency_symbol}{Number(confirmation.total_amount).toLocaleString('en-IN')}</strong>
