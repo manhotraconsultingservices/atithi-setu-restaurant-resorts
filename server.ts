@@ -28204,7 +28204,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'rate-preview-direct-matrix-query-skip-orphan-mealplans',
+    commit_marker: 'public-booking-page-promoted-to-top-level-tab',
     code_features: [
       'subscription-billing',
       'read-only-mode',

@@ -87,7 +87,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // to any non-owner with an ancient unmarked allowedTabs list — which is
 // the exact bug the founder flagged on 7 Jun 2026 ("STAFF_ACCESS should
 // only be visible to Business owner. this is critical.").
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -6589,6 +6589,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE'  // hospitality Phase 2 & 3
     | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
     | 'CHANNEL_MANAGER'                           // OTA credentials + iCal feeds + webhook log + room mappings
+    | 'PUBLIC_BOOKING_PAGE'                       // Marriott-grade direct-booking page profile + galleries
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
   >('MONITOR');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
@@ -10164,7 +10165,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
-    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchTariff(); fetchPropertyProfile(); fetchPropertyGallery(); fetchAmenityLibrary(); fetchHotelRooms(); }
+    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchTariff(); }
+    if (activeTab === 'PUBLIC_BOOKING_PAGE') { fetchPropertyProfile(); fetchPropertyGallery(); fetchAmenityLibrary(); fetchHotelRooms(); }
     if (activeTab === 'STAFF_ACCESS') { fetchStaffAccess(); fetchPermAuditLog(); fetchManageableTenants(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
@@ -10751,6 +10753,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ...operationalSummary,
               { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk' },
               { id: 'CHANNEL_MANAGER',      label: 'Channel Manager' },
+              { id: 'PUBLIC_BOOKING_PAGE',  label: 'Public Booking Page' },
               { id: 'ROOMS',                label: 'Rooms' },
               { id: 'HOTEL_BOOKINGS',       label: 'Hotel Bookings' },
               { id: 'SERVICES',             label: 'Services' },
@@ -19406,6 +19409,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
               { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk', description: 'Live Stay View + Arrival / Departure / Room Status / Night Audit reports for any date range. CSV download.', hotelOnly: true },
               { id: 'CHANNEL_MANAGER', label: 'Channel Manager', description: 'OTA integrations: API credentials, iCal feeds (Booking.com/Airbnb/Vrbo/Agoda/MMT/Goibibo), inbound webhook log, room-code mappings.', hotelOnly: true },
+              { id: 'PUBLIC_BOOKING_PAGE', label: 'Public Booking Page', description: 'Customer-facing direct-booking page: hero, photo galleries, amenities, slug URL, cancellation policy. 0% commission channel.', hotelOnly: true },
             ];
             const visibleTabs = PERMISSIBLE_TABS.filter(t => !t.hotelOnly || isHotelEnabled);
 
@@ -19683,6 +19687,200 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             );
           })()}
         </div>
+      ) : activeTab === 'PUBLIC_BOOKING_PAGE' && isHotelEnabled ? (
+        /* ════════════════ 🌐 PUBLIC BOOKING PAGE (top-level tab) ════════
+           Promoted from Settings → its own tab (9 Jun 2026, client
+           request). Holds the entire owner-facing config for the
+           guest-facing /book/<slug> page: slug, hero, profile,
+           amenities, gallery, per-room-type galleries, cancellation
+           policy. All state + handlers come from the outer scope
+           (fetchPropertyProfile, savePropertyProfile, uploadImage,
+           addPropertyGalleryImage, deletePropertyGalleryImage,
+           addRoomTypeGalleryImage, deleteRoomTypeGalleryImage,
+           fetchRoomTypeGallery — same ones SETTINGS previously used). */
+        <div className="max-w-4xl space-y-5">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">🌐 Public Booking Page</h2>
+              <p className="text-sm text-[#6b5d52] mt-1 max-w-2xl">
+                Everything you set here shows up on your public direct-booking page at <strong className="font-mono text-xs">erp.atithi-setu.com/book/&lt;slug&gt;</strong>. Direct bookings have <strong>0% commission</strong> — every guest you convert here is pure margin.
+              </p>
+            </div>
+            {propertyProfile?.booking_slug && (
+              <a
+                href={`/book/${propertyProfile.booking_slug}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs font-bold uppercase tracking-widest px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
+              >Preview live page ↗</a>
+            )}
+          </div>
+          {!propertyProfile ? (
+            <div className="bg-white p-12 rounded-3xl shadow-sm text-center text-[#9c8e85]">Loading property profile…</div>
+          ) : (
+            <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm relative overflow-hidden">
+              <div className="absolute top-0 left-0 right-0 h-[3px] bg-emerald-500"></div>
+              <div className="space-y-4">
+                {/* Slug */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Friendly URL slug</label>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-[#9c8e85] whitespace-nowrap">/book/</span>
+                    <input
+                      type="text"
+                      value={propertyProfile.booking_slug || ''}
+                      onChange={e => setPropertyProfile({ ...propertyProfile, booking_slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
+                      placeholder="vivekscafe"
+                      className="flex-1 bg-[#faf7f2] border-none rounded-2xl px-3 py-2 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                    {propertyProfile.booking_slug && (
+                      <button type="button" onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/book/${propertyProfile.booking_slug}`); alert('Copied!'); }} className="px-3 py-2 rounded-xl bg-[#faf7f2] text-xs font-bold hover:bg-[#f0e6d6]">📋 Copy link</button>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Lowercase letters, digits, dashes. 3-50 chars. Must be unique across all Atithi-Setu properties.</p>
+                </div>
+                {/* Hero image */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Hero image (1920x800 recommended)</label>
+                  <div className="flex items-center gap-3">
+                    {propertyProfile.hero_image_url && (
+                      <img src={propertyProfile.hero_image_url} alt="hero" className="w-32 h-20 object-cover rounded-xl shadow-sm" />
+                    )}
+                    <input type="file" accept="image/*"
+                      onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; try { const url = await uploadImage(f); setPropertyProfile({ ...propertyProfile, hero_image_url: url }); } catch (err: any) { alert(err?.message || 'Upload failed'); } }}
+                      className="text-xs text-[#6b5d52] file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-[#cc5a16] file:text-white file:font-bold file:cursor-pointer" />
+                    {propertyProfile.hero_image_url && (
+                      <button onClick={() => setPropertyProfile({ ...propertyProfile, hero_image_url: '' })} className="text-[10px] text-red-600 hover:underline">Remove</button>
+                    )}
+                  </div>
+                </div>
+                {/* Type + stars */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Property type</label>
+                    <select value={propertyProfile.hotel_property_type || ''} onChange={e => setPropertyProfile({ ...propertyProfile, hotel_property_type: e.target.value })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                      <option value="">— pick one —</option>
+                      <option value="BOUTIQUE">Boutique</option>
+                      <option value="RESORT">Resort</option>
+                      <option value="BUSINESS">Business</option>
+                      <option value="HERITAGE">Heritage</option>
+                      <option value="HOMESTAY">Homestay</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Star rating (1-5)</label>
+                    <input type="number" min={1} max={5} value={propertyProfile.hotel_star_rating || ''} onChange={e => setPropertyProfile({ ...propertyProfile, hotel_star_rating: e.target.value === '' ? null : Number(e.target.value) })} className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                </div>
+                {/* Description */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">About the property</label>
+                  <textarea rows={4} value={propertyProfile.hotel_description || ''} onChange={e => setPropertyProfile({ ...propertyProfile, hotel_description: e.target.value })} placeholder="Describe the vibe, history, what makes you special. 2-4 paragraphs." className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                {/* Address */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Full address</label>
+                  <textarea rows={2} value={propertyProfile.hotel_full_address || ''} onChange={e => setPropertyProfile({ ...propertyProfile, hotel_full_address: e.target.value })} placeholder="123 Beach Road, Anjuna, North Goa - 403509" className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone</label>
+                    <input value={propertyProfile.hotel_phone || ''} onChange={e => setPropertyProfile({ ...propertyProfile, hotel_phone: e.target.value })} placeholder="+91 9876543210" className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Email</label>
+                    <input type="email" value={propertyProfile.hotel_email || ''} onChange={e => setPropertyProfile({ ...propertyProfile, hotel_email: e.target.value })} placeholder="hello@yourhotel.com" className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Google Maps URL or embed link</label>
+                  <input value={propertyProfile.hotel_map_url || ''} onChange={e => setPropertyProfile({ ...propertyProfile, hotel_map_url: e.target.value })} placeholder="https://www.google.com/maps/embed?pb=..." className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Go to Google Maps → search your property → Share → Embed a map → copy the <code>src</code> URL. Or paste any maps.google.com link — guests will see it as a "Open in Maps" button.</p>
+                </div>
+                {/* Amenities */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Amenities (pick what you offer)</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {amenityLibrary.map(a => {
+                      const selected = (propertyProfile.hotel_amenity_keys || []).includes(a.key);
+                      return (
+                        <label key={a.key} className={cn(
+                          'flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer border-2 text-xs',
+                          selected ? 'border-[#cc5a16] bg-[#cc5a16]/5' : 'border-[#faf7f2] bg-[#faf7f2] hover:border-[#cc5a16]/30'
+                        )}>
+                          <input type="checkbox" checked={selected}
+                            onChange={e => { const prev: string[] = propertyProfile.hotel_amenity_keys || []; const next = e.target.checked ? [...prev, a.key] : prev.filter(k => k !== a.key); setPropertyProfile({ ...propertyProfile, hotel_amenity_keys: next }); }}
+                            className="w-3 h-3" />
+                          <span>{a.icon}</span><span className="font-bold">{a.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Cancellation policy (in plain English)</label>
+                  <textarea rows={3} value={propertyProfile.hotel_cancellation_policy_text || ''} onChange={e => setPropertyProfile({ ...propertyProfile, hotel_cancellation_policy_text: e.target.value })} placeholder="Free cancellation up to 7 days before check-in. 50% refund within 7 days. No refund within 48 hours." className="w-full bg-[#faf7f2] border-none rounded-2xl px-3 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  <p className="text-[10px] text-[#9c8e85] mt-1">Leave blank to auto-generate from your refund-days settings in the main Settings tab.</p>
+                </div>
+                <div className="flex items-center gap-3 pt-2">
+                  <button onClick={savePropertyProfile} disabled={propertyProfileSaving} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50">{propertyProfileSaving ? 'Saving…' : 'Save public page'}</button>
+                  {propertyProfileSaved && <span className="text-xs font-bold text-emerald-600">✓ Saved</span>}
+                </div>
+              </div>
+              {/* Property gallery */}
+              <div className="mt-8 pt-6 border-t border-[#f0e6d6]">
+                <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Property gallery ({propertyGallery.length} photos)</p>
+                <p className="text-[10px] text-[#9c8e85] mb-3">Add up to ~10 lifestyle / property photos. First photo is used as the secondary image in the "About" section.</p>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                  {propertyGallery.map(g => (
+                    <div key={g.id} className="relative aspect-square rounded-xl overflow-hidden bg-[#faf7f2] group">
+                      <img src={g.image_url} alt="" className="w-full h-full object-cover" />
+                      <button onClick={() => deletePropertyGalleryImage(g.id)} className="absolute top-1 right-1 w-6 h-6 rounded-full bg-red-600 text-white text-xs opacity-0 group-hover:opacity-100 transition-opacity" title="Remove">×</button>
+                    </div>
+                  ))}
+                  <label className="aspect-square rounded-xl border-2 border-dashed border-[#cc5a16]/30 flex flex-col items-center justify-center cursor-pointer hover:bg-[#cc5a16]/5">
+                    <span className="text-2xl mb-1">+</span><span className="text-[10px] text-[#9c8e85]">Add photo</span>
+                    <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) addPropertyGalleryImage(f); }} />
+                  </label>
+                </div>
+              </div>
+              {/* Per-room-type galleries */}
+              {hotelRooms.length > 0 && (
+                <div className="mt-8 pt-6 border-t border-[#f0e6d6]">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Per-category photo galleries</p>
+                  <p className="text-[10px] text-[#9c8e85] mb-3">Each room category can have its own gallery. First photo is used as the card image on the public page.</p>
+                  {(() => {
+                    const seen: Record<string, { id: string; name: string }> = {};
+                    hotelRooms.forEach((r: any) => { if (r.type_id && !seen[r.type_id]) seen[r.type_id] = { id: r.type_id, name: r.type || r.category || r.type_id }; });
+                    return Object.values(seen);
+                  })().map(rt => {
+                    const photos = roomTypeGalleries[rt.id] || [];
+                    return (
+                      <div key={rt.id} className="bg-[#faf7f2] rounded-2xl p-3 mb-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-sm font-bold">{rt.name} <span className="text-[10px] font-normal text-[#9c8e85]">· {photos.length} photo{photos.length === 1 ? '' : 's'}</span></p>
+                          <button onClick={() => fetchRoomTypeGallery(rt.id)} className="text-[10px] text-[#6b5d52] hover:text-[#cc5a16] hover:underline">↻ Refresh</button>
+                        </div>
+                        <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+                          {photos.map(p => (
+                            <div key={p.id} className="relative aspect-square rounded-lg overflow-hidden bg-white group">
+                              <img src={p.image_url} alt="" className="w-full h-full object-cover" />
+                              <button onClick={() => deleteRoomTypeGalleryImage(rt.id, p.id)} className="absolute top-1 right-1 w-5 h-5 rounded-full bg-red-600 text-white text-[10px] opacity-0 group-hover:opacity-100 transition-opacity" title="Remove">×</button>
+                            </div>
+                          ))}
+                          <label className="aspect-square rounded-lg border border-dashed border-[#cc5a16]/30 flex items-center justify-center cursor-pointer hover:bg-white">
+                            <span className="text-lg">+</span>
+                            <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) addRoomTypeGalleryImage(rt.id, f); }} />
+                          </label>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       ) : activeTab === 'SETTINGS' ? (
         <div className="max-w-xl space-y-6">
           {/* ── Property Type — READ-ONLY for Owners ─────────────────────
@@ -19767,14 +19965,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             )}
           </div>
 
-          {/* ── 🌐 Public Booking Page (9 Jun 2026) ───────────────
-              Controls everything a guest sees on the /book/<slug>
-              landing page: friendly URL slug, hero image, brand
-              description, address + contact + map link, star rating,
-              property type, photo gallery, curated amenities,
-              cancellation policy. Only relevant when the Hotel module
-              is on. */}
-          {isHotelEnabled && propertyProfile && (
+          {/* ── 🌐 Public Booking Page — moved to dedicated top-level
+              tab (9 Jun 2026). Settings keeps a small redirect card
+              so owners hunting through Settings still find the way. */}
+          {isHotelEnabled && (
+            <div
+              onClick={() => setActiveTab('PUBLIC_BOOKING_PAGE')}
+              className="bg-emerald-50 p-5 rounded-[24px] border-2 border-emerald-200 cursor-pointer hover:bg-emerald-100 transition-all flex items-center gap-3"
+            >
+              <span className="text-3xl">🌐</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-base font-bold text-[#1a1208]">Public Booking Page</p>
+                <p className="text-xs text-[#6b5d52]">Hero, photos, amenities, slug URL, cancellation policy — now a dedicated top-level tab. Click to open →</p>
+              </div>
+              <span className="text-emerald-700 font-bold">→</span>
+            </div>
+          )}
+          {/* The original 280-line panel that used to live here has moved
+              to its own top-level tab. See activeTab === 'PUBLIC_BOOKING_PAGE'. */}
+          {false && (
             <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-[3px] bg-emerald-500"></div>
               <div className="flex items-start justify-between gap-3 mb-1 flex-wrap">
@@ -34911,7 +35120,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // Hotel-only tabs (shown only when the selected restaurant has property_type IN ('HOTEL','BOTH'))
   const HOTEL_TABS = [
     'ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS',
-    'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ',
+    'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ', 'PUBLIC_BOOKING_PAGE',
   ];
   // Compose the active tab list based on the currently-selected restaurant's property_type
   const selectedRestaurantRow = restaurants.find(r => r.id === permSelectedRestaurant);
