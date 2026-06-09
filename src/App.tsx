@@ -45494,9 +45494,16 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 <p className="text-sm sm:text-base mt-4 opacity-95 tracking-wide">{[hotelInfo.city, hotelInfo.state].filter(Boolean).join(' · ')}</p>
               </div>
             </div>
+          </section>
 
-            {/* Glassmorphic booking widget overlapping hero bottom */}
-            <div id="book-widget" className="max-w-4xl mx-auto px-4 -mt-12 sm:-mt-16 relative z-10">
+          {/* Glassmorphic booking widget overlapping hero bottom.
+              IMPORTANT: this lives OUTSIDE the hero <section> because
+              the hero has `overflow-hidden` (required for the Ken
+              Burns zoom). When the Rooms & Guests popover opens, it
+              extends downward past the widget — if the widget were
+              inside the hero section, the popover would be clipped
+              by overflow-hidden. As a sibling it can extend freely. */}
+          <div id="book-widget" className="max-w-4xl mx-auto px-4 -mt-12 sm:-mt-16 relative z-20">
               <div className="bg-white/95 backdrop-blur rounded-3xl shadow-2xl border border-white p-4 sm:p-5">
                 <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
                   <div>
@@ -45537,7 +45544,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                       <ChevronDown size={14} className={cn('transition-transform', occOpen && 'rotate-180')} />
                     </button>
                     {occOpen && (
-                      <div className="absolute z-30 mt-2 left-0 right-0 sm:right-auto sm:w-80 bg-white rounded-2xl shadow-2xl border border-[#f0e8dd] p-4 space-y-3">
+                      <div className="absolute top-full mt-2 left-0 right-0 sm:right-auto sm:w-80 bg-white rounded-2xl shadow-2xl border border-[#f0e8dd] p-4 space-y-3 z-50">
                         {[
                           { key: 'rooms',    label: 'Rooms',    min: 1, max: 9, sub: 'Each room is priced + booked separately.' },
                           { key: 'adults',   label: 'Adults',   min: 1, max: 16, sub: 'Ages 13 and above.' },
@@ -45633,7 +45640,6 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 </div>
               </div>
             </div>
-          </section>
 
           {/* ── Trust strip — sits between the hero/booking widget and
               About. Reinforces direct-booking advantages (0% commission,
@@ -46113,29 +46119,62 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
         )}
 
         {/* STEP 3: GUEST DETAILS */}
-        {step === 'GUEST' && pickedRoom && (
+        {step === 'GUEST' && pickedRoom && (() => {
+          // ── Estimated total — chosen meal plan × nights × num_rooms.
+          // Handles three sources of truth in priority order:
+          //   1. category-shape (new) + meal plan picked  →
+          //        plan.per_night_rate × nights × num_rooms
+          //   2. category-shape (new) without explicit plan →
+          //        starting_from_total × num_rooms  (cheapest plan)
+          //   3. legacy room-shape  →  total_rate × num_rooms
+          // Server is authoritative — the actual amount lands on
+          // confirmation.total_amount after the POST. This is a
+          // pre-submit estimate so the guest knows what's coming.
+          const isCategory = !!pickedRoom.category_id;
+          const planObj    = isCategory
+            ? (pickedRoom.meal_plans || []).find((mp: any) => mp.meal_plan_id === mealPlanByCat[pickedRoom.category_id])
+            : null;
+          const nights = Math.max(1, pickedRoom.nights || 1);
+          const rooms  = Math.max(1, searchParams.rooms || 1);
+          let estPerRoom: number;
+          if (planObj) {
+            estPerRoom = Number(planObj.per_night_rate || 0) * nights;
+          } else if (isCategory) {
+            estPerRoom = Number(pickedRoom.starting_from_total || 0);
+          } else {
+            estPerRoom = Number(pickedRoom.total_rate || 0);
+          }
+          const estTotal = estPerRoom * rooms;
+          const displayName = isCategory
+            ? (pickedRoom.category_name || 'Room')
+            : (pickedRoom.name || 'Room');
+          return (
           <form onSubmit={submitBooking} className="bg-white rounded-3xl shadow-sm p-5 space-y-3">
             <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">Your details</p>
             <div className="bg-[#faf7f2] rounded-2xl p-3 text-sm">
-              <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{pickedRoom.name}</strong></div>
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{displayName}</strong></div>
               <div className="flex justify-between"><span className="text-[#6b5d52]">Dates</span>{searchParams.start} → {searchParams.end}</div>
               <div className="flex justify-between"><span className="text-[#6b5d52]">Rooms</span>{searchParams.rooms}</div>
               <div className="flex justify-between"><span className="text-[#6b5d52]">Adults</span>{searchParams.adults}</div>
               {searchParams.children > 0 && (
                 <div className="flex justify-between"><span className="text-[#6b5d52]">Children</span>{searchParams.children}{searchParams.child_ages.length > 0 ? ` (${searchParams.child_ages.join(', ')} yr)` : ''}</div>
               )}
-              {pickedRoom?.category_id && mealPlanByCat[pickedRoom.category_id] && (
-                (() => {
-                  const plan = (pickedRoom.meal_plans || []).find((mp: any) => mp.meal_plan_id === mealPlanByCat[pickedRoom.category_id]);
-                  return plan ? (
-                    <div className="flex justify-between"><span className="text-[#6b5d52]">Plan</span>{plan.code} — {plan.name}</div>
-                  ) : null;
-                })()
+              {planObj && (
+                <div className="flex justify-between"><span className="text-[#6b5d52]">Plan</span>{planObj.code} — {planObj.name}</div>
               )}
               <div className="flex justify-between pt-1 mt-1 border-t border-[#cc5a16]/10">
-                <span className="text-[#6b5d52] font-bold">Total</span>
-                <strong className="font-mono text-[#cc5a16]">{hotelInfo.currency_symbol}{Number(pickedRoom.total_rate).toLocaleString('en-IN')}</strong>
+                <span className="text-[#6b5d52] font-bold">Estimated total</span>
+                <strong className="font-mono text-[#cc5a16]">{hotelInfo.currency_symbol}{Number.isFinite(estTotal) ? estTotal.toLocaleString('en-IN') : '—'}</strong>
               </div>
+              {rooms > 1 && (
+                <p className="text-[10px] text-[#9c8e85] mt-0.5 text-right">
+                  {rooms} rooms × {hotelInfo.currency_symbol}{Number.isFinite(estPerRoom) ? estPerRoom.toLocaleString('en-IN') : '—'}
+                </p>
+              )}
+              <p className="text-[10px] text-[#9c8e85] mt-0.5 text-right">
+                {Number(hotelInfo.rates_include_gst) === 0 ? '+ GST as applicable' : 'Includes all taxes'}
+                {searchParams.adults > 2 ? ` · ${searchParams.adults - 2} extra adult${searchParams.adults - 2 === 1 ? '' : 's'} priced separately` : ''}
+              </p>
             </div>
             <div>
               <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Full name *</label>
@@ -46172,7 +46211,8 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
               </button>
             </div>
           </form>
-        )}
+          );
+        })()}
 
         {/* STEP 4: CONFIRMATION */}
         {step === 'DONE' && confirmation && (

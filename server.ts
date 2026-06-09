@@ -28741,7 +28741,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-booking-rooms-adults-children-meal-plan-multi-room',
+    commit_marker: 'public-booking-popover-clipping-nan-total-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
