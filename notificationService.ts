@@ -950,6 +950,22 @@ export function buildNotificationContent(
       };
     }
 
+    case 'BOOKING_NO_SHOW': {
+      const guest = data.guestName || 'Guest';
+      const checkIn = data.checkIn ? new Date(String(data.checkIn)).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'expected date';
+      return {
+        subject: `No-show flagged — ${guest}`,
+        text: `Heads-up: booking for ${guest} (expected arrival ${checkIn}) was flagged as NO_SHOW by the daily 02:30 IST sweep. The folio (if any) has been voided. Review and apply your no-show policy in the booking detail.\n\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #fed7aa;border-radius:8px;background:#fff7ed">` +
+          `<h2 style="color:#9a3412;margin-top:0">No-show flagged</h2>` +
+          `<p>Booking for <strong>${guest}</strong> (expected arrival <strong>${checkIn}</strong>) was flagged as <strong>NO_SHOW</strong> by the daily 02:30 IST sweep.</p>` +
+          `<p>The folio (if any) has been voided. Review and apply your no-show policy in the booking detail.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
     case 'PAYSLIP_GENERATED': {
       const name = data.staff_name || 'Team';
       const period = data.period || 'this month';

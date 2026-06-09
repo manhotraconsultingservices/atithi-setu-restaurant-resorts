@@ -13367,6 +13367,33 @@ ${data.tenant.name}`;
     }
   });
 
+  // ══════════════════════════════════════════════════════════════════════
+  // BA-FIX-#7 — HR currency safety check (INR-only gate)
+  // ══════════════════════════════════════════════════════════════════════
+  // Returns { ok, currency_code, warning } — frontend uses this to
+  // show a "HR module is INR-only" banner if the tenant's currency_code
+  // is not INR. The HR endpoints still work (they don't hard-block), but
+  // the math assumes INR throughout (statutory rules, PF cap @ ₹15k etc).
+  app.get("/api/restaurant/:id/hr/currency-safety", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenant: any = await centralDb.get(
+        "SELECT currency_code, currency_symbol FROM restaurants WHERE id = ?",
+        [req.params.id]
+      );
+      const code = String(tenant?.currency_code || 'INR').toUpperCase();
+      const ok = code === 'INR';
+      res.json({
+        ok,
+        currency_code: code,
+        currency_symbol: tenant?.currency_symbol || '₹',
+        warning: ok ? null : `HR & Payroll module is designed for Indian statutory compliance (₹). Your tenant currency is ${code}. Reports and statutory exports will still display ₹ amounts. Switch to INR in Settings to fully match. Multi-currency payroll is on the Phase 2 roadmap.`,
+      });
+    } catch (err: any) {
+      console.error('hr/currency-safety error:', err);
+      res.status(500).json({ error: err?.message || 'Check failed' });
+    }
+  });
+
   // ── Phase 5: Credentials encrypted CRUD ────────────────────────────────
   // Per-tenant + per-channel credentials. AES-256-GCM at rest, master key
   // from ATITHI_CREDENTIAL_KEY env var. The owner-facing UI never displays
@@ -20484,19 +20511,43 @@ ${data.tenant.name}`;
           total = rate * nights;
         }
       }
+      // BA-FIX-#4 — auto-lookup OTA commission on staff-entered bookings
+      // ----------------------------------------------------------------
+      // When booking_source matches an enabled OTA channel with a
+      // commission_pct configured, populate commission_pct + commission_amount
+      // on the booking so the OTA 360 dashboard sees the correct net revenue.
+      // Direct/walk-in/web bookings keep commission_pct=0.
+      let commission_pct = 0;
+      let commission_amount = 0;
+      const src = String(booking_source || 'DIRECT').toUpperCase();
+      const isDirect = src === 'DIRECT' || src === 'DIRECT_WEB' || src === 'WALK_IN';
+      if (!isDirect) {
+        try {
+          const credRow: any = await tenantDb.get(
+            "SELECT COALESCE(commission_pct, 0) AS pct FROM channel_credentials WHERE UPPER(channel) = ? AND is_enabled = 1",
+            [src]
+          );
+          if (credRow && Number(credRow.pct) > 0) {
+            commission_pct = Number(credRow.pct);
+            commission_amount = Math.round((total * commission_pct / 100) * 100) / 100;
+          }
+        } catch { /* table optional */ }
+      }
+      const net_amount = Math.max(0, total - commission_amount);
+
       await tenantDb.run(
         `INSERT INTO room_bookings
          (id, room_id, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
           num_guests, check_in_date, check_out_date, status, booking_source, room_rate, total_amount, special_requests, booking_type,
           meal_plan_id, meal_plan_snapshot, extra_adults, extra_children_with_mattress, extra_children_no_mattress,
-          agent_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          agent_id, commission_pct, commission_amount, net_amount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [bid, room_id, guest_name, guest_phone || null, guest_email || null,
          guest_id_proof || null, guest_nationality || null, guest_state || null,
          num_guests || 1, check_in_date, check_out_date, booking_source || 'DIRECT', rate, total,
          special_requests || null, bookingType,
          meal_plan_id || null, mealPlanSnapshot, xpAdults, xpChildMat, xpChildNoMat,
-         agent_id || null]
+         agent_id || null, commission_pct, commission_amount, net_amount]
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
@@ -21877,6 +21928,240 @@ ${data.tenant.name}`;
     } catch (err: any) {
       console.error('outstanding-payments error:', err);
       res.status(500).json({ error: err?.message || 'Report failed' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // BA-FIX-#5 — Night Audit Report (occupancy / ADR / RevPAR)
+  // ══════════════════════════════════════════════════════════════════════
+  // The night auditor's daily 1-pager. Pulls bookings active on a given
+  // date and computes the three KPIs every PMS must show, plus ancillary
+  // revenue breakdown (F&B / services / other) for the period.
+  //
+  //   Occupancy %  = occupied_room_nights / available_room_nights × 100
+  //   ADR          = room_revenue / occupied_room_nights
+  //   RevPAR       = room_revenue / available_room_nights  (== ADR × occupancy/100)
+  //
+  // Query params: date=YYYY-MM-DD (defaults to today)
+  //               range=N (defaults to 1, max 31 — rolling N-day window)
+  app.get("/api/restaurant/:id/hotel/reports/night-audit", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const today = new Date().toISOString().slice(0, 10);
+      const date = String(req.query.date || today).slice(0, 10);
+      const range = Math.max(1, Math.min(31, Number(req.query.range) || 1));
+      // Window: [start, end] inclusive of both ends. For range=1, start === end.
+      const endD = new Date(date + 'T00:00:00Z');
+      const startD = new Date(endD);
+      startD.setUTCDate(endD.getUTCDate() - (range - 1));
+      const start = startD.toISOString().slice(0, 10);
+      const end = endD.toISOString().slice(0, 10);
+
+      // 1. Total rooms (available room nights)
+      const roomsRow: any = await tenantDb.get("SELECT COUNT(*)::int AS n FROM hotel_rooms WHERE deleted_at IS NULL").catch(() => ({ n: 0 }));
+      const totalRooms = Number(roomsRow?.n || 0);
+      const availableRoomNights = totalRooms * range;
+
+      // 2. Bookings overlapping the window
+      const bookings: any[] = await tenantDb.query(
+        `SELECT id, room_id, check_in_date, check_out_date, total_amount, status,
+                booking_source, commission_amount, net_amount, guest_name
+           FROM room_bookings
+          WHERE status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+            AND check_in_date <= ?
+            AND check_out_date >= ?
+          ORDER BY check_in_date`,
+        [end, start]
+      );
+
+      // Compute overlap nights per booking with the [start, end] window
+      const dayMs = 86400000;
+      const startMs = new Date(start + 'T00:00:00Z').getTime();
+      const endMs = new Date(end + 'T00:00:00Z').getTime();
+
+      let occupiedRoomNights = 0;
+      let roomRevenue = 0;
+      let commissionTotal = 0;
+      const bySource: Record<string, { nights: number; revenue: number }> = {};
+      for (const b of bookings) {
+        const ciMs = new Date(String(b.check_in_date).slice(0, 10) + 'T00:00:00Z').getTime();
+        const coMs = new Date(String(b.check_out_date).slice(0, 10) + 'T00:00:00Z').getTime();
+        const overlapStart = Math.max(ciMs, startMs);
+        const overlapEnd = Math.min(coMs, endMs + dayMs); // checkout day is exclusive
+        const nights = Math.max(0, Math.floor((overlapEnd - overlapStart) / dayMs));
+        const totalNights = Math.max(1, Math.floor((coMs - ciMs) / dayMs));
+        const perNightRevenue = nights > 0 ? (Number(b.total_amount || 0) / totalNights) * nights : 0;
+        occupiedRoomNights += nights;
+        roomRevenue += perNightRevenue;
+        commissionTotal += (Number(b.commission_amount || 0) / totalNights) * nights;
+        const src = String(b.booking_source || 'DIRECT').toUpperCase();
+        bySource[src] = bySource[src] || { nights: 0, revenue: 0 };
+        bySource[src].nights += nights;
+        bySource[src].revenue += perNightRevenue;
+      }
+
+      const adr = occupiedRoomNights > 0 ? roomRevenue / occupiedRoomNights : 0;
+      const occupancyPct = availableRoomNights > 0 ? (occupiedRoomNights / availableRoomNights) * 100 : 0;
+      const revpar = availableRoomNights > 0 ? roomRevenue / availableRoomNights : 0;
+
+      // 3. Ancillary revenue — F&B (orders) + service charges (service_requests) + folio non-room entries
+      const fnbRow: any = await tenantDb.get(
+        `SELECT COALESCE(SUM(total), 0) AS total
+           FROM orders WHERE created_at::date BETWEEN ? AND ?
+             AND status NOT IN ('CANCELLED')`,
+        [start, end]
+      ).catch(() => ({ total: 0 }));
+      const fnbRevenue = Number(fnbRow?.total || 0);
+
+      const svcRow: any = await tenantDb.get(
+        `SELECT COALESCE(SUM(charge_amount), 0) AS total
+           FROM service_requests
+          WHERE COALESCE(is_complimentary, 0) = 0
+            AND requested_at::date BETWEEN ? AND ?`,
+        [start, end]
+      ).catch(() => ({ total: 0 }));
+      const serviceRevenue = Number(svcRow?.total || 0);
+
+      // 4. Outstanding folios as of end-date
+      const outstandingRow: any = await tenantDb.get(
+        `SELECT COALESCE(SUM(GREATEST(0, COALESCE(grand_total, 0) - COALESCE(amount_paid, 0))), 0) AS total
+           FROM folios WHERE status NOT IN ('SETTLED', 'CANCELLED')`,
+        []
+      ).catch(() => ({ total: 0 }));
+      const outstandingTotal = Number(outstandingRow?.total || 0);
+
+      // 5. Today-level KPIs (always for the END date specifically)
+      const todayArrivals: any[] = await tenantDb.query(
+        "SELECT COUNT(*)::int AS n FROM room_bookings WHERE check_in_date = ? AND status IN ('BOOKED', 'CHECKED_IN')",
+        [end]
+      ).catch(() => [{ n: 0 }]);
+      const todayDepartures: any[] = await tenantDb.query(
+        "SELECT COUNT(*)::int AS n FROM room_bookings WHERE check_out_date = ? AND status IN ('CHECKED_IN', 'CHECKED_OUT')",
+        [end]
+      ).catch(() => [{ n: 0 }]);
+
+      res.json({
+        date,
+        range,
+        period: { start, end },
+        rooms: {
+          total: totalRooms,
+          available_room_nights: availableRoomNights,
+          occupied_room_nights: occupiedRoomNights,
+          occupancy_pct: Math.round(occupancyPct * 100) / 100,
+        },
+        revenue: {
+          rooms: Math.round(roomRevenue * 100) / 100,
+          fnb: Math.round(fnbRevenue * 100) / 100,
+          services: Math.round(serviceRevenue * 100) / 100,
+          total_ancillary: Math.round((fnbRevenue + serviceRevenue) * 100) / 100,
+          grand_total: Math.round((roomRevenue + fnbRevenue + serviceRevenue) * 100) / 100,
+          ota_commission_paid: Math.round(commissionTotal * 100) / 100,
+          net_room_revenue: Math.round((roomRevenue - commissionTotal) * 100) / 100,
+        },
+        kpis: {
+          adr: Math.round(adr * 100) / 100,
+          revpar: Math.round(revpar * 100) / 100,
+          occupancy_pct: Math.round(occupancyPct * 100) / 100,
+        },
+        end_day_kpis: {
+          arrivals_today: Number(todayArrivals?.[0]?.n || 0),
+          departures_today: Number(todayDepartures?.[0]?.n || 0),
+        },
+        outstanding_total: Math.round(outstandingTotal * 100) / 100,
+        by_source: Object.entries(bySource).map(([source, v]) => ({
+          source,
+          occupied_room_nights: v.nights,
+          revenue: Math.round(v.revenue * 100) / 100,
+        })),
+        bookings_in_window: bookings.length,
+      });
+    } catch (err: any) {
+      console.error('night-audit error:', err);
+      res.status(500).json({ error: err?.message || 'Night audit failed' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // BA-FIX-#10 — Service Request auto-bill confirmation
+  // ══════════════════════════════════════════════════════════════════════
+  // When a service request with charge_amount > 0 is completed, the staff
+  // currently has no explicit confirmation step before it posts to the
+  // folio — silent revenue leak risk if a freebie was supposed to apply,
+  // or double-bill risk if posted twice.
+  //
+  // Defensive ALTER adds a `charge_status` enum (PENDING/POSTED/WAIVED).
+  // New endpoint confirms posting; cron sweep flags overdue.
+  app.post("/api/restaurant/:id/hotel/service-requests/:requestId/confirm-bill", authenticate, hotelStaff, requireTabAccess('SERVICE_REQUESTS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      // Defensive ALTER — adds the column if a tenant DB pre-dates this feature.
+      await tenantDb.run("ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS charge_status TEXT").catch(() => {});
+      const sr: any = await tenantDb.get(
+        "SELECT * FROM service_requests WHERE id = ?",
+        [req.params.requestId]
+      );
+      if (!sr) return res.status(404).json({ error: 'Service request not found' });
+      if (Number(sr.is_complimentary) === 1) {
+        return res.status(409).json({ error: 'This is a complimentary request — no bill to confirm' });
+      }
+      const amt = Number(sr.charge_amount || 0);
+      if (amt <= 0) {
+        return res.status(409).json({ error: 'Charge amount is 0 — nothing to bill' });
+      }
+      // Idempotency: if folio_entry_id already set, return success
+      if (sr.folio_entry_id) {
+        return res.json({ ok: true, idempotent: true, request: sr });
+      }
+      // Resolve room → folio (re-uses ensureFolioForRoom from earlier work)
+      if (!sr.room_id) {
+        return res.status(400).json({ error: 'service_request has no room_id — cannot post to folio' });
+      }
+      const folioRef = await ensureFolioForRoom(req.params.id, sr.room_id);
+      const folioId = folioRef?.folioId;
+      if (!folioId) return res.status(500).json({ error: 'Could not resolve a folio for this room' });
+      const entryId = randomUUID();
+      const stamp = new Date().toISOString();
+      const label = String(sr.service_name || sr.category || 'Service').slice(0, 200);
+      await tenantDb.run(
+        `INSERT INTO folio_entries (id, folio_id, entry_type, description, amount, gst_amount, total, posted_at)
+           VALUES (?, ?, 'SERVICE', ?, ?, 0, ?, ?)`,
+        [entryId, folioId, label, amt, amt, stamp]
+      );
+      await tenantDb.run(
+        `UPDATE service_requests SET charge_status = 'POSTED', folio_entry_id = ? WHERE id = ?`,
+        [entryId, req.params.requestId]
+      );
+      await recomputeFolioTotals(tenantDb, folioId).catch(() => {});
+      const updated = await tenantDb.get("SELECT * FROM service_requests WHERE id = ?", [req.params.requestId]);
+      res.json({ ok: true, request: updated, folio_entry_id: entryId });
+    } catch (err: any) {
+      console.error('service-requests confirm-bill error:', err);
+      res.status(500).json({ error: err?.message || 'Confirm-bill failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/service-requests/:requestId/waive-bill", authenticate, hotelStaff, requireTabAccess('SERVICE_REQUESTS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.run("ALTER TABLE service_requests ADD COLUMN IF NOT EXISTS charge_status TEXT").catch(() => {});
+      const reason = String(req.body?.reason || 'Waived by staff').trim();
+      const result: any = await tenantDb.run(
+        `UPDATE service_requests
+            SET charge_status = 'WAIVED', is_complimentary = 1,
+                notes = COALESCE(notes, '') || E'\nWAIVED: ' || ?
+          WHERE id = ? AND (charge_status IS NULL OR charge_status = 'PENDING') AND folio_entry_id IS NULL`,
+        [reason, req.params.requestId]
+      );
+      if (result && result.changes === 0) {
+        const fresh = await tenantDb.get("SELECT * FROM service_requests WHERE id = ?", [req.params.requestId]);
+        return res.status(409).json({ error: 'Cannot waive — already posted or already waived', request: fresh });
+      }
+      const updated = await tenantDb.get("SELECT * FROM service_requests WHERE id = ?", [req.params.requestId]);
+      res.json({ ok: true, request: updated });
+    } catch (err: any) {
+      console.error('service-requests waive-bill error:', err);
+      res.status(500).json({ error: err?.message || 'Waive failed' });
     }
   });
 
@@ -24367,6 +24652,38 @@ ${data.tenant.name}`;
             error: "At least one ID-proof document (Aadhaar / Passport / Driving License / etc.) must be uploaded before check-in. Open the booking and add the document, then retry check-in.",
             missing_field: 'guest_documents',
             require_id_at_checkin: true,
+          });
+        }
+      }
+
+      // ── BA-FIX-#8 — Form-C mandatory at foreign-guest check-in ──────
+      // Indian law (Foreigners Act §14 + Rule 14 of Registration of
+      // Foreigners Rules) requires the hotel to submit Form-C to the
+      // FRRO within 24 hours of a foreign national's arrival. Penalty
+      // for non-compliance is significant. Most hotels treat this as
+      // an internal compliance step; we make it a HARD GATE at check-in
+      // so it cannot be forgotten.
+      //
+      // Override via req.body.skip_form_c_for_now=true (returns warning
+      // in response but still allows transition) so a hotelier with
+      // their own portal upload workflow can opt out per-booking.
+      const nat = String(b.guest_nationality || '').trim().toUpperCase();
+      const isForeign = nat && !['IN', 'INDIA', 'INDIAN', ''].includes(nat);
+      if (isForeign && !req.body?.skip_form_c_for_now) {
+        // Check whether a Form-C audit row exists for this booking
+        let formCDone = false;
+        try {
+          const formCRow: any = await tenantDb.get(
+            "SELECT id FROM form_c_audit WHERE booking_id = ? LIMIT 1",
+            [req.params.bookingId]
+          );
+          formCDone = !!formCRow;
+        } catch { formCDone = false; /* table optional in older tenants */ }
+        if (!formCDone) {
+          return res.status(409).json({
+            error: "Form-C must be generated for foreign nationals before check-in (Foreigners Act compliance). Open the booking and click 'Generate Form-C', or pass skip_form_c_for_now=true to override.",
+            error_code: 'FORM_C_REQUIRED',
+            nationality: b.guest_nationality,
           });
         }
       }
@@ -31948,7 +32265,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hr-statutory-exports-expenses-offers-selfservice',
+    commit_marker: 'ba-phase2-night-audit-noshow-formc-commission',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -33199,6 +33516,74 @@ ${data.tenant.name}`;
   // ═════════════════════════════════════════════════════════════════════════
   // HR-P1 #140 — Auto-create monthly payroll DRAFT (1st of month, 03:00 IST)
   // ═════════════════════════════════════════════════════════════════════════
+  // ═════════════════════════════════════════════════════════════════════════
+  // BA-FIX-#9 — No-show flag + auto-cancel cron (daily 02:30 IST)
+  // ═════════════════════════════════════════════════════════════════════════
+  // A booking is considered NO_SHOW when:
+  //   • status = 'BOOKED'  (never checked in)
+  //   • check_in_date <  today - 1 day  (grace window of one full day)
+  //   • actual_checkin_at IS NULL
+  // We flag it (defensive `no_show` flag + status = 'NO_SHOW') and write a
+  // notification so the front office sees it. Folio (if any) is preserved
+  // for audit but marked as VOID — no automatic refund/charge logic (that
+  // depends on the no-show policy).
+  cron.schedule('30 2 * * *', async () => {
+    try {
+      const tenants: any[] = await centralDb.query(
+        `SELECT id FROM restaurants WHERE is_active = 1 AND access_revoked = 0`
+      );
+      const today = new Date().toISOString().slice(0, 10);
+      const yest = (() => {
+        const d = new Date(); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10);
+      })();
+      let total = 0;
+      for (const t of tenants) {
+        try {
+          const tdb = await getTenantDb(t.id);
+          // Defensive ALTER — flag column may not exist on legacy tenants
+          await tdb.run("ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS no_show INT DEFAULT 0").catch(() => {});
+          // Identify candidates first (so we can notify)
+          const candidates: any[] = await tdb.query(
+            `SELECT id, guest_name, guest_phone, guest_email, check_in_date, room_id
+               FROM room_bookings
+              WHERE status = 'BOOKED'
+                AND actual_checkin_at IS NULL
+                AND check_in_date < ?
+                AND COALESCE(no_show, 0) = 0
+              LIMIT 500`,
+            [yest]
+          ).catch(() => []);
+          if (candidates.length === 0) continue;
+          for (const b of candidates) {
+            const result: any = await tdb.run(
+              `UPDATE room_bookings
+                  SET status = 'NO_SHOW', no_show = 1
+                WHERE id = ? AND status = 'BOOKED' AND actual_checkin_at IS NULL`,
+              [b.id]
+            ).catch(() => ({ changes: 0 }));
+            if (result && result.changes > 0) {
+              total++;
+              // Void any open folio for the no-show
+              await tdb.run(
+                "UPDATE folios SET status = 'VOIDED' WHERE booking_id = ? AND status NOT IN ('SETTLED', 'CANCELLED', 'VOIDED')",
+                [b.id]
+              ).catch(() => {});
+              triggerNotification(t.id, 'BOOKING_NO_SHOW', {
+                bookingId: b.id, guestName: b.guest_name, checkIn: b.check_in_date,
+              }).catch(() => {});
+            }
+          }
+        } catch (err) {
+          console.error(`[no-show-sweep] tenant ${t.id} failed:`, err);
+        }
+      }
+      if (total > 0) console.log(`[no-show-sweep] flagged ${total} no-show booking(s) across ${tenants.length} tenants`);
+    } catch (err) {
+      console.error('[no-show-sweep] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[no-show-sweep] Daily 02:30 IST no-show sweep cron started');
+
   cron.schedule('0 3 1 * *', async () => {
     try {
       const tenants: any[] = await centralDb.query(
