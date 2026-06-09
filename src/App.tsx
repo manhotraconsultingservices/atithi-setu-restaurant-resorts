@@ -7580,6 +7580,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [travelAgents, setTravelAgents] = useState<any[]>([]);
   const [editingAgent, setEditingAgent] = useState<any | null>(null);
   const [receivablesAging, setReceivablesAging] = useState<any>(null);
+  // Outstanding-payments report (per-booking, sortable + filterable).
+  // Populated by the new /reports/outstanding-payments endpoint.
+  const [outstandingReport, setOutstandingReport] = useState<any>(null);
+  const [outstandingLoading, setOutstandingLoading] = useState(false);
+  const [outstandingSort, setOutstandingSort] = useState<{ col: string; dir: 'asc' | 'desc' }>({ col: 'days_overdue', dir: 'desc' });
+  const [outstandingFilters, setOutstandingFilters] = useState<{
+    partner_type: string;
+    partner_code: string;
+    status: string;
+    q: string;
+  }>({ partner_type: '', partner_code: '', status: '', q: '' });
   const [partnerInvoices, setPartnerInvoices] = useState<any[]>([]);
   const [partnerStatement, setPartnerStatement] = useState<any>(null);
   const [statementLoading, setStatementLoading] = useState(false);
@@ -7608,6 +7619,60 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!isHotelEnabled) return;
     try { setReceivablesAging(await hotelApi('/reports/receivables-aging')); }
     catch { setReceivablesAging(null); }
+  };
+  const fetchOutstandingReport = async () => {
+    if (!isHotelEnabled) return;
+    setOutstandingLoading(true);
+    try { setOutstandingReport(await hotelApi('/reports/outstanding-payments')); }
+    catch { setOutstandingReport(null); }
+    finally { setOutstandingLoading(false); }
+  };
+  // Apply current sort + filters to the outstanding-payments rows.
+  // Memo would be premature — dataset is small (< few hundred rows)
+  // and the table re-renders on every filter/sort tick anyway.
+  // Hides PAID by default; explicit "Paid" status filter to show.
+  const applyOutstandingFiltersAndSort = (): any[] => {
+    const all: any[] = outstandingReport?.rows || [];
+    const f = outstandingFilters;
+    const q = (f.q || '').toLowerCase().trim();
+    const filtered = all.filter((r: any) => {
+      if (f.partner_type && r.partner_type !== f.partner_type) return false;
+      if (f.partner_code && r.partner_code !== f.partner_code) return false;
+      if (f.status) {
+        if (r.status !== f.status) return false;
+      } else {
+        // Default view: hide fully PAID rows. They're settled — the
+        // owner usually doesn't care about them in this report.
+        if (r.status === 'PAID') return false;
+      }
+      if (q) {
+        const hay = `${r.booking_id} ${r.guest_name || ''} ${r.guest_phone || ''} ${r.partner_name || ''} ${r.invoice_number || ''}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    const { col, dir } = outstandingSort;
+    const mul = dir === 'asc' ? 1 : -1;
+    return [...filtered].sort((a: any, b: any) => {
+      const av = a[col]; const bv = b[col];
+      // null / undefined always sort to the bottom regardless of dir.
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * mul;
+      return String(av).localeCompare(String(bv)) * mul;
+    });
+  };
+  // Inline currency formatter that respects the tenant's symbol —
+  // used in the outstanding-payments report. Returns just the
+  // number when withSymbol=false (for compact table cells).
+  const currency = (n: number, withSymbol: boolean = true): string => {
+    const sym = (restaurant as any)?.currency_symbol || '₹';
+    const v = Number.isFinite(n) ? n : 0;
+    let formatted: string;
+    try { formatted = v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+    catch { formatted = v.toFixed(2); }
+    return withSymbol ? `${sym}${formatted}` : formatted;
   };
   const fetchPartnerInvoices = async () => {
     if (!isHotelEnabled) return;
@@ -10174,7 +10239,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // BCG client request 8 Jun 2026 — Channel Manager moved out of Settings.
     // Eagerly load credentials + iCal feeds + recent webhook events when
     // the tab is opened so the page renders with data, not loading spinners.
-    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); fetchTravelAgents(); fetchReceivablesAging(); fetchPartnerInvoices(); }
+    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); fetchTravelAgents(); fetchReceivablesAging(); fetchPartnerInvoices(); fetchOutstandingReport(); }
     if (activeTab === 'FOLIOS') fetchHotelFolios();
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
@@ -18482,6 +18547,257 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               );
             })()}
+          </div>
+
+          {/* ════════════════ 📋 OUTSTANDING PAYMENTS — per-booking ════════════════
+              Drill-down view of the aging grid above. Owner sees one
+              row per commissioned booking (OTA or agent) that isn't
+              fully settled, with booking ID, due date, days overdue,
+              and click-through to the partner statement modal.
+              Every column sortable; partner / status / search filters
+              client-side; CSV export uses the same helper as Front
+              Office Reports. */}
+          <div className="bg-white p-8 rounded-[32px] border border-[#cc5a16]/10 shadow-sm">
+            <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+              <div>
+                <h3 className="text-2xl font-bold font-serif text-[#1a1208]">📋 Outstanding payments — per booking</h3>
+                <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
+                  Every commissioned booking (OTA + travel agent) with money still to collect.
+                  Click any column header to sort, use filters to narrow down. Click a row to open
+                  the partner statement and record a payment.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    if (!outstandingReport?.rows?.length) { alert('Nothing to export yet.'); return; }
+                    // Apply current filters + sort to the CSV so what
+                    // the user sees on screen is what they download.
+                    const rows = applyOutstandingFiltersAndSort();
+                    const fmt = (n: number) => Number.isFinite(n) ? n.toFixed(2) : '';
+                    const header = ['Booking ID','Guest','Check-in','Check-out','Partner type','Partner','Source','Gross','Comm %','Commission','Net to property','Invoice #','Invoice date','Due date','Days overdue','Outstanding','Status'];
+                    const csvRows = rows.map((r: any) => [
+                      r.booking_id, r.guest_name || '', r.check_in_date || '', r.check_out_date || '',
+                      r.partner_type, r.partner_name || r.partner_code, r.booking_source || '',
+                      fmt(r.total_amount), fmt(r.commission_pct), fmt(r.commission_amount), fmt(r.net_amount),
+                      r.invoice_number || '', r.invoice_date || '', r.due_date || '',
+                      r.days_overdue == null ? '' : String(r.days_overdue),
+                      fmt(r.outstanding_balance), r.status,
+                    ]);
+                    // Append summary footer.
+                    const s = outstandingReport.summary || {};
+                    csvRows.push([]);
+                    csvRows.push(['', '', '', '', '', '', '', '', '', '', '', '', '', 'TOTAL OUTSTANDING', '', fmt(s.total_outstanding || 0), '']);
+                    csvRows.push(['', '', '', '', '', '', '', '', '', '', '', '', '', `Overdue: ${s.overdue_bookings || 0} bookings`, '', fmt(s.overdue_amount || 0), '']);
+                    downloadCsv(`outstanding-payments-${outstandingReport.as_of || new Date().toISOString().slice(0,10)}.csv`, header, csvRows);
+                  }}
+                  className="text-[10px] font-bold text-[#3d3128] hover:underline"
+                >📥 Export CSV</button>
+                <button onClick={() => fetchOutstandingReport()} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
+              </div>
+            </div>
+
+            {/* ── KPI summary strip ───────────────────────────────── */}
+            {outstandingReport && outstandingReport.summary && (() => {
+              const s = outstandingReport.summary;
+              return (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                  <div className="bg-rose-50 rounded-2xl p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-rose-700">Total outstanding</div>
+                    <div className="text-2xl font-bold font-mono text-rose-900 mt-1">{currency(s.total_outstanding)}</div>
+                    <div className="text-[10px] text-rose-700 mt-0.5">{s.total_bookings} booking{s.total_bookings===1?'':'s'}</div>
+                  </div>
+                  <div className="bg-red-50 rounded-2xl p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-red-700">Overdue</div>
+                    <div className="text-2xl font-bold font-mono text-red-900 mt-1">{currency(s.overdue_amount)}</div>
+                    <div className="text-[10px] text-red-700 mt-0.5">{s.overdue_bookings} booking{s.overdue_bookings===1?'':'s'} past due</div>
+                  </div>
+                  <div className="bg-[#faf7f2] rounded-2xl p-3 col-span-2">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Top partners by outstanding</div>
+                    <div className="mt-1 space-y-0.5 max-h-20 overflow-y-auto">
+                      {(s.partners || []).slice(0, 3).map((p: any) => (
+                        <div key={`${p.partner_type}-${p.partner_code}`} className="flex justify-between text-[11px]">
+                          <span className="truncate text-[#3d3128]">{p.partner_name || p.partner_code} <span className="text-[#9c8e85]">({p.booking_count})</span></span>
+                          <span className="font-mono font-bold">{currency(p.outstanding)}</span>
+                        </div>
+                      ))}
+                      {(s.partners || []).length === 0 && <span className="text-[11px] text-[#9c8e85] italic">No partners pending.</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ── Filter row ──────────────────────────────────────── */}
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-3 p-3 bg-[#faf7f2] rounded-2xl">
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Partner type</label>
+                <select
+                  value={outstandingFilters.partner_type}
+                  onChange={e => setOutstandingFilters({ ...outstandingFilters, partner_type: e.target.value })}
+                  className="w-full bg-white border-none rounded-xl px-2 py-1.5 text-xs outline-none"
+                >
+                  <option value="">All</option>
+                  <option value="OTA">OTA only</option>
+                  <option value="AGENT">Travel agent only</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Partner</label>
+                <select
+                  value={outstandingFilters.partner_code}
+                  onChange={e => setOutstandingFilters({ ...outstandingFilters, partner_code: e.target.value })}
+                  className="w-full bg-white border-none rounded-xl px-2 py-1.5 text-xs outline-none"
+                >
+                  <option value="">All partners</option>
+                  {Array.from(new Map((outstandingReport?.rows || []).map((r: any) => [r.partner_code, r])).values())
+                    .map((r: any) => (
+                      <option key={r.partner_code} value={r.partner_code}>{r.partner_name || r.partner_code}</option>
+                    ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Status</label>
+                <select
+                  value={outstandingFilters.status}
+                  onChange={e => setOutstandingFilters({ ...outstandingFilters, status: e.target.value })}
+                  className="w-full bg-white border-none rounded-xl px-2 py-1.5 text-xs outline-none"
+                >
+                  <option value="">All statuses</option>
+                  <option value="UNBILLED">Unbilled</option>
+                  <option value="OPEN">Open</option>
+                  <option value="PARTIAL">Partial</option>
+                  <option value="OVERDUE">Overdue</option>
+                  <option value="PAID">Paid (hidden by default)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Search</label>
+                <input
+                  type="text"
+                  placeholder="Booking ID, guest name, phone…"
+                  value={outstandingFilters.q}
+                  onChange={e => setOutstandingFilters({ ...outstandingFilters, q: e.target.value })}
+                  className="w-full bg-white border-none rounded-xl px-2 py-1.5 text-xs outline-none"
+                />
+              </div>
+            </div>
+
+            {/* ── Data table ──────────────────────────────────────── */}
+            {!outstandingReport ? (
+              <div className="text-center text-sm text-[#9c8e85] p-8 italic">{outstandingLoading ? 'Loading…' : 'Click "Refresh" to load.'}</div>
+            ) : (() => {
+              const rows = applyOutstandingFiltersAndSort();
+              if (rows.length === 0) {
+                return (
+                  <div className="text-center text-sm text-[#9c8e85] p-8 bg-[#faf7f2] rounded-2xl">
+                    🎉 No outstanding payments match your filters.
+                  </div>
+                );
+              }
+              // Sortable column header — click toggles direction.
+              const SortHeader = ({ col, label, align = 'left' }: { col: string; label: string; align?: 'left' | 'right' | 'center' }) => {
+                const active = outstandingSort.col === col;
+                const arrow = active ? (outstandingSort.dir === 'asc' ? '↑' : '↓') : '↕';
+                return (
+                  <th
+                    className={cn('px-3 py-2 cursor-pointer hover:bg-[#cc5a16]/10 select-none whitespace-nowrap',
+                      align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left')}
+                    onClick={() => setOutstandingSort(prev =>
+                      prev.col === col
+                        ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+                        : { col, dir: 'asc' }
+                    )}
+                  >
+                    {label} <span className={cn('text-[9px]', active ? 'text-[#cc5a16]' : 'text-[#9c8e85]')}>{arrow}</span>
+                  </th>
+                );
+              };
+              const statusPill = (s: string) => {
+                const colours: Record<string, string> = {
+                  PAID:     'bg-emerald-100 text-emerald-800',
+                  OPEN:     'bg-amber-100 text-amber-800',
+                  PARTIAL:  'bg-blue-100 text-blue-800',
+                  OVERDUE:  'bg-rose-100 text-rose-800',
+                  UNBILLED: 'bg-stone-100 text-stone-700',
+                };
+                return <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold', colours[s] || 'bg-stone-100 text-stone-700')}>{s}</span>;
+              };
+              return (
+                <div className="overflow-x-auto rounded-2xl border border-[#f0e8dd]">
+                  <table className="w-full text-[11px] min-w-[1000px]">
+                    <thead className="bg-[#faf7f2]/60 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                      <tr>
+                        <SortHeader col="booking_id"          label="Booking ID" />
+                        <SortHeader col="guest_name"          label="Guest" />
+                        <SortHeader col="check_in_date"       label="Check-in" />
+                        <SortHeader col="check_out_date"      label="Check-out" />
+                        <SortHeader col="partner_name"        label="Partner" />
+                        <SortHeader col="partner_type"        label="Type" />
+                        <SortHeader col="total_amount"        label="Gross" align="right" />
+                        <SortHeader col="commission_amount"   label="Commission" align="right" />
+                        <SortHeader col="invoice_number"      label="Invoice #" />
+                        <SortHeader col="due_date"            label="Due" />
+                        <SortHeader col="days_overdue"        label="Days OD" align="right" />
+                        <SortHeader col="outstanding_balance" label="Outstanding" align="right" />
+                        <SortHeader col="status"              label="Status" align="center" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((r: any) => (
+                        <tr
+                          key={r.booking_id}
+                          className="border-t border-[#f0e8dd] hover:bg-[#faf7f2]/60 cursor-pointer"
+                          onClick={() => openPartnerStatement(r.partner_type, r.partner_code)}
+                          title="Click to open partner statement"
+                        >
+                          <td className="px-3 py-1.5 font-mono text-[10px]">{r.booking_id}</td>
+                          <td className="px-3 py-1.5">
+                            <div className="font-semibold text-[#1a1208]">{r.guest_name || '—'}</div>
+                            {r.guest_phone && <div className="text-[10px] text-[#9c8e85]">{r.guest_phone}</div>}
+                          </td>
+                          <td className="px-3 py-1.5 text-[10px]">{formatDateForTenant(r.check_in_date, restaurant?.date_format)}</td>
+                          <td className="px-3 py-1.5 text-[10px]">{formatDateForTenant(r.check_out_date, restaurant?.date_format)}</td>
+                          <td className="px-3 py-1.5">{r.partner_name || r.partner_code}</td>
+                          <td className="px-3 py-1.5 text-[10px]">
+                            <span className={cn('px-1.5 py-0.5 rounded text-[9px] font-bold',
+                              r.partner_type === 'OTA' ? 'bg-indigo-50 text-indigo-700' : 'bg-purple-50 text-purple-700')}>
+                              {r.partner_type}
+                            </span>
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-mono">{currency(r.total_amount, false)}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{currency(r.commission_amount, false)}<span className="text-[9px] text-[#9c8e85]"> ({r.commission_pct}%)</span></td>
+                          <td className="px-3 py-1.5 text-[10px]">{r.invoice_number || <span className="text-[#9c8e85] italic">unbilled</span>}</td>
+                          <td className="px-3 py-1.5 text-[10px]">{r.due_date ? formatDateForTenant(r.due_date, restaurant?.date_format) : '—'}</td>
+                          <td className={cn('px-3 py-1.5 text-right font-mono font-bold',
+                            (r.days_overdue || 0) > 30 ? 'text-rose-700' :
+                            (r.days_overdue || 0) > 0 ? 'text-amber-700' : 'text-[#6b5d52]')}>
+                            {r.days_overdue == null ? '—' : (r.days_overdue > 0 ? `+${r.days_overdue}` : r.days_overdue)}
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-mono font-bold text-rose-700">{currency(r.outstanding_balance, false)}</td>
+                          <td className="px-3 py-1.5 text-center">{statusPill(r.status)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-[#faf7f2]/40 font-bold text-[#1a1208]">
+                      <tr className="border-t-2 border-[#cc5a16]/20">
+                        <td colSpan={11} className="px-3 py-2 text-right text-[10px] uppercase tracking-widest">Showing {rows.length} of {outstandingReport.rows.length} · Outstanding</td>
+                        <td className="px-3 py-2 text-right font-mono text-rose-700">
+                          {currency(rows.reduce((s: number, r: any) => s + (r.outstanding_balance || 0), 0), false)}
+                        </td>
+                        <td />
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              );
+            })()}
+            <p className="text-[10px] text-[#9c8e85] italic mt-2">
+              As of {outstandingReport?.as_of || '—'}.
+              Outstanding = invoice net_due − net_received (apportioned per booking by commission share).
+              "Unbilled" = commissioned booking with no partner invoice yet — auto-invoice runs monthly.
+              Click any row to open the partner statement and record a payment.
+            </p>
           </div>
 
           {/* ════════════════ 🤝 TRAVEL AGENTS ════════════════

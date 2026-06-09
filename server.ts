@@ -19543,6 +19543,214 @@ async function startServer() {
   });
 
   // ════════════════════════════════════════════════════════════════════
+  // ─── Outstanding Payments Report ──────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  // Per-booking view of money owed to the property by OTAs + travel
+  // agents. One row per commissioned booking that isn't fully paid.
+  //
+  // The frontend renders this as a sortable + filterable grid with
+  // CSV export. Sorting/filtering is done client-side (datasets are
+  // small — at most a few hundred outstanding bookings per tenant).
+  //
+  // Status field semantics (computed per booking):
+  //   UNBILLED  → checked-out booking with commission but no invoice yet
+  //   OPEN      → on an invoice, no payment received
+  //   PARTIAL   → on an invoice, some payment received
+  //   PAID      → fully settled
+  //   OVERDUE   → past invoice due_date and not PAID
+  app.get("/api/restaurant/:id/hotel/reports/outstanding-payments", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      // Optional date window — default to the last 365 days of
+      // check-out dates so we don't drag the whole history forever
+      // on properties with thousands of bookings.
+      const from = String(req.query.from || new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10));
+      // Optional partner-type filter ('OTA' | 'AGENT' | empty=all).
+      const partnerTypeFilter = String(req.query.partner_type || '').toUpperCase();
+      // Include zero-commission rows? Default NO — those are direct
+      // bookings with nothing to collect. Owner can pass include_zero=1
+      // to see EVERY commissioned booking even those fully paid.
+      const includeZero = req.query.include_zero === '1' || req.query.include_zero === 'true';
+
+      // Pull every booking with a non-zero commission_amount in the
+      // window. Direct bookings (commission=0) are excluded — there's
+      // nothing for the OTA/agent to settle on those.
+      const bookings: any[] = await db.query(
+        `SELECT b.id, b.guest_name, b.guest_phone,
+                b.check_in_date, b.check_out_date, b.status,
+                b.total_amount, b.commission_pct, b.commission_amount, b.net_amount,
+                b.booking_source, b.agent_id, b.payment_status,
+                COALESCE(ta.name, ?) AS partner_name_fallback,
+                ta.payment_terms_days AS agent_payment_terms
+           FROM room_bookings b
+      LEFT JOIN travel_agents ta ON ta.id = b.agent_id
+          WHERE b.check_in_date BETWEEN ? AND ?
+            AND b.status NOT IN ('CANCELLED')
+            ${includeZero ? '' : "AND b.commission_amount > 0"}
+          ORDER BY b.check_in_date DESC`,
+        ['Direct', from, to]
+      ).catch(() => []);
+
+      // Pull every invoice that COULD cover one of these bookings.
+      // booking_ids_json is a JSON-encoded array of booking IDs the
+      // invoice covers. Cheaper to fetch them all and join in JS than
+      // to LIKE-scan the JSON column per booking.
+      const invoices: any[] = await db.query(
+        `SELECT id, partner_type, partner_code, partner_name, invoice_number,
+                invoice_date, due_date, net_due, net_received, status,
+                booking_ids_json
+           FROM partner_invoices
+          WHERE status NOT IN ('WRITTEN_OFF')`
+      ).catch(() => []);
+      const invoiceByBookingId = new Map<string, any>();
+      for (const inv of invoices) {
+        let ids: string[] = [];
+        try { ids = JSON.parse(inv.booking_ids_json || '[]'); } catch {}
+        for (const bid of ids) {
+          // First invoice wins (oldest by index). Reasonable for the
+          // common case where each booking is invoiced exactly once.
+          if (!invoiceByBookingId.has(bid)) invoiceByBookingId.set(bid, inv);
+        }
+      }
+
+      // For each booking, decide its outstanding status + amount.
+      const today = new Date();
+      const todayIso = today.toISOString().slice(0, 10);
+      const rows = bookings.map((b: any) => {
+        const commission = Number(b.commission_amount || 0);
+        const inv = invoiceByBookingId.get(b.id);
+        // OTA partner_code is the booking_source uppercased; AGENT
+        // partner_code is the travel_agents.id.
+        const isAgent = !!b.agent_id;
+        const partnerType = isAgent ? 'AGENT' : 'OTA';
+        const partnerCode = isAgent ? String(b.agent_id) : String(b.booking_source || '').toUpperCase();
+        const partnerName = (inv && inv.partner_name)
+          || (isAgent ? b.partner_name_fallback : otaDisplayName(partnerCode));
+
+        let invoiceShare = commission;       // amount this booking
+                                             // contributes to the invoice
+        let outstanding = commission;
+        let invoiceId: string | null = null;
+        let invoiceNumber: string | null = null;
+        let invoiceDate: string | null = null;
+        let dueDate: string | null = null;
+        let status: 'UNBILLED' | 'OPEN' | 'PARTIAL' | 'PAID' | 'OVERDUE' = 'UNBILLED';
+        let daysOverdue: number | null = null;
+
+        if (inv) {
+          invoiceId     = inv.id;
+          invoiceNumber = inv.invoice_number || inv.id;
+          invoiceDate   = inv.invoice_date ? String(inv.invoice_date).slice(0, 10) : null;
+          dueDate       = inv.due_date     ? String(inv.due_date).slice(0, 10)     : null;
+          // Apportion the invoice's net_received across its bookings
+          // pro-rata by commission_amount. Approximation — exact
+          // booking-level allocation requires per-booking payment
+          // rows which the current schema doesn't capture.
+          let coveredBookingIds: string[] = [];
+          try { coveredBookingIds = JSON.parse(inv.booking_ids_json || '[]'); } catch {}
+          const totalNetDue = Number(inv.net_due || 0);
+          const totalReceived = Number(inv.net_received || 0);
+          const share = totalNetDue > 0 ? commission / totalNetDue : 0;
+          const receivedShare = totalReceived * share;
+          outstanding = Math.max(0, commission - receivedShare);
+          invoiceShare = commission;
+          if (totalReceived >= totalNetDue - 0.01)      status = 'PAID';
+          else if (totalReceived > 0)                   status = 'PARTIAL';
+          else                                          status = 'OPEN';
+          if (dueDate && dueDate < todayIso && status !== 'PAID') {
+            status = 'OVERDUE';
+            daysOverdue = Math.floor((today.getTime() - new Date(dueDate).getTime()) / 86400000);
+          }
+        } else {
+          // No invoice yet → UNBILLED. Compute the *expected* due date
+          // from check_out + agent payment_terms_days (default 30) so
+          // the owner can still flag "overdue but uninvoiced" bookings.
+          const co = b.check_out_date ? new Date(b.check_out_date) : null;
+          const termsDays = Number(b.agent_payment_terms || 30);
+          if (co) {
+            const projectedDue = new Date(co.getTime() + termsDays * 86400000);
+            dueDate = projectedDue.toISOString().slice(0, 10);
+            if (dueDate < todayIso) {
+              daysOverdue = Math.floor((today.getTime() - projectedDue.getTime()) / 86400000);
+            }
+          }
+        }
+
+        return {
+          booking_id:           b.id,
+          guest_name:           b.guest_name,
+          guest_phone:          b.guest_phone,
+          check_in_date:        b.check_in_date ? String(b.check_in_date).slice(0, 10) : null,
+          check_out_date:       b.check_out_date ? String(b.check_out_date).slice(0, 10) : null,
+          booking_status:       b.status,
+          partner_type:         partnerType,
+          partner_code:         partnerCode,
+          partner_name:         partnerName,
+          booking_source:       b.booking_source,
+          total_amount:         Number(b.total_amount || 0),
+          commission_pct:       Number(b.commission_pct || 0),
+          commission_amount:    Math.round(commission * 100) / 100,
+          net_amount:           Number(b.net_amount || 0),
+          invoice_id:           invoiceId,
+          invoice_number:       invoiceNumber,
+          invoice_date:         invoiceDate,
+          due_date:             dueDate,
+          days_overdue:         daysOverdue,
+          outstanding_balance:  Math.round(outstanding * 100) / 100,
+          invoice_share:        Math.round(invoiceShare * 100) / 100,
+          status,
+        };
+      })
+      .filter((r: any) => (partnerTypeFilter ? r.partner_type === partnerTypeFilter : true));
+
+      // Aggregate summary KPIs for the report header.
+      const totalOutstanding = rows.reduce((s: number, r: any) => s + r.outstanding_balance, 0);
+      const overdueBookings  = rows.filter((r: any) => r.status === 'OVERDUE').length;
+      const overdueAmount    = rows
+        .filter((r: any) => r.status === 'OVERDUE')
+        .reduce((s: number, r: any) => s + r.outstanding_balance, 0);
+      const byPartner: Record<string, { partner_type: string; partner_code: string; partner_name: string; outstanding: number; booking_count: number }> = {};
+      for (const r of rows) {
+        if (r.status === 'PAID') continue;
+        const key = `${r.partner_type}|${r.partner_code}`;
+        if (!byPartner[key]) {
+          byPartner[key] = {
+            partner_type: r.partner_type,
+            partner_code: r.partner_code,
+            partner_name: r.partner_name,
+            outstanding: 0,
+            booking_count: 0,
+          };
+        }
+        byPartner[key].outstanding += r.outstanding_balance;
+        byPartner[key].booking_count += 1;
+      }
+      const partnerSummary = Object.values(byPartner)
+        .map(p => ({ ...p, outstanding: Math.round(p.outstanding * 100) / 100 }))
+        .sort((a, b) => b.outstanding - a.outstanding);
+
+      res.json({
+        as_of:        todayIso,
+        period:       { from, to },
+        rows,
+        summary: {
+          total_outstanding: Math.round(totalOutstanding * 100) / 100,
+          overdue_amount:    Math.round(overdueAmount * 100) / 100,
+          overdue_bookings:  overdueBookings,
+          total_bookings:    rows.length,
+          partners:          partnerSummary,
+        },
+      });
+    } catch (err: any) {
+      console.error('outstanding-payments error:', err);
+      res.status(500).json({ error: err?.message || 'Report failed' });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
   // ─── OUTBOUND SYNC QUEUE INSPECTOR (Gap 7) ─────────────────────────
   // ════════════════════════════════════════════════════════════════════
   // List + manual-retry + dismiss endpoints for the channel_sync_log
@@ -29120,7 +29328,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'confirmation-step-scroll-to-top-plus-cta-buttons',
+    commit_marker: 'outstanding-payments-per-booking-report-sortable',
     code_features: [
       'subscription-billing',
       'read-only-mode',
