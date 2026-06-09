@@ -20083,28 +20083,38 @@ async function startServer() {
         [room_type_id]
       );
       if (!room) return res.json({ starting_from_rate: null, note: 'no rooms available' });
-      const mealPlans: any[] = await tenantDb.query(
-        "SELECT id, code, name FROM meal_plans WHERE is_active = 1"
-      ).catch(() => []);
-      // Compute per-night for each meal plan; pick the minimum.
+      // Query the matrix DIRECTLY for the cheapest meal-plan rate that
+      // overlaps the requested date range. This is more robust than
+      // iterating all meal_plans and calling computeBookingTotalWithExtras:
+      // tenants frequently end up with orphan meal_plans (created via the
+      // Tariff UI but never wired into room_tariffs), and those orphans
+      // make the resolver fall back to room.base_rate which then beats
+      // the real matrix rates in the "cheapest" picker.
+      // We restrict to meal_plans that ACTUALLY appear in room_tariffs
+      // for this room_type so only real, sellable plans are considered.
       const nights = Math.max(1, Math.ceil((new Date(end).getTime() - new Date(start).getTime()) / 86400000));
       let cheapest: { rate: number; meal_plan_id: string | null; meal_plan_label: string } | null = null;
-      const candidates = mealPlans.length > 0 ? mealPlans : [{ id: null, code: 'EP', name: 'Room Only' }];
-      for (const mp of candidates) {
-        try {
-          const breakdown: any = await computeBookingTotalWithExtras(req.params.id, room.id, start, end, {
-            mealPlanId: mp.id, extraAdults: 0, extraChildrenWithMattress: 0, extraChildrenNoMattress: 0,
-            bookingType: 'OVERNIGHT',
-          });
-          const perNight = Number(breakdown.total || 0) / nights;
-          if (!cheapest || perNight < cheapest.rate) {
-            // Display name: "EP — Room Only" if the plan has both code+name.
-            const label = mp.code && mp.name ? `${mp.code} — ${mp.name}` : (mp.name || mp.code || 'Room Only');
-            cheapest = { rate: Math.round(perNight), meal_plan_id: mp.id, meal_plan_label: label };
-          }
-        } catch { /* missing matrix entry — skip this plan */ }
-      }
-      // Final fallback: room.base_rate.
+      try {
+        const row: any = await tenantDb.get(
+          `SELECT mp.id AS mp_id, mp.code AS mp_code, mp.name AS mp_name, MIN(rt.rate) AS min_rate
+             FROM room_tariffs rt
+             JOIN meal_plans mp     ON mp.id = rt.meal_plan_id AND mp.is_active = 1
+             JOIN season_periods sp ON sp.season_id = rt.season_id
+            WHERE rt.room_type_id = ?
+              AND sp.start_date <= ?
+              AND sp.end_date   >= ?
+            GROUP BY mp.id, mp.code, mp.name
+            ORDER BY min_rate ASC
+            LIMIT 1`,
+          [room_type_id, end, start]
+        );
+        if (row && row.min_rate != null) {
+          const label = row.mp_code && row.mp_name ? `${row.mp_code} — ${row.mp_name}` : (row.mp_name || row.mp_code || 'Room Only');
+          cheapest = { rate: Math.round(Number(row.min_rate)), meal_plan_id: row.mp_id, meal_plan_label: label };
+        }
+      } catch { /* matrix query failed — drop to base_rate fallback */ }
+      // Final fallback: room.base_rate (used when tenant hasn't set up
+      // any matrix entries OR no season period covers the date range).
       if (!cheapest) cheapest = { rate: Number(room.base_rate || 0), meal_plan_id: null, meal_plan_label: 'Base rate' };
       res.json({
         starting_from_rate: cheapest.rate,
@@ -28194,7 +28204,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-booking-page-e2e-fixes-mealplan-name-rooms-fetch',
+    commit_marker: 'rate-preview-direct-matrix-query-skip-orphan-mealplans',
     code_features: [
       'subscription-billing',
       'read-only-mode',
