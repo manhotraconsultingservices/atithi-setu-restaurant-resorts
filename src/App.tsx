@@ -45204,13 +45204,21 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     setSearching(true);
     setSearchResults(null);
     try {
-      // Availability endpoint uses `guests` as a sleep-capacity filter
-      // (rooms whose capacity < guests are hidden). We send the
-      // per-room occupancy (adults + children) so the filter matches
-      // what the guest will sleep in ONE room.
-      const perRoomOcc = Math.max(1, (searchParams.adults || 0) + (searchParams.children || 0));
+      // Marriott-grade search shape — send adults/children/rooms
+      // separately so the backend can compute per-room occupancy =
+      // ceil((adults+children) / rooms). Capacity filter then matches
+      // physical room sleep limits, and the backend drops categories
+      // with rooms_available < requested_rooms.
+      // `guests` is included as a legacy back-compat alias for any
+      // shared endpoint consumer still reading the single field.
+      const totalOcc = Math.max(1, (searchParams.adults || 0) + (searchParams.children || 0));
       const qs = new URLSearchParams({
-        start: searchParams.start, end: searchParams.end, guests: String(perRoomOcc),
+        start:    searchParams.start,
+        end:      searchParams.end,
+        rooms:    String(searchParams.rooms || 1),
+        adults:   String(searchParams.adults || 0),
+        children: String(searchParams.children || 0),
+        guests:   String(totalOcc),
       });
       const res = await fetch(`/api/public/restaurant/${encodeURIComponent(resolvedTenantId)}/hotel/availability?${qs.toString()}`);
       const data = await res.json();
@@ -45976,8 +45984,30 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
             {searchResults !== null && (
               <div className="space-y-2">
                 {searchResults.length === 0 ? (
-                  <div className="bg-white rounded-3xl shadow-sm p-8 text-center text-sm text-[#6b5d52]">
-                    No rooms available for these dates. Try a different range or contact the property.
+                  <div className="bg-white rounded-3xl shadow-sm p-8 text-center text-sm text-[#6b5d52] space-y-3">
+                    <p className="font-bold text-[#3d3128]">No rooms fit that party in {searchParams.rooms} room{searchParams.rooms === 1 ? '' : 's'}.</p>
+                    <p className="text-xs">
+                      You asked for <strong>{searchParams.adults} adult{searchParams.adults===1?'':'s'}{searchParams.children > 0 ? ` + ${searchParams.children} child${searchParams.children===1?'':'ren'}` : ''}</strong> across <strong>{searchParams.rooms} room{searchParams.rooms===1?'':'s'}</strong> — that's <strong>{Math.ceil(((searchParams.adults||0)+(searchParams.children||0)) / Math.max(1, searchParams.rooms))} guest{Math.ceil(((searchParams.adults||0)+(searchParams.children||0)) / Math.max(1, searchParams.rooms))===1?'':'s'} per room</strong>.
+                    </p>
+                    {/* Auto-fix suggestion — bump rooms up to fit. The
+                        biggest typical room sleeps 4, so dividing the
+                        party by 4 gives the minimum room count needed. */}
+                    {(((searchParams.adults||0)+(searchParams.children||0)) > 2) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const total = (searchParams.adults||0) + (searchParams.children||0);
+                          const suggested = Math.min(9, Math.max(searchParams.rooms + 1, Math.ceil(total / 2)));
+                          setSearchParams(p => ({ ...p, rooms: suggested }));
+                          setTimeout(runSearch, 0);
+                        }}
+                        className="px-4 py-2 rounded-2xl text-white text-xs font-bold"
+                        style={{ background: brandPrimary }}
+                      >
+                        Try {Math.min(9, Math.max(searchParams.rooms + 1, Math.ceil(((searchParams.adults||0)+(searchParams.children||0)) / 2)))} rooms
+                      </button>
+                    )}
+                    <p className="text-[10px] text-[#9c8e85]">Or pick different dates, or contact the property directly.</p>
                   </div>
                 ) : (
                   searchResults.map((r: any) => {
@@ -46024,7 +46054,24 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                                       {left} room{left === 1 ? '' : 's'} left
                                     </span>
                                   )}
-                                  {r.capacity && <span className="text-[10px] text-[#9c8e85]">Sleeps {r.capacity}</span>}
+                                  {r.capacity && (
+                                    <span className="text-[10px] text-[#9c8e85]">
+                                      Sleeps {r.capacity} per room
+                                    </span>
+                                  )}
+                                  {/* Extra-adult chip — only when the
+                                      search context implies the guest
+                                      will trigger extra-adult charges
+                                      (adults_per_room > baseline 2). */}
+                                  {isCategory && r.extra_adults_per_room > 0 && (
+                                    <span
+                                      className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                                      style={{ background: '#fff3e0', color: '#c66a14' }}
+                                      title="Extra-adult charge applies to adults beyond 2 per room as per tariff"
+                                    >
+                                      +{r.extra_adults_per_room} extra adult{r.extra_adults_per_room === 1 ? '' : 's'} · charges apply
+                                    </span>
+                                  )}
                                 </div>
                                 {description && <p className="text-[12px] text-[#6b5d52] mt-2 line-clamp-2">{description}</p>}
                                 {amenities && <p className="text-[10px] text-[#9c8e85] mt-1 line-clamp-1">{amenities}</p>}

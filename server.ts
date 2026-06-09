@@ -20223,15 +20223,50 @@ async function startServer() {
     }
   });
 
-  // Public availability search — same shape as the authed endpoint
-  // (re-uses find-available-rooms logic) but with no PII leakage.
+  // Public availability search — Marriott-grade pattern.
+  //
+  // Search input shape (matches Marriott / Hyatt / Hilton / Booking):
+  //   rooms     — how many rooms the guest wants (1..9)
+  //   adults    — adults across the entire booking
+  //   children  — children across the entire booking
+  //   guests    — legacy single value (back-compat for older clients)
+  //
+  // We compute PER-ROOM OCCUPANCY  =  ceil((adults+children) / rooms)
+  // and filter rooms whose `capacity` (max sleep occupancy) is large
+  // enough to hold one room's share. A category only surfaces if it
+  // has at least `rooms` units actually available for the date range.
+  //
+  // Pricing convention (matches the user's tariff configuration):
+  //   • Base rate covers 2 adults per room (industry-standard)
+  //   • Adults beyond 2 attract extra_person_charges per night
+  //   • Children priced by age band (handled at booking-create time)
+  //
+  // Surfacing extras here lets the room card label "+1 extra adult"
+  // BEFORE the guest commits — no surprises at checkout.
   app.get("/api/public/restaurant/:id/hotel/availability", async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const start = (req.query.start as string) || '';
       const end   = (req.query.end as string)   || '';
-      const guests = Math.max(1, Number(req.query.guests) || 1);
+      const reqRooms    = Math.max(1, Math.min(9, Number(req.query.rooms)    || 1));
+      const reqAdults   = Math.max(1, Number(req.query.adults)   || 0);
+      const reqChildren = Math.max(0, Number(req.query.children) || 0);
+      // Legacy `guests` param: if explicitly provided, treat as total
+      // occupancy (back-compat for older clients that don't yet send
+      // adults/children separately). Falls through when not provided.
+      const legacyGuests = Number(req.query.guests) || 0;
+      const totalOcc = reqAdults + reqChildren || legacyGuests || 1;
+      // Per-room headcount drives the capacity filter. ceil() so two
+      // adults asking for 2 rooms = 1 person per room (which actually
+      // fails the realistic min — bump to at least 1 below).
+      const perRoomOcc = Math.max(1, Math.ceil(totalOcc / reqRooms));
+      // Baseline = 2 adults per room (industry standard). Anything
+      // beyond is an "extra adult" — drives extra_person_charges.
+      const BASELINE_ADULTS_PER_ROOM = 2;
+      const adultsPerRoom = Math.max(1, Math.ceil(reqAdults / reqRooms));
+      const childrenPerRoom = Math.max(0, Math.ceil(reqChildren / reqRooms));
+      const extraAdultsPerRoom = Math.max(0, adultsPerRoom - BASELINE_ADULTS_PER_ROOM);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
         return res.status(400).json({ error: "start and end must be YYYY-MM-DD" });
       }
@@ -20276,10 +20311,13 @@ async function startServer() {
         || Number(check.restaurant.rates_include_gst) === 1) ? 1 : 0;
       const taxCfg = ratesIncGst === 0 ? await loadHotelTaxConfig(req.params.id) : null;
 
-      // Compute rate-plan total for each available room.
+      // Compute rate-plan total for each available room. The capacity
+      // check uses PER-ROOM occupancy (not total guests across all
+      // rooms) so a couple booking 2 rooms for a 4-person party
+      // correctly matches standard 2-cap rooms.
       const results: any[] = [];
       for (const r of rooms) {
-        const fits = Number(r.capacity || 0) >= guests;
+        const fits = Number(r.capacity || 0) >= perRoomOcc;
         const blocked = r.status === 'MAINTENANCE' || r.status === 'BLOCKED';
         const conflict = conflictByRoom[r.id];
         if (!fits || blocked || conflict) continue;  // public page shows only available
@@ -20337,7 +20375,12 @@ async function startServer() {
           byCat[key].starting_from_total = Math.round(r.total_rate);
         }
       }
-      const categories = Object.values(byCat).sort((a: any, b: any) => (a.starting_from_rate || 0) - (b.starting_from_rate || 0));
+      // Inventory filter — only surface categories with enough rooms
+      // available for the requested room count. A guest asking for 3
+      // rooms shouldn't see a category that has only 1 left, since
+      // they can't actually complete the booking.
+      let categories = Object.values(byCat).filter((c: any) => c.rooms_available >= reqRooms);
+      categories.sort((a: any, b: any) => (a.starting_from_rate || 0) - (b.starting_from_rate || 0));
 
       // Phase B (Marriott-grade) — surface every meal plan per category
       // so the guest sees a rate-plan radio strip ("Room Only", "Bed +
@@ -20396,8 +20439,38 @@ async function startServer() {
         for (const c of categories as any[]) if (!c.meal_plans) c.meal_plans = [];
       }
 
-      res.json({ start, end, guests, categories, rooms: results,
-                 rates_include_gst: ratesIncGst });
+      // Decorate each category with the per-room occupancy hint so the
+      // frontend card can show "Sleeps up to N" + an extra-adult chip
+      // when adults_per_room > BASELINE_ADULTS_PER_ROOM. No DB write —
+      // pure annotation derived from the search context.
+      for (const c of categories as any[]) {
+        c.adults_per_room          = adultsPerRoom;
+        c.children_per_room        = childrenPerRoom;
+        c.extra_adults_per_room    = extraAdultsPerRoom;
+        c.per_room_occupancy       = perRoomOcc;
+        c.baseline_adults_per_room = BASELINE_ADULTS_PER_ROOM;
+      }
+
+      res.json({
+        start, end,
+        // Echo back the canonical occupancy fields so the UI can label
+        // results correctly even when the user changes inputs.
+        requested_rooms:    reqRooms,
+        requested_adults:   reqAdults,
+        requested_children: reqChildren,
+        adults_per_room:       adultsPerRoom,
+        children_per_room:     childrenPerRoom,
+        extra_adults_per_room: extraAdultsPerRoom,
+        per_room_occupancy:    perRoomOcc,
+        // Legacy alias retained for older clients still reading `guests`.
+        guests:    totalOcc,
+        categories,
+        // `rooms` stays the flat result list (back-compat with the
+        // owner-side find-available-rooms consumer and the legacy
+        // public-page fallback path).
+        rooms:     results,
+        rates_include_gst: ratesIncGst,
+      });
     } catch (err) {
       console.error("public availability error:", err);
       res.status(500).json({ error: "Failed to search rooms" });
@@ -28741,7 +28814,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-booking-popover-clipping-nan-total-fix',
+    commit_marker: 'availability-per-room-occupancy-search-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
