@@ -20084,12 +20084,12 @@ async function startServer() {
       );
       if (!room) return res.json({ starting_from_rate: null, note: 'no rooms available' });
       const mealPlans: any[] = await tenantDb.query(
-        "SELECT id, label FROM meal_plans WHERE is_active = 1"
+        "SELECT id, code, name FROM meal_plans WHERE is_active = 1"
       ).catch(() => []);
       // Compute per-night for each meal plan; pick the minimum.
       const nights = Math.max(1, Math.ceil((new Date(end).getTime() - new Date(start).getTime()) / 86400000));
       let cheapest: { rate: number; meal_plan_id: string | null; meal_plan_label: string } | null = null;
-      const candidates = mealPlans.length > 0 ? mealPlans : [{ id: null, label: 'Room Only' }];
+      const candidates = mealPlans.length > 0 ? mealPlans : [{ id: null, code: 'EP', name: 'Room Only' }];
       for (const mp of candidates) {
         try {
           const breakdown: any = await computeBookingTotalWithExtras(req.params.id, room.id, start, end, {
@@ -20098,7 +20098,9 @@ async function startServer() {
           });
           const perNight = Number(breakdown.total || 0) / nights;
           if (!cheapest || perNight < cheapest.rate) {
-            cheapest = { rate: Math.round(perNight), meal_plan_id: mp.id, meal_plan_label: mp.label };
+            // Display name: "EP — Room Only" if the plan has both code+name.
+            const label = mp.code && mp.name ? `${mp.code} — ${mp.name}` : (mp.name || mp.code || 'Room Only');
+            cheapest = { rate: Math.round(perNight), meal_plan_id: mp.id, meal_plan_label: label };
           }
         } catch { /* missing matrix entry — skip this plan */ }
       }
@@ -28192,7 +28194,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'public-booking-page-premium-redesign-with-slug-galleries',
+    commit_marker: 'public-booking-page-e2e-fixes-mealplan-name-rooms-fetch',
     code_features: [
       'subscription-billing',
       'read-only-mode',

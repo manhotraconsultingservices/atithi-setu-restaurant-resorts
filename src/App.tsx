@@ -10164,7 +10164,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
-    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchTariff(); fetchPropertyProfile(); fetchPropertyGallery(); fetchAmenityLibrary(); }
+    if (activeTab === 'SETTINGS') { fetchHotelSettings(); fetchYieldRules(); fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchTariff(); fetchPropertyProfile(); fetchPropertyGallery(); fetchAmenityLibrary(); fetchHotelRooms(); }
     if (activeTab === 'STAFF_ACCESS') { fetchStaffAccess(); fetchPermAuditLog(); fetchManageableTenants(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
