@@ -402,7 +402,29 @@ export async function initDb() {
     --                          standard, GST added on top). Drives
     --                          net-room-rate vs gross calculation.
     ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS date_format       TEXT DEFAULT 'DD-MMM-YYYY';
-    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS rates_include_gst INT  DEFAULT 1
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS rates_include_gst INT  DEFAULT 1;
+    -- Per-tenant room occupancy policy (10 Jun 2026).
+    --   • free_adults_per_room      — adults included in base rate (no
+    --                                  extra-adult charge). Default 2.
+    --   • max_extra_adults_per_room — additional adults allowed beyond
+    --                                  baseline, each attracting an
+    --                                  extra-adult charge from the
+    --                                  tariff matrix. Default 2.
+    --   • free_child_age_max        — children at or below this age
+    --                                  stay free (mapped to
+    --                                  CHILD_NO_MATTRESS, typically
+    --                                  configured at 0 in the tariff
+    --                                  matrix). Default 5.
+    --   • max_children_per_room     — total children allowed per room
+    --                                  (capacity cap; extras charged
+    --                                  as CHILD_WITH_MATTRESS).
+    --                                  Default 2.
+    -- Total cap per room = free_adults + max_extra_adults + max_children.
+    -- Defaults preserve the previous hardcoded behaviour (2/2/5/2).
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS free_adults_per_room       INT DEFAULT 2;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS max_extra_adults_per_room  INT DEFAULT 2;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS free_child_age_max         INT DEFAULT 5;
+    ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS max_children_per_room      INT DEFAULT 2
   `);
   await centralDb.exec(
     `CREATE INDEX IF NOT EXISTS idx_restaurants_brand ON restaurants (brand_id)`

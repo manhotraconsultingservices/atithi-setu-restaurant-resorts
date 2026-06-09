@@ -9523,7 +9523,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     setPropertyProfileSaving(true);
     setPropertyProfileSaved(false);
     try {
-      await hotelApi('/property-profile', { method: 'PATCH', body: JSON.stringify(propertyProfile) });
+      // Flatten the nested occupancy_policy onto the root body so the
+      // backend's PATCH handler (which reads b.free_adults_per_room
+      // etc. at the top level) picks them up. The original nested
+      // shape stays for client-side state convenience.
+      const occ: any = (propertyProfile as any).occupancy_policy || {};
+      const body = {
+        ...propertyProfile,
+        free_adults_per_room:      occ.free_adults_per_room,
+        max_extra_adults_per_room: occ.max_extra_adults_per_room,
+        free_child_age_max:        occ.free_child_age_max,
+        max_children_per_room:     occ.max_children_per_room,
+      };
+      await hotelApi('/property-profile', { method: 'PATCH', body: JSON.stringify(body) });
       setPropertyProfileSaved(true);
       setTimeout(() => setPropertyProfileSaved(false), 2500);
     } catch (err: any) {
@@ -19896,6 +19908,78 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       Used for public-page price display + cross-channel net room rate calculation.
                     </p>
                   </div>
+                </div>
+                {/* ── Occupancy policy ──────────────────────────────────
+                    Owner-defined "house rules" for how many adults +
+                    children stay free vs. attract extra-person charges.
+                    Drives search filter / booking POST capacity guard /
+                    public-page chips / extra-person line items. */}
+                <div className="p-3 rounded-2xl bg-[#faf7f2]/70 border border-[#e8d8c4] space-y-3">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Occupancy policy</p>
+                    <p className="text-[10px] text-[#9c8e85] mt-0.5">
+                      How many adults + children stay free per room. Extras attract per-night
+                      charges from the <em>Tariff Settings → Extra-Person Charges</em> matrix.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {[
+                      { key: 'free_adults_per_room',      label: 'Free adults / room',  hint: 'Included in base rate', min: 1, max: 8, def: 2 },
+                      { key: 'max_extra_adults_per_room', label: 'Max extra adults',    hint: 'Beyond baseline (charged)', min: 0, max: 6, def: 2 },
+                      { key: 'free_child_age_max',        label: 'Free child age',      hint: 'Kids at/below stay free', min: 0, max: 17, def: 5 },
+                      { key: 'max_children_per_room',     label: 'Max children / room', hint: 'Total cap (over-age = charged)', min: 0, max: 6, def: 2 },
+                    ].map(f => {
+                      const cur = (propertyProfile.occupancy_policy as any)?.[f.key] ?? f.def;
+                      return (
+                        <div key={f.key}>
+                          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">{f.label}</label>
+                          <div className="flex items-center justify-between bg-white rounded-2xl px-2 py-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setPropertyProfile({
+                                ...propertyProfile,
+                                occupancy_policy: {
+                                  ...(propertyProfile.occupancy_policy || {}),
+                                  [f.key]: Math.max(f.min, Number(cur) - 1),
+                                },
+                              })}
+                              className="w-7 h-7 rounded-full text-[#6b5d52] hover:bg-[#faf7f2] disabled:opacity-30"
+                              disabled={Number(cur) <= f.min}
+                            >–</button>
+                            <span className="text-sm font-bold tabular-nums">{cur}</span>
+                            <button
+                              type="button"
+                              onClick={() => setPropertyProfile({
+                                ...propertyProfile,
+                                occupancy_policy: {
+                                  ...(propertyProfile.occupancy_policy || {}),
+                                  [f.key]: Math.min(f.max, Number(cur) + 1),
+                                },
+                              })}
+                              className="w-7 h-7 rounded-full text-[#6b5d52] hover:bg-[#faf7f2] disabled:opacity-30"
+                              disabled={Number(cur) >= f.max}
+                            >+</button>
+                          </div>
+                          <p className="text-[10px] text-[#9c8e85] mt-0.5">{f.hint}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {(() => {
+                    const op: any = propertyProfile.occupancy_policy || {};
+                    const fa = Number(op.free_adults_per_room ?? 2);
+                    const me = Number(op.max_extra_adults_per_room ?? 2);
+                    const fc = Number(op.free_child_age_max ?? 5);
+                    const mc = Number(op.max_children_per_room ?? 2);
+                    return (
+                      <div className="text-[11px] text-[#3d3128] bg-white rounded-xl p-2.5 border border-[#e8d8c4]">
+                        <strong>Live preview:</strong> Each room sleeps up to <strong>{fa + me + mc}</strong> guests
+                        (<strong>{fa}</strong> free adult{fa===1?'':'s'}{me > 0 ? ` + up to ${me} extra adult${me===1?'':'s'} charged` : ''}
+                        {mc > 0 ? `, plus up to ${mc} child${mc===1?'':'ren'}` : ''}).
+                        Children {fc===0 ? 'are always charged' : `aged ${fc} and under stay free`}.
+                      </div>
+                    );
+                  })()}
                 </div>
                 {/* Description */}
                 <div>
@@ -46056,9 +46140,21 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                                       {left} room{left === 1 ? '' : 's'} left
                                     </span>
                                   )}
-                                  {r.capacity && (
-                                    <span className="text-[10px] text-[#9c8e85]" title={`Base ${r.capacity} adults + up to 2 extras`}>
-                                      Sleeps up to {Number(r.capacity) + 2} per room
+                                  {/* Sleeps-up-to uses the property's
+                                      max_per_room (from occupancy
+                                      policy on backend) — falls back
+                                      to capacity+2 for legacy clients. */}
+                                  {(r.max_per_room || r.capacity) && (
+                                    <span className="text-[10px] text-[#9c8e85]">
+                                      Sleeps up to {r.max_per_room || (Number(r.capacity || 0) + 2)} per room
+                                    </span>
+                                  )}
+                                  {/* "Kids under N stay free" hint —
+                                      surfaces the property's free-
+                                      child-age policy on every card. */}
+                                  {isCategory && (r.free_child_age_max ?? 0) > 0 && (
+                                    <span className="text-[10px] text-emerald-700" title={`Children aged ${r.free_child_age_max} and under stay free`}>
+                                      Kids ≤{r.free_child_age_max} yr free
                                     </span>
                                   )}
                                   {/* Extra-adult chip — only when the

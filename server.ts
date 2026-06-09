@@ -1328,6 +1328,49 @@ function gstRateForTariff(tariff: number, cfg?: HotelTaxConfig): number {
  * convention: slab applies to the published room rate). All three
  * values are rounded to 2 decimals using banker-friendly cent rounding.
  */
+/**
+ * Owner-configurable room-occupancy policy (10 Jun 2026). Stored on
+ * `restaurants` (central) with safe defaults that preserve the
+ * previously hardcoded behaviour (2 free adults / +2 extras allowed /
+ * kids ≤ 5 free / max 2 kids per room).
+ *
+ *   free_adults_per_room      adults included in the base rate. Beyond
+ *                             this count, each adult is charged using
+ *                             the extra_person_charges table (ADULT).
+ *   max_extra_adults_per_room cap on adults beyond baseline. The cap
+ *                             feeds the capacity guard at search +
+ *                             booking time. Default 2 means a 2-cap
+ *                             room sleeps up to 4 adults.
+ *   free_child_age_max        children at or below this age slot into
+ *                             CHILD_NO_MATTRESS (typically configured
+ *                             at zero rate). Older children slot into
+ *                             CHILD_WITH_MATTRESS (charged).
+ *   max_children_per_room     cap on children per room. Feeds the
+ *                             capacity guard alongside adult caps.
+ *
+ * Helper resolves to a normalised, clamped object so caller code
+ * doesn't have to defensively handle NULL / negative values.
+ */
+interface OccupancyPolicy {
+  free_adults_per_room: number;
+  max_extra_adults_per_room: number;
+  free_child_age_max: number;
+  max_children_per_room: number;
+}
+function resolveOccupancyPolicy(r: any): OccupancyPolicy {
+  const n = (v: any, def: number, min = 0, max = 99) => {
+    const x = Number(v);
+    if (!Number.isFinite(x)) return def;
+    return Math.max(min, Math.min(max, Math.floor(x)));
+  };
+  return {
+    free_adults_per_room:      n(r?.free_adults_per_room,      2, 1, 16),
+    max_extra_adults_per_room: n(r?.max_extra_adults_per_room, 2, 0, 16),
+    free_child_age_max:        n(r?.free_child_age_max,        5, 0, 17),
+    max_children_per_room:     n(r?.max_children_per_room,     2, 0, 16),
+  };
+}
+
 function rateBreakdown(
   rate: number,
   gstPct: number,
@@ -20135,6 +20178,10 @@ async function startServer() {
         date_format:                   check.restaurant?.date_format        || 'DD-MMM-YYYY',
         rates_include_gst:             check.restaurant?.rates_include_gst == null
           ? 1 : Number(check.restaurant.rates_include_gst),
+        // Occupancy policy — public page needs it to render "Sleeps up
+        // to N", "Kids under M stay free", and clamp the stepper
+        // popover to sane bounds for THIS property.
+        occupancy_policy:              resolveOccupancyPolicy(check.restaurant),
         // Fallback cancellation text computed from the numeric refund policy
         // so a tenant that hasn't written one still surfaces something.
         cancellation_policy_fallback:
@@ -20261,12 +20308,13 @@ async function startServer() {
       // adults asking for 2 rooms = 1 person per room (which actually
       // fails the realistic min — bump to at least 1 below).
       const perRoomOcc = Math.max(1, Math.ceil(totalOcc / reqRooms));
-      // Baseline = 2 adults per room (industry standard). Anything
-      // beyond is an "extra adult" — drives extra_person_charges.
-      const BASELINE_ADULTS_PER_ROOM = 2;
+      // Owner-defined occupancy policy. Drives the baseline-adults
+      // count, the max-extras cap, and the free-child-age threshold.
+      // Defaults to (2 free / +2 extras / kids ≤ 5 free / max 2 kids).
+      const occPolicy = resolveOccupancyPolicy(check.restaurant);
       const adultsPerRoom = Math.max(1, Math.ceil(reqAdults / reqRooms));
       const childrenPerRoom = Math.max(0, Math.ceil(reqChildren / reqRooms));
-      const extraAdultsPerRoom = Math.max(0, adultsPerRoom - BASELINE_ADULTS_PER_ROOM);
+      const extraAdultsPerRoom = Math.max(0, adultsPerRoom - occPolicy.free_adults_per_room);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
         return res.status(400).json({ error: "start and end must be YYYY-MM-DD" });
       }
@@ -20316,13 +20364,21 @@ async function startServer() {
       // rooms) so a couple booking 2 rooms for a 4-person party
       // correctly matches standard 2-cap rooms.
       //
-      // capacity is BASELINE capacity (typically 2 adults, included
-      // in the matrix rate). Extras up to MAX_EXTRAS_PER_ROOM beyond
-      // baseline are allowed — they attract extra_person_charges
-      // per night. So a capacity=2 room can sleep up to 4 people
-      // (2 base + 2 extras with extra-adult charges applied).
-      const MAX_EXTRAS_PER_ROOM = 2;
-      const effectiveMaxOcc = (cap: number) => Math.max(1, Number(cap || 0)) + MAX_EXTRAS_PER_ROOM;
+      // Effective per-room max occupancy =
+      //     free_adults + max_extra_adults + max_children
+      // (all from the tenant's `occupancy_policy`). This replaces the
+      // previously hardcoded `capacity + 2` formula so owners control
+      // exactly how many guests their rooms accept.
+      //
+      // We don't use rooms.capacity in this calculation — capacity is
+      // the BASELINE adult count and is already implicit in
+      // free_adults_per_room. Tenants whose physical rooms can't hold
+      // the policy max should reduce max_extra_adults / max_children
+      // in Settings rather than depend on rooms.capacity.
+      const effectiveMaxOcc = (_cap: number) =>
+        occPolicy.free_adults_per_room
+        + occPolicy.max_extra_adults_per_room
+        + occPolicy.max_children_per_room;
       const results: any[] = [];
       for (const r of rooms) {
         const fits = effectiveMaxOcc(r.capacity) >= perRoomOcc;
@@ -20449,14 +20505,18 @@ async function startServer() {
 
       // Decorate each category with the per-room occupancy hint so the
       // frontend card can show "Sleeps up to N" + an extra-adult chip
-      // when adults_per_room > BASELINE_ADULTS_PER_ROOM. No DB write —
-      // pure annotation derived from the search context.
+      // when adults_per_room > free_adults_per_room (from policy).
+      // No DB write — pure annotation derived from the search context.
       for (const c of categories as any[]) {
         c.adults_per_room          = adultsPerRoom;
         c.children_per_room        = childrenPerRoom;
         c.extra_adults_per_room    = extraAdultsPerRoom;
         c.per_room_occupancy       = perRoomOcc;
-        c.baseline_adults_per_room = BASELINE_ADULTS_PER_ROOM;
+        c.baseline_adults_per_room = occPolicy.free_adults_per_room;
+        c.max_per_room             = occPolicy.free_adults_per_room
+                                   + occPolicy.max_extra_adults_per_room
+                                   + occPolicy.max_children_per_room;
+        c.free_child_age_max       = occPolicy.free_child_age_max;
       }
 
       res.json({
@@ -20478,6 +20538,9 @@ async function startServer() {
         // public-page fallback path).
         rooms:     results,
         rates_include_gst: ratesIncGst,
+        // Tenant occupancy policy — frontend reads to render hints
+        // like "Children under N stay free", clamp steppers, etc.
+        occupancy_policy: occPolicy,
       });
     } catch (err) {
       console.error("public availability error:", err);
@@ -20619,40 +20682,41 @@ async function startServer() {
       }
 
       // ── Sleeper-capacity check ───────────────────────────────────
-      // First room defines the capacity contract — every room in the
-      // category has the same `capacity` so checking one is enough.
-      // capacity is BASELINE (2 adults included in base rate).
-      // Extras up to MAX_EXTRAS_PER_ROOM beyond baseline are allowed
-      // and attract extra_person_charges per night. Same constant as
-      // in the public availability endpoint above — keep in sync.
-      const MAX_EXTRAS_PER_ROOM_BOOK = 2;
-      const probeRoom: any = await tenantDb.get(
-        "SELECT capacity FROM rooms WHERE id = ?", [candidate_rooms[0]]
-      );
-      const capacity = Math.max(1, Number(probeRoom?.capacity || 2));
-      const effectiveMax = capacity + MAX_EXTRAS_PER_ROOM_BOOK;
-      if (total_occupants > effectiveMax) {
+      // Effective max per room from the owner's occupancy policy:
+      //   free_adults + max_extra_adults + max_children
+      // Per-room occupancy = ceil(total / rooms). Reject when over.
+      // This is the authoritative capacity gate — search uses the
+      // same formula upstream so legit guests never reach this code
+      // unless they bypass the public page.
+      const occPolicy = resolveOccupancyPolicy(check.restaurant);
+      const adultsPerRoomBook   = Math.ceil(adults   / num_rooms);
+      const childrenPerRoomBook = Math.ceil(children / num_rooms);
+      const perRoomOccBook      = adultsPerRoomBook + childrenPerRoomBook;
+      const effectiveMax = occPolicy.free_adults_per_room
+                         + occPolicy.max_extra_adults_per_room
+                         + occPolicy.max_children_per_room;
+      if (perRoomOccBook > effectiveMax) {
         return res.status(400).json({
-          error: `This category sleeps up to ${effectiveMax} per room (${capacity} base + ${MAX_EXTRAS_PER_ROOM_BOOK} with extras). ${adults} adult${adults===1?'':'s'} + ${children} child${children===1?'':'ren'} exceeds it. Try a bigger room or add another room to the booking.`,
+          error: `Per-room occupancy ${perRoomOccBook} exceeds the property's limit of ${effectiveMax} (${occPolicy.free_adults_per_room} free adults + ${occPolicy.max_extra_adults_per_room} extra adults + ${occPolicy.max_children_per_room} children). Reduce guests or add another room.`,
         });
       }
 
       // ── Extra-person split for matrix tariffs ────────────────────
-      // The tenant's tariff is calibrated for a baseline of 2 adults
-      // per room (common across Indian hotels). Anyone beyond that
-      // adds an extra_person charge from the extra_person_charges
-      // table — computeBookingTotalWithExtras() handles the lookup
-      // by (person_type × season × meal_plan).
+      // Driven by the tenant's occupancy policy:
+      //   • adults beyond free_adults_per_room → extra_adults
+      //   • children > free_child_age_max      → CHILD_WITH_MATTRESS (charged)
+      //   • children ≤ free_child_age_max      → CHILD_NO_MATTRESS  (typically free)
+      // computeBookingTotalWithExtras() then looks up the per-night
+      // charge per (person_type × season × meal_plan).
       //
-      // Convention:
-      //   • adults beyond 2          → extra_adults
-      //   • children with mattress   → child_ages > 5
-      //   • children no mattress     → child_ages ≤ 5  (typically free)
-      const BASELINE_ADULTS = 2;
-      const extra_adults = Math.max(0, adults - BASELINE_ADULTS);
+      // Note: extras here are TOTAL across the whole booking — when
+      // num_rooms > 1, the matrix charge applies once per the entire
+      // booking's extras. If owners want per-room semantics they can
+      // book each room as a separate transaction.
+      const extra_adults = Math.max(0, adults - occPolicy.free_adults_per_room);
       const ages = Array.isArray(child_ages) ? child_ages.map((a: any) => Number(a) || 0) : [];
-      const childWithMattress = ages.filter((a: number) => a > 5).length;
-      const childNoMattress   = ages.filter((a: number) => a <= 5).length;
+      const childWithMattress = ages.filter((a: number) => a > occPolicy.free_child_age_max).length;
+      const childNoMattress   = ages.filter((a: number) => a <= occPolicy.free_child_age_max).length;
       // If caller sent children but no ages, default to "with mattress"
       // (paid). Owner-side configuration of the extra_person_charges
       // table determines the actual price (often 50 % for 5-12 yr,
@@ -22812,6 +22876,11 @@ async function startServer() {
       // so any tenant that hasn't toggled them yet sees a sensible value.
       date_format:                  r?.date_format        || 'DD-MMM-YYYY',
       rates_include_gst:            r?.rates_include_gst == null ? 1 : Number(r.rates_include_gst),
+      // Per-tenant occupancy policy (free adults / max extras / free
+      // child age / max children per room). resolveOccupancyPolicy()
+      // clamps + applies defaults, so Settings UI always gets sane
+      // values even on first-time tenants.
+      occupancy_policy:             resolveOccupancyPolicy(r),
     });
   });
 
@@ -22887,6 +22956,19 @@ async function startServer() {
         || String(b.rates_include_gst) === '1'
         || String(b.rates_include_gst).toLowerCase() === 'true') ? 1 : 0;
     }
+    // Occupancy policy — 4 INT fields, each clamped to sane bounds.
+    // Same clamping rules as resolveOccupancyPolicy() so what gets
+    // written is exactly what gets read.
+    const occClamp = (v: any, min: number, max: number): number | undefined => {
+      if (v == null || v === '') return undefined;
+      const x = Number(v);
+      if (!Number.isFinite(x)) return undefined;
+      return Math.max(min, Math.min(max, Math.floor(x)));
+    };
+    const freeAdults  = occClamp(b.free_adults_per_room,      1, 16);
+    const maxExtras   = occClamp(b.max_extra_adults_per_room, 0, 16);
+    const freeChildAge = occClamp(b.free_child_age_max,       0, 17);
+    const maxChildren = occClamp(b.max_children_per_room,     0, 16);
     try {
       await centralDb.run(
         `UPDATE restaurants SET
@@ -22905,7 +22987,11 @@ async function startServer() {
             brand_primary_color   = ${brandPrimary   === undefined ? 'brand_primary_color'   : '?'},
             brand_secondary_color = ${brandSecondary === undefined ? 'brand_secondary_color' : '?'},
             date_format           = ${dateFormat     === undefined ? 'date_format'           : '?'},
-            rates_include_gst     = ${ratesIncGst    === undefined ? 'rates_include_gst'     : '?'}
+            rates_include_gst     = ${ratesIncGst    === undefined ? 'rates_include_gst'     : '?'},
+            free_adults_per_room      = ${freeAdults    === undefined ? 'free_adults_per_room'      : '?'},
+            max_extra_adults_per_room = ${maxExtras     === undefined ? 'max_extra_adults_per_room' : '?'},
+            free_child_age_max        = ${freeChildAge  === undefined ? 'free_child_age_max'        : '?'},
+            max_children_per_room     = ${maxChildren   === undefined ? 'max_children_per_room'     : '?'}
           WHERE id = ?`,
         [slug, b.hero_image_url ?? null, b.hotel_logo_url ?? null,
          b.hotel_description ?? null, b.hotel_full_address ?? null,
@@ -22915,6 +23001,10 @@ async function startServer() {
          ...(brandSecondary === undefined ? [] : [brandSecondary]),
          ...(dateFormat     === undefined ? [] : [dateFormat]),
          ...(ratesIncGst    === undefined ? [] : [ratesIncGst]),
+         ...(freeAdults     === undefined ? [] : [freeAdults]),
+         ...(maxExtras      === undefined ? [] : [maxExtras]),
+         ...(freeChildAge   === undefined ? [] : [freeChildAge]),
+         ...(maxChildren    === undefined ? [] : [maxChildren]),
          req.params.id]
       );
       res.json({ ok: true });
@@ -28826,7 +28916,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'availability-baseline-capacity-plus-extras',
+    commit_marker: 'configurable-occupancy-policy-per-tenant',
     code_features: [
       'subscription-billing',
       'read-only-mode',
