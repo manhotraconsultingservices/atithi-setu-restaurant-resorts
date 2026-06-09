@@ -23550,8 +23550,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Nights</label>
                     <input
                       type="number" min={1} max={30}
-                      value={draft.nights}
-                      onChange={e => setDraft({ nights: Math.max(1, Math.min(30, Number(e.target.value) || 1)) })}
+                      value={draft.nights || ''}
+                      onChange={e => { const v = parseInt(e.target.value, 10); setDraft({ nights: isNaN(v) ? 0 : Math.max(0, Math.min(30, v)) }); }}
+                      onBlur={() => setDraft({ nights: Math.max(1, draft.nights || 1) })}
                       className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
                     />
                   </div>
@@ -23599,7 +23600,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap">+ Adult</label>
                         <input type="number" min={0} max={4}
                           value={draft.extra_adults}
-                          onChange={e => setDraft({ extra_adults: Math.max(0, Number(e.target.value) || 0) })}
+                          onChange={e => { const v = parseInt(e.target.value, 10); setDraft({ extra_adults: isNaN(v) ? 0 : Math.max(0, Math.min(4, v)) }); }}
                           className="flex-1 bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
                         />
                       </div>
@@ -24137,11 +24138,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             </div>
                             <input
                               type="number" min={1}
-                              value={sel.num_guests}
+                              value={sel.num_guests || ''}
                               onChange={e => {
+                                const v = parseInt(e.target.value, 10);
                                 const next = [...draft.rooms];
-                                next[idx] = { ...next[idx], num_guests: Math.max(1, Number(e.target.value) || 1) };
+                                next[idx] = { ...next[idx], num_guests: isNaN(v) ? 0 : Math.max(0, v) };
                                 setGroupBookingDraft({ ...draft, rooms: next });
+                              }}
+                              onBlur={() => {
+                                if (!sel.num_guests || sel.num_guests < 1) {
+                                  const next = [...draft.rooms];
+                                  next[idx] = { ...next[idx], num_guests: 1 };
+                                  setGroupBookingDraft({ ...draft, rooms: next });
+                                }
                               }}
                               title="Guests"
                               className="w-16 bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1 text-xs text-center"
@@ -24150,8 +24159,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               type="number" min={0}
                               value={sel.room_rate}
                               onChange={e => {
+                                const v = parseInt(e.target.value, 10);
                                 const next = [...draft.rooms];
-                                next[idx] = { ...next[idx], room_rate: Math.max(0, Number(e.target.value) || 0) };
+                                next[idx] = { ...next[idx], room_rate: isNaN(v) ? 0 : Math.max(0, v) };
                                 setGroupBookingDraft({ ...draft, rooms: next });
                               }}
                               title="Rate/night"
@@ -25947,24 +25957,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <div>
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Extra Adult (with mattress)">+ Adult</label>
                         <input type="number" min={0} max={6}
-                          value={editingBooking.extra_adults || 0}
-                          onChange={e => setEditingBooking({...editingBooking, extra_adults: Math.max(0, Number(e.target.value) || 0)})}
+                          value={editingBooking.extra_adults ?? 0}
+                          onChange={e => { const v = parseInt(e.target.value, 10); setEditingBooking({...editingBooking, extra_adults: isNaN(v) ? 0 : Math.max(0, Math.min(6, v))}); }}
                           className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
                         />
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Extra Child 5-12 yrs with mattress">+ Child (mat)</label>
                         <input type="number" min={0} max={4}
-                          value={editingBooking.extra_children_with_mattress || 0}
-                          onChange={e => setEditingBooking({...editingBooking, extra_children_with_mattress: Math.max(0, Number(e.target.value) || 0)})}
+                          value={editingBooking.extra_children_with_mattress ?? 0}
+                          onChange={e => { const v = parseInt(e.target.value, 10); setEditingBooking({...editingBooking, extra_children_with_mattress: isNaN(v) ? 0 : Math.max(0, Math.min(4, v))}); }}
                           className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
                         />
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Extra Child 5-12 yrs without mattress">+ Child (no-mat)</label>
                         <input type="number" min={0} max={4}
-                          value={editingBooking.extra_children_no_mattress || 0}
-                          onChange={e => setEditingBooking({...editingBooking, extra_children_no_mattress: Math.max(0, Number(e.target.value) || 0)})}
+                          value={editingBooking.extra_children_no_mattress ?? 0}
+                          onChange={e => { const v = parseInt(e.target.value, 10); setEditingBooking({...editingBooking, extra_children_no_mattress: isNaN(v) ? 0 : Math.max(0, Math.min(4, v))}); }}
                           className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
                         />
                       </div>
@@ -26178,7 +26188,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
-                  <input type="number" min={1} value={editingBooking.num_guests || 1} onChange={e => setEditingBooking({...editingBooking, num_guests: Number(e.target.value)||1})} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
+                  <input type="number" min={1}
+                    value={editingBooking.num_guests || ''}
+                    onChange={e => { const v = parseInt(e.target.value, 10); setEditingBooking({...editingBooking, num_guests: isNaN(v) ? 0 : Math.max(0, v)}); }}
+                    onBlur={() => { if (!editingBooking.num_guests || editingBooking.num_guests < 1) setEditingBooking({...editingBooking, num_guests: 1}); }}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
                 </div>
               </div>
               <div>
@@ -31261,8 +31275,9 @@ const CheckInWizardModal: React.FC<{
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
                 <input
                   type="number" min="1" max="20"
-                  value={draft.num_guests}
-                  onChange={e => updateDraft({ num_guests: Math.max(1, Number(e.target.value) || 1) })}
+                  value={draft.num_guests || ''}
+                  onChange={e => { const v = parseInt(e.target.value, 10); updateDraft({ num_guests: isNaN(v) ? 0 : Math.max(0, Math.min(20, v)) }); }}
+                  onBlur={() => { if (!draft.num_guests || draft.num_guests < 1) updateDraft({ num_guests: 1 }); }}
                   className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
                 />
               </div>
