@@ -31969,6 +31969,8 @@ const CheckoutModal: React.FC<{
   const [payNow, setPayNow] = useState({ amount: '', method: 'CASH', reference: '' });
   const [waive, setWaive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // Folio breakdown toggle — expanded by default so staff sees charges
+  const [entriesExpanded, setEntriesExpanded] = useState(true);
   const sym = restaurant?.currency_symbol || '₹';
 
   const refresh = async () => {
@@ -32070,6 +32072,100 @@ const CheckoutModal: React.FC<{
                   {refunded > 0 && <div className="flex justify-between"><span>Refunded</span><span className="font-mono text-amber-700">+{fmt(refunded)}</span></div>}
                 </div>
               </div>
+
+              {/* ── Folio charge breakdown (room + F&B + services) ── */}
+              {Array.isArray(data.entries) && data.entries.length > 0 && (() => {
+                // Group entries by type in display order
+                const TYPE_ORDER = ['ROOM_CHARGE', 'SERVICE_CHARGE', 'F_AND_B', 'SERVICE', 'EXTRA_PERSON', 'ADJUSTMENT', 'TAX', 'DISCOUNT'];
+                const TYPE_ICONS: Record<string, string> = {
+                  ROOM_CHARGE: '🛏', SERVICE_CHARGE: '🔧', F_AND_B: '🍽', SERVICE: '🛎',
+                  EXTRA_PERSON: '👤', ADJUSTMENT: '✏️', TAX: '📋', DISCOUNT: '🏷',
+                };
+                const TYPE_LABELS: Record<string, string> = {
+                  ROOM_CHARGE: 'Room charges', SERVICE_CHARGE: 'Service charge',
+                  F_AND_B: 'Food & beverage', SERVICE: 'Hotel services',
+                  EXTRA_PERSON: 'Extra person', ADJUSTMENT: 'Adjustments',
+                  TAX: 'Tax', DISCOUNT: 'Discounts',
+                };
+                const groups: Record<string, any[]> = {};
+                for (const e of data.entries) {
+                  const t = e.entry_type || 'OTHER';
+                  if (!groups[t]) groups[t] = [];
+                  groups[t].push(e);
+                }
+                const orderedKeys = [
+                  ...TYPE_ORDER.filter(k => groups[k]),
+                  ...Object.keys(groups).filter(k => !TYPE_ORDER.includes(k)),
+                ];
+                // Subtotals per group
+                const groupTotals = orderedKeys.map(k => ({
+                  key: k,
+                  label: TYPE_LABELS[k] || k,
+                  icon: TYPE_ICONS[k] || '📄',
+                  items: groups[k],
+                  total: groups[k].reduce((s: number, e: any) => s + Number(e.amount || 0), 0),
+                }));
+                // Count F&B items specifically for the header badge
+                const fnbCount = (groups['F_AND_B'] || []).length;
+                return (
+                  <div className="bg-white rounded-2xl border border-[#f0e8dd] overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setEntriesExpanded(x => !x)}
+                      className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-[#faf7f2] transition-colors"
+                    >
+                      <div className="flex items-center gap-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Folio charges</p>
+                        {fnbCount > 0 && (
+                          <span className="text-[9px] font-bold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full">
+                            🍽 {fnbCount} F&B item{fnbCount !== 1 ? 's' : ''}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-mono font-bold text-[#1a1208]">{fmt(grand)}</span>
+                        <ChevronDown size={13} className={cn('text-[#9c8e85] transition-transform', entriesExpanded && 'rotate-180')} />
+                      </div>
+                    </button>
+                    {entriesExpanded && (
+                      <div className="border-t border-[#f0e8dd] px-3 pb-3 space-y-3 pt-2">
+                        {groupTotals.map(({ key, label, icon, items, total }) => (
+                          <div key={key}>
+                            <div className="flex items-center justify-between mb-1">
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                                {icon} {label}
+                              </p>
+                              <span className="text-[10px] font-mono font-semibold text-[#6b5d52]">{fmt(total)}</span>
+                            </div>
+                            <div className="space-y-0.5 pl-2">
+                              {items.map((e: any) => (
+                                <div key={e.id} className="flex items-start justify-between text-[11px]">
+                                  <span className="text-[#3d3128] flex-1 pr-3 leading-snug">
+                                    {e.description || label}
+                                    {e.quantity && Number(e.quantity) > 1 && (
+                                      <span className="text-[#9c8e85] ml-1">×{e.quantity}</span>
+                                    )}
+                                  </span>
+                                  <span className={cn(
+                                    'font-mono whitespace-nowrap font-semibold',
+                                    Number(e.amount) < 0 ? 'text-emerald-700' : 'text-[#1a1208]'
+                                  )}>
+                                    {Number(e.amount) < 0 ? '−' : ''}{fmt(Math.abs(Number(e.amount)))}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                        <div className="border-t border-[#cc5a16]/10 pt-2 flex justify-between text-[12px] font-bold">
+                          <span className="text-[#1a1208]">Total charges</span>
+                          <span className="font-mono text-[#1a1208]">{fmt(grand)}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* ── Payment ledger (audit history) ──────────────── */}
               {Array.isArray(data.payments) && data.payments.length > 0 && (

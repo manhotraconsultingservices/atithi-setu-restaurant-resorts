@@ -2107,7 +2107,8 @@ async function recomputeFolioTotals(tenantDb: DbInterface, folioId: string): Pro
  */
 interface FolioOutstanding {
   folio: any;
-  payments: any[];
+  entries: any[];   // folio_entries rows (room, F&B, services, taxes, discounts)
+  payments: any[];  // folio_payments rows (advance, interim, final, refund)
   total_paid: number;
   total_refunded: number;
   outstanding: number;
@@ -2116,6 +2117,16 @@ interface FolioOutstanding {
 async function getFolioOutstanding(tenantDb: DbInterface, folioId: string): Promise<FolioOutstanding | null> {
   const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folioId]);
   if (!folio) return null;
+  // Folio line-items (room nights, F&B, services, adjustments, taxes).
+  // Exclude PAYMENT type (those live in folio_payments, not here).
+  const entries: any[] = await tenantDb.query(
+    `SELECT * FROM folio_entries
+     WHERE folio_id = ?
+       AND entry_type NOT IN ('PAYMENT')
+       AND (is_voided IS NULL OR is_voided = 0)
+     ORDER BY created_at ASC`,
+    [folioId]
+  ).catch(() => []);
   const payments: any[] = await tenantDb.query(
     "SELECT * FROM folio_payments WHERE folio_id = ? ORDER BY recorded_at",
     [folioId]
@@ -2133,6 +2144,7 @@ async function getFolioOutstanding(tenantDb: DbInterface, folioId: string): Prom
   const outstanding = Math.max(0, Math.round((grand_total - net_paid) * 100) / 100);
   return {
     folio,
+    entries,
     payments,
     total_paid: Math.round(total_paid * 100) / 100,
     total_refunded: Math.round(total_refunded * 100) / 100,
