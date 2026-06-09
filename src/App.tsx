@@ -45344,6 +45344,34 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     return () => { cancelled = true; };
   }, [tenantId]);
 
+  // ── Reset to LANDING + scroll to top ────────────────────────────
+  // When the booking flow finishes (DONE step) or the guest taps
+  // "Book another stay", reset state cleanly. Called by the
+  // confirmation card's CTA buttons.
+  const resetToLanding = () => {
+    setStep('LANDING');
+    setConfirmation(null);
+    setPickedRoom(null);
+    setSearchResults(null);
+    setGuest({ name: '', phone: '', email: '', special_requests: '' });
+    setPreviewPlan(null);
+    setMealPlanByCat({});
+    // Defer scroll so the LANDING re-render lands before we jump.
+    setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 50);
+  };
+
+  // ── Auto-scroll on step transitions ─────────────────────────────
+  // When the flow advances to GUEST or DONE, scroll the viewport
+  // to the top so the new content is visible. Without this, the
+  // user clicks "Confirm booking" at the bottom of the form and
+  // the success card renders above the fold — they think "nothing
+  // happened" because they can't see it.
+  useEffect(() => {
+    if (step === 'GUEST' || step === 'DONE') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [step]);
+
   // ── GUEST-step server-side estimate ─────────────────────────────
   // When the guest lands on the GUEST step (or changes meal plan /
   // adults / children), call the booking-preview endpoint which
@@ -46542,6 +46570,31 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 <strong className="text-[#6b5d52]">Cancellation:</strong> {hotelInfo.hotel_cancellation_policy_text}
               </p>
             )}
+            {/* ── "What's next" CTAs — without these the page sits
+                in the confirmation state with no clear exit. Primary
+                button takes the guest back to the property landing
+                (clears all booking state); secondary copy-the-ref
+                button is a quick-grab if they want to forward the
+                booking ID before leaving. */}
+            <div className="mt-5 pt-4 border-t border-[#f0e8dd] grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                onClick={() => {
+                  try { navigator.clipboard?.writeText(String(confirmation.booking_id || '')); }
+                  catch { /* clipboard blocked — no-op */ }
+                }}
+                className="px-3 py-2.5 rounded-2xl text-xs font-bold border-2 transition-colors"
+                style={{ borderColor: brandPrimary, color: brandPrimary, background: 'transparent' }}
+                onMouseEnter={e => { e.currentTarget.style.background = `${brandPrimary}15`; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+              >📋 Copy booking reference</button>
+              <button
+                onClick={resetToLanding}
+                className="px-3 py-2.5 rounded-2xl text-xs font-bold text-white transition-colors"
+                style={{ background: brandPrimary }}
+                onMouseEnter={e => (e.currentTarget.style.background = brandSecondary)}
+                onMouseLeave={e => (e.currentTarget.style.background = brandPrimary)}
+              >✓ Done — back to home</button>
+            </div>
           </div>
         )}
 
