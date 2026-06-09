@@ -43380,49 +43380,591 @@ function _formatTimeRange(start: string, end: string): string {
 // fully wired; subsequent commits will fill in Salary Structure /
 // Components / Payroll / Expenses / Offer Letters / Reports.
 function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
-  const [subTab, setSubTab] = useState<'EMPLOYEES' | 'SALARY' | 'PAYROLL' | 'EXPENSES' | 'OFFERS' | 'REPORTS'>('EMPLOYEES');
-  const SUB_TABS: Array<{ id: typeof subTab; label: string; emoji: string; ready: boolean }> = [
-    { id: 'EMPLOYEES', label: 'Employees',         emoji: '👥', ready: true },
-    { id: 'SALARY',    label: 'Salary Structure',  emoji: '💰', ready: false },
-    { id: 'PAYROLL',   label: 'Payroll Runs',      emoji: '📋', ready: false },
-    { id: 'EXPENSES',  label: 'Expense Claims',    emoji: '🧾', ready: false },
-    { id: 'OFFERS',    label: 'Offer Letters',     emoji: '✉️', ready: false },
-    { id: 'REPORTS',   label: 'HR Reports',        emoji: '📊', ready: false },
+  const [subTab, setSubTab] = useState<'EMPLOYEES' | 'SALARY' | 'PAYROLL' | 'EXPENSES' | 'OFFERS' | 'SETTINGS'>('EMPLOYEES');
+  const [currencyWarning, setCurrencyWarning] = useState<string | null>(null);
+  const SUB_TABS: Array<{ id: typeof subTab; label: string; emoji: string }> = [
+    { id: 'EMPLOYEES', label: 'Employees',        emoji: '👥' },
+    { id: 'SALARY',    label: 'Salary Structure', emoji: '💰' },
+    { id: 'PAYROLL',   label: 'Payroll Runs',     emoji: '📋' },
+    { id: 'EXPENSES',  label: 'Expense Claims',   emoji: '🧾' },
+    { id: 'OFFERS',    label: 'Offer Letters',    emoji: '✉️' },
+    { id: 'SETTINGS',  label: 'Statutory Setup',  emoji: '⚙️' },
   ];
+  // BA-FIX-#7 — non-INR tenant safety banner
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/hr/currency-safety`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d && !d.ok) setCurrencyWarning(d.warning); })
+      .catch(() => {});
+  }, [restaurantId, token]);
   return (
     <div className="space-y-4">
       <div>
         <h2 className="text-2xl font-bold text-[#1a1208]">HR &amp; Payroll</h2>
         <p className="text-xs text-[#6b5d52] mt-1">
           Employee directory, salary structure, payroll runs with statutory PF/ESI/PT/TDS,
-          expense reimbursement, and offer letters. Phase 1 MVP — additional surfaces
-          (statutory PDFs, self-service, leaves) ship in following commits.
+          expense reimbursement, offer letters, and Form 16 / 24Q / EPF ECR exports.
         </p>
       </div>
+      {currencyWarning && (
+        <div className="rounded-2xl bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
+          <strong className="font-bold">⚠ Currency notice:</strong> {currencyWarning}
+        </div>
+      )}
       <div className="flex items-center gap-1 overflow-x-auto bg-[#faf7f2] rounded-2xl p-1">
         {SUB_TABS.map(t => (
           <button
             key={t.id}
-            onClick={() => t.ready && setSubTab(t.id)}
-            disabled={!t.ready}
+            onClick={() => setSubTab(t.id)}
             className={cn(
               'px-3 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors',
               subTab === t.id ? 'bg-white text-[#cc5a16] shadow-sm' : 'text-[#6b5d52] hover:bg-white/60',
-              !t.ready && 'opacity-40 cursor-not-allowed',
             )}
-            title={t.ready ? '' : 'Coming in next commit'}
           >
             {t.emoji} {t.label}
-            {!t.ready && <span className="ml-1 text-[9px]">(soon)</span>}
           </button>
         ))}
       </div>
       {subTab === 'EMPLOYEES' && <EmployeeDirectory restaurantId={restaurantId} token={token} restaurant={restaurant} />}
-      {subTab !== 'EMPLOYEES' && (
-        <div className="bg-white rounded-3xl border-2 border-dashed border-[#cc5a16]/20 p-12 text-center">
-          <p className="text-sm text-[#9c8e85] italic">This sub-tab ships in the next HR-Payroll commit.</p>
+      {subTab === 'SALARY'    && <SalaryStructureEditor restaurantId={restaurantId} token={token} restaurant={restaurant} />}
+      {subTab === 'PAYROLL'   && <PayrollRunsView restaurantId={restaurantId} token={token} restaurant={restaurant} />}
+      {subTab === 'EXPENSES'  && <ExpenseClaimsInbox restaurantId={restaurantId} token={token} restaurant={restaurant} />}
+      {subTab === 'OFFERS'    && <OfferLettersView restaurantId={restaurantId} token={token} restaurant={restaurant} />}
+      {subTab === 'SETTINGS'  && <StatutoryConfigEditor restaurantId={restaurantId} token={token} />}
+    </div>
+  );
+}
+
+// ─── Salary Structure Editor ───────────────────────────────────────
+function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const [employees, setEmployees] = useState<any[]>([]);
+  const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null);
+  const [structure, setStructure] = useState<any>(null);
+  const [history, setHistory] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<any>({
+    effective_from: new Date().toISOString().slice(0, 10),
+    gross_monthly: 0, basic: 0, hra: 0, special: 0, conveyance: 0, medical: 0, other_allowances: 0,
+    tds_regime: 'NEW', section_80c_declared: 0, hra_exemption_declared: 0, notes: '',
+  });
+  const cur = useTenantFormatter(restaurant);
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/hr/employees?status=ACTIVE`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(d => setEmployees(d.employees || []))
+      .catch(() => setEmployees([]));
+  }, [restaurantId, token]);
+  useEffect(() => {
+    if (!selectedStaffId) { setStructure(null); setHistory([]); return; }
+    setLoading(true);
+    fetch(`/api/restaurant/${restaurantId}/hr/salary-structures/${selectedStaffId}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(d => { setStructure(d.current); setHistory(d.history || []); })
+      .catch(() => { setStructure(null); setHistory([]); })
+      .finally(() => setLoading(false));
+  }, [selectedStaffId, restaurantId, token]);
+  const computedTotal = Number(form.basic) + Number(form.hra) + Number(form.special) + Number(form.conveyance) + Number(form.medical) + Number(form.other_allowances);
+  const tolerance = Math.abs(computedTotal - Number(form.gross_monthly)) <= 2;
+
+  async function saveStructure() {
+    if (!selectedStaffId) return;
+    if (!tolerance) { alert('Components sum must match gross monthly (±₹2)'); return; }
+    const res = await fetch(`/api/restaurant/${restaurantId}/hr/salary-structures`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ staff_id: selectedStaffId, ...form }),
+    });
+    if (res.ok) {
+      setEditing(false);
+      const d = await res.json();
+      setStructure(d.structure);
+      // refetch history
+      fetch(`/api/restaurant/${restaurantId}/hr/salary-structures/${selectedStaffId}`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json()).then(d2 => setHistory(d2.history || []));
+    } else {
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || 'Save failed');
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-3xl border border-[#e8dccf] p-4">
+        <label className="text-xs font-bold text-[#6b5d52] block mb-2">Select Employee</label>
+        <select value={selectedStaffId || ''} onChange={(e) => setSelectedStaffId(e.target.value || null)}
+          className="w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm">
+          <option value="">— pick an employee —</option>
+          {employees.map(e => (
+            <option key={e.id} value={e.id}>{e.name}{e.designation ? ` · ${e.designation}` : ''}</option>
+          ))}
+        </select>
+      </div>
+      {selectedStaffId && (
+        <div className="bg-white rounded-3xl border border-[#e8dccf] p-4">
+          {loading ? <p className="text-xs text-[#9c8e85]">Loading…</p> : (
+            <>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-bold text-[#1a1208]">Current structure</h3>
+                <button onClick={() => {
+                  if (structure) {
+                    setForm({
+                      effective_from: new Date().toISOString().slice(0, 10),
+                      gross_monthly: Number(structure.gross_monthly) || 0,
+                      basic: Number(structure.basic) || 0, hra: Number(structure.hra) || 0,
+                      special: Number(structure.special) || 0, conveyance: Number(structure.conveyance) || 0,
+                      medical: Number(structure.medical) || 0, other_allowances: Number(structure.other_allowances) || 0,
+                      tds_regime: structure.tds_regime || 'NEW',
+                      section_80c_declared: Number(structure.section_80c_declared) || 0,
+                      hra_exemption_declared: Number(structure.hra_exemption_declared) || 0,
+                      notes: '',
+                    });
+                  }
+                  setEditing(true);
+                }} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">
+                  {structure ? 'Revise structure' : 'Add structure'}
+                </button>
+              </div>
+              {structure ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                  <div><span className="text-[#9c8e85]">Effective from</span><br/><b>{structure.effective_from}</b></div>
+                  <div><span className="text-[#9c8e85]">Gross monthly</span><br/><b>{cur(Number(structure.gross_monthly))}</b></div>
+                  <div><span className="text-[#9c8e85]">Basic</span><br/>{cur(Number(structure.basic))}</div>
+                  <div><span className="text-[#9c8e85]">HRA</span><br/>{cur(Number(structure.hra))}</div>
+                  <div><span className="text-[#9c8e85]">Special</span><br/>{cur(Number(structure.special))}</div>
+                  <div><span className="text-[#9c8e85]">Conveyance</span><br/>{cur(Number(structure.conveyance))}</div>
+                  <div><span className="text-[#9c8e85]">Medical</span><br/>{cur(Number(structure.medical))}</div>
+                  <div><span className="text-[#9c8e85]">Other</span><br/>{cur(Number(structure.other_allowances))}</div>
+                  <div><span className="text-[#9c8e85]">TDS regime</span><br/><b>{structure.tds_regime}</b></div>
+                </div>
+              ) : (
+                <p className="text-xs text-[#9c8e85] italic">No structure on file. Click "Add structure" to create one.</p>
+              )}
+              {history.length > 1 && (
+                <div className="mt-4 pt-3 border-t border-[#e8dccf]">
+                  <p className="text-[10px] font-bold text-[#6b5d52] uppercase tracking-wider mb-2">History</p>
+                  <div className="space-y-1 text-xs">
+                    {history.slice(1).map((h, i) => (
+                      <div key={h.id || i} className="flex justify-between text-[#9c8e85]">
+                        <span>{h.effective_from} → {h.effective_to || 'now'}</span>
+                        <span>{cur(Number(h.gross_monthly))}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
+      {editing && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto" onClick={() => setEditing(false)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-6 my-8" onClick={(e) => e.stopPropagation()}>
+          <div className="space-y-3">
+            <h3 className="text-lg font-bold text-[#1a1208]">Revise salary structure</h3>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <label>Effective from
+                <input type="date" value={form.effective_from} onChange={e => setForm({ ...form, effective_from: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
+              </label>
+              <label>Gross monthly
+                <input type="number" value={form.gross_monthly} onChange={e => setForm({ ...form, gross_monthly: Number(e.target.value) })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
+              </label>
+              {(['basic', 'hra', 'special', 'conveyance', 'medical', 'other_allowances'] as const).map(k => (
+                <label key={k}>{k.replace('_', ' ')}
+                  <input type="number" value={form[k]} onChange={e => setForm({ ...form, [k]: Number(e.target.value) })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
+                </label>
+              ))}
+              <label>TDS regime
+                <select value={form.tds_regime} onChange={e => setForm({ ...form, tds_regime: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]">
+                  <option value="NEW">NEW</option><option value="OLD">OLD</option>
+                </select>
+              </label>
+              {form.tds_regime === 'OLD' && (
+                <>
+                  <label>80C declared (annual)
+                    <input type="number" value={form.section_80c_declared} onChange={e => setForm({ ...form, section_80c_declared: Number(e.target.value) })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
+                  </label>
+                  <label>HRA exempt (annual)
+                    <input type="number" value={form.hra_exemption_declared} onChange={e => setForm({ ...form, hra_exemption_declared: Number(e.target.value) })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
+                  </label>
+                </>
+              )}
+            </div>
+            <div className={cn('text-xs p-2 rounded-lg', tolerance ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800')}>
+              Components sum: <b>{cur(computedTotal)}</b>{!tolerance && ` (off by ${cur(Math.abs(computedTotal - Number(form.gross_monthly)))})`}
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-[#e8dccf]">
+              <button onClick={() => setEditing(false)} className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">Cancel</button>
+              <button onClick={saveStructure} disabled={!tolerance} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold disabled:opacity-50">Save</button>
+            </div>
+          </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Payroll Runs ──────────────────────────────────────────────────
+function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const [runs, setRuns] = useState<any[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [payslips, setPayslips] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+  const cur = useTenantFormatter(restaurant);
+  const refresh = useCallback(() => {
+    fetch(`/api/restaurant/${restaurantId}/payroll/runs`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(d => setRuns(d.runs || []))
+      .catch(() => setRuns([]));
+  }, [restaurantId, token]);
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!selectedRunId) { setPayslips([]); return; }
+    fetch(`/api/restaurant/${restaurantId}/payroll/runs/${selectedRunId}/payslips`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(d => setPayslips(d.payslips || []))
+      .catch(() => setPayslips([]));
+  }, [selectedRunId, restaurantId, token]);
+  async function createRun() {
+    const now = new Date();
+    const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+    const month = now.getMonth() === 0 ? 12 : now.getMonth();
+    setBusy(true);
+    await fetch(`/api/restaurant/${restaurantId}/payroll/runs`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ year, month }),
+    });
+    setBusy(false);
+    refresh();
+  }
+  async function runAction(action: 'compute' | 'approve' | 'lock' | 'mark-paid') {
+    if (!selectedRunId) return;
+    setBusy(true);
+    const res = await fetch(`/api/restaurant/${restaurantId}/payroll/runs/${selectedRunId}/${action}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || `${action} failed`);
+    }
+    setBusy(false);
+    refresh();
+    if (selectedRunId) {
+      fetch(`/api/restaurant/${restaurantId}/payroll/runs/${selectedRunId}/payslips`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json()).then(d => setPayslips(d.payslips || []));
+    }
+  }
+  const run = runs.find(r => r.id === selectedRunId);
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-3xl border border-[#e8dccf] p-4">
+        <div className="flex justify-between mb-3">
+          <h3 className="font-bold text-[#1a1208]">Payroll Runs</h3>
+          <button onClick={createRun} disabled={busy} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">
+            + Create prior-month draft
+          </button>
+        </div>
+        <div className="space-y-1 max-h-72 overflow-y-auto">
+          {runs.length === 0 ? <p className="text-xs italic text-[#9c8e85]">No payroll runs yet.</p> :
+            runs.map(r => (
+              <button key={r.id} onClick={() => setSelectedRunId(r.id)}
+                className={cn('w-full text-left p-3 rounded-xl border text-xs flex items-center justify-between',
+                  selectedRunId === r.id ? 'bg-[#fff7e5] border-[#cc5a16]' : 'bg-white border-[#e8dccf]')}>
+                <span>
+                  <b>{r.year}-{String(r.month).padStart(2, '0')}</b>
+                  <span className="ml-3 text-[#9c8e85]">{r.period_start} – {r.period_end}</span>
+                </span>
+                <span>
+                  <span className={cn('px-2 py-0.5 rounded-full font-bold text-[10px]',
+                    r.status === 'DRAFT' && 'bg-gray-100 text-gray-700',
+                    r.status === 'APPROVED' && 'bg-blue-100 text-blue-700',
+                    r.status === 'LOCKED' && 'bg-purple-100 text-purple-700',
+                    r.status === 'PAID' && 'bg-green-100 text-green-700',
+                  )}>{r.status}</span>
+                  <span className="ml-3 text-[#6b5d52]">{cur(Number(r.total_net))}</span>
+                </span>
+              </button>
+            ))}
+        </div>
+      </div>
+      {run && (
+        <div className="bg-white rounded-3xl border border-[#e8dccf] p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-bold text-[#1a1208]">Run {run.year}-{String(run.month).padStart(2, '0')} · {run.status}</h3>
+            <div className="flex gap-2">
+              {run.status === 'DRAFT' && <button onClick={() => runAction('compute')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">Run compute</button>}
+              {run.status === 'DRAFT' && payslips.length > 0 && <button onClick={() => runAction('approve')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-bold">Approve</button>}
+              {run.status === 'APPROVED' && <button onClick={() => runAction('lock')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-purple-600 text-white text-xs font-bold">Lock</button>}
+              {(run.status === 'APPROVED' || run.status === 'LOCKED') && <button onClick={() => runAction('mark-paid')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-green-600 text-white text-xs font-bold">Mark paid</button>}
+              <a href={`/api/restaurant/${restaurantId}/payroll/runs/${run.id}/export.csv`} target="_blank" rel="noopener" className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">Bank advice CSV</a>
+              <a href={`/api/restaurant/${restaurantId}/payroll/runs/${run.id}/epf-ecr.txt`} target="_blank" rel="noopener" className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">EPF ECR</a>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3 text-xs mb-3">
+            <div className="bg-[#faf7f2] rounded-xl p-2"><span className="text-[#9c8e85]">Gross</span><br/><b>{cur(Number(run.total_gross))}</b></div>
+            <div className="bg-[#faf7f2] rounded-xl p-2"><span className="text-[#9c8e85]">Deductions</span><br/><b>{cur(Number(run.total_deductions))}</b></div>
+            <div className="bg-[#faf7f2] rounded-xl p-2"><span className="text-[#9c8e85]">Net pay</span><br/><b className="text-[#cc5a16]">{cur(Number(run.total_net))}</b></div>
+          </div>
+          {payslips.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-[#9c8e85] border-b border-[#e8dccf]">
+                    <th className="py-1 pr-2">Employee</th>
+                    <th className="py-1 pr-2">Gross</th>
+                    <th className="py-1 pr-2">PF</th>
+                    <th className="py-1 pr-2">ESI</th>
+                    <th className="py-1 pr-2">PT</th>
+                    <th className="py-1 pr-2">TDS</th>
+                    <th className="py-1 pr-2">Net</th>
+                    <th className="py-1 pr-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payslips.map(p => (
+                    <tr key={p.id} className="border-b border-[#f1ece3]">
+                      <td className="py-1.5 pr-2">{p.staff_name}<div className="text-[10px] text-[#9c8e85]">{p.designation}</div></td>
+                      <td className="py-1.5 pr-2">{cur(Number(p.gross_earnings))}</td>
+                      <td className="py-1.5 pr-2">{cur(Number(p.pf_employee))}</td>
+                      <td className="py-1.5 pr-2">{cur(Number(p.esi_employee))}</td>
+                      <td className="py-1.5 pr-2">{cur(Number(p.professional_tax))}</td>
+                      <td className="py-1.5 pr-2">{cur(Number(p.tds))}</td>
+                      <td className="py-1.5 pr-2 font-bold">{cur(Number(p.net_pay))}</td>
+                      <td className="py-1.5">
+                        <a href={`/api/restaurant/${restaurantId}/payroll/payslips/${p.id}/pdf`} target="_blank" rel="noopener" className="text-[10px] text-[#cc5a16] hover:underline">PDF</a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-xs italic text-[#9c8e85]">No payslips yet. Click "Run compute" to generate.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Expense Claims ────────────────────────────────────────────────
+function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const [claims, setClaims] = useState<any[]>([]);
+  const [statusFilter, setStatusFilter] = useState<string>('SUBMITTED');
+  const cur = useTenantFormatter(restaurant);
+  const refresh = useCallback(() => {
+    const u = new URL(`/api/restaurant/${restaurantId}/hr/expenses`, window.location.origin);
+    if (statusFilter !== 'ALL') u.searchParams.set('status', statusFilter);
+    fetch(u.toString(), { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(d => setClaims(d.claims || []))
+      .catch(() => setClaims([]));
+  }, [restaurantId, token, statusFilter]);
+  useEffect(() => { refresh(); }, [refresh]);
+  async function actOn(id: string, action: 'submit' | 'approve' | 'reject') {
+    const body: any = {};
+    if (action === 'reject') body.reason = prompt('Rejection reason:') || 'Rejected';
+    await fetch(`/api/restaurant/${restaurantId}/hr/expenses/${id}/${action}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    refresh();
+  }
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap">
+        {['ALL', 'SUBMITTED', 'MANAGER_APPROVED', 'HR_APPROVED', 'REJECTED', 'REIMBURSED'].map(s => (
+          <button key={s} onClick={() => setStatusFilter(s)} className={cn('px-3 py-1.5 rounded-xl text-xs',
+            statusFilter === s ? 'bg-[#cc5a16] text-white' : 'border border-[#e8dccf] text-[#6b5d52]')}>{s}</button>
+        ))}
+      </div>
+      <div className="bg-white rounded-3xl border border-[#e8dccf]">
+        {claims.length === 0 ? <p className="p-6 text-xs italic text-[#9c8e85] text-center">No claims with this status.</p> :
+          <table className="w-full text-xs">
+            <thead><tr className="text-left text-[#9c8e85] border-b border-[#e8dccf]">
+              <th className="p-3">Claim #</th><th className="p-3">Staff</th><th className="p-3">Date</th><th className="p-3">Amount</th><th className="p-3">Status</th><th className="p-3"></th>
+            </tr></thead>
+            <tbody>
+              {claims.map(c => (
+                <tr key={c.id} className="border-b border-[#f1ece3]">
+                  <td className="p-3 font-mono">{c.claim_number}</td>
+                  <td className="p-3">{c.staff_name}<div className="text-[10px] text-[#9c8e85]">{c.designation}</div></td>
+                  <td className="p-3">{c.claim_date}</td>
+                  <td className="p-3 font-bold">{cur(Number(c.total_amount))}</td>
+                  <td className="p-3">{c.status}</td>
+                  <td className="p-3 space-x-1">
+                    {c.status === 'SUBMITTED' && <>
+                      <button onClick={() => actOn(c.id, 'approve')} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Mgr OK</button>
+                      <button onClick={() => actOn(c.id, 'reject')} className="px-2 py-1 rounded bg-red-600 text-white text-[10px]">Reject</button>
+                    </>}
+                    {c.status === 'MANAGER_APPROVED' && <>
+                      <button onClick={() => actOn(c.id, 'approve')} className="px-2 py-1 rounded bg-green-600 text-white text-[10px]">HR OK</button>
+                      <button onClick={() => actOn(c.id, 'reject')} className="px-2 py-1 rounded bg-red-600 text-white text-[10px]">Reject</button>
+                    </>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        }
+      </div>
+    </div>
+  );
+}
+
+// ─── Offer Letters ─────────────────────────────────────────────────
+function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const [offers, setOffers] = useState<any[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState<any>({
+    candidate_name: '', candidate_email: '', candidate_phone: '',
+    designation: '', department: '', ctc: 0, joining_date: '', expires_at: '',
+  });
+  const cur = useTenantFormatter(restaurant);
+  const refresh = useCallback(() => {
+    fetch(`/api/restaurant/${restaurantId}/hr/offer-letters`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(d => setOffers(d.offers || []))
+      .catch(() => setOffers([]));
+  }, [restaurantId, token]);
+  useEffect(() => { refresh(); }, [refresh]);
+  async function createOffer() {
+    if (!form.candidate_name || !form.designation || !form.joining_date || form.ctc <= 0) {
+      alert('Name, designation, joining date and CTC are required'); return;
+    }
+    const res = await fetch(`/api/restaurant/${restaurantId}/hr/offer-letters`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(form),
+    });
+    if (res.ok) {
+      setCreating(false);
+      setForm({ candidate_name: '', candidate_email: '', candidate_phone: '', designation: '', department: '', ctc: 0, joining_date: '', expires_at: '' });
+      refresh();
+    } else {
+      const e = await res.json(); alert(e.error || 'Save failed');
+    }
+  }
+  async function sendOffer(id: string) {
+    await fetch(`/api/restaurant/${restaurantId}/hr/offer-letters/${id}/send`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    });
+    refresh();
+  }
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-end">
+        <button onClick={() => setCreating(true)} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">+ New offer</button>
+      </div>
+      <div className="bg-white rounded-3xl border border-[#e8dccf]">
+        {offers.length === 0 ? <p className="p-6 text-xs italic text-[#9c8e85] text-center">No offers yet.</p> :
+          <table className="w-full text-xs">
+            <thead><tr className="text-left text-[#9c8e85] border-b border-[#e8dccf]">
+              <th className="p-3">Offer #</th><th className="p-3">Candidate</th><th className="p-3">Designation</th><th className="p-3">CTC</th><th className="p-3">Joining</th><th className="p-3">Status</th><th className="p-3"></th>
+            </tr></thead>
+            <tbody>
+              {offers.map(o => (
+                <tr key={o.id} className="border-b border-[#f1ece3]">
+                  <td className="p-3 font-mono">{o.offer_number}</td>
+                  <td className="p-3">{o.candidate_name}<div className="text-[10px] text-[#9c8e85]">{o.candidate_email}</div></td>
+                  <td className="p-3">{o.designation}</td>
+                  <td className="p-3 font-bold">{cur(Number(o.ctc))}</td>
+                  <td className="p-3">{o.joining_date}</td>
+                  <td className="p-3">{o.status}</td>
+                  <td className="p-3 space-x-1">
+                    <a href={`/api/restaurant/${restaurantId}/hr/offer-letters/${o.id}/pdf`} target="_blank" rel="noopener" className="text-[10px] text-[#cc5a16] hover:underline">PDF</a>
+                    {(o.status === 'DRAFT' || o.status === 'SENT') && <button onClick={() => sendOffer(o.id)} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Send</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        }
+      </div>
+      {creating && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-start sm:items-center justify-center p-4 overflow-y-auto" onClick={() => setCreating(false)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-xl p-6 my-8" onClick={(e) => e.stopPropagation()}>
+          <div className="space-y-3">
+            <h3 className="font-bold text-lg text-[#1a1208]">New offer letter</h3>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <label>Candidate name<input value={form.candidate_name} onChange={e => setForm({ ...form, candidate_name: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <label>Email<input value={form.candidate_email} onChange={e => setForm({ ...form, candidate_email: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <label>Phone<input value={form.candidate_phone} onChange={e => setForm({ ...form, candidate_phone: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <label>Designation<input value={form.designation} onChange={e => setForm({ ...form, designation: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <label>Department<input value={form.department} onChange={e => setForm({ ...form, department: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <label>CTC (annual)<input type="number" value={form.ctc} onChange={e => setForm({ ...form, ctc: Number(e.target.value) })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <label>Joining date<input type="date" value={form.joining_date} onChange={e => setForm({ ...form, joining_date: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <label>Expires on (optional)<input type="date" value={form.expires_at} onChange={e => setForm({ ...form, expires_at: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+            </div>
+            <div className="flex justify-end gap-2 pt-3 border-t border-[#e8dccf]">
+              <button onClick={() => setCreating(false)} className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">Cancel</button>
+              <button onClick={createOffer} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">Create</button>
+            </div>
+          </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Statutory Config Settings ─────────────────────────────────────
+function StatutoryConfigEditor({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [cfg, setCfg] = useState<any>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    fetch(`/api/restaurant/${restaurantId}/hr/statutory-config`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(d => setCfg(d.config))
+      .catch(() => setCfg({}));
+  }, [restaurantId, token]);
+  async function save() {
+    setSaving(true);
+    const res = await fetch(`/api/restaurant/${restaurantId}/hr/statutory-config`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(cfg),
+    });
+    if (res.ok) { setSaved(true); setTimeout(() => setSaved(false), 2000); }
+    else { const e = await res.json(); alert(e.error || 'Save failed'); }
+    setSaving(false);
+  }
+  if (!cfg) return <p className="text-xs italic text-[#9c8e85]">Loading…</p>;
+  return (
+    <div className="bg-white rounded-3xl border border-[#e8dccf] p-4 space-y-4">
+      <div>
+        <h3 className="font-bold text-[#1a1208]">Statutory configuration</h3>
+        <p className="text-[10px] text-[#9c8e85] mt-1">PF, ESI, Professional Tax, TDS regime. Defaults align with Indian FY 2025-26.</p>
+      </div>
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <label className="flex items-center gap-2"><input type="checkbox" checked={!!Number(cfg.pf_enabled)} onChange={e => setCfg({ ...cfg, pf_enabled: e.target.checked ? 1 : 0 })} /> PF enabled</label>
+        <label className="flex items-center gap-2"><input type="checkbox" checked={!!Number(cfg.esi_enabled)} onChange={e => setCfg({ ...cfg, esi_enabled: e.target.checked ? 1 : 0 })} /> ESI enabled</label>
+        <label>PT state code (MH / KA / WB)
+          <input value={cfg.pt_state || ''} onChange={e => setCfg({ ...cfg, pt_state: e.target.value.toUpperCase() })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" maxLength={4} />
+        </label>
+        <label>Default TDS regime
+          <select value={cfg.tds_regime_default || 'NEW'} onChange={e => setCfg({ ...cfg, tds_regime_default: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]">
+            <option value="NEW">NEW</option><option value="OLD">OLD</option>
+          </select>
+        </label>
+        <label>PF wage ceiling
+          <input type="number" value={cfg.pf_wage_ceiling || 15000} onChange={e => setCfg({ ...cfg, pf_wage_ceiling: Number(e.target.value) })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
+        </label>
+        <label>ESI wage ceiling
+          <input type="number" value={cfg.esi_wage_ceiling || 21000} onChange={e => setCfg({ ...cfg, esi_wage_ceiling: Number(e.target.value) })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
+        </label>
+        <label>Employer PAN
+          <input value={cfg.pan_employer || ''} onChange={e => setCfg({ ...cfg, pan_employer: e.target.value.toUpperCase() })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" maxLength={10} />
+        </label>
+        <label>Employer TAN
+          <input value={cfg.tan_employer || ''} onChange={e => setCfg({ ...cfg, tan_employer: e.target.value.toUpperCase() })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" maxLength={10} />
+        </label>
+        <label>EPF Establishment Code
+          <input value={cfg.pf_estab_code || ''} onChange={e => setCfg({ ...cfg, pf_estab_code: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
+        </label>
+        <label>ESI Employer Code
+          <input value={cfg.esi_employer_code || ''} onChange={e => setCfg({ ...cfg, esi_employer_code: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
+        </label>
+      </div>
+      <div className="flex justify-end items-center gap-2 pt-3 border-t border-[#e8dccf]">
+        {saved && <span className="text-xs text-green-700">✓ Saved</span>}
+        <button onClick={save} disabled={saving} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">{saving ? 'Saving…' : 'Save'}</button>
+      </div>
     </div>
   );
 }
