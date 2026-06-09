@@ -950,6 +950,105 @@ export function buildNotificationContent(
       };
     }
 
+    case 'PAYSLIP_GENERATED': {
+      const name = data.staff_name || 'Team';
+      const period = data.period || 'this month';
+      const net = data.net_pay ? `₹${Number(data.net_pay).toLocaleString('en-IN')}` : 'released';
+      return {
+        subject: `Payslip available — ${period} at ${r}`,
+        text: `Hi ${name},\n\nYour payslip for ${period} has been generated and is ready in the employee portal.\n\nNet pay: ${net}\n\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#7c5e3c;margin-top:0">Payslip available</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>Your payslip for <strong>${period}</strong> has been generated and is ready in the employee portal.</p>` +
+          `<p style="background:#faf7f2;border-radius:8px;padding:12px"><b>Net pay:</b> ${net}</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'PAYROLL_RUN_AUTOCREATED': {
+      const period = `${data.year}-${String(data.month).padStart(2, '0')}`;
+      return {
+        subject: `Payroll DRAFT created for ${period}`,
+        text: `A new DRAFT payroll run for ${period} has been auto-created. Open the HR & Payroll module to run compute and approve.\n\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#7c5e3c;margin-top:0">New payroll DRAFT — ${period}</h2>` +
+          `<p>A new DRAFT payroll run for <strong>${period}</strong> has been auto-created on the 1st of the month.</p>` +
+          `<p>Open the HR & Payroll module to compute and approve.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'EXPENSE_SUBMITTED': {
+      const name = data.staff_name || 'A team member';
+      const amt = data.total_amount ? `₹${Number(data.total_amount).toLocaleString('en-IN')}` : '—';
+      return {
+        subject: `Expense claim submitted — ${name}`,
+        text: `${name} has submitted an expense claim of ${amt}. Open the HR & Payroll module → Expenses to review.\n\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#7c5e3c;margin-top:0">New expense claim</h2>` +
+          `<p><strong>${name}</strong> has submitted a claim of <strong>${amt}</strong>.</p>` +
+          `<p>Open the HR & Payroll module → Expenses to review.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'EXPENSE_APPROVED': {
+      const name = data.staff_name || 'Team';
+      const amt = data.total_amount ? `₹${Number(data.total_amount).toLocaleString('en-IN')}` : '—';
+      return {
+        subject: `Expense claim approved — ${amt}`,
+        text: `Hi ${name},\n\nYour expense claim of ${amt} has been approved and will be reimbursed in the next payroll run.\n\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #d1fae5;border-radius:8px;background:#f0fdf4">` +
+          `<h2 style="color:#065f46;margin-top:0">Expense approved</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>Your claim of <strong>${amt}</strong> is approved and will be reimbursed in the next payroll run.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'EXPENSE_REJECTED': {
+      const name = data.staff_name || 'Team';
+      const reason = data.reason || 'No reason provided';
+      return {
+        subject: `Expense claim rejected`,
+        text: `Hi ${name},\n\nYour recent expense claim has been rejected.\n\nReason: ${reason}\n\nIf you have questions, please reach out to HR.\n\n— ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #fecaca;border-radius:8px;background:#fef2f2">` +
+          `<h2 style="color:#991b1b;margin-top:0">Expense claim rejected</h2>` +
+          `<p>Hi <strong>${name}</strong>,</p>` +
+          `<p>Reason: <em>${reason}</em></p>` +
+          `<p>If you have questions, please reach out to HR.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— ${r}</p>` +
+          `</div>`,
+      };
+    }
+
+    case 'OFFER_LETTER_SENT': {
+      const name = data.candidate_name || 'Candidate';
+      const designation = data.designation || 'the role';
+      return {
+        subject: `Letter of Offer — ${designation} at ${r}`,
+        text: `Dear ${name},\n\nPlease find attached your Letter of Offer for the position of ${designation} at ${r}.\n\nKindly review and respond with your acceptance.\n\n— Human Resources, ${r}`,
+        html:
+          `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:8px">` +
+          `<h2 style="color:#7c5e3c;margin-top:0">Letter of Offer</h2>` +
+          `<p>Dear <strong>${name}</strong>,</p>` +
+          `<p>Please find attached your Letter of Offer for the position of <strong>${designation}</strong> at <strong>${r}</strong>.</p>` +
+          `<p>Kindly review and respond with your acceptance.</p>` +
+          `<p style="color:#6b7280;font-size:12px">— Human Resources, ${r}</p>` +
+          `</div>`,
+      };
+    }
+
     case 'SHIFT_REMINDER': {
       // Daily 8am IST cron — staff get a reminder of shifts in the next 12 hours.
       const name = data.staff_name || 'Team';

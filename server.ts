@@ -25,6 +25,21 @@ import {
   type TdsSlab,
 } from "./statutoryRules.ts";
 import { generatePayslipPdf, type PayslipData } from "./payslipService.ts";
+import {
+  generateForm16Pdf,
+  generate24QPdf,
+  generateEpfEcr,
+  type Form16Data,
+  type Form24QData,
+  type EpfEcrRow,
+} from "./statutoryExports.ts";
+import {
+  generateOfferLetterPdf,
+  renderTemplate,
+  buildDefaultCtcBreakup,
+  DEFAULT_OFFER_TEMPLATE,
+  type OfferLetterData,
+} from "./offerLetterService.ts";
 import { provisionTenantSubdomain, deprovisionTenantSubdomain, cloudflareIsConfigured } from "./cloudflareService.ts";
 import { downloadFromDrive } from "./googleDriveService.ts";
 import multer from "multer";
@@ -12463,6 +12478,892 @@ You can also view all your payslips in the employee portal.
     } catch (err: any) {
       console.error('payroll/runs export.csv error:', err);
       res.status(500).json({ error: err?.message || 'Export failed' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // HR-P1 #136 — Statutory exports (Form 16, 24Q, EPF ECR)
+  // ══════════════════════════════════════════════════════════════════════
+
+  // EPF ECR text file for a payroll run
+  app.get("/api/restaurant/:id/payroll/runs/:runId/epf-ecr.txt", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      if (!run) return res.status(404).json({ error: 'Run not found' });
+      const payslips: any[] = await db.query(
+        `SELECT p.*, s.name AS staff_name, s.uan, s.basic AS staff_basic
+           FROM payslips p
+           LEFT JOIN attendance_staff s ON s.id = p.staff_id
+          WHERE p.payroll_run_id = ?`,
+        [req.params.runId]
+      );
+      const cfg = await getStatutoryConfig(db);
+      const ceiling = Number(cfg.pf_wage_ceiling) || 15000;
+      const rows: EpfEcrRow[] = payslips
+        .filter((p) => p.uan && (Number(p.pf_employee) > 0 || Number(p.pf_employer_eps) > 0))
+        .map((p) => {
+          // Get pro-rated basic from structure_snapshot OR fall back to staff_basic
+          let basicProRated = Number(p.staff_basic) || 0;
+          try {
+            const ss = JSON.parse(p.structure_snapshot || '{}');
+            basicProRated = Number(ss.basic) || basicProRated;
+          } catch { /* ignore */ }
+          // Pro-rate basic by paid_days / work_days
+          const paidFactor = (Number(p.paid_days) || 0) / Math.max(1, Number(p.work_days) || 30);
+          const proRatedBasic = Math.round(basicProRated * paidFactor);
+          const epfWages = Math.min(proRatedBasic, ceiling);
+          return {
+            uan: String(p.uan || ''),
+            member_name: String(p.staff_name || ''),
+            gross_wages: Math.round(Number(p.gross_earnings) || 0),
+            epf_wages: epfWages,
+            eps_wages: epfWages,
+            edli_wages: epfWages,
+            epf_contrib_remitted: Number(p.pf_employer_epf) || 0,
+            eps_contrib_remitted: Number(p.pf_employer_eps) || 0,
+            epf_eps_diff_remitted: (Number(p.pf_employer_epf) || 0) + (Number(p.pf_employer_eps) || 0) - (Number(p.pf_employer_eps) || 0),
+            ncp_days: Number(p.lop_days) || 0,
+            refund_of_advances: 0,
+          };
+        });
+      const text = generateEpfEcr(rows);
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="ecr-${run.year}-${String(run.month).padStart(2, '0')}.txt"`);
+      res.send(text);
+    } catch (err: any) {
+      console.error('payroll/epf-ecr error:', err);
+      res.status(500).json({ error: err?.message || 'ECR generation failed' });
+    }
+  });
+
+  // Form 24Q quarterly TDS return
+  app.get("/api/restaurant/:id/payroll/quarterly/24q.pdf", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const year = Number(req.query.year);
+      const quarter = String(req.query.quarter || '').toUpperCase() as 'Q1' | 'Q2' | 'Q3' | 'Q4';
+      if (!Number.isInteger(year)) return res.status(400).json({ error: 'year required' });
+      if (!['Q1', 'Q2', 'Q3', 'Q4'].includes(quarter)) return res.status(400).json({ error: 'quarter must be Q1/Q2/Q3/Q4' });
+      const db = await getTenantDb(req.params.id);
+      const cfg = await getStatutoryConfig(db);
+      const tenant: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [req.params.id]);
+
+      // Quarter month ranges
+      const months: Record<string, number[]> = {
+        Q1: [4, 5, 6],   // Apr-Jun
+        Q2: [7, 8, 9],   // Jul-Sep
+        Q3: [10, 11, 12],
+        Q4: [1, 2, 3],   // Jan-Mar (FY closer)
+      };
+      const m = months[quarter];
+      const fy = quarter === 'Q4' ? `${year - 1}-${String(year).slice(2)}` : `${year}-${String(year + 1).slice(2)}`;
+      const period_start = `${year}-${String(m[0]).padStart(2, '0')}-01`;
+      const period_end_last = new Date(year, m[2], 0).getDate();
+      const period_end = `${year}-${String(m[2]).padStart(2, '0')}-${String(period_end_last).padStart(2, '0')}`;
+
+      // Aggregate per-employee within the quarter
+      const rows: any[] = await db.query(
+        `SELECT p.staff_id, COALESCE(s.name, 'Unknown') AS name, s.pan,
+                SUM(COALESCE(p.gross_earnings, 0)) AS amount_paid,
+                SUM(COALESCE(p.tds, 0)) AS tds_deducted
+           FROM payslips p
+           LEFT JOIN attendance_staff s ON s.id = p.staff_id
+          WHERE p.pay_period_start >= ? AND p.pay_period_end <= ?
+          GROUP BY p.staff_id, s.name, s.pan
+          ORDER BY s.name`,
+        [period_start, period_end]
+      );
+      const data: Form24QData = {
+        tenant: {
+          name: tenant?.name || 'Atithi Setu',
+          pan: cfg?.pan_employer || '',
+          tan: cfg?.tan_employer || '',
+          address: tenant?.address || '',
+        },
+        fy,
+        quarter,
+        period_start,
+        period_end,
+        deductees: rows.filter((r: any) => Number(r.tds_deducted) > 0).map((r: any) => ({
+          employee_name: r.name,
+          pan: r.pan || 'PANNOTAVL',
+          section_code: '192',
+          amount_paid: Number(r.amount_paid) || 0,
+          tds_deducted: Number(r.tds_deducted) || 0,
+        })),
+      };
+      const pdf = await generate24QPdf(data);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="24Q-${quarter}-${fy}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) {
+      console.error('payroll/24q error:', err);
+      res.status(500).json({ error: err?.message || '24Q generation failed' });
+    }
+  });
+
+  // Form 16 annual TDS certificate per employee
+  app.get("/api/restaurant/:id/payroll/annual/form16/:staffId.pdf", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const fy = String(req.query.fy || '').trim() || '2025-26';
+      const [fyStartStr] = fy.split('-');
+      const fyStartYear = Number(fyStartStr);
+      const fyEndYear = fyStartYear + 1;
+      const period_start = `${fyStartYear}-04-01`;
+      const period_end = `${fyEndYear}-03-31`;
+      const assessment_year = `${fyEndYear}-${String(fyEndYear + 1).slice(2)}`;
+
+      const db = await getTenantDb(req.params.id);
+      const staff: any = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [req.params.staffId]);
+      if (!staff) return res.status(404).json({ error: 'Employee not found' });
+      const cfg = await getStatutoryConfig(db);
+      const tenant: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [req.params.id]);
+
+      const payslips: any[] = await db.query(
+        `SELECT * FROM payslips
+          WHERE staff_id = ?
+            AND pay_period_start >= ? AND pay_period_end <= ?
+          ORDER BY pay_period_start`,
+        [req.params.staffId, period_start, period_end]
+      );
+      const regime = (() => {
+        try {
+          const last = payslips[payslips.length - 1];
+          const ss = JSON.parse(last?.structure_snapshot || '{}');
+          return (String(ss.tds_regime || 'NEW').toUpperCase() === 'OLD') ? 'OLD' as const : 'NEW' as const;
+        } catch { return 'NEW' as const; }
+      })();
+
+      // Quarterly aggregates
+      const quartersList: Array<'Q1' | 'Q2' | 'Q3' | 'Q4'> = ['Q1', 'Q2', 'Q3', 'Q4'];
+      const quarterRange: Record<string, [number, number]> = {
+        Q1: [4, 6], Q2: [7, 9], Q3: [10, 12], Q4: [1, 3],
+      };
+      const quarters = quartersList.map((q) => {
+        const [mStart, mEnd] = quarterRange[q];
+        const yr = q === 'Q4' ? fyEndYear : fyStartYear;
+        const inQ = payslips.filter((p) => {
+          const d = new Date(String(p.pay_period_start) + 'T00:00:00Z');
+          const mm = d.getUTCMonth() + 1;
+          return d.getUTCFullYear() === yr && mm >= mStart && mm <= mEnd;
+        });
+        const amount_paid = inQ.reduce((s, p) => s + (Number(p.gross_earnings) || 0), 0);
+        const tds = inQ.reduce((s, p) => s + (Number(p.tds) || 0), 0);
+        return {
+          quarter: q,
+          period: `${['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][mStart]}-${['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][mEnd]} ${yr}`,
+          amount_paid,
+          tds_deducted: tds,
+          tds_deposited: tds,
+        };
+      });
+
+      const gross_salary = payslips.reduce((s, p) => s + (Number(p.gross_earnings) || 0), 0);
+      const professional_tax_annual = payslips.reduce((s, p) => s + (Number(p.professional_tax) || 0), 0);
+      const total_tax_deducted = payslips.reduce((s, p) => s + (Number(p.tds) || 0), 0);
+      const exempt_allowances = 0; // Phase 1: no HRA exempt computation
+      const standard_deduction = 50000;
+      const net_taxable_salary = Math.max(0, gross_salary - exempt_allowances - standard_deduction - professional_tax_annual);
+      const pfEmpAnnual = payslips.reduce((s, p) => s + (Number(p.pf_employee) || 0), 0);
+      const chapter_via_80c = regime === 'OLD' ? Math.min(150000, pfEmpAnnual) : 0;
+      const total_taxable_income = Math.max(0, net_taxable_salary - chapter_via_80c);
+      const tax_on_total_income = total_tax_deducted; // Phase 1: deducted = computed
+      const cess = 0;
+      const total_tax = tax_on_total_income + cess;
+
+      const data: Form16Data = {
+        tenant: {
+          name: tenant?.name || 'Atithi Setu',
+          address: [tenant?.address, tenant?.city, tenant?.state, tenant?.pincode].filter(Boolean).join(', '),
+          pan: cfg?.pan_employer || '',
+          tan: cfg?.tan_employer || '',
+          gstin: tenant?.gstin || '',
+        },
+        employee: {
+          name: staff.name || '',
+          pan: staff.pan || '',
+          designation: staff.designation || '',
+          department: staff.department || '',
+          joining_date: staff.joining_date || '',
+          address: staff.address || '',
+        },
+        fy,
+        assessment_year,
+        regime,
+        quarters,
+        gross_salary,
+        exempt_allowances,
+        standard_deduction,
+        professional_tax_annual,
+        net_taxable_salary,
+        chapter_via_80c,
+        chapter_via_other: 0,
+        total_taxable_income,
+        tax_on_total_income,
+        surcharge: 0,
+        cess,
+        total_tax,
+        relief_section_89: 0,
+        net_tax_payable: total_tax,
+        total_tax_deducted,
+      };
+      const pdf = await generateForm16Pdf(data);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="Form16-${staff.name?.replace(/[^a-z0-9]+/gi, '-')}-${fy}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) {
+      console.error('payroll/form16 error:', err);
+      res.status(500).json({ error: err?.message || 'Form 16 generation failed' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // HR-P1 #137 — Expense Claims with Approval Chain
+  // ══════════════════════════════════════════════════════════════════════
+  // State machine: DRAFT → SUBMITTED → MANAGER_APPROVED → HR_APPROVED → REIMBURSED
+  //                                                                   ↘ REJECTED
+
+  app.get("/api/restaurant/:id/hr/expenses", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const where: string[] = [];
+      const args: any[] = [];
+      if (req.query.status) { where.push('c.status = ?'); args.push(String(req.query.status).toUpperCase()); }
+      if (req.query.staff_id) { where.push('c.staff_id = ?'); args.push(String(req.query.staff_id)); }
+      const rows: any[] = await db.query(
+        `SELECT c.*, s.name AS staff_name, s.designation
+           FROM expense_claims c
+           LEFT JOIN attendance_staff s ON s.id = c.staff_id
+          ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+          ORDER BY c.created_at DESC
+          LIMIT 500`,
+        args
+      );
+      // hydrate items
+      for (const r of rows) {
+        const items = await db.query("SELECT * FROM expense_claim_items WHERE claim_id = ? ORDER BY expense_date", [r.id]);
+        r.items = items;
+      }
+      res.json({ claims: rows });
+    } catch (err: any) {
+      console.error('hr/expenses list error:', err);
+      res.status(500).json({ error: err?.message || 'List failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/expenses", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      const staff_id = String(b.staff_id || '').trim();
+      if (!staff_id) return res.status(400).json({ error: 'staff_id required' });
+      const items: any[] = Array.isArray(b.items) ? b.items : [];
+      if (items.length === 0) return res.status(400).json({ error: 'At least one line item required' });
+      const total = items.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+      const db = await getTenantDb(req.params.id);
+      const claim_id = randomUUID();
+      const seqNum = await getNextTenantSequence(db, `expense-${new Date().getFullYear()}`).catch(() => Date.now());
+      const claim_number = `CLAIM-${new Date().getFullYear()}-${String(seqNum).padStart(4, '0')}`;
+      await db.run(
+        `INSERT INTO expense_claims (id, staff_id, claim_number, claim_date, total_amount, status, notes)
+           VALUES (?, ?, ?, ?, ?, 'DRAFT', ?)`,
+        [claim_id, staff_id, claim_number, b.claim_date || new Date().toISOString().slice(0, 10), total, b.notes || null]
+      );
+      for (const i of items) {
+        await db.run(
+          `INSERT INTO expense_claim_items (id, claim_id, category, description, amount, expense_date, receipt_url, gst_amount)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [randomUUID(), claim_id, String(i.category || 'OTHER').toUpperCase(), i.description || '',
+            Number(i.amount) || 0, i.expense_date || null, i.receipt_url || null, Number(i.gst_amount) || 0]
+        );
+      }
+      const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [claim_id]);
+      const claimItems = await db.query("SELECT * FROM expense_claim_items WHERE claim_id = ?", [claim_id]);
+      res.json({ claim: { ...claim, items: claimItems } });
+    } catch (err: any) {
+      console.error('hr/expenses create error:', err);
+      res.status(500).json({ error: err?.message || 'Create failed' });
+    }
+  });
+
+  // Receipt upload (multipart)
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/receipt", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      const item_id = String(req.body?.item_id || '').trim();
+      if (!item_id) return res.status(400).json({ error: 'item_id required' });
+      const url = `/uploads/${req.file.filename}`;
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE expense_claim_items SET receipt_url = ? WHERE id = ? AND claim_id = ?",
+        [url, item_id, req.params.claimId]);
+      res.json({ ok: true, url });
+    } catch (err: any) {
+      console.error('hr/expenses receipt upload error:', err);
+      res.status(500).json({ error: err?.message || 'Upload failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/submit", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const stamp = new Date().toISOString();
+      const result: any = await db.run(
+        `UPDATE expense_claims SET status = 'SUBMITTED', submitted_at = ?
+          WHERE id = ? AND status = 'DRAFT'`,
+        [stamp, req.params.claimId]
+      );
+      if (result && result.changes === 0) {
+        const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+        return res.status(409).json({ error: `Claim is ${fresh?.status} — must be DRAFT to submit`, claim: fresh });
+      }
+      const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+      res.json({ claim });
+    } catch (err: any) {
+      console.error('hr/expenses submit error:', err);
+      res.status(500).json({ error: err?.message || 'Submit failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/approve", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      // 2-step: SUBMITTED → MANAGER_APPROVED → HR_APPROVED
+      // Determine which step from the body OR from the current state
+      const db = await getTenantDb(req.params.id);
+      const current = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+      if (!current) return res.status(404).json({ error: 'Claim not found' });
+      const stamp = new Date().toISOString();
+      let result: any;
+      if (current.status === 'SUBMITTED') {
+        result = await db.run(
+          `UPDATE expense_claims SET status = 'MANAGER_APPROVED', manager_approved_by = ?, manager_approved_at = ?
+             WHERE id = ? AND status = 'SUBMITTED'`,
+          [req.user?.id || null, stamp, req.params.claimId]
+        );
+      } else if (current.status === 'MANAGER_APPROVED') {
+        result = await db.run(
+          `UPDATE expense_claims SET status = 'HR_APPROVED', hr_approved_by = ?, hr_approved_at = ?
+             WHERE id = ? AND status = 'MANAGER_APPROVED'`,
+          [req.user?.id || null, stamp, req.params.claimId]
+        );
+      } else {
+        return res.status(409).json({ error: `Claim is ${current.status} — cannot approve`, claim: current });
+      }
+      if (result && result.changes === 0) {
+        const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+        return res.status(409).json({ error: 'Approval race lost', claim: fresh });
+      }
+      const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+      res.json({ claim });
+    } catch (err: any) {
+      console.error('hr/expenses approve error:', err);
+      res.status(500).json({ error: err?.message || 'Approve failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/reject", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const reason = String(req.body?.reason || '').trim() || 'No reason provided';
+      const db = await getTenantDb(req.params.id);
+      const stamp = new Date().toISOString();
+      const result: any = await db.run(
+        `UPDATE expense_claims
+            SET status = 'REJECTED', rejected_by = ?, rejected_at = ?, rejected_reason = ?
+          WHERE id = ? AND status IN ('SUBMITTED', 'MANAGER_APPROVED')`,
+        [req.user?.id || null, stamp, reason, req.params.claimId]
+      );
+      if (result && result.changes === 0) {
+        const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+        return res.status(409).json({ error: 'Cannot reject from current state', claim: fresh });
+      }
+      const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+      res.json({ claim });
+    } catch (err: any) {
+      console.error('hr/expenses reject error:', err);
+      res.status(500).json({ error: err?.message || 'Reject failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/expenses/:claimId/attach-to-run", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const run_id = String(req.body?.payroll_run_id || '').trim();
+      if (!run_id) return res.status(400).json({ error: 'payroll_run_id required' });
+      const db = await getTenantDb(req.params.id);
+      const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [run_id]);
+      if (!run) return res.status(404).json({ error: 'Run not found' });
+      if (run.status === 'PAID') return res.status(409).json({ error: 'Cannot attach to a PAID run' });
+      const result: any = await db.run(
+        `UPDATE expense_claims SET reimburse_with_payroll_run_id = ?
+          WHERE id = ? AND status = 'HR_APPROVED' AND reimburse_with_payroll_run_id IS NULL`,
+        [run_id, req.params.claimId]
+      );
+      if (result && result.changes === 0) {
+        const fresh = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+        return res.status(409).json({ error: 'Claim must be HR_APPROVED and not already attached', claim: fresh });
+      }
+      const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+      res.json({ claim });
+    } catch (err: any) {
+      console.error('hr/expenses attach error:', err);
+      res.status(500).json({ error: err?.message || 'Attach failed' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // HR-P1 #138 — Offer Letters + Template editor
+  // ══════════════════════════════════════════════════════════════════════
+
+  // Templates
+  app.get("/api/restaurant/:id/hr/offer-letter-templates", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      let rows = await db.query("SELECT * FROM offer_letter_templates ORDER BY is_default DESC, name");
+      if (!rows || rows.length === 0) {
+        // Seed default template on first access
+        const id = randomUUID();
+        await db.run(
+          `INSERT INTO offer_letter_templates (id, name, body_html, is_default) VALUES (?, ?, ?, 1)
+             ON CONFLICT (id) DO NOTHING`,
+          [id, 'Default Offer Letter', DEFAULT_OFFER_TEMPLATE]
+        );
+        rows = await db.query("SELECT * FROM offer_letter_templates ORDER BY is_default DESC, name");
+      }
+      res.json({ templates: rows });
+    } catch (err: any) {
+      console.error('hr/offer-letter-templates list error:', err);
+      res.status(500).json({ error: err?.message || 'List failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/offer-letter-templates", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      const id = b.id || randomUUID();
+      const name = String(b.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'Name required' });
+      const body = String(b.body_html || '');
+      const db = await getTenantDb(req.params.id);
+      const stamp = new Date().toISOString();
+      // If this is set as default, demote others first
+      if (b.is_default) {
+        await db.run("UPDATE offer_letter_templates SET is_default = 0");
+      }
+      await db.run(
+        `INSERT INTO offer_letter_templates (id, name, body_html, is_default, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, body_html = EXCLUDED.body_html,
+             is_default = EXCLUDED.is_default, updated_at = EXCLUDED.updated_at`,
+        [id, name, body, b.is_default ? 1 : 0, stamp]
+      );
+      const row = await db.get("SELECT * FROM offer_letter_templates WHERE id = ?", [id]);
+      res.json({ template: row });
+    } catch (err: any) {
+      console.error('hr/offer-letter-templates upsert error:', err);
+      res.status(500).json({ error: err?.message || 'Save failed' });
+    }
+  });
+
+  // Offer letters
+  app.get("/api/restaurant/:id/hr/offer-letters", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const where: string[] = [];
+      const args: any[] = [];
+      if (req.query.status) { where.push('status = ?'); args.push(String(req.query.status).toUpperCase()); }
+      const rows = await db.query(
+        `SELECT * FROM offer_letters ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY created_at DESC LIMIT 500`,
+        args
+      );
+      res.json({ offers: rows });
+    } catch (err: any) {
+      console.error('hr/offer-letters list error:', err);
+      res.status(500).json({ error: err?.message || 'List failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/offer-letters", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      const candidate_name = String(b.candidate_name || '').trim();
+      const designation = String(b.designation || '').trim();
+      const ctc = Number(b.ctc) || 0;
+      if (!candidate_name) return res.status(400).json({ error: 'candidate_name required' });
+      if (!designation) return res.status(400).json({ error: 'designation required' });
+      if (!b.joining_date) return res.status(400).json({ error: 'joining_date required (YYYY-MM-DD)' });
+      if (ctc <= 0) return res.status(400).json({ error: 'CTC must be > 0' });
+
+      const db = await getTenantDb(req.params.id);
+      const seqNum = await getNextTenantSequence(db, `offer-${new Date().getFullYear()}`).catch(() => Date.now());
+      const offer_number = `OFFER-${new Date().getFullYear()}-${String(seqNum).padStart(4, '0')}`;
+      const monthlyGross = Math.round(ctc / 12);
+      const breakup = b.ctc_breakup || buildDefaultCtcBreakup(monthlyGross);
+
+      const id = randomUUID();
+      await db.run(
+        `INSERT INTO offer_letters (
+            id, offer_number, candidate_name, candidate_email, candidate_phone,
+            designation, department, ctc, ctc_breakup, joining_date,
+            template_id, status, expires_at, created_by
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
+        [
+          id, offer_number, candidate_name, b.candidate_email || null, b.candidate_phone || null,
+          designation, b.department || null, ctc, JSON.stringify(breakup),
+          b.joining_date, b.template_id || null,
+          b.expires_at || null, req.user?.id || null,
+        ]
+      );
+      const row = await db.get("SELECT * FROM offer_letters WHERE id = ?", [id]);
+      res.json({ offer: row });
+    } catch (err: any) {
+      console.error('hr/offer-letters create error:', err);
+      res.status(500).json({ error: err?.message || 'Create failed' });
+    }
+  });
+
+  async function buildOfferLetterData(restaurantId: string, offerId: string): Promise<OfferLetterData> {
+    const db = await getTenantDb(restaurantId);
+    const offer: any = await db.get("SELECT * FROM offer_letters WHERE id = ?", [offerId]);
+    if (!offer) throw new Error('Offer not found');
+    const tenant: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [restaurantId]);
+    const tmpl = offer.template_id
+      ? await db.get("SELECT * FROM offer_letter_templates WHERE id = ?", [offer.template_id])
+      : await db.get("SELECT * FROM offer_letter_templates WHERE is_default = 1");
+    const templateBody = tmpl?.body_html || DEFAULT_OFFER_TEMPLATE;
+    const ctcBreakup = (() => {
+      try { return JSON.parse(offer.ctc_breakup || ''); }
+      catch { return buildDefaultCtcBreakup(Math.round(Number(offer.ctc) / 12)); }
+    })();
+    const ctcInWords = (() => {
+      try { return new (Intl as any).NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(Number(offer.ctc)); }
+      catch { return `INR ${Number(offer.ctc).toLocaleString('en-IN')}`; }
+    })();
+    const expiresLabel = offer.expires_at || '30 days from this letter';
+    const body = renderTemplate(templateBody, {
+      candidate_name: offer.candidate_name,
+      designation: offer.designation,
+      department: offer.department || 'the relevant',
+      ctc: ctcInWords,
+      ctc_in_words: ctcInWords,
+      joining_date: offer.joining_date,
+      expires_at_label: expiresLabel,
+      employer_name: tenant?.name || '',
+      employer_city: tenant?.city || '',
+    });
+    return {
+      tenant: {
+        name: tenant?.name || 'Atithi Setu',
+        address: tenant?.address || '',
+        city: tenant?.city || '',
+        state: tenant?.state || '',
+        pincode: tenant?.pincode || '',
+        logo_url: tenant?.logo_url || '',
+        contact_email: tenant?.email || '',
+        contact_phone: tenant?.phone || '',
+        website: tenant?.website || '',
+      },
+      candidate: {
+        name: offer.candidate_name,
+        email: offer.candidate_email,
+        phone: offer.candidate_phone,
+        address: '',
+      },
+      offer: {
+        offer_number: offer.offer_number,
+        designation: offer.designation,
+        department: offer.department,
+        joining_date: offer.joining_date,
+        ctc: Number(offer.ctc) || 0,
+        ctc_breakup: ctcBreakup,
+        expires_at: offer.expires_at,
+        issued_date: offer.created_at || new Date().toISOString(),
+      },
+      body_html: body,
+    };
+  }
+
+  app.get("/api/restaurant/:id/hr/offer-letters/:offerId/pdf", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const data = await buildOfferLetterData(req.params.id, req.params.offerId);
+      const pdf = await generateOfferLetterPdf(data);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${data.offer.offer_number}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) {
+      console.error('hr/offer-letters PDF error:', err);
+      res.status(500).json({ error: err?.message || 'PDF failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/send", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const data = await buildOfferLetterData(req.params.id, req.params.offerId);
+      const to = String(req.body?.to || data.candidate.email || '').trim();
+      if (!to) return res.status(400).json({ error: 'No candidate email — set candidate_email or pass `to` in body' });
+      const pdf = await generateOfferLetterPdf(data);
+      const subject = `Letter of Offer — ${data.offer.designation} at ${data.tenant.name}`;
+      const text = `Dear ${data.candidate.name},
+
+Please find attached your Letter of Offer for the position of ${data.offer.designation} at ${data.tenant.name}.
+
+Total CTC (annual): ₹${data.offer.ctc.toLocaleString('en-IN')}
+Tentative joining date: ${data.offer.joining_date}
+
+Kindly review and respond with your acceptance.
+
+Warm regards,
+Human Resources
+${data.tenant.name}`;
+      await sendEmail(to, subject, text, undefined, [
+        { filename: `${data.offer.offer_number}.pdf`, content: pdf, contentType: 'application/pdf' },
+      ]);
+      const db = await getTenantDb(req.params.id);
+      const stamp = new Date().toISOString();
+      await db.run(
+        `UPDATE offer_letters SET status = 'SENT', sent_at = ?, updated_at = ?
+          WHERE id = ? AND status IN ('DRAFT', 'SENT')`,
+        [stamp, stamp, req.params.offerId]
+      );
+      res.json({ ok: true, sent_to: to });
+    } catch (err: any) {
+      console.error('hr/offer-letters send error:', err);
+      res.status(500).json({ error: err?.message || 'Send failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/accept", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const stamp = new Date().toISOString();
+      const result: any = await db.run(
+        `UPDATE offer_letters SET status = 'ACCEPTED', accepted_at = ?, updated_at = ?
+          WHERE id = ? AND status IN ('DRAFT', 'SENT')`,
+        [stamp, stamp, req.params.offerId]
+      );
+      if (result && result.changes === 0) {
+        const fresh = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
+        return res.status(409).json({ error: `Cannot accept ${fresh?.status} offer`, offer: fresh });
+      }
+      const offer = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
+      res.json({ offer });
+    } catch (err: any) {
+      console.error('hr/offer-letters accept error:', err);
+      res.status(500).json({ error: err?.message || 'Accept failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/decline", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const stamp = new Date().toISOString();
+      const result: any = await db.run(
+        `UPDATE offer_letters SET status = 'DECLINED', declined_at = ?, updated_at = ?
+          WHERE id = ? AND status IN ('DRAFT', 'SENT')`,
+        [stamp, stamp, req.params.offerId]
+      );
+      if (result && result.changes === 0) {
+        const fresh = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
+        return res.status(409).json({ error: `Cannot decline ${fresh?.status} offer`, offer: fresh });
+      }
+      const offer = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
+      res.json({ offer });
+    } catch (err: any) {
+      console.error('hr/offer-letters decline error:', err);
+      res.status(500).json({ error: err?.message || 'Decline failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/offer-letters/:offerId/upload-signed", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), upload.single('file'), async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      const url = `/uploads/${req.file.filename}`;
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE offer_letters SET signed_pdf_url = ?, updated_at = ? WHERE id = ?",
+        [url, new Date().toISOString(), req.params.offerId]);
+      const offer = await db.get("SELECT * FROM offer_letters WHERE id = ?", [req.params.offerId]);
+      res.json({ offer });
+    } catch (err: any) {
+      console.error('hr/offer-letters upload-signed error:', err);
+      res.status(500).json({ error: err?.message || 'Upload failed' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // HR-P1 #139 — Employee Self-Service Portal (/me/*)
+  // ══════════════════════════════════════════════════════════════════════
+  // Every /me/* endpoint reads staff_id from req.user.id (the JWT subject)
+  // and queries WHERE staff_id = req.user.id — NEVER accepts an external
+  // staff_id query/path param. Mirrors the tenant-isolation pattern from T1-S2.
+
+  // Resolve current staff (verify the JWT really belongs to a staff record)
+  async function resolveSelfStaff(req: AuthRequest, restaurantId: string) {
+    if (!req.user?.id) throw new Error('Not authenticated');
+    const db = await getTenantDb(restaurantId);
+    const staff: any = await db.get(
+      "SELECT * FROM attendance_staff WHERE id = ?",
+      [req.user.id]
+    );
+    if (!staff) throw new Error('Staff record not found');
+    return { db, staff };
+  }
+
+  app.get("/api/restaurant/:id/me/profile", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { staff } = await resolveSelfStaff(req, req.params.id);
+      // Strip secrets before returning
+      const { password, ...safe } = staff;
+      res.json({ profile: safe });
+    } catch (err: any) {
+      res.status(401).json({ error: err?.message || 'Unauthorized' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/me/payslips", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { db, staff } = await resolveSelfStaff(req, req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT p.*, r.year, r.month, r.status AS run_status
+           FROM payslips p
+           JOIN payroll_runs r ON r.id = p.payroll_run_id
+          WHERE p.staff_id = ? AND r.status IN ('APPROVED', 'LOCKED', 'PAID')
+          ORDER BY r.year DESC, r.month DESC
+          LIMIT 36`,
+        [staff.id]
+      );
+      // Hide the JSON snapshots from the self-service view (large + redundant)
+      const payslips = rows.map((r) => {
+        const { staff_snapshot, structure_snapshot, ...safe } = r;
+        return safe;
+      });
+      res.json({ payslips });
+    } catch (err: any) {
+      res.status(401).json({ error: err?.message || 'Unauthorized' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/me/payslips/:payslipId/pdf", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { db, staff } = await resolveSelfStaff(req, req.params.id);
+      const payslip: any = await db.get(
+        `SELECT p.*, r.status AS run_status
+           FROM payslips p JOIN payroll_runs r ON r.id = p.payroll_run_id
+          WHERE p.id = ? AND p.staff_id = ?`,
+        [req.params.payslipId, staff.id]
+      );
+      if (!payslip) return res.status(404).json({ error: 'Payslip not found' });
+      if (!['APPROVED', 'LOCKED', 'PAID'].includes(String(payslip.run_status))) {
+        return res.status(403).json({ error: 'Payslip not yet released' });
+      }
+      const { data } = await buildPayslipPdfData(req.params.id, req.params.payslipId);
+      const pdf = await generatePayslipPdf(data);
+      // Stamp acknowledged_at so HR sees who's viewed
+      if (!payslip.acknowledged_at) {
+        await db.run("UPDATE payslips SET acknowledged_at = ? WHERE id = ?",
+          [new Date().toISOString(), req.params.payslipId]);
+      }
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${data.payslip.payslip_number}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) {
+      console.error('me/payslips PDF error:', err);
+      res.status(500).json({ error: err?.message || 'PDF failed' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/me/expenses", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { db, staff } = await resolveSelfStaff(req, req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT * FROM expense_claims WHERE staff_id = ? ORDER BY created_at DESC LIMIT 100`,
+        [staff.id]
+      );
+      for (const r of rows) {
+        const items = await db.query("SELECT * FROM expense_claim_items WHERE claim_id = ? ORDER BY expense_date", [r.id]);
+        r.items = items;
+      }
+      res.json({ claims: rows });
+    } catch (err: any) {
+      res.status(401).json({ error: err?.message || 'Unauthorized' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/me/expenses", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { db, staff } = await resolveSelfStaff(req, req.params.id);
+      const b = req.body || {};
+      const items: any[] = Array.isArray(b.items) ? b.items : [];
+      if (items.length === 0) return res.status(400).json({ error: 'At least one line item required' });
+      const total = items.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+      const claim_id = randomUUID();
+      const seqNum = await getNextTenantSequence(db, `expense-${new Date().getFullYear()}`).catch(() => Date.now());
+      const claim_number = `CLAIM-${new Date().getFullYear()}-${String(seqNum).padStart(4, '0')}`;
+      await db.run(
+        `INSERT INTO expense_claims (id, staff_id, claim_number, claim_date, total_amount, status, notes, submitted_at)
+           VALUES (?, ?, ?, ?, ?, 'SUBMITTED', ?, ?)`,
+        [claim_id, staff.id, claim_number, b.claim_date || new Date().toISOString().slice(0, 10), total, b.notes || null, new Date().toISOString()]
+      );
+      for (const i of items) {
+        await db.run(
+          `INSERT INTO expense_claim_items (id, claim_id, category, description, amount, expense_date, receipt_url, gst_amount)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [randomUUID(), claim_id, String(i.category || 'OTHER').toUpperCase(), i.description || '',
+            Number(i.amount) || 0, i.expense_date || null, i.receipt_url || null, Number(i.gst_amount) || 0]
+        );
+      }
+      const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [claim_id]);
+      res.json({ claim });
+    } catch (err: any) {
+      console.error('me/expenses create error:', err);
+      res.status(500).json({ error: err?.message || 'Create failed' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // HR-P1 #141 — Statutory Config Settings
+  // ══════════════════════════════════════════════════════════════════════
+
+  app.get("/api/restaurant/:id/hr/statutory-config", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const cfg = await getStatutoryConfig(db);
+      // Hydrate with central PT slabs for the selected state (read-only preview)
+      const ptSlabs = cfg.pt_state ? await getCentralPtSlabs(cfg.pt_state) : [];
+      res.json({ config: cfg, pt_slabs_preview: ptSlabs });
+    } catch (err: any) {
+      console.error('hr/statutory-config get error:', err);
+      res.status(500).json({ error: err?.message || 'Fetch failed' });
+    }
+  });
+
+  app.put("/api/restaurant/:id/hr/statutory-config", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      const db = await getTenantDb(req.params.id);
+      // Idempotently ensure the singleton row exists
+      await getStatutoryConfig(db);
+      const stamp = new Date().toISOString();
+      const ptState = b.pt_state ? String(b.pt_state).toUpperCase() : null;
+      const ptStateValid = !ptState || /^[A-Z]{2,4}$/.test(ptState);
+      if (!ptStateValid) return res.status(400).json({ error: 'pt_state must be a 2-4 letter state code' });
+      const tdsRegime = (String(b.tds_regime_default || 'NEW').toUpperCase() === 'OLD') ? 'OLD' : 'NEW';
+      await db.run(
+        `UPDATE statutory_config SET
+           pf_enabled = ?, esi_enabled = ?, pt_state = ?, pt_slabs = ?,
+           tds_regime_default = ?, pf_wage_ceiling = ?, esi_wage_ceiling = ?,
+           pan_employer = ?, tan_employer = ?, pf_estab_code = ?, esi_employer_code = ?,
+           financial_year = ?, notes = ?, updated_at = ?
+         WHERE id = 'SINGLETON'`,
+        [
+          b.pf_enabled ? 1 : 0, b.esi_enabled ? 1 : 0,
+          ptState, b.pt_slabs ? JSON.stringify(b.pt_slabs) : null,
+          tdsRegime, Number(b.pf_wage_ceiling) || 15000, Number(b.esi_wage_ceiling) || 21000,
+          b.pan_employer || null, b.tan_employer || null,
+          b.pf_estab_code || null, b.esi_employer_code || null,
+          b.financial_year || '2025-26', b.notes || null, stamp,
+        ]
+      );
+      const cfg = await getStatutoryConfig(db);
+      res.json({ config: cfg });
+    } catch (err: any) {
+      console.error('hr/statutory-config update error:', err);
+      res.status(500).json({ error: err?.message || 'Save failed' });
     }
   });
 
@@ -31047,7 +31948,7 @@ You can also view all your payslips in the employee portal.
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hr-payroll-engine-payslip-pdf',
+    commit_marker: 'hr-statutory-exports-expenses-offers-selfservice',
     code_features: [
       'subscription-billing',
       'read-only-mode',
@@ -32294,6 +33195,87 @@ You can also view all your payslips in the employee portal.
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[shift-reminder] Daily 08:00 IST shift reminder cron started');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // HR-P1 #140 — Auto-create monthly payroll DRAFT (1st of month, 03:00 IST)
+  // ═════════════════════════════════════════════════════════════════════════
+  cron.schedule('0 3 1 * *', async () => {
+    try {
+      const tenants: any[] = await centralDb.query(
+        `SELECT id, name FROM restaurants
+          WHERE is_active = 1 AND id <> 'SYSTEM'
+            AND access_revoked = 0`
+      );
+      const now = new Date();
+      // Cron fires on day 1 — compute the PRIOR month's run (the just-closed month)
+      const prior = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const year = prior.getFullYear();
+      const month = prior.getMonth() + 1;
+      const period_start = `${year}-${String(month).padStart(2, '0')}-01`;
+      const lastDay = new Date(year, month, 0).getDate();
+      const period_end = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+      let created = 0;
+      for (const t of tenants) {
+        try {
+          const db = await getTenantDb(t.id);
+          const cfg = await db.get("SELECT * FROM statutory_config WHERE id = 'SINGLETON'").catch(() => null);
+          // Only create runs for tenants who've configured HR (any statutory_config row)
+          if (!cfg) continue;
+          const result: any = await db.run(
+            `INSERT INTO payroll_runs (id, year, month, period_start, period_end, status)
+               VALUES (?, ?, ?, ?, ?, 'DRAFT')
+               ON CONFLICT (year, month) DO NOTHING`,
+            [randomUUID(), year, month, period_start, period_end]
+          );
+          if (result && result.changes > 0) {
+            created++;
+            triggerNotification(t.id, 'PAYROLL_RUN_AUTOCREATED', {
+              year, month, period_start, period_end,
+            }).catch(() => {});
+          }
+        } catch (err) {
+          console.error(`[payroll-autoCreate] tenant ${t.id} failed:`, err);
+        }
+      }
+      console.log(`[payroll-autoCreate] done — DRAFT run created for ${created}/${tenants.length} tenants for ${year}-${String(month).padStart(2, '0')}`);
+    } catch (err) {
+      console.error('[payroll-autoCreate] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[payroll-autoCreate] Monthly 1st@03:00 IST payroll run autocreate cron started');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // HR-P1 #140 — Offer letter expiry sweep (daily 09:00 IST)
+  // ═════════════════════════════════════════════════════════════════════════
+  cron.schedule('0 9 * * *', async () => {
+    try {
+      const tenants: any[] = await centralDb.query(
+        `SELECT id FROM restaurants WHERE is_active = 1 AND access_revoked = 0`
+      );
+      const today = new Date().toISOString().slice(0, 10);
+      let expired = 0;
+      for (const t of tenants) {
+        try {
+          const db = await getTenantDb(t.id);
+          const result: any = await db.run(
+            `UPDATE offer_letters
+                SET status = 'EXPIRED', updated_at = ?
+              WHERE status IN ('DRAFT', 'SENT')
+                AND expires_at IS NOT NULL
+                AND expires_at < ?`,
+            [new Date().toISOString(), today]
+          );
+          if (result && result.changes > 0) expired += result.changes;
+        } catch (err) {
+          console.error(`[offer-expiry] tenant ${t.id} failed:`, err);
+        }
+      }
+      if (expired > 0) console.log(`[offer-expiry] expired ${expired} offer(s) across ${tenants.length} tenants`);
+    } catch (err) {
+      console.error('[offer-expiry] cron error:', err);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[offer-expiry] Daily 09:00 IST offer expiry cron started');
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── Phase I2 — Daily auto-PO draft generation (06:00 IST) ───────────────
