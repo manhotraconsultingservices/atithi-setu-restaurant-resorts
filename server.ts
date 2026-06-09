@@ -18,6 +18,13 @@ import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
 import { generatePOPdf, buildPOEmailBody, type POPdfData } from "./poService.ts";
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
+import {
+  computePayslip as computeStatutoryPayslip,
+  type StatutoryInput,
+  type PtSlab,
+  type TdsSlab,
+} from "./statutoryRules.ts";
+import { generatePayslipPdf, type PayslipData } from "./payslipService.ts";
 import { provisionTenantSubdomain, deprovisionTenantSubdomain, cloudflareIsConfigured } from "./cloudflareService.ts";
 import { downloadFromDrive } from "./googleDriveService.ts";
 import multer from "multer";
@@ -11775,6 +11782,687 @@ async function startServer() {
     } catch (err: any) {
       console.error('hr/employees document upload error:', err);
       res.status(500).json({ error: err?.message || 'Upload failed' });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // HR-P1 #132 / #134 — Salary Structures + Components + Payroll Engine
+  // ══════════════════════════════════════════════════════════════════════
+  // Helpers shared across all HR endpoints below. Cached per-request only.
+
+  async function getStatutoryConfig(tenantDb: DbInterface): Promise<any> {
+    let cfg: any = await tenantDb.get(
+      "SELECT * FROM statutory_config WHERE id = 'SINGLETON'"
+    );
+    if (!cfg) {
+      // First read — create the default row idempotently.
+      await tenantDb.run(
+        `INSERT INTO statutory_config (id) VALUES ('SINGLETON')
+           ON CONFLICT (id) DO NOTHING`
+      );
+      cfg = await tenantDb.get(
+        "SELECT * FROM statutory_config WHERE id = 'SINGLETON'"
+      );
+    }
+    return cfg || {};
+  }
+
+  async function getCentralPtSlabs(state: string | null): Promise<PtSlab[]> {
+    if (!state) return [];
+    const today = new Date().toISOString().slice(0, 10);
+    const rows: any[] = await centralDb.query(
+      `SELECT state_code, min_gross, max_gross, amount, extra_month, extra_amount
+         FROM central_pt_slabs
+        WHERE state_code = ?
+          AND effective_from <= ?
+          AND (effective_to IS NULL OR effective_to >= ?)
+        ORDER BY min_gross ASC`,
+      [state, today, today]
+    );
+    return rows.map((r) => ({
+      state_code: r.state_code,
+      min_gross: Number(r.min_gross),
+      max_gross: r.max_gross == null ? null : Number(r.max_gross),
+      amount: Number(r.amount),
+      extra_month: r.extra_month == null ? null : Number(r.extra_month),
+      extra_amount: Number(r.extra_amount) || 0,
+    }));
+  }
+
+  async function getCentralTdsSlabs(fy: string, regime: 'OLD' | 'NEW'): Promise<TdsSlab[]> {
+    const rows: any[] = await centralDb.query(
+      `SELECT fy, regime, min_income, max_income, rate_pct, base_tax, surcharge_pct, cess_pct
+         FROM central_tds_slabs
+        WHERE fy = ? AND regime = ?
+        ORDER BY min_income ASC`,
+      [fy, regime]
+    );
+    return rows.map((r) => ({
+      fy: r.fy,
+      regime: r.regime,
+      min_income: Number(r.min_income),
+      max_income: r.max_income == null ? null : Number(r.max_income),
+      rate_pct: Number(r.rate_pct),
+      base_tax: Number(r.base_tax) || 0,
+      surcharge_pct: Number(r.surcharge_pct) || 0,
+      cess_pct: Number(r.cess_pct) || 4,
+    }));
+  }
+
+  // ── Salary Components master ───────────────────────────────────────────
+  app.get("/api/restaurant/:id/hr/salary-components", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT * FROM salary_components ORDER BY type, display_order, name`
+      );
+      res.json({ components: rows });
+    } catch (err: any) {
+      console.error('hr/salary-components list error:', err);
+      res.status(500).json({ error: err?.message || 'List failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/salary-components", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      const id = b.id || randomUUID();
+      const name = String(b.name || '').trim();
+      const type = String(b.type || '').toUpperCase();
+      const calc_basis = String(b.calc_basis || 'FIXED').toUpperCase();
+      if (!name) return res.status(400).json({ error: 'Name required' });
+      if (!['EARNING', 'DEDUCTION', 'STATUTORY'].includes(type)) {
+        return res.status(400).json({ error: 'Type must be EARNING / DEDUCTION / STATUTORY' });
+      }
+      if (!['FIXED', 'PCT_GROSS', 'PCT_BASIC', 'FORMULA'].includes(calc_basis)) {
+        return res.status(400).json({ error: 'Invalid calc_basis' });
+      }
+      const db = await getTenantDb(req.params.id);
+      await db.run(
+        `INSERT INTO salary_components (id, name, type, calc_basis, value, formula, display_order, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name, type = EXCLUDED.type, calc_basis = EXCLUDED.calc_basis,
+           value = EXCLUDED.value, formula = EXCLUDED.formula,
+           display_order = EXCLUDED.display_order, is_active = EXCLUDED.is_active`,
+        [id, name, type, calc_basis, Number(b.value) || 0, b.formula || null,
+         Number(b.display_order) || 0, b.is_active === false ? 0 : 1]
+      );
+      const row = await db.get("SELECT * FROM salary_components WHERE id = ?", [id]);
+      res.json({ component: row });
+    } catch (err: any) {
+      console.error('hr/salary-components upsert error:', err);
+      res.status(500).json({ error: err?.message || 'Save failed' });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hr/salary-components/:componentId", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("DELETE FROM salary_components WHERE id = ?", [req.params.componentId]);
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error('hr/salary-components delete error:', err);
+      res.status(500).json({ error: err?.message || 'Delete failed' });
+    }
+  });
+
+  // ── Salary Structures (per-employee, versioned) ────────────────────────
+  app.get("/api/restaurant/:id/hr/salary-structures/:staffId", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT * FROM salary_structures WHERE staff_id = ? ORDER BY effective_from DESC`,
+        [req.params.staffId]
+      );
+      const current = rows.find((r: any) => !r.effective_to) || rows[0] || null;
+      res.json({ history: rows, current });
+    } catch (err: any) {
+      console.error('hr/salary-structures get error:', err);
+      res.status(500).json({ error: err?.message || 'Fetch failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hr/salary-structures", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const b = req.body || {};
+      const staff_id = String(b.staff_id || '').trim();
+      const effective_from = String(b.effective_from || '').trim();
+      if (!staff_id) return res.status(400).json({ error: 'staff_id required' });
+      if (!effective_from) return res.status(400).json({ error: 'effective_from required (YYYY-MM-DD)' });
+      const gross_monthly = Number(b.gross_monthly) || 0;
+      const basic = Number(b.basic) || 0;
+      const hra = Number(b.hra) || 0;
+      const special = Number(b.special) || 0;
+      const conveyance = Number(b.conveyance) || 0;
+      const medical = Number(b.medical) || 0;
+      const other = Number(b.other_allowances) || 0;
+      // Soft validation — sum should equal gross (allow small rounding tolerance)
+      const sum = basic + hra + special + conveyance + medical + other;
+      if (gross_monthly > 0 && Math.abs(sum - gross_monthly) > 2) {
+        return res.status(400).json({
+          error: `Components sum (₹${sum}) doesn't match gross (₹${gross_monthly}). Tolerance ±₹2.`,
+        });
+      }
+      const tds_regime = (String(b.tds_regime || 'NEW').toUpperCase() === 'OLD') ? 'OLD' : 'NEW';
+      const db = await getTenantDb(req.params.id);
+      // Close previous current row (effective_to = day before new from)
+      const dayBefore = (() => {
+        const d = new Date(effective_from + 'T00:00:00Z');
+        d.setUTCDate(d.getUTCDate() - 1);
+        return d.toISOString().slice(0, 10);
+      })();
+      await db.run(
+        `UPDATE salary_structures
+            SET effective_to = ?
+          WHERE staff_id = ? AND effective_to IS NULL`,
+        [dayBefore, staff_id]
+      );
+      const id = randomUUID();
+      await db.run(
+        `INSERT INTO salary_structures (
+            id, staff_id, effective_from, effective_to, gross_monthly,
+            basic, hra, special, conveyance, medical, other_allowances,
+            employer_pf_included, tds_regime, section_80c_declared,
+            hra_exemption_declared, notes, created_by
+          ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id, staff_id, effective_from, gross_monthly, basic, hra, special,
+          conveyance, medical, other,
+          b.employer_pf_included === false ? 0 : 1, tds_regime,
+          Number(b.section_80c_declared) || 0,
+          Number(b.hra_exemption_declared) || 0,
+          b.notes || null, req.user?.id || null,
+        ]
+      );
+      // Also stamp ctc on attendance_staff so the directory shows the latest
+      if (gross_monthly > 0) {
+        await db.run(
+          `UPDATE attendance_staff SET ctc = ? WHERE id = ?`,
+          [gross_monthly * 12, staff_id]
+        );
+      }
+      const row = await db.get("SELECT * FROM salary_structures WHERE id = ?", [id]);
+      res.json({ structure: row });
+    } catch (err: any) {
+      console.error('hr/salary-structures create error:', err);
+      res.status(500).json({ error: err?.message || 'Save failed' });
+    }
+  });
+
+  // ── Payroll Runs ───────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/payroll/runs", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const where: string[] = [];
+      const args: any[] = [];
+      if (req.query.year) { where.push("year = ?"); args.push(Number(req.query.year)); }
+      if (req.query.month) { where.push("month = ?"); args.push(Number(req.query.month)); }
+      const sql = `SELECT * FROM payroll_runs ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY year DESC, month DESC LIMIT 50`;
+      const rows = await db.query(sql, args);
+      res.json({ runs: rows });
+    } catch (err: any) {
+      console.error('payroll/runs list error:', err);
+      res.status(500).json({ error: err?.message || 'List failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payroll/runs", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const year = Number(req.body?.year);
+      const month = Number(req.body?.month);
+      if (!Number.isInteger(year) || year < 2020 || year > 2099) return res.status(400).json({ error: 'Invalid year' });
+      if (!Number.isInteger(month) || month < 1 || month > 12) return res.status(400).json({ error: 'Invalid month (1-12)' });
+      const db = await getTenantDb(req.params.id);
+      // Idempotent — UNIQUE(year, month) ensures we get at most one row
+      const period_start = `${year}-${String(month).padStart(2, '0')}-01`;
+      // last day of month: new Date(y, m, 0).getDate() works because Date months are 0-indexed
+      const lastDay = new Date(year, month, 0).getDate();
+      const period_end = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+      const id = randomUUID();
+      await db.run(
+        `INSERT INTO payroll_runs (id, year, month, period_start, period_end, status, created_by)
+           VALUES (?, ?, ?, ?, ?, 'DRAFT', ?)
+           ON CONFLICT (year, month) DO NOTHING`,
+        [id, year, month, period_start, period_end, req.user?.id || null]
+      );
+      const row = await db.get("SELECT * FROM payroll_runs WHERE year = ? AND month = ?", [year, month]);
+      res.json({ run: row });
+    } catch (err: any) {
+      console.error('payroll/runs create error:', err);
+      res.status(500).json({ error: err?.message || 'Create failed' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/payroll/runs/:runId/payslips", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      if (!run) return res.status(404).json({ error: 'Run not found' });
+      const payslips = await db.query(
+        `SELECT p.*, s.name AS staff_name, s.designation, s.department, s.uan, s.pan, s.bank_account
+           FROM payslips p
+           LEFT JOIN attendance_staff s ON s.id = p.staff_id
+          WHERE p.payroll_run_id = ?
+          ORDER BY s.name`,
+        [req.params.runId]
+      );
+      res.json({ run, payslips });
+    } catch (err: any) {
+      console.error('payroll/payslips list error:', err);
+      res.status(500).json({ error: err?.message || 'List failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payroll/runs/:runId/compute", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      if (!run) return res.status(404).json({ error: 'Run not found' });
+      if (run.status === 'APPROVED' || run.status === 'LOCKED' || run.status === 'PAID') {
+        return res.status(409).json({ error: `Cannot recompute a ${run.status} run` });
+      }
+
+      // Mark PROCESSING (row-level guard: re-check status inside the update)
+      const procStamp = new Date().toISOString();
+      const procResult: any = await db.run(
+        `UPDATE payroll_runs SET status = 'PROCESSING', updated_at = ?
+          WHERE id = ? AND status IN ('DRAFT','PROCESSING')`,
+        [procStamp, req.params.runId]
+      );
+      // If we got 0 changes (run already moved past PROCESSING), abort
+      if (procResult && procResult.changes === 0) {
+        const fresh = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+        return res.status(409).json({ error: `Run is ${fresh?.status}`, run: fresh });
+      }
+
+      // Load statutory config + slabs once for this run
+      const cfg = await getStatutoryConfig(db);
+      const ptSlabs = await getCentralPtSlabs(cfg.pt_state || null);
+      // We'll resolve TDS slabs per-employee (regime may differ on structure)
+
+      // Find every active employee with a current salary structure
+      const employees: any[] = await db.query(
+        `SELECT s.*, st.id AS structure_id, st.gross_monthly, st.basic, st.hra, st.special,
+                st.conveyance, st.medical, st.other_allowances, st.tds_regime,
+                st.section_80c_declared, st.hra_exemption_declared, st.employer_pf_included
+           FROM attendance_staff s
+           JOIN salary_structures st ON st.staff_id = s.id
+            AND st.effective_from <= ?
+            AND (st.effective_to IS NULL OR st.effective_to >= ?)
+          WHERE (s.hr_status IS NULL OR s.hr_status = 'ACTIVE')
+            AND COALESCE(s.is_active, 1) = 1`,
+        [run.period_end, run.period_start]
+      );
+
+      const fy = (() => {
+        // FY runs Apr-Mar. month 1-3 → previous FY, 4-12 → current FY
+        const y = run.year;
+        return run.month <= 3 ? `${y - 1}-${String(y).slice(2)}` : `${y}-${String(y + 1).slice(2)}`;
+      })();
+
+      // Resolve TDS slabs ONCE per regime
+      const tdsCache: { OLD?: TdsSlab[]; NEW?: TdsSlab[] } = {};
+      const ensureTds = async (regime: 'OLD' | 'NEW') => {
+        if (!tdsCache[regime]) tdsCache[regime] = await getCentralTdsSlabs(fy, regime);
+        return tdsCache[regime]!;
+      };
+
+      // Pull timesheet aggregates for the period — if no timesheets exist, fall
+      // back to "full month, no LOP". Phase 1 keeps this simple; Phase 2 will
+      // wire actual paid_days/lop_days from timesheet_day.
+      const tsRows: any[] = await db.query(
+        `SELECT staff_id,
+                SUM(CASE WHEN status = 'PRESENT' OR status IS NULL THEN 1 ELSE 0 END) AS work_days,
+                SUM(CASE WHEN status = 'LOP' OR status = 'ABSENT' THEN 1 ELSE 0 END) AS lop_days
+           FROM timesheet_day
+          WHERE work_date BETWEEN ? AND ?
+          GROUP BY staff_id`,
+        [run.period_start, run.period_end]
+      ).catch(() => []);
+      const tsMap = new Map<string, { work_days: number; lop_days: number }>();
+      for (const r of tsRows) tsMap.set(String(r.staff_id), { work_days: Number(r.work_days) || 0, lop_days: Number(r.lop_days) || 0 });
+
+      // Determine month days as default work_days
+      const monthDays = new Date(run.year, run.month, 0).getDate();
+
+      let total_gross = 0;
+      let total_deductions = 0;
+      let total_net = 0;
+      let employee_count = 0;
+
+      for (const emp of employees) {
+        const ts = tsMap.get(String(emp.id));
+        const workDays = ts && ts.work_days > 0 ? ts.work_days + (ts.lop_days || 0) : monthDays;
+        const lopDays = ts ? ts.lop_days : 0;
+        const paidDays = Math.max(0, workDays - lopDays);
+
+        const regime = (String(emp.tds_regime || cfg.tds_regime_default || 'NEW').toUpperCase() === 'OLD') ? 'OLD' : 'NEW';
+        const tdsSlabs = await ensureTds(regime);
+
+        const input: StatutoryInput = {
+          basic: Number(emp.basic) || 0,
+          hra: Number(emp.hra) || 0,
+          special: Number(emp.special) || 0,
+          conveyance: Number(emp.conveyance) || 0,
+          medical: Number(emp.medical) || 0,
+          other_allowances: Number(emp.other_allowances) || 0,
+          pf_enabled: !!Number(cfg.pf_enabled),
+          esi_enabled: !!Number(cfg.esi_enabled),
+          pf_wage_ceiling: Number(cfg.pf_wage_ceiling) || 15000,
+          esi_wage_ceiling: Number(cfg.esi_wage_ceiling) || 21000,
+          pt_state: cfg.pt_state || null,
+          pt_slabs: ptSlabs,
+          tds_regime: regime,
+          tds_slabs: tdsSlabs,
+          section_80c_declared: Number(emp.section_80c_declared) || 0,
+          hra_exemption_declared: Number(emp.hra_exemption_declared) || 0,
+          work_days: workDays,
+          paid_days: paidDays,
+          lop_days: lopDays,
+          month: run.month,
+          voluntary_deductions: 0,
+        };
+        const result = computeStatutoryPayslip(input);
+
+        // Apply approved-and-attached expense claims as reimbursement (negative deduction)
+        const reimbursements: any[] = await db.query(
+          `SELECT id, total_amount FROM expense_claims
+            WHERE staff_id = ? AND reimburse_with_payroll_run_id = ?
+              AND status = 'HR_APPROVED'`,
+          [emp.id, req.params.runId]
+        ).catch(() => []);
+        const reimburseTotal = reimbursements.reduce((s, r) => s + (Number(r.total_amount) || 0), 0);
+        const netWithReimbursement = result.net_pay + reimburseTotal;
+
+        const payslipNumber = (() => {
+          const yy = run.year;
+          const mm = String(run.month).padStart(2, '0');
+          return `PSLIP-${yy}-${mm}-${String(emp.id).slice(-6).toUpperCase()}`;
+        })();
+
+        const staffSnapshot = JSON.stringify({
+          id: emp.id, name: emp.name, designation: emp.designation, department: emp.department,
+          pan: emp.pan, uan: emp.uan, esic_number: emp.esic_number,
+          bank_account: emp.bank_account, bank_ifsc: emp.bank_ifsc, bank_name: emp.bank_name,
+          joining_date: emp.joining_date, ctc: emp.ctc,
+        });
+        const structureSnapshot = JSON.stringify({
+          id: emp.structure_id, gross_monthly: emp.gross_monthly, basic: emp.basic, hra: emp.hra,
+          special: emp.special, conveyance: emp.conveyance, medical: emp.medical,
+          other_allowances: emp.other_allowances, tds_regime: regime,
+          section_80c_declared: emp.section_80c_declared,
+          hra_exemption_declared: emp.hra_exemption_declared,
+        });
+
+        const payslipId = randomUUID();
+        await db.run(
+          `INSERT INTO payslips (
+              id, payroll_run_id, staff_id, payslip_number, staff_snapshot, structure_snapshot,
+              line_items, gross_earnings, gross_deductions, net_pay,
+              work_days, paid_days, lop_days,
+              pf_employee, pf_employer_eps, pf_employer_epf,
+              esi_employee, esi_employer, professional_tax, tds, voluntary_deductions,
+              pay_period_start, pay_period_end
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (payroll_run_id, staff_id) DO UPDATE SET
+              payslip_number = EXCLUDED.payslip_number,
+              staff_snapshot = EXCLUDED.staff_snapshot,
+              structure_snapshot = EXCLUDED.structure_snapshot,
+              line_items = EXCLUDED.line_items,
+              gross_earnings = EXCLUDED.gross_earnings,
+              gross_deductions = EXCLUDED.gross_deductions,
+              net_pay = EXCLUDED.net_pay,
+              work_days = EXCLUDED.work_days, paid_days = EXCLUDED.paid_days, lop_days = EXCLUDED.lop_days,
+              pf_employee = EXCLUDED.pf_employee, pf_employer_eps = EXCLUDED.pf_employer_eps,
+              pf_employer_epf = EXCLUDED.pf_employer_epf,
+              esi_employee = EXCLUDED.esi_employee, esi_employer = EXCLUDED.esi_employer,
+              professional_tax = EXCLUDED.professional_tax,
+              tds = EXCLUDED.tds, voluntary_deductions = EXCLUDED.voluntary_deductions,
+              pay_period_start = EXCLUDED.pay_period_start, pay_period_end = EXCLUDED.pay_period_end`,
+          [
+            payslipId, req.params.runId, emp.id, payslipNumber, staffSnapshot, structureSnapshot,
+            JSON.stringify(result.line_items),
+            result.gross_earnings, result.gross_deductions, netWithReimbursement,
+            workDays, paidDays, lopDays,
+            result.pf_employee, result.pf_employer_eps, result.pf_employer_epf,
+            result.esi_employee, result.esi_employer,
+            result.professional_tax, result.tds, 0,
+            run.period_start, run.period_end,
+          ]
+        );
+
+        total_gross += result.gross_earnings;
+        total_deductions += result.gross_deductions;
+        total_net += netWithReimbursement;
+        employee_count++;
+      }
+
+      const stamp = new Date().toISOString();
+      await db.run(
+        `UPDATE payroll_runs
+            SET status = 'DRAFT',
+                computed_at = ?,
+                total_gross = ?, total_deductions = ?, total_net = ?, employee_count = ?,
+                updated_at = ?
+          WHERE id = ?`,
+        [stamp, total_gross, total_deductions, total_net, employee_count, stamp, req.params.runId]
+      );
+
+      const updated = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      res.json({ run: updated, computed: employee_count });
+    } catch (err: any) {
+      console.error('payroll/runs compute error:', err);
+      res.status(500).json({ error: err?.message || 'Compute failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payroll/runs/:runId/approve", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const stamp = new Date().toISOString();
+      const result: any = await db.run(
+        `UPDATE payroll_runs
+            SET status = 'APPROVED', approved_by = ?, approved_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'DRAFT'`,
+        [req.user?.id || null, stamp, stamp, req.params.runId]
+      );
+      if (result && result.changes === 0) {
+        const fresh = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+        return res.status(409).json({ error: `Run is ${fresh?.status} — must be DRAFT to approve`, run: fresh });
+      }
+      const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      res.json({ run });
+    } catch (err: any) {
+      console.error('payroll/runs approve error:', err);
+      res.status(500).json({ error: err?.message || 'Approve failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payroll/runs/:runId/lock", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const stamp = new Date().toISOString();
+      const result: any = await db.run(
+        `UPDATE payroll_runs SET status = 'LOCKED', updated_at = ? WHERE id = ? AND status = 'APPROVED'`,
+        [stamp, req.params.runId]
+      );
+      if (result && result.changes === 0) {
+        const fresh = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+        return res.status(409).json({ error: `Run is ${fresh?.status} — must be APPROVED to lock`, run: fresh });
+      }
+      const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      res.json({ run });
+    } catch (err: any) {
+      console.error('payroll/runs lock error:', err);
+      res.status(500).json({ error: err?.message || 'Lock failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payroll/runs/:runId/mark-paid", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const stamp = new Date().toISOString();
+      const result: any = await db.run(
+        `UPDATE payroll_runs SET status = 'PAID', paid_at = ?, updated_at = ?
+          WHERE id = ? AND status IN ('APPROVED','LOCKED')`,
+        [stamp, stamp, req.params.runId]
+      );
+      if (result && result.changes === 0) {
+        const fresh = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+        return res.status(409).json({ error: `Run is ${fresh?.status} — must be APPROVED/LOCKED to mark paid`, run: fresh });
+      }
+      // Flip attached expense claims to REIMBURSED
+      await db.run(
+        `UPDATE expense_claims SET status = 'REIMBURSED', reimbursed_at = ?
+          WHERE reimburse_with_payroll_run_id = ? AND status = 'HR_APPROVED'`,
+        [stamp, req.params.runId]
+      );
+      const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      res.json({ run });
+    } catch (err: any) {
+      console.error('payroll/runs mark-paid error:', err);
+      res.status(500).json({ error: err?.message || 'Mark-paid failed' });
+    }
+  });
+
+  // ── Payslip PDF + email ────────────────────────────────────────────────
+  async function buildPayslipPdfData(restaurantId: string, payslipId: string): Promise<{ data: PayslipData; recipientEmail: string | null }> {
+    const db = await getTenantDb(restaurantId);
+    const payslip: any = await db.get("SELECT * FROM payslips WHERE id = ?", [payslipId]);
+    if (!payslip) throw new Error('Payslip not found');
+    const staff: any = await db.get("SELECT * FROM attendance_staff WHERE id = ?", [payslip.staff_id]);
+    if (!staff) throw new Error('Employee record missing');
+    const tenant: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [restaurantId]);
+    const cfg = await getStatutoryConfig(db);
+
+    let lineItems: any[] = [];
+    try { lineItems = JSON.parse(payslip.line_items || '[]'); } catch { lineItems = []; }
+
+    const data: PayslipData = {
+      tenant: {
+        name: tenant?.name || 'Atithi Setu',
+        address: tenant?.address || '',
+        city: tenant?.city || '',
+        state: tenant?.state || '',
+        pincode: tenant?.pincode || '',
+        gstin: tenant?.gstin || '',
+        pan: cfg?.pan_employer || '',
+        tan: cfg?.tan_employer || '',
+        logo_url: tenant?.logo_url || '',
+        currency_symbol: tenant?.currency_symbol || '₹',
+        currency_code: tenant?.currency_code || 'INR',
+      },
+      payslip: {
+        payslip_number: payslip.payslip_number || `PSLIP-${payslipId.slice(-6)}`,
+        pay_period_start: payslip.pay_period_start,
+        pay_period_end: payslip.pay_period_end,
+        work_days: Number(payslip.work_days) || 0,
+        paid_days: Number(payslip.paid_days) || 0,
+        lop_days: Number(payslip.lop_days) || 0,
+        gross_earnings: Number(payslip.gross_earnings) || 0,
+        gross_deductions: Number(payslip.gross_deductions) || 0,
+        net_pay: Number(payslip.net_pay) || 0,
+        pf_employer_eps: Number(payslip.pf_employer_eps) || 0,
+        pf_employer_epf: Number(payslip.pf_employer_epf) || 0,
+        esi_employer: Number(payslip.esi_employer) || 0,
+        line_items: lineItems,
+      },
+      employee: {
+        name: staff.name || '',
+        designation: staff.designation || '',
+        department: staff.department || '',
+        joining_date: staff.joining_date || '',
+        pan: staff.pan || '',
+        uan: staff.uan || '',
+        esic_number: staff.esic_number || '',
+        bank_account: staff.bank_account || '',
+        bank_ifsc: staff.bank_ifsc || '',
+        bank_name: staff.bank_name || '',
+      },
+    };
+    return { data, recipientEmail: staff.email || null };
+  }
+
+  app.get("/api/restaurant/:id/payroll/payslips/:payslipId/pdf", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const { data } = await buildPayslipPdfData(req.params.id, req.params.payslipId);
+      const pdf = await generatePayslipPdf(data);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${data.payslip.payslip_number}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) {
+      console.error('payroll/payslips PDF error:', err);
+      res.status(500).json({ error: err?.message || 'PDF failed' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/payroll/payslips/:payslipId/email", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const { data, recipientEmail } = await buildPayslipPdfData(req.params.id, req.params.payslipId);
+      const to = String(req.body?.to || recipientEmail || '').trim();
+      if (!to) return res.status(400).json({ error: 'No email address — set staff.email or pass `to` in body' });
+      const pdf = await generatePayslipPdf(data);
+      const subject = `Payslip — ${data.payslip.payslip_number}`;
+      const text = `Hi ${data.employee.name},
+
+Your payslip for ${data.payslip.pay_period_start} to ${data.payslip.pay_period_end} is attached.
+
+Gross earnings: ₹${data.payslip.gross_earnings}
+Gross deductions: ₹${data.payslip.gross_deductions}
+Net pay: ₹${data.payslip.net_pay}
+
+You can also view all your payslips in the employee portal.
+
+— ${data.tenant.name}`;
+      await sendEmail(to, subject, text, undefined, [
+        { filename: `${data.payslip.payslip_number}.pdf`, content: pdf, contentType: 'application/pdf' },
+      ]);
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE payslips SET email_sent_at = ? WHERE id = ?", [new Date().toISOString(), req.params.payslipId]);
+      res.json({ ok: true, sent_to: to });
+    } catch (err: any) {
+      console.error('payroll/payslips email error:', err);
+      res.status(500).json({ error: err?.message || 'Email failed' });
+    }
+  });
+
+  // Bank-advice CSV export (NPCI / banking system import format)
+  app.get("/api/restaurant/:id/payroll/runs/:runId/export.csv", authenticate, restaurantStaff, requireTabAccess('HR_PAYROLL'), async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+      if (!run) return res.status(404).json({ error: 'Run not found' });
+      const payslips: any[] = await db.query(
+        `SELECT p.*, s.name AS staff_name, s.bank_account, s.bank_ifsc, s.bank_name, s.uan, s.pan
+           FROM payslips p
+           LEFT JOIN attendance_staff s ON s.id = p.staff_id
+          WHERE p.payroll_run_id = ?
+          ORDER BY s.name`,
+        [req.params.runId]
+      );
+      const rows: string[] = [];
+      rows.push('Employee Name,Bank Account,IFSC,Bank,Amount,PAN,UAN,Period');
+      for (const p of payslips) {
+        const period = `${run.period_start} to ${run.period_end}`;
+        const cells = [
+          p.staff_name || '',
+          p.bank_account || '',
+          p.bank_ifsc || '',
+          p.bank_name || '',
+          Number(p.net_pay || 0).toFixed(2),
+          p.pan || '',
+          p.uan || '',
+          period,
+        ].map((s) => /[",\n]/.test(String(s)) ? `"${String(s).replace(/"/g, '""')}"` : String(s));
+        rows.push(cells.join(','));
+      }
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="bank-advice-${run.year}-${String(run.month).padStart(2, '0')}.csv"`);
+      res.send(rows.join('\n'));
+    } catch (err: any) {
+      console.error('payroll/runs export.csv error:', err);
+      res.status(500).json({ error: err?.message || 'Export failed' });
     }
   });
 
@@ -30359,7 +31047,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ba-quickwins-fnb-nullroom-checkin-lock-invseq',
+    commit_marker: 'hr-payroll-engine-payslip-pdf',
     code_features: [
       'subscription-billing',
       'read-only-mode',
