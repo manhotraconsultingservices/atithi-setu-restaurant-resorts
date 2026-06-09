@@ -6704,6 +6704,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // off; otherwise the submit button stays disabled.
     id_doc: File | null;
     id_doc_type: string;   // PASSPORT | AADHAAR | DRIVING_LICENSE | VOTER_ID | OTHER
+    // ADV-PAY: advance deposit collected at walk-in (very common — guest
+    // hands cash/card the moment they arrive). Forwarded to checkInBooking
+    // which records it as a folio_payments ADVANCE row.
+    advance_amount: number;
+    advance_method: string;
+    advance_reference: string;
   } | null>(null);
   const openWalkInModal = () => {
     // Auto-pick the first VACANT, non-blocked room that has no
@@ -6745,6 +6751,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))[0]?.id || null)
         : null,
       extra_adults: 0,
+      // ADV-PAY: advance collected at walk-in (defaults to 0 = no advance)
+      advance_amount: 0,
+      advance_method: 'CASH',
+      advance_reference: '',
     });
   };
   const submitWalkIn = async () => {
@@ -6810,8 +6820,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           throw new Error(errBody.error || `ID document upload failed (HTTP ${upRes.status})`);
         }
       }
-      // 3. Immediately check the guest in (force=true since today >= check_in)
-      await checkInBooking(created.id, false);
+      // 3. Immediately check the guest in (force=true since today >= check_in).
+      //    Pass advance payment details if provided so the folio records
+      //    the deposit at the moment the room is opened.
+      const walkInAdv = walkInDraft.advance_amount > 0 && walkInDraft.advance_method
+        ? { amount: walkInDraft.advance_amount, method: walkInDraft.advance_method, reference: walkInDraft.advance_reference || undefined }
+        : undefined;
+      await checkInBooking(created.id, false, walkInAdv);
       // 4. Close modal + refresh views
       setWalkInDraft(null);
       await fetchHotelBookings();
@@ -6852,6 +6867,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     special_requests: string;
     rooms: Array<{ room_id: string; room_rate: number; num_guests: number }>;
     saving: boolean;
+    // ADV-PAY: advance collected at group booking time (corporate / wedding
+    // groups frequently pay a deposit upfront). Stored on room_booking_groups
+    // and applied as a deduction at group settlement.
+    advance_amount: number;
+    advance_method: string;
+    advance_reference: string;
   } | null>(null);
   const openGroupBookingModal = () => {
     const today = new Date().toISOString().slice(0, 10);
@@ -6861,6 +6882,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       check_in_date: today, check_out_date: tomorrow,
       booking_type: 'OVERNIGHT', booking_source: 'DIRECT',
       special_requests: '', rooms: [], saving: false,
+      advance_amount: 0, advance_method: 'CASH', advance_reference: '',
     });
   };
   const submitGroupBooking = async () => {
@@ -6882,6 +6904,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         booking_source: groupBookingDraft.booking_source,
         special_requests: groupBookingDraft.special_requests.trim() || null,
         rooms: groupBookingDraft.rooms,
+        // ADV-PAY: pass advance to server; stored on room_booking_groups row.
+        advance_amount: groupBookingDraft.advance_amount || 0,
+        advance_method: groupBookingDraft.advance_amount > 0 ? groupBookingDraft.advance_method : null,
+        advance_reference: groupBookingDraft.advance_reference.trim() || null,
       };
       const result = await hotelApi('/bookings/group', { method: 'POST', body: JSON.stringify(payload) });
       const n = result?.bookings?.length || groupBookingDraft.rooms.length;
@@ -10199,6 +10225,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const b = hotelBookings.find((x: any) => x.id === bookingId) || { id: bookingId };
     await openCancelBookingModal(b);
   };
+
+  // ── Record advance payment for a booking ─────────────────────────
+  // Opens a compact modal (advancePayTarget) where the receptionist enters
+  // amount + method + reference then hits confirm. For BOOKED bookings this
+  // creates a folio on-demand; for CHECKED_IN bookings the folio already
+  // exists. Mapped to the new POST .../record-advance endpoint.
+  const [advancePayTarget, setAdvancePayTarget] = useState<any | null>(null);
+  const [advanceDraft, setAdvanceDraft] = useState<{ amount: string; method: string; reference: string }>({
+    amount: '', method: 'CASH', reference: '',
+  });
 
   // ── Send payment link to guest (email / WhatsApp) ────────────────
   // Wraps the new POST .../send-payment-link endpoint. Shows a
@@ -17353,6 +17389,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <th className="text-left px-4 py-3">Dates</th>
                     <th className="text-left px-4 py-3">Status</th>
                     <th className="text-right px-4 py-3">Total</th>
+                    <th className="text-right px-4 py-3" title="Advance payments already collected">Advance</th>
                     <th className="text-center px-4 py-3">Pay link</th>
                     <th className="text-right px-4 py-3">Actions</th>
                   </tr>
@@ -17403,6 +17440,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           >{lcStyle.label}</span>
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>
+                        {/* ADV-PAY: show advance collected so far. Green when >0. */}
+                        <td className="px-4 py-3 text-right">
+                          {Number(b.advance_paid || 0) > 0 ? (
+                            <span className="font-mono text-emerald-700 font-semibold text-xs">₹{Number(b.advance_paid).toLocaleString('en-IN')}</span>
+                          ) : (
+                            <span className="text-[10px] text-[#9c8e85]">—</span>
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-center">
                           {/* Pay-link send buttons — only on bookings
                               that aren't fully settled. Each button
@@ -17416,19 +17461,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 type="button"
                                 disabled={paylinkBusy === `${b.id}|EMAIL` || !b.guest_email}
                                 onClick={() => sendPayLink(b.id, 'EMAIL')}
-                                title={b.guest_email ? `Email payment link to ${b.guest_email}` : 'No email on file'}
-                                className="px-2 py-1 rounded-md border border-[#cc5a16]/20 text-[#cc5a16] hover:bg-[#cc5a16]/10 text-[11px] disabled:opacity-30 disabled:cursor-not-allowed"
+                                title={b.guest_email ? `Email payment link to ${b.guest_email}` : 'No email on file — add email to booking first'}
+                                className="px-2.5 py-1.5 rounded-lg border-2 border-[#cc5a16] text-[#cc5a16] bg-white hover:bg-[#cc5a16]/10 text-[11px] font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-[#cc5a16]/30 disabled:text-[#cc5a16]/50"
                               >
-                                {paylinkBusy === `${b.id}|EMAIL` ? '…' : '📧'}
+                                {paylinkBusy === `${b.id}|EMAIL` ? '…' : '📧 Email'}
                               </button>
                               <button
                                 type="button"
                                 disabled={paylinkBusy === `${b.id}|WHATSAPP` || !b.guest_phone}
                                 onClick={() => sendPayLink(b.id, 'WHATSAPP')}
-                                title={b.guest_phone ? `WhatsApp payment link to ${b.guest_phone}` : 'No phone on file'}
-                                className="px-2 py-1 rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-[11px] disabled:opacity-30 disabled:cursor-not-allowed"
+                                title={b.guest_phone ? `WhatsApp payment link to ${b.guest_phone}` : 'No phone on file — add phone to booking first'}
+                                className="px-2.5 py-1.5 rounded-lg border-2 border-emerald-600 text-emerald-700 bg-white hover:bg-emerald-50 text-[11px] font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-emerald-300 disabled:text-emerald-400"
                               >
-                                {paylinkBusy === `${b.id}|WHATSAPP` ? '…' : '💬'}
+                                {paylinkBusy === `${b.id}|WHATSAPP` ? '…' : '💬 WA'}
                               </button>
                             </div>
                           ) : (
@@ -17474,6 +17519,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             })()}
                             {b.status === 'BOOKED' && <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600">Check In</button>}
                             {b.status === 'CHECKED_IN' && <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608]">Check Out</button>}
+                            {/* ADV-PAY: "💰 Advance" button — record a deposit against this booking at
+                                any time (pre-checkin or mid-stay). Opens the AdvancePaymentModal. */}
+                            {(b.status === 'BOOKED' || b.status === 'CHECKED_IN') && (
+                              <button
+                                onClick={() => {
+                                  setAdvancePayTarget(b);
+                                  setAdvanceDraft({ amount: '', method: 'CASH', reference: '' });
+                                }}
+                                title="Record advance / deposit payment"
+                                className="px-3 py-1.5 rounded-lg border border-amber-400 bg-amber-50 text-amber-800 text-[11px] font-bold hover:bg-amber-100"
+                              >💰 Advance</button>
+                            )}
+                            {/* F&B / FOLIO: "📋 Folio" button — opens the folio directly from the
+                                bookings list so staff can add F&B charges, view invoice, and
+                                print/email without navigating to the separate Folios tab. Only
+                                shows for CHECKED_IN bookings (folios are created at check-in). */}
+                            {b.status === 'CHECKED_IN' && b.open_folio_id && (
+                              <button
+                                onClick={async () => {
+                                  try { await loadFolio(b.open_folio_id); }
+                                  catch (err: any) { alert(err?.message || 'Failed to load folio'); }
+                                }}
+                                title="Open folio — view charges, add F&B, download invoice"
+                                className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/30 bg-[#faf7f2] text-[#cc5a16] text-[11px] font-bold hover:bg-[#cc5a16]/10"
+                              >📋 Folio</button>
+                            )}
                             {(b.status === 'BOOKED') && <button onClick={() => cancelBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Cancel</button>}
                             {/* P2-B-FIX (client report "clubbed group invoice"):
                                 two group-level actions, shown on every row that
@@ -23586,6 +23657,57 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   );
                 })()}
 
+                {/* ADV-PAY — Advance payment section (very common at Indian
+                    hotel walk-ins: guest hands ₹500-2000 cash/UPI on arrival).
+                    Forwarded to checkInBooking() which records it as a
+                    folio_payments ADVANCE row so checkout shows the correct
+                    outstanding balance. */}
+                <div className="bg-amber-50 rounded-2xl p-3 border border-amber-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-amber-900">💰 Advance Payment <span className="font-normal normal-case text-amber-700">(optional)</span></p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-amber-800 mb-1">Amount (₹)</label>
+                      <input
+                        type="number" min={0} step="1"
+                        value={draft.advance_amount || ''}
+                        placeholder="0"
+                        onChange={e => setDraft({ advance_amount: Math.max(0, Number(e.target.value) || 0) })}
+                        className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-amber-300/40"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-amber-800 mb-1">Method</label>
+                      <select
+                        value={draft.advance_method}
+                        onChange={e => setDraft({ advance_method: e.target.value })}
+                        className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-amber-300/40"
+                      >
+                        <option value="CASH">Cash</option>
+                        <option value="UPI">UPI</option>
+                        <option value="CARD">Card</option>
+                        <option value="BANK_TRANSFER">Bank Transfer</option>
+                        <option value="CHEQUE">Cheque</option>
+                        <option value="OTHER">Other</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-amber-800 mb-1">Reference</label>
+                      <input
+                        type="text"
+                        value={draft.advance_reference}
+                        placeholder="UTR / txn ID"
+                        onChange={e => setDraft({ advance_reference: e.target.value })}
+                        className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-amber-300/40"
+                      />
+                    </div>
+                  </div>
+                  {draft.advance_amount > 0 && (
+                    <p className="text-[10px] text-emerald-700 mt-1.5 font-semibold">✓ ₹{Number(draft.advance_amount).toLocaleString('en-IN')} will be recorded as advance — outstanding at checkout reduces by this amount.</p>
+                  )}
+                </div>
+
                 {/* Stay summary with live MATRIX preview (BCG Phase 4.2).
                     Shows staff the EXACT rate the server will use, including
                     meal-plan resolution and extra-person charges, before they
@@ -24075,6 +24197,57 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   ) : (
                     <p className="text-[11px] text-[#c13b3b] italic px-1">
                       {ciStr && coStr ? 'No more rooms available for these dates.' : 'Pick dates first.'}
+                    </p>
+                  )}
+                </div>
+
+                {/* ADV-PAY — Advance deposit section for group bookings.
+                    Corporate / wedding groups routinely pay 20–50% upfront.
+                    Stored on the room_booking_groups row and deducted at
+                    group settlement time. */}
+                <div className="bg-amber-50 rounded-2xl p-4 border border-amber-200">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-amber-900 mb-2">💰 Advance Deposit <span className="font-normal normal-case text-amber-700">(optional)</span></p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-amber-800 mb-1">Amount (₹)</label>
+                      <input
+                        type="number" min={0} step="1"
+                        value={draft.advance_amount || ''}
+                        placeholder="0"
+                        onChange={e => setGroupBookingDraft({ ...draft, advance_amount: Math.max(0, Number(e.target.value) || 0) })}
+                        className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-amber-300/40"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-amber-800 mb-1">Method</label>
+                      <select
+                        value={draft.advance_method}
+                        onChange={e => setGroupBookingDraft({ ...draft, advance_method: e.target.value })}
+                        className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-amber-300/40"
+                      >
+                        <option value="CASH">Cash</option>
+                        <option value="UPI">UPI</option>
+                        <option value="CARD">Card</option>
+                        <option value="BANK_TRANSFER">Bank Transfer</option>
+                        <option value="CHEQUE">Cheque</option>
+                        <option value="OTHER">Other</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-amber-800 mb-1">Reference</label>
+                      <input
+                        type="text"
+                        value={draft.advance_reference}
+                        placeholder="Txn ID / cheque #"
+                        onChange={e => setGroupBookingDraft({ ...draft, advance_reference: e.target.value })}
+                        className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-amber-300/40"
+                      />
+                    </div>
+                  </div>
+                  {draft.advance_amount > 0 && (
+                    <p className="text-[10px] text-emerald-700 mt-1.5 font-semibold">
+                      ✓ ₹{Number(draft.advance_amount).toLocaleString('en-IN')} advance recorded — deducted at group settlement.
+                      Balance due: ₹{Math.max(0, subtotal - draft.advance_amount).toLocaleString('en-IN')}
                     </p>
                   )}
                 </div>
@@ -26611,6 +26784,120 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           }}
         />
       )}
+
+      {/* ═════════ Advance Payment Modal ═════════
+          Opened by "💰 Advance" button in the booking table row.
+          Works for BOOKED (pre-checkin deposit) and CHECKED_IN (mid-stay
+          payment). Calls POST .../record-advance which creates a folio
+          on-demand for BOOKED bookings. */}
+      {advancePayTarget && (() => {
+        const b = advancePayTarget;
+        const amtNum = Number(advanceDraft.amount || 0);
+        const canSubmit = amtNum > 0 && advanceDraft.method;
+        const submit = async () => {
+          if (!canSubmit) return;
+          try {
+            await hotelApi(`/bookings/${b.id}/record-advance`, {
+              method: 'POST',
+              body: JSON.stringify({
+                amount: amtNum,
+                method: advanceDraft.method,
+                reference: advanceDraft.reference.trim() || null,
+              }),
+            });
+            alert(`✓ Advance of ₹${amtNum.toLocaleString('en-IN')} recorded for ${b.guest_name}.`);
+            setAdvancePayTarget(null);
+            await fetchHotelBookings();
+          } catch (err: any) {
+            alert(err?.message || 'Failed to record advance');
+          }
+        };
+        return (
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+            onClick={() => setAdvancePayTarget(null)}
+          >
+            <div
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-lg font-bold font-serif text-[#1a1208]">💰 Record Advance Payment</h3>
+                  <p className="text-[11px] text-[#6b5d52] mt-0.5">{b.guest_name} · {b.room_name || b.room_id} · {b.status}</p>
+                </div>
+                <button onClick={() => setAdvancePayTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18}/></button>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Amount (₹) <span className="text-[#c13b3b]">*</span></label>
+                  <input
+                    type="number" min={1} step="1" autoFocus
+                    value={advanceDraft.amount}
+                    onChange={e => setAdvanceDraft({ ...advanceDraft, amount: e.target.value })}
+                    placeholder="e.g. 2000"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Method</label>
+                    <select
+                      value={advanceDraft.method}
+                      onChange={e => setAdvanceDraft({ ...advanceDraft, method: e.target.value })}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    >
+                      <option value="CASH">Cash</option>
+                      <option value="UPI">UPI</option>
+                      <option value="CARD">Card</option>
+                      <option value="BANK_TRANSFER">Bank Transfer</option>
+                      <option value="CHEQUE">Cheque</option>
+                      <option value="OTHER">Other</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Reference</label>
+                    <input
+                      type="text"
+                      value={advanceDraft.reference}
+                      onChange={e => setAdvanceDraft({ ...advanceDraft, reference: e.target.value })}
+                      placeholder="UTR / txn ID (optional)"
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    />
+                  </div>
+                </div>
+                {amtNum > 0 && (
+                  <div className="bg-amber-50 rounded-2xl p-3 border border-amber-200">
+                    <p className="text-[11px] text-emerald-700 font-semibold">
+                      ✓ ₹{amtNum.toLocaleString('en-IN')} will be recorded as ADVANCE.
+                    </p>
+                    <p className="text-[10px] text-[#6b5d52] mt-0.5">
+                      Outstanding at checkout reduces by this amount.
+                      {Number(b.advance_paid || 0) > 0 && ` (₹${Number(b.advance_paid).toLocaleString('en-IN')} already collected)`}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex gap-2 pt-4">
+                <button
+                  onClick={() => setAdvancePayTarget(null)}
+                  className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]"
+                >Cancel</button>
+                <button
+                  onClick={submit}
+                  disabled={!canSubmit}
+                  className={cn(
+                    "flex-1 px-4 py-2.5 rounded-2xl text-sm font-bold transition-all",
+                    canSubmit ? "bg-amber-600 text-white hover:bg-amber-700" : "bg-stone-200 text-stone-400 cursor-not-allowed"
+                  )}
+                >Record ₹{amtNum > 0 ? amtNum.toLocaleString('en-IN') : '—'}</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Add Item Modal */}
       <AnimatePresence>

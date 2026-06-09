@@ -491,6 +491,12 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS settled_at     TIMESTAMP;
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS payment_method TEXT;
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS settled_by     TEXT;
+    -- ADV-PAY (Jun 2026): advance payment collected at group booking time
+    -- (common for corporate/wedding groups that pay a deposit upfront).
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS advance_amount    NUMERIC DEFAULT 0;
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS advance_method    TEXT;
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS advance_reference TEXT;
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS advance_recorded_at TEXT;
 
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
@@ -20064,8 +20070,22 @@ ${data.tenant.name}`;
       // rank in JS after the query lands. Cleaner placeholder math.
       // Req 1b — surface ID-doc count alongside each booking.
       const params: any[] = [];
+      // ADV-PAY: include advance_paid (sum of ADVANCE folio payments) and
+      // open_folio_id (for direct "open folio" action from the booking row
+      // so staff can add F&B charges without navigating to the Folios tab).
       let sql = `SELECT b.*, r.name AS room_name,
-                        (SELECT COUNT(*)::int FROM guest_documents gd WHERE gd.booking_id = b.id) AS document_count
+                        (SELECT COUNT(*)::int FROM guest_documents gd WHERE gd.booking_id = b.id) AS document_count,
+                        COALESCE(
+                          (SELECT SUM(fp.amount)
+                           FROM folio_payments fp
+                           JOIN folios f ON f.id = fp.folio_id
+                           WHERE f.booking_id = b.id
+                             AND fp.payment_type = 'ADVANCE'
+                             AND (fp.is_voided IS NULL OR fp.is_voided = 0)), 0
+                        ) AS advance_paid,
+                        (SELECT f.id FROM folios f
+                         WHERE f.booking_id = b.id AND f.status = 'open'
+                         ORDER BY f.created_at DESC LIMIT 1) AS open_folio_id
                  FROM room_bookings b
               LEFT JOIN rooms r ON r.id = b.room_id
                  WHERE 1 = 1`;
@@ -20586,6 +20606,13 @@ ${data.tenant.name}`;
         check_in_date, check_out_date, booking_type,
         booking_source, special_requests,
       } = b;
+      // ADV-PAY: optional advance collected at group booking time (corporate /
+      // wedding groups frequently pay a deposit upfront before any room is
+      // checked in). Stored on the group row; applied as a deduction at
+      // group settlement time and reflected on the consolidated invoice.
+      const advanceAmount    = Number(b.advance_amount || 0);
+      const advanceMethod    = String(b.advance_method || '').toUpperCase().trim() || null;
+      const advanceReference = String(b.advance_reference || '').trim() || null;
       const rooms: Array<{ room_id: string; room_rate?: number; num_guests?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
       if (!name || String(name).trim().length === 0) {
         return res.status(400).json({ error: "Group name is required." });
@@ -20667,11 +20694,15 @@ ${data.tenant.name}`;
         await tenantDb.run(
           `INSERT INTO room_booking_groups
              (id, name, contact_name, contact_phone, contact_email, num_rooms,
-              check_in_date, check_out_date, total_amount, notes, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              check_in_date, check_out_date, total_amount, notes, created_by,
+              advance_amount, advance_method, advance_reference, advance_recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [groupId, String(name).trim(), contact_name, contact_phone || null,
            contact_email || null, rooms.length, check_in_date, check_out_date,
-           groupTotal, special_requests || null, req.user?.id || null]
+           groupTotal, special_requests || null, req.user?.id || null,
+           advanceAmount > 0 ? advanceAmount : 0, advanceAmount > 0 ? advanceMethod : null,
+           advanceAmount > 0 ? advanceReference : null,
+           advanceAmount > 0 ? new Date().toISOString() : null]
         );
       } catch (e) {
         console.warn('[group-booking] failed to record group meta:', e);
@@ -20684,11 +20715,73 @@ ${data.tenant.name}`;
         group_id: groupId,
         num_rooms: rooms.length,
         total_amount: groupTotal,
+        advance_amount: advanceAmount,
+        advance_method: advanceMethod,
         bookings: created,
       });
     } catch (err: any) {
       console.error("group booking create error:", err);
       res.status(500).json({ error: "Failed to create group booking" });
+    }
+  });
+
+  // ─── RECORD ADVANCE PAYMENT for existing booking ─────────────────────
+  // Allows recording an advance at any point during a stay (or pre-checkin
+  // for BOOKED bookings). The folio is created on-demand for BOOKED
+  // bookings (normally folios are created at check-in, but a deposit
+  // collected before arrival still needs a payment record).
+  // POST /api/restaurant/:id/hotel/bookings/:bookingId/record-advance
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/record-advance", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { bookingId } = req.params;
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bookingId]);
+      if (!b) return res.status(404).json({ error: 'Booking not found' });
+      if (!['BOOKED', 'CHECKED_IN'].includes(b.status)) {
+        return res.status(400).json({ error: `Cannot record advance on a ${b.status} booking.` });
+      }
+      const amount    = Number(req.body?.amount || 0);
+      const method    = String(req.body?.method || '').toUpperCase().trim();
+      const reference = String(req.body?.reference || '').trim() || null;
+      const notes     = String(req.body?.notes || 'Advance payment recorded by staff').trim();
+      if (amount <= 0) return res.status(400).json({ error: 'amount must be a positive number' });
+      const VALID_METHODS = new Set(['CASH','CARD','UPI','BANK_TRANSFER','CHEQUE','OTHER']);
+      if (!VALID_METHODS.has(method)) {
+        return res.status(400).json({ error: `method must be one of ${Array.from(VALID_METHODS).join(', ')}` });
+      }
+      // Ensure a folio exists — look up by booking_id first (works for any
+      // status, including BOOKED bookings for future dates). If none exists,
+      // create one on-demand so the advance payment has a home.
+      let folioRow: any = await tenantDb.get(
+        "SELECT id FROM folios WHERE booking_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+        [bookingId]
+      );
+      if (!folioRow) {
+        const newFolio = await createFolioWithRoomCharges(req.params.id, b);
+        if (!newFolio?.id) {
+          return res.status(500).json({ error: 'Could not create folio for advance payment. Please check the room assignment on this booking.' });
+        }
+        folioRow = { id: newFolio.id };
+      }
+      const folioId: string = folioRow.id;
+      await recordFolioPayment(tenantDb, {
+        folioId,
+        amount,
+        method,
+        type: 'ADVANCE',
+        reference,
+        recordedBy: req.user?.id || req.user?.email || null,
+        notes,
+      });
+      const updatedFolio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folioId]);
+      const payments: any[] = await tenantDb.query("SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0 ORDER BY created_at", [folioId]);
+      const totalPaid = payments.filter((p: any) => p.payment_type !== 'REFUND').reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+      res.json({ ok: true, folio_id: folioId, total_advance_paid: totalPaid, folio: updatedFolio });
+    } catch (err: any) {
+      console.error('[record-advance] error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to record advance' });
     }
   });
 
