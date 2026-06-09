@@ -1142,6 +1142,40 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS posted_by TEXT;
     CREATE INDEX IF NOT EXISTS idx_folio_entries_ref ON folio_entries (reference_number);
 
+    -- folio_payments ledger (10 Jun 2026 — critical checkout-flow fix).
+    -- Previously the folio model only had a single payment_method
+    -- column, meaning the system couldn't model:
+    --   • advance paid at check-in
+    --   • multiple interim payments during stay
+    --   • outstanding balance (grand_total − sum(payments))
+    --   • checkout-gating on a fully-paid folio
+    -- Now every payment is a discrete row, audit-preserving (voids
+    -- via is_voided flag rather than DELETE).
+    --   payment_type:  ADVANCE  — taken at check-in (or pre-arrival)
+    --                  INTERIM  — taken mid-stay (extras, deposits)
+    --                  FINAL    — taken at check-out to settle balance
+    --                  REFUND   — money returned to guest (negative ledger)
+    --   payment_method: CASH | CARD | UPI | BANK_TRANSFER | CHEQUE | OTHER
+    -- Sum of (non-voided non-REFUND amounts) − (non-voided REFUND amounts)
+    -- gives total_paid. Outstanding = max(0, grand_total − total_paid).
+    CREATE TABLE IF NOT EXISTS folio_payments (
+      id               TEXT PRIMARY KEY,
+      folio_id         TEXT NOT NULL,
+      amount           DOUBLE PRECISION NOT NULL,
+      payment_method   TEXT NOT NULL,
+      payment_type     TEXT NOT NULL DEFAULT 'INTERIM',
+      reference_number TEXT,
+      recorded_by      TEXT,
+      recorded_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      notes            TEXT,
+      is_voided        INT DEFAULT 0,
+      voided_at        TIMESTAMP,
+      voided_by        TEXT,
+      voided_reason    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_folio_payments_folio
+      ON folio_payments (folio_id, recorded_at);
+
     CREATE TABLE IF NOT EXISTS guest_compliance_log (
       id                   TEXT PRIMARY KEY,
       booking_id           TEXT,
@@ -1689,9 +1723,22 @@ async function postOrderToFolio(
     return { ok: true, folio_id: existing.folio_id, reason: 'already-posted' };
   }
 
-  const { folioId } = await resolveActiveFolioForRoom(tenantDb, {
+  let { folioId, bookingId: resolvedBookingId } = await resolveActiveFolioForRoom(tenantDb, {
     bookingId: order.booking_id, roomId: order.room_id,
   });
+  // ── F&B-not-reflecting fix (10 Jun 2026) ────────────────────────
+  // Previously: if no open folio existed (e.g. guest places a QR
+  // order while in the room but staff hasn't formally "checked-in"
+  // the booking yet), this returned ok:false and the order ended
+  // up DELETED by the atomic guard in /orders POST — silently
+  // dropping the F&B charge. Now we defensively create a folio
+  // tied to the room's current CHECKED_IN booking (or BOOKED
+  // arriving-today) so the charge always lands somewhere.
+  if (!folioId && order.room_id) {
+    const ensured = await ensureFolioForRoom(restaurantId, order.room_id);
+    folioId = ensured.folioId;
+    resolvedBookingId = resolvedBookingId || ensured.bookingId;
+  }
   if (!folioId) {
     return { ok: false, reason: 'no-open-folio-for-room-or-booking' };
   }
@@ -1998,6 +2045,127 @@ async function recomputeFolioTotals(tenantDb: DbInterface, folioId: string): Pro
   const discount = Number(f?.discount || 0);
   const grand = Math.max(0, subtotal + gst - discount);
   await tenantDb.run("UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?", [subtotal, gst, grand, folioId]);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Folio payments — multi-payment ledger (10 Jun 2026 critical fix)
+// ════════════════════════════════════════════════════════════════════
+
+/**
+ * Computes the outstanding balance on a folio. Reads grand_total from
+ * `folios` (which sums folio_entries — room charge, F&B, service,
+ * extras, GST — see recomputeFolioTotals above) and subtracts all
+ * non-voided payments. REFUND payments count as negative (i.e. they
+ * INCREASE the outstanding back up).
+ *
+ * Returns ALL payments (incl. voided) so the UI can show full history
+ * for audit, but `total_paid` only counts non-voided non-REFUND minus
+ * non-voided REFUND amounts. `outstanding = max(0, grand_total − total_paid)`.
+ */
+interface FolioOutstanding {
+  folio: any;
+  payments: any[];
+  total_paid: number;
+  total_refunded: number;
+  outstanding: number;
+  is_fully_paid: boolean;
+}
+async function getFolioOutstanding(tenantDb: DbInterface, folioId: string): Promise<FolioOutstanding | null> {
+  const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folioId]);
+  if (!folio) return null;
+  const payments: any[] = await tenantDb.query(
+    "SELECT * FROM folio_payments WHERE folio_id = ? ORDER BY recorded_at",
+    [folioId]
+  ).catch(() => []);
+  let total_paid = 0;
+  let total_refunded = 0;
+  for (const p of payments) {
+    if (p.is_voided) continue;
+    const amt = Number(p.amount || 0);
+    if (p.payment_type === 'REFUND') total_refunded += amt;
+    else total_paid += amt;
+  }
+  const net_paid = total_paid - total_refunded;
+  const grand_total = Number(folio.grand_total || 0);
+  const outstanding = Math.max(0, Math.round((grand_total - net_paid) * 100) / 100);
+  return {
+    folio,
+    payments,
+    total_paid: Math.round(total_paid * 100) / 100,
+    total_refunded: Math.round(total_refunded * 100) / 100,
+    outstanding,
+    is_fully_paid: outstanding <= 0.01,
+  };
+}
+
+/**
+ * Insert a payment row + return the inserted record. payment_type
+ * defaults to INTERIM; pass 'ADVANCE' from check-in path and
+ * 'FINAL' from checkout path. Caller should validate amount > 0
+ * (this fn doesn't gate — REFUND callers may pass any positive,
+ * the type makes it subtract in getFolioOutstanding).
+ */
+async function recordFolioPayment(
+  tenantDb: DbInterface,
+  args: {
+    folioId: string;
+    amount: number;
+    method: string;
+    type: 'ADVANCE' | 'INTERIM' | 'FINAL' | 'REFUND';
+    reference?: string | null;
+    recordedBy?: string | null;
+    notes?: string | null;
+  }
+): Promise<any> {
+  const id = `FP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  await tenantDb.run(
+    `INSERT INTO folio_payments
+       (id, folio_id, amount, payment_method, payment_type, reference_number, recorded_by, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, args.folioId, Math.abs(args.amount), args.method, args.type,
+     args.reference || null, args.recordedBy || null, args.notes || null]
+  );
+  return tenantDb.get("SELECT * FROM folio_payments WHERE id = ?", [id]);
+}
+
+/**
+ * Defensive folio resolver — when a room order arrives but no open
+ * folio exists yet, this helper finds the room's current/most-recent
+ * CHECKED_IN or BOOKED booking and auto-opens a folio for it. Closes
+ * the F&B-not-reflecting gap reported on 10 Jun 2026 where customer-
+ * side QR orders silently rejected because the guest hadn't been
+ * checked in yet by staff.
+ */
+async function ensureFolioForRoom(
+  restaurantId: string,
+  roomId: string,
+): Promise<{ folioId: string | null; bookingId: string | null; created: boolean }> {
+  const tenantDb = await getTenantDb(restaurantId);
+  // First — existing open folio on the room?
+  const existing: any = await tenantDb.get(
+    "SELECT id, booking_id FROM folios WHERE room_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+    [roomId]
+  );
+  if (existing) return { folioId: existing.id, bookingId: existing.booking_id, created: false };
+  // Find the room's current booking (CHECKED_IN preferred, then BOOKED arriving today).
+  const todayIso = new Date().toISOString().slice(0, 10);
+  let booking: any = await tenantDb.get(
+    "SELECT * FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' ORDER BY actual_checkin_at DESC LIMIT 1",
+    [roomId]
+  );
+  if (!booking) {
+    booking = await tenantDb.get(
+      `SELECT * FROM room_bookings WHERE room_id = ? AND status = 'BOOKED'
+         AND check_in_date <= ? AND check_out_date > ?
+         ORDER BY check_in_date LIMIT 1`,
+      [roomId, todayIso, todayIso]
+    );
+  }
+  if (!booking) return { folioId: null, bookingId: null, created: false };
+  // Create folio just-in-time. createFolioWithRoomCharges seeds room
+  // charges, which is what we want — F&B then layers on top.
+  const folio = await createFolioWithRoomCharges(restaurantId, booking);
+  return { folioId: folio?.id || null, bookingId: booking.id, created: !!folio?.id };
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -22683,6 +22851,36 @@ async function startServer() {
       // Open a folio with ROOM_CHARGE entries (Phase 3 — folio engine)
       const folio = await createFolioWithRoomCharges(req.params.id, b);
 
+      // ── ADVANCE PAYMENT (10 Jun 2026 critical fix) ─────────────────
+      // Front-desk staff may collect a partial payment from the guest
+      // at check-in (cash deposit, card swipe, UPI). Body shape:
+      //   { advance_amount: 5000, advance_method: 'CASH'|'CARD'|'UPI'|
+      //     'BANK_TRANSFER'|'CHEQUE'|'OTHER', advance_reference?: '...' }
+      // Records a folio_payments row with payment_type='ADVANCE' tied
+      // to the freshly-created folio. Outstanding then drops by that
+      // amount at checkout time.
+      const advanceAmount = Number(req.body?.advance_amount || 0);
+      const advanceMethod = String(req.body?.advance_method || '').toUpperCase().trim();
+      if (folio?.id && advanceAmount > 0 && advanceMethod) {
+        const VALID_METHODS = new Set(['CASH','CARD','UPI','BANK_TRANSFER','CHEQUE','OTHER']);
+        if (!VALID_METHODS.has(advanceMethod)) {
+          return res.status(400).json({ error: `advance_method must be one of ${Array.from(VALID_METHODS).join(', ')}` });
+        }
+        try {
+          await recordFolioPayment(tenantDb, {
+            folioId: folio.id,
+            amount: advanceAmount,
+            method: advanceMethod,
+            type: 'ADVANCE',
+            reference: req.body?.advance_reference || null,
+            recordedBy: req.user?.id || req.user?.email || null,
+            notes: 'Advance collected at check-in',
+          });
+        } catch (e) {
+          console.warn('[hotel-checkin] advance-payment record failed (non-fatal):', e);
+        }
+      }
+
       // ── Phase H1: guest perk on check-in ─────────────────────────
       //   Fire a notification + return the perk info so the UI shows
       //   a banner. The hotel decides what to physically comp (cake,
@@ -23061,7 +23259,70 @@ async function startServer() {
         console.warn('[hotel-checkout] late-fee compute failed:', e);
       }
 
-      // Settle folio (loyalty-aware)
+      // ── OUTSTANDING-GATED CHECKOUT (10 Jun 2026 critical fix) ──────
+      // Before settling we:
+      //   1. Record an optional "final payment" the staff is taking
+      //      right now (additional_payment_amount / _method / _reference)
+      //   2. Compute outstanding = folio.grand_total − total_paid
+      //   3. Refuse to settle when outstanding > 0 UNLESS waive=true
+      //
+      // This closes three gaps:
+      //   • staff can't accidentally check out a guest with unpaid bill
+      //   • F&B added mid-stay is now visible in the folio total
+      //   • the additional payment is captured as a discrete ledger
+      //     row, audit-preserving (was previously a single payment_method
+      //     column on folios with no breakdown).
+      const openFolio: any = await tenantDb.get(
+        "SELECT id FROM folios WHERE booking_id = ? AND status = 'open'", [b.id]
+      );
+      if (openFolio?.id) {
+        // Recompute totals one more time to capture any in-flight F&B
+        // that landed in folio_entries since the modal was opened.
+        await recomputeFolioTotals(tenantDb, openFolio.id);
+        const additionalAmt    = Number(req.body?.additional_payment_amount || 0);
+        const additionalMethod = String(req.body?.additional_payment_method || '').toUpperCase().trim();
+        const additionalRef    = req.body?.additional_payment_reference || null;
+        if (additionalAmt > 0 && additionalMethod) {
+          const VALID = new Set(['CASH','CARD','UPI','BANK_TRANSFER','CHEQUE','OTHER']);
+          if (!VALID.has(additionalMethod)) {
+            return res.status(400).json({ error: `additional_payment_method must be one of ${Array.from(VALID).join(', ')}` });
+          }
+          try {
+            await recordFolioPayment(tenantDb, {
+              folioId: openFolio.id,
+              amount: additionalAmt,
+              method: additionalMethod,
+              type: 'FINAL',
+              reference: additionalRef,
+              recordedBy: req.user?.id || req.user?.email || null,
+              notes: 'Final payment at check-out',
+            });
+          } catch (e) {
+            console.warn('[hotel-checkout] final-payment record failed:', e);
+          }
+        }
+        const outstanding = await getFolioOutstanding(tenantDb, openFolio.id);
+        // waive=true is the explicit "comp the bill" path (e.g. owner
+        // waiving for a complaint, contra account, loyalty redemption).
+        // Without that flag, refuse checkout when outstanding > 0.
+        if (!waive && outstanding && outstanding.outstanding > 0.01) {
+          return res.status(409).json({
+            error: 'OUTSTANDING_BALANCE',
+            message: `Outstanding balance of ₹${outstanding.outstanding.toLocaleString('en-IN')} must be cleared before check-out. Record a payment or set waive=true to comp.`,
+            folio_id: openFolio.id,
+            grand_total: outstanding.folio?.grand_total || 0,
+            total_paid: outstanding.total_paid,
+            total_refunded: outstanding.total_refunded,
+            outstanding: outstanding.outstanding,
+            payments: outstanding.payments,
+          });
+        }
+      }
+
+      // Settle folio (loyalty-aware). At this point either outstanding=0
+      // or waive=true. settleFolioForBooking flips folio.status='settled'
+      // and stamps payment_method (single-column legacy). The detailed
+      // payment breakdown lives in folio_payments now.
       const settled = await settleFolioForBooking(
         req.params.id, b.id, payment_method || 'CASH', discount || 0, !!waive, loyaltyResolver
       );
@@ -23093,31 +23354,136 @@ async function startServer() {
 
       try { await triggerNotification(req.params.id, 'GUEST_CHECKED_OUT', { bookingId: b.id, guestName: b.guest_name, roomId: b.room_id }); } catch {}
 
-      // ── Final-bill payment link on check-out ─────────────────────
-      // If the folio finished settled BUT has a payment outstanding
-      // (loyalty waive / partial-pay flow), email the guest a UPI
-      // link for the residual. Skips when folio is fully paid.
+      // ── AUTO-SEND INVOICE (email + WhatsApp) on successful checkout ──
+      // Now that outstanding=0 has been enforced (above), the folio is
+      // FULLY PAID. Generate the tax invoice PDF and push it to the
+      // guest's email + WhatsApp automatically — no more "owner has to
+      // open the folio modal and click Email Invoice as a second step".
+      //
+      // Email: invoice PDF attached.
+      // WhatsApp: text summary (sendWhatsApp doesn't support binary
+      //   attachments), with a one-liner pointing the guest to email.
+      //
+      // Fire-and-forget — never blocks the checkout response. Errors
+      // are warned, not thrown.
       (async () => {
         try {
-          if (!b.guest_email) return;
-          const grandTotal = Number((settled as any)?.grand_total || 0);
-          const totalPaid  = Number((settled as any)?.total_paid  || grandTotal);
-          const due = Math.max(0, grandTotal - totalPaid);
-          if (due <= 0.01) return;
-          const payload = await buildHotelPaymentLinkPayload(req.params.id, req.params.bookingId);
-          if (!payload.ok || payload.amount <= 0) return;
-          // Override amount to the residual due (not the full folio).
-          payload.amount = Math.round(due * 100) / 100;
-          if (payload.upi_vpa) {
-            payload.upi_link = `upi://pay?pa=${encodeURIComponent(payload.upi_vpa)}` +
-              `&pn=${encodeURIComponent(payload.upi_payee)}` +
-              `&am=${payload.amount.toFixed(2)}` +
-              `&cu=INR` +
-              `&tn=${encodeURIComponent(`Booking ${b.id} (balance)`)}`;
+          const hotel = check.restaurant;
+          // Fetch the settled folio fresh — settled object from
+          // settleFolioForBooking may not include all columns we need.
+          const folio: any = await tenantDb.get(
+            `SELECT f.*, r.name AS room_name
+               FROM folios f
+          LEFT JOIN rooms r ON r.id = f.room_id
+              WHERE f.booking_id = ?
+           ORDER BY f.created_at DESC LIMIT 1`,
+            [b.id]
+          );
+          if (!folio) return;
+          const entries: any[] = await tenantDb.query(
+            "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
+            [folio.id]
+          );
+          const invoiceDate = folio.settled_at || folio.created_at || new Date().toISOString();
+          const settledDate = new Date(invoiceDate);
+          const invNum = `INV-${settledDate.getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
+
+          const pdf = await generateInvoicePdf({
+            hotel: { name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number, phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined, fssai: hotel.fssai_license_number || null, fssaiValidUntil: hotel.fssai_license_valid_until || null },
+            guest: { name: b.guest_name || 'Guest', phone: b.guest_phone, email: b.guest_email, nationality: b.guest_nationality, state: b.guest_state },
+            stay:  {
+              roomName: folio.room_name || folio.room_id,
+              bookingId: b.id,
+              checkInDate: b.check_in_date,
+              checkOutDate: b.check_out_date,
+              actualCheckInAt: b.actual_checkin_at,
+              actualCheckOutAt: b.actual_checkout_at,
+              numGuests: b.num_guests,
+            },
+            folio: {
+              id: folio.id, invoiceNumber: invNum, invoiceDate,
+              subtotal: Number(folio.subtotal || 0), discount: Number(folio.discount || 0),
+              gstAmount: Number(folio.gst_amount || 0), grandTotal: Number(folio.grand_total || 0),
+              paymentMethod: folio.payment_method, settledAt: folio.settled_at, status: folio.status,
+            },
+            entries: entries.map(e => ({
+              description: e.description, entryType: e.entry_type,
+              quantity: Number(e.quantity || 1), unitPrice: Number(e.unit_price || 0),
+              amount: Number(e.amount || 0), gstRate: Number(e.gst_rate || 0), gstAmount: Number(e.gst_amount || 0),
+            })),
+            placeOfSupply: hotel.state,
+            bilingual: true,
+            tenant: {
+              country:          hotel.country || 'IN',
+              currency_code:    hotel.currency_code || 'INR',
+              currency_symbol:  hotel.currency_symbol || '₹',
+              locale:           hotel.locale || 'en-IN',
+              invoice_template: (hotel.invoice_template === 'BOUTIQUE' ? 'BOUTIQUE' : 'CLASSIC') as 'CLASSIC' | 'BOUTIQUE',
+            },
+            roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
+            irn: {
+              irn:               folio.irn || null,
+              ackNo:             folio.ack_no || null,
+              ackDate:           folio.ack_date || null,
+              signedQrCode:      folio.signed_qr_code || null,
+              status:            folio.irn_status || 'PENDING',
+              eInvoiceMandatory: Number(hotel.e_invoicing_enabled || 0) === 1
+                              && Number(hotel.e_invoicing_turnover_threshold_met || 0) === 1,
+            },
+          });
+
+          const currency = hotel.currency_symbol || '₹';
+          const grandFmt = `${currency}${Number(folio.grand_total || 0).toLocaleString(hotel.locale || 'en-IN')}`;
+          const safeName = String(b.guest_name || 'guest').replace(/[^a-z0-9_-]+/gi, '-');
+
+          // ── Email with PDF attached ──────────────────────────────
+          if (b.guest_email) {
+            const subject = `Tax Invoice ${invNum} — ${hotel.name}`;
+            const textBody =
+              `Dear ${b.guest_name || 'Guest'},\n\n` +
+              `Thank you for your stay at ${hotel.name}. ` +
+              `Please find attached your tax invoice ${invNum}.\n\n` +
+              `Amount paid: ${grandFmt}\n\n` +
+              `We hope to host you again soon!\n\n${hotel.name} Team`;
+            const htmlBody =
+              `<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:auto;padding:24px;background:#faf7f2">` +
+                `<div style="background:#cc5a16;color:#fff;padding:24px;border-radius:24px 24px 0 0">` +
+                  `<h1 style="font-family:Georgia,serif;margin:0;font-size:22px">Tax Invoice</h1>` +
+                  `<p style="margin:6px 0 0;opacity:0.85">${hotel.name}</p>` +
+                `</div>` +
+                `<div style="background:#fff;padding:24px;border-radius:0 0 24px 24px">` +
+                  `<p>Dear ${b.guest_name || 'Guest'},</p>` +
+                  `<p>Thank you for your stay at <strong>${hotel.name}</strong>. Please find your tax invoice <strong>${invNum}</strong> attached.</p>` +
+                  `<p style="color:#6b5d52;font-size:13px">Amount paid: <strong>${grandFmt}</strong></p>` +
+                  `<p style="margin-top:24px">We hope to host you again soon!<br/><strong>${hotel.name} Team</strong></p>` +
+                `</div>` +
+              `</div>`;
+            await sendEmail(b.guest_email, subject, textBody, htmlBody, [{
+              filename: `${invNum}-${safeName}.pdf`,
+              content: pdf,
+              contentType: 'application/pdf',
+            }]);
           }
-          const msg = renderPaymentLinkMessage(payload);
-          await sendEmail(b.guest_email, msg.subject, msg.text, msg.html);
-        } catch (e) { console.warn('[hotel-checkout] auto payment-link failed:', e); }
+
+          // ── WhatsApp summary (text-only) ─────────────────────────
+          if (b.guest_phone) {
+            const waMsg =
+              `*Tax Invoice ${invNum}*\n` +
+              `${hotel.name}\n\n` +
+              `Dear ${b.guest_name || 'Guest'},\n` +
+              `Thank you for your stay. Your invoice is settled.\n\n` +
+              `Amount paid: *${grandFmt}*\n` +
+              `Stay: ${String(b.check_in_date).slice(0,10)} → ${String(b.check_out_date).slice(0,10)}\n\n` +
+              (b.guest_email
+                ? `The full PDF invoice has been sent to your email (${b.guest_email}).`
+                : `Reply to this message for a copy of the PDF invoice.`) +
+              `\n\nWe hope to host you again soon! — ${hotel.name}`;
+            try { await sendWhatsApp(b.guest_phone, waMsg); }
+            catch (e) { console.warn('[hotel-checkout] WhatsApp invoice failed:', e); }
+          }
+        } catch (e) {
+          console.warn('[hotel-checkout] auto invoice send failed:', e);
+        }
       })();
 
       res.json({
@@ -24030,6 +24396,119 @@ async function startServer() {
       res.json(await tenantDb.query(sql, params));
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch folios" });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // Folio payments ledger (10 Jun 2026 critical fix)
+  // ════════════════════════════════════════════════════════════════════
+  // Surfaces the new folio_payments table to the UI so the staff can:
+  //   • see grand_total, total_paid, outstanding live during a stay
+  //   • record a fresh payment (deposit, mid-stay top-up, final balance)
+  //   • void an erroneous payment (audit-preserving — sets is_voided=1)
+  //
+  // GET .../outstanding returns { folio, payments[], total_paid,
+  //   total_refunded, outstanding, is_fully_paid } — the master record
+  //   for the checkout modal's "Outstanding" section.
+
+  app.get("/api/restaurant/:id/hotel/folios/:folioId/outstanding", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      // Recompute totals first — guarantees we read a fresh grand_total
+      // that includes any F&B / extras posted since the modal opened.
+      await recomputeFolioTotals(tenantDb, req.params.folioId);
+      const data = await getFolioOutstanding(tenantDb, req.params.folioId);
+      if (!data) return res.status(404).json({ error: 'Folio not found' });
+      res.json(data);
+    } catch (err: any) {
+      console.error('folio outstanding error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to fetch outstanding' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/folios/:folioId/payments", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows = await tenantDb.query(
+        "SELECT * FROM folio_payments WHERE folio_id = ? ORDER BY recorded_at",
+        [req.params.folioId]
+      ).catch(() => []);
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to fetch payments' });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/payments", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const folio: any = await tenantDb.get("SELECT id, status FROM folios WHERE id = ?", [req.params.folioId]);
+      if (!folio) return res.status(404).json({ error: 'Folio not found' });
+      if (folio.status === 'settled' || folio.status === 'voided') {
+        return res.status(409).json({ error: `Folio is ${folio.status}; payments cannot be added.` });
+      }
+      const amount = Number(req.body?.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return res.status(400).json({ error: 'amount must be a positive number' });
+      }
+      const method = String(req.body?.payment_method || '').toUpperCase().trim();
+      const VALID_METHODS = new Set(['CASH','CARD','UPI','BANK_TRANSFER','CHEQUE','OTHER']);
+      if (!VALID_METHODS.has(method)) {
+        return res.status(400).json({ error: `payment_method must be one of ${Array.from(VALID_METHODS).join(', ')}` });
+      }
+      const type = String(req.body?.payment_type || 'INTERIM').toUpperCase().trim();
+      const VALID_TYPES = new Set(['ADVANCE','INTERIM','FINAL','REFUND']);
+      if (!VALID_TYPES.has(type)) {
+        return res.status(400).json({ error: `payment_type must be one of ${Array.from(VALID_TYPES).join(', ')}` });
+      }
+      const payment = await recordFolioPayment(tenantDb, {
+        folioId: req.params.folioId,
+        amount,
+        method,
+        type: type as any,
+        reference: req.body?.reference_number || null,
+        recordedBy: req.user?.id || req.user?.email || null,
+        notes: req.body?.notes || null,
+      });
+      // Return the updated outstanding so the UI can update without
+      // a second round-trip.
+      const outstanding = await getFolioOutstanding(tenantDb, req.params.folioId);
+      res.status(201).json({ payment, outstanding });
+    } catch (err: any) {
+      console.error('folio payment record error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to record payment' });
+    }
+  });
+
+  // Void payment — audit-preserving. Flips is_voided=1 + stamps
+  // voided_at / voided_by / voided_reason. Row stays in the ledger
+  // for forensic audit. getFolioOutstanding ignores voided rows.
+  app.post("/api/restaurant/:id/hotel/folio-payments/:paymentId/void", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const payment: any = await tenantDb.get("SELECT * FROM folio_payments WHERE id = ?", [req.params.paymentId]);
+      if (!payment) return res.status(404).json({ error: 'Payment not found' });
+      if (payment.is_voided) return res.status(409).json({ error: 'Payment already voided' });
+      const reason = String(req.body?.reason || '').trim();
+      if (!reason) return res.status(400).json({ error: 'reason is required for audit trail' });
+      const now = new Date().toISOString();
+      await tenantDb.run(
+        `UPDATE folio_payments SET is_voided = 1, voided_at = ?, voided_by = ?, voided_reason = ? WHERE id = ?`,
+        [now, req.user?.id || req.user?.email || null, reason, req.params.paymentId]
+      );
+      const outstanding = await getFolioOutstanding(tenantDb, payment.folio_id);
+      res.json({ ok: true, outstanding });
+    } catch (err: any) {
+      console.error('folio payment void error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to void payment' });
     }
   });
 
@@ -29850,7 +30329,7 @@ async function startServer() {
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hr-p1-2-employee-directory-crud',
+    commit_marker: 'checkout-advance-outstanding-fnb-fix-invoice-autosend',
     code_features: [
       'subscription-billing',
       'read-only-mode',

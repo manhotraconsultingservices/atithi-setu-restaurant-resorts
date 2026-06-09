@@ -10024,8 +10024,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchHotelBookings();
     markAvailabilityDirty();
   };
-  const checkInBooking = async (bookingId: string, force = false) => {
-    const result = await hotelApi(`/bookings/${bookingId}/checkin`, { method: 'POST', body: JSON.stringify({ force }) });
+  const checkInBooking = async (
+    bookingId: string,
+    force = false,
+    advance?: { amount: number; method: string; reference?: string }
+  ) => {
+    const body: any = { force };
+    // Advance payment (10 Jun 2026 critical fix): when staff collected
+    // a partial / deposit / full payment from the guest at check-in,
+    // record it as a folio_payments row with type='ADVANCE'. Reduces
+    // the outstanding shown at checkout.
+    if (advance && advance.amount > 0 && advance.method) {
+      body.advance_amount    = advance.amount;
+      body.advance_method    = advance.method;
+      body.advance_reference = advance.reference || null;
+    }
+    const result = await hotelApi(`/bookings/${bookingId}/checkin`, { method: 'POST', body: JSON.stringify(body) });
     await fetchHotelBookings();
     await fetchHotelRooms();
     markAvailabilityDirty();
@@ -10103,15 +10117,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setEarlyCheckInSubmitting(false);
     }
   };
-  const checkOutBooking = async (bookingId: string, payment: string, discount: number) => {
+  const checkOutBooking = async (
+    bookingId: string,
+    payment: string,
+    discount: number,
+    opts?: {
+      additional_payment_amount?: number;
+      additional_payment_method?: string;
+      additional_payment_reference?: string;
+      waive?: boolean;
+    }
+  ) => {
     const result = await hotelApi(`/bookings/${bookingId}/checkout`, {
       method: 'POST',
-      body: JSON.stringify({ payment_method: payment, discount }),
+      body: JSON.stringify({
+        payment_method: payment,
+        discount,
+        additional_payment_amount: opts?.additional_payment_amount || 0,
+        additional_payment_method: opts?.additional_payment_method || null,
+        additional_payment_reference: opts?.additional_payment_reference || null,
+        waive: !!opts?.waive,
+      }),
     });
     await fetchHotelBookings();
     await fetchHotelRooms();
     markAvailabilityDirty();
     return result;
+  };
+  // Fetch the live outstanding breakdown for a booking's open folio.
+  // Used by the checkout modal to show grand_total / paid / outstanding
+  // and the payments ledger. Returns null when no open folio exists.
+  const fetchFolioOutstanding = async (bookingId: string): Promise<any | null> => {
+    try {
+      const folios = await hotelApi(`/folios?booking_id=${encodeURIComponent(bookingId)}`);
+      const open = Array.isArray(folios) ? folios.find((f: any) => f.status === 'open') : null;
+      if (!open) return null;
+      return await hotelApi(`/folios/${encodeURIComponent(open.id)}/outstanding`);
+    } catch { return null; }
   };
   // Open the cancellation confirm modal — fetches the refund preview so
   // the cashier can see what's owed before confirming. The actual cancel
@@ -26058,9 +26100,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // Optimistically merge saved fields back into the bookings list
               setHotelBookings((rows: any[]) => rows.map(r => r.id === patched.id ? { ...r, ...patched } : r));
             }}
-            onCheckIn={async () => {
+            onCheckIn={async (advance?: { amount: number; method: string; reference?: string }) => {
               try {
-                await checkInBooking(b.id, false);
+                await checkInBooking(b.id, false, advance);
                 setCheckInChecklistTarget(null);
               } catch (err: any) {
                 const msg = err?.message || '';
@@ -26353,82 +26395,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       )}
 
       {/* ═════════ Check-out modal (with folio preview) ═════════ */}
-      {showCheckoutModal && checkoutBooking && (() => {
-        // Loyalty preview for this guest. Mirrors the restaurant
-        // PostpaidInvoiceModal: when the guest's phone is on file AND
-        // their tier has discount_percent > 0, surface a banner so
-        // staff knows the discount will be auto-applied at settlement.
-        // The actual application happens server-side (see
-        // /hotel/bookings/:id/checkout → settleFolioForBooking with the
-        // loyaltyResolver) so the banner is a preview, not authoritative.
-        const phone = (checkoutBooking as any).guest_phone || '';
-        return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Check Out — {checkoutBooking.guest_name}</h3>
-                <button onClick={() => { setShowCheckoutModal(false); setCheckoutBooking(null); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
-              </div>
-              <div className="bg-[#faf7f2] rounded-2xl p-4 mb-4 text-sm">
-                <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Room</span><span className="font-semibold">{checkoutBooking.room_name || checkoutBooking.room_id}</span></div>
-                <div className="flex justify-between mb-1"><span className="text-[#6b5d52]">Dates</span><span>{formatDateForTenant(checkoutBooking.check_in_date, restaurant?.date_format)} → {formatDateForTenant(checkoutBooking.check_out_date, restaurant?.date_format)}</span></div>
-                <p className="text-[10px] text-[#9c8e85] mt-2">Folio totals will include room nights + completed service charges.</p>
-              </div>
-
-              {/* Late checkout fee preview — appears only when the
-                  tenant configured a cutoff and the guest is past it. */}
-              <HotelLateFeeBanner
-                restaurantId={restaurantId}
-                token={token}
-                bookingId={checkoutBooking.id}
-              />
-
-              {/* Loyalty preview banner. Looks up the tier on-mount and
-                  caches in component state via the existing loyaltyTier
-                  state if we add one — for now we just fetch inline. */}
-              <HotelLoyaltyBanner
-                restaurantId={restaurantId}
-                token={token}
-                guestPhone={phone}
-                manualDiscountActive={checkoutDiscount > 0}
-              />
-
-              <div className="space-y-3 mb-4">
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment Method</label>
-                  <select value={checkoutPayment} onChange={e => setCheckoutPayment(e.target.value as any)} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3">
-                    <option value="CASH">Cash</option><option value="CARD">Card</option><option value="UPI">UPI</option><option value="BANK">Bank Transfer</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
-                    Discount (₹)
-                    <span className="block text-[9px] font-normal text-[#9c8e85] mt-0.5 normal-case">
-                      Override the auto-applied loyalty discount, if any.
-                    </span>
-                  </label>
-                  <input type="number" min={0} value={checkoutDiscount} onChange={e => setCheckoutDiscount(Number(e.target.value)||0)} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3"/>
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <button onClick={() => { setShowCheckoutModal(false); setCheckoutBooking(null); }} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
-                <button onClick={async () => {
-                  try {
-                    const result = await checkOutBooking(checkoutBooking.id, checkoutPayment, checkoutDiscount);
-                    setShowCheckoutModal(false); setCheckoutBooking(null); setCheckoutDiscount(0);
-                    if (result?.folio?.id) await loadFolio(result.folio.id);
-                    // Surface a small success cue when loyalty was applied
-                    if (result?.loyalty) {
-                      const loy = result.loyalty;
-                      console.log(`[hotel-checkout] Loyalty applied: ${loy.tier_name} − ₹${Number(loy.discount_amount).toFixed(2)}`);
-                    }
-                  } catch (err: any) { alert(err.message); }
-                }} className="flex-1 px-4 py-2.5 rounded-2xl bg-[#b8860b] text-white text-sm font-bold hover:bg-[#8f6608]">Settle &amp; Check Out</button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
+      {showCheckoutModal && checkoutBooking && (
+        <CheckoutModal
+          booking={checkoutBooking}
+          restaurant={restaurant}
+          restaurantId={restaurantId!}
+          token={token!}
+          fetchFolioOutstanding={fetchFolioOutstanding}
+          hotelApi={hotelApi}
+          onClose={() => { setShowCheckoutModal(false); setCheckoutBooking(null); setCheckoutDiscount(0); }}
+          onSettled={async (result) => {
+            setShowCheckoutModal(false); setCheckoutBooking(null); setCheckoutDiscount(0);
+            await fetchHotelBookings(); await fetchHotelRooms();
+            markAvailabilityDirty();
+            if (result?.folio?.id) await loadFolio(result.folio.id);
+          }}
+          loyaltyBanner={<HotelLoyaltyBanner restaurantId={restaurantId!} token={token!} guestPhone={(checkoutBooking as any).guest_phone || ''} manualDiscountActive={false} />}
+          lateFeeBanner={<HotelLateFeeBanner restaurantId={restaurantId!} token={token!} bookingId={checkoutBooking.id} />}
+        />
+      )}
 
       {/* ═════════ FAQ add/edit modal (Phase 4) ═════════ */}
       {showFaqModal && editingFaq && (
@@ -30770,7 +30755,7 @@ const CheckInWizardModal: React.FC<{
   onPreview?: (doc: any) => void;
   onCancel: () => void;
   onSaved?: (patched: any) => void;
-  onCheckIn: () => void | Promise<void>;
+  onCheckIn: (advance?: { amount: number; method: string; reference?: string }) => void | Promise<void>;
 }> = ({ booking, requireDocs, restaurantId, token, onPreview, onCancel, onSaved, onCheckIn }) => {
   const [step, setStep] = useState<1 | 2>(1);
   const [draft, setDraft] = useState<any>({
@@ -30789,6 +30774,11 @@ const CheckInWizardModal: React.FC<{
   const [docCount, setDocCount] = useState<number>(Number(booking.document_count || 0));
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  // Advance payment (10 Jun 2026 critical fix): optional partial /
+  // full payment collected at check-in. When amount > 0 + method set,
+  // gets posted as a folio_payments row with payment_type='ADVANCE'
+  // by the backend. Reduces outstanding shown at checkout.
+  const [advance, setAdvance] = useState({ amount: '', method: 'CASH', reference: '' });
 
   // Re-fetch document count whenever the embedded widget refreshes.
   useEffect(() => {
@@ -30859,7 +30849,13 @@ const CheckInWizardModal: React.FC<{
   const confirm = async () => {
     if (!canCheckIn || submitting) return;
     setSubmitting(true);
-    try { await onCheckIn(); } finally { setSubmitting(false); }
+    try {
+      const amt = Number(advance.amount || 0);
+      const adv = amt > 0 && advance.method
+        ? { amount: amt, method: advance.method.toUpperCase(), reference: advance.reference || undefined }
+        : undefined;
+      await onCheckIn(adv);
+    } finally { setSubmitting(false); }
   };
 
   const updateDraft = (patch: any) => setDraft((d: any) => ({ ...d, ...patch }));
@@ -31089,6 +31085,62 @@ const CheckInWizardModal: React.FC<{
                 To turn this off for transit properties, open <strong>Settings → Hotel</strong>.
               </p>
             )}
+
+            {/* ── Advance payment (optional) ───────────────────────
+                Common Indian-hotel workflow: staff collects a partial
+                deposit at check-in (especially for walk-ins). Recorded
+                as a folio_payments row with payment_type='ADVANCE'.
+                Outstanding shown at checkout is reduced by this amount. */}
+            <div className="bg-amber-50 rounded-2xl p-3 border border-amber-200 mt-3">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-amber-900 mb-2">💰 Advance payment (optional)</p>
+              <p className="text-[10px] text-[#6b5d52] mb-2">
+                Collect a partial / full payment now. Skip if none — guest pays everything at check-out.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-[10px] font-bold text-[#6b5d52] mb-1">Amount (₹)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={advance.amount}
+                    onChange={e => setAdvance({ ...advance, amount: e.target.value })}
+                    placeholder="0.00"
+                    className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-[#6b5d52] mb-1">Method</label>
+                  <select
+                    value={advance.method}
+                    onChange={e => setAdvance({ ...advance, method: e.target.value })}
+                    className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none"
+                  >
+                    <option value="CASH">Cash</option>
+                    <option value="CARD">Card</option>
+                    <option value="UPI">UPI</option>
+                    <option value="BANK_TRANSFER">Bank Transfer</option>
+                    <option value="CHEQUE">Cheque</option>
+                    <option value="OTHER">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-[#6b5d52] mb-1">Reference (optional)</label>
+                  <input
+                    type="text"
+                    value={advance.reference}
+                    onChange={e => setAdvance({ ...advance, reference: e.target.value })}
+                    placeholder="UTR / card last 4"
+                    className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none"
+                  />
+                </div>
+              </div>
+              {Number(advance.amount) > 0 && (
+                <p className="text-[11px] text-emerald-700 mt-2">
+                  ✓ ₹{Number(advance.amount).toLocaleString('en-IN')} will be recorded as ADVANCE. Outstanding at checkout reduces by this amount.
+                </p>
+              )}
+            </div>
 
             <div className="flex gap-2 pt-3 mt-1 border-t border-[#cc5a16]/10">
               <button
@@ -31580,6 +31632,281 @@ const PickupPaceChart: React.FC<{ restaurantId: string; token: string }> = ({ re
    • Silver/Gold with >0% → amber "X% off auto-applied" banner.
    • If staff has typed a manual discount > 0, the banner notes
      that the manual value will OVERRIDE the auto-applied one.    */
+
+// ════════════════════════════════════════════════════════════════════
+// CheckoutModal — outstanding-aware, multi-payment, auto-invoice send
+// ════════════════════════════════════════════════════════════════════
+// Replaces the legacy single-payment modal. Shows:
+//   • Live folio breakdown (room nights + F&B + services + GST)
+//   • Payment ledger (advance at check-in, any interim payments, void
+//     trail). Read straight from folio_payments via the new
+//     /folios/:folioId/outstanding endpoint.
+//   • Outstanding amount (large + red if > 0).
+//   • "Receive payment" form to record the final payment now.
+//   • "Settle & Check Out" button — disabled until outstanding ≤ 0
+//     OR the staff explicitly toggles "Comp / waive".
+// Server enforces the gate too (returns 409 with OUTSTANDING_BALANCE
+// when not waived) — UI block is for ergonomics, server is the law.
+const CheckoutModal: React.FC<{
+  booking: any;
+  restaurant: any;
+  restaurantId: string;
+  token: string;
+  fetchFolioOutstanding: (bookingId: string) => Promise<any | null>;
+  hotelApi: (path: string, opts?: RequestInit) => Promise<any>;
+  onClose: () => void;
+  onSettled: (result: any) => void | Promise<void>;
+  loyaltyBanner: React.ReactNode;
+  lateFeeBanner: React.ReactNode;
+}> = ({ booking, restaurant, restaurantId, token, fetchFolioOutstanding, hotelApi, onClose, onSettled, loyaltyBanner, lateFeeBanner }) => {
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [discount, setDiscount] = useState(0);
+  const [paymentMethod, setPaymentMethod] = useState<'CASH'|'CARD'|'UPI'|'BANK'>('CASH');
+  // Final-payment-now form (records into folio_payments as type=FINAL)
+  const [payNow, setPayNow] = useState({ amount: '', method: 'CASH', reference: '' });
+  const [waive, setWaive] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const sym = restaurant?.currency_symbol || '₹';
+
+  const refresh = async () => {
+    setLoading(true);
+    try { setData(await fetchFolioOutstanding(booking.id)); }
+    catch { setData(null); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { refresh(); /* eslint-disable-line */ }, [booking.id]);
+
+  const grand = Number(data?.folio?.grand_total || booking.total_amount || 0);
+  const paid = Number(data?.total_paid || 0);
+  const refunded = Number(data?.total_refunded || 0);
+  const baseOutstanding = Number(data?.outstanding || Math.max(0, grand - paid + refunded));
+  // Apply optional final payment + discount preview client-side so the
+  // staff sees the post-payment outstanding live as they type.
+  const previewPay = Number(payNow.amount || 0);
+  const effectiveOutstanding = Math.max(0, baseOutstanding - previewPay - discount);
+  const canSettle = effectiveOutstanding <= 0.01 || waive;
+
+  const settle = async () => {
+    setSubmitting(true);
+    try {
+      const result = await hotelApi(`/bookings/${booking.id}/checkout`, {
+        method: 'POST',
+        body: JSON.stringify({
+          payment_method: paymentMethod,
+          discount,
+          additional_payment_amount: previewPay > 0 ? previewPay : 0,
+          additional_payment_method: previewPay > 0 ? payNow.method.toUpperCase() : null,
+          additional_payment_reference: previewPay > 0 ? payNow.reference || null : null,
+          waive,
+        }),
+      });
+      await onSettled(result);
+    } catch (err: any) {
+      // Server returns { error: 'OUTSTANDING_BALANCE', outstanding, ... }
+      // when balance > 0 and not waived. Re-fetch + surface the message.
+      try {
+        const msg = err?.message || 'Checkout failed';
+        if (msg.includes('OUTSTANDING_BALANCE') || msg.includes('Outstanding')) {
+          await refresh();
+          alert(msg);
+        } else {
+          alert(msg);
+        }
+      } catch { alert('Checkout failed'); }
+    } finally { setSubmitting(false); }
+  };
+
+  const fmt = (n: number) => `${sym}${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-xl my-8">
+        <div className="sticky top-0 bg-white border-b border-[#cc5a16]/10 px-6 py-4 flex items-center justify-between rounded-t-3xl">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">Check out</p>
+            <h3 className="text-xl font-bold font-serif text-[#1a1208]">{booking.guest_name}</h3>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 rounded-full bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#3d3128]">×</button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <div className="bg-[#faf7f2] rounded-2xl p-3 text-[12px] space-y-1">
+            <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{booking.room_name || booking.room_id}</strong></div>
+            <div className="flex justify-between"><span className="text-[#6b5d52]">Dates</span><span>{formatDateForTenant(booking.check_in_date, restaurant?.date_format)} → {formatDateForTenant(booking.check_out_date, restaurant?.date_format)}</span></div>
+          </div>
+
+          {lateFeeBanner}
+          {loyaltyBanner}
+
+          {loading && <p className="text-center text-sm text-[#9c8e85] py-4 italic">Loading folio…</p>}
+
+          {!loading && data && (
+            <>
+              {/* ── Folio totals + outstanding hero ─────────────── */}
+              <div className={cn(
+                'rounded-2xl p-4 border-2',
+                baseOutstanding > 0.01 ? 'border-rose-300 bg-rose-50' : 'border-emerald-300 bg-emerald-50'
+              )}>
+                <div className="flex items-baseline justify-between mb-2">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Outstanding balance</p>
+                    <p className={cn(
+                      'text-3xl font-bold font-mono mt-1',
+                      baseOutstanding > 0.01 ? 'text-rose-700' : 'text-emerald-700'
+                    )}>
+                      {fmt(baseOutstanding)}
+                    </p>
+                  </div>
+                  {baseOutstanding <= 0.01 && (
+                    <span className="px-3 py-1 rounded-full bg-emerald-200 text-emerald-900 text-[10px] font-bold uppercase">Fully paid ✓</span>
+                  )}
+                </div>
+                <div className="text-[11px] text-[#6b5d52] space-y-0.5">
+                  <div className="flex justify-between"><span>Folio grand total</span><span className="font-mono">{fmt(grand)}</span></div>
+                  <div className="flex justify-between"><span>Paid so far</span><span className="font-mono text-emerald-700">−{fmt(paid)}</span></div>
+                  {refunded > 0 && <div className="flex justify-between"><span>Refunded</span><span className="font-mono text-amber-700">+{fmt(refunded)}</span></div>}
+                </div>
+              </div>
+
+              {/* ── Payment ledger (audit history) ──────────────── */}
+              {Array.isArray(data.payments) && data.payments.length > 0 && (
+                <div className="bg-white rounded-2xl border border-[#f0e8dd] p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Payment history</p>
+                  <div className="space-y-1 text-[11px]">
+                    {data.payments.map((p: any) => {
+                      const isVoided = p.is_voided;
+                      const isRefund = p.payment_type === 'REFUND';
+                      return (
+                        <div key={p.id} className={cn('flex justify-between items-center px-2 py-1.5 rounded',
+                          isVoided ? 'bg-stone-50 text-stone-400 line-through' :
+                          isRefund ? 'bg-amber-50' : 'bg-emerald-50')}>
+                          <div>
+                            <span className="font-bold text-[10px] uppercase">{p.payment_type}</span>
+                            <span className="text-[#9c8e85] ml-2">{p.payment_method}</span>
+                            {p.reference_number && <span className="text-[#9c8e85] ml-2">· {p.reference_number}</span>}
+                            <span className="text-[#9c8e85] ml-2">· {formatDateForTenant(p.recorded_at, restaurant?.date_format)}</span>
+                          </div>
+                          <span className="font-mono font-bold">{isRefund ? '−' : '+'}{fmt(p.amount)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* ── Receive payment NOW (records as FINAL) ──────── */}
+              {baseOutstanding > 0.01 && !waive && (
+                <div className="bg-amber-50 rounded-2xl p-4 border border-amber-200">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-amber-900 mb-2">💰 Receive payment from guest</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div className="sm:col-span-1">
+                      <label className="block text-[10px] font-bold text-[#6b5d52] mb-1">Amount ({sym})</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={payNow.amount}
+                        onChange={e => setPayNow({ ...payNow, amount: e.target.value })}
+                        placeholder={baseOutstanding.toFixed(2)}
+                        className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setPayNow({ ...payNow, amount: baseOutstanding.toFixed(2) })}
+                        className="text-[10px] text-amber-700 hover:underline mt-1"
+                      >Use outstanding {fmt(baseOutstanding)}</button>
+                    </div>
+                    <div className="sm:col-span-1">
+                      <label className="block text-[10px] font-bold text-[#6b5d52] mb-1">Method</label>
+                      <select
+                        value={payNow.method}
+                        onChange={e => setPayNow({ ...payNow, method: e.target.value })}
+                        className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none"
+                      >
+                        <option value="CASH">Cash</option>
+                        <option value="CARD">Card</option>
+                        <option value="UPI">UPI</option>
+                        <option value="BANK_TRANSFER">Bank Transfer</option>
+                        <option value="CHEQUE">Cheque</option>
+                        <option value="OTHER">Other</option>
+                      </select>
+                    </div>
+                    <div className="sm:col-span-1">
+                      <label className="block text-[10px] font-bold text-[#6b5d52] mb-1">Reference (optional)</label>
+                      <input
+                        type="text"
+                        value={payNow.reference}
+                        onChange={e => setPayNow({ ...payNow, reference: e.target.value })}
+                        placeholder="UTR / card last 4"
+                        className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none"
+                      />
+                    </div>
+                  </div>
+                  {previewPay > 0 && (
+                    <p className="text-[11px] mt-2 text-amber-900">
+                      After this payment, remaining outstanding: <strong className="font-mono">{fmt(effectiveOutstanding)}</strong>
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* ── Discount + comp/waive ──────────────────────── */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Discount ({sym})</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={discount}
+                    onChange={e => setDiscount(Number(e.target.value) || 0)}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Settlement method (legacy)</label>
+                  <select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value as any)} className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
+                    <option value="CASH">Cash</option>
+                    <option value="CARD">Card</option>
+                    <option value="UPI">UPI</option>
+                    <option value="BANK">Bank Transfer</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex items-start gap-2 bg-stone-50 rounded-xl p-3 border border-stone-200">
+                <input type="checkbox" id="waive" checked={waive} onChange={e => setWaive(e.target.checked)} className="mt-0.5" />
+                <label htmlFor="waive" className="text-[11px] text-[#3d3128] cursor-pointer">
+                  <strong>Comp / waive outstanding</strong> — only use when the property is comping the bill (complaint, contra-account, loyalty redemption). Bypasses the outstanding gate. Audit-logged.
+                </label>
+              </div>
+
+              <p className="text-[10px] text-emerald-700 italic">
+                ✓ On successful checkout, the tax invoice PDF will be emailed to {booking.guest_email || 'guest email'} and a WhatsApp summary will be sent to {booking.guest_phone || 'guest phone'}.
+              </p>
+            </>
+          )}
+        </div>
+
+        <div className="sticky bottom-0 bg-white border-t border-[#cc5a16]/10 px-6 py-4 flex items-center justify-end gap-2 rounded-b-3xl">
+          <button onClick={onClose} className="px-4 py-2 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Cancel</button>
+          <button
+            onClick={settle}
+            disabled={submitting || !canSettle}
+            className={cn(
+              "px-5 py-2 rounded-2xl text-white text-sm font-bold",
+              canSettle && !submitting ? "bg-[#cc5a16] hover:bg-[#a84612]" : "bg-stone-300 cursor-not-allowed",
+            )}
+            title={canSettle ? '' : `Outstanding of ${fmt(effectiveOutstanding)} must be paid first (or check 'Comp / waive').`}
+          >
+            {submitting ? 'Settling…' : (canSettle ? '✓ Settle & Check Out' : `Outstanding ${fmt(effectiveOutstanding)}`)}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const HotelLoyaltyBanner: React.FC<{
   restaurantId: string;
   token: string;
