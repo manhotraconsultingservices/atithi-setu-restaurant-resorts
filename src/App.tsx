@@ -6642,6 +6642,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [hotelInventory, setHotelInventory] = useState<any[]>([]);
   const [storageLocations, setStorageLocations] = useState<any[]>([]);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  // ── Left-sidebar navigation (BCG IA redesign, Jun 2026) ──────────
+  //  navCollapsed   → icon-rail mode (desktop sidebar shows icons only,
+  //                   labels appear on hover via title attr).
+  //  expandedModules→ accordion open/closed state per module id. A module
+  //                   not present in the map falls back to "auto": open
+  //                   only when it contains the active tab. The first
+  //                   manual toggle writes an explicit boolean that then
+  //                   wins over the auto behaviour.
+  const [navCollapsed, setNavCollapsed] = useState(false);
+  const [expandedModules, setExpandedModules] = useState<Record<string, boolean>>({});
   const [notificationSettings, setNotificationSettings] = useState<any[]>([]);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [menu, setMenu] = useState<MenuItem[]>([]);
@@ -10833,19 +10843,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   return (
-    <div className="space-y-6 md:space-y-8">
+    <div className="md:flex md:gap-6 lg:gap-8 md:items-start">
 
-      {/* ── MOBILE: Hamburger nav header (hidden on md+) ── */}
-      <div className="md:hidden flex items-center justify-between bg-white border border-[#cc5a16]/10 rounded-2xl px-4 py-3 shadow-sm">
+      {/* ── MOBILE: top bar with hamburger (hidden on md+) ── */}
+      <div className="md:hidden flex items-center justify-between bg-white border border-[#cc5a16]/10 rounded-2xl px-4 py-3 shadow-sm mb-4">
         <span className="text-sm font-bold text-[#1a1208]">
           {({
-            MENU: 'Menu Management', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', REPORTS: 'Analytics & Reports', QR: 'QR Management',
-            BOOKINGS: 'Bookings', LOYALTY: 'Loyalty Program', STAFF: 'Staff Management',
-            ROSTER: 'Roster', TIMESHEET: 'Timesheet',
-            ORDERS: 'Orders', INVOICES: 'Invoices',
-            ATTENDANCE: 'Attendance', FEEDBACK: 'Feedback',
-            SUBSCRIPTION: 'Subscription', NOTIFICATIONS: 'Notifications',
-            SETTINGS: 'Brand & Settings', MONITOR: 'Command & Control'
+            MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
+            MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Rooms & Availability', FRONT_OFFICE_REPORTS: 'Stay View / Front Office', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
+            STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
+            SETTINGS: 'Brand & Settings', STAFF_ACCESS: 'Staff Access', NOTIFICATIONS: 'Notifications', SUBSCRIPTION: 'Subscription'
           } as Record<string, string>)[activeTab]}
         </span>
         <button
@@ -10873,263 +10882,250 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           the RESTAURANT lane is hidden when isRestaurantEnabled is
           false (only-hotel tenants).                                   */}
       {(() => {
-        type NavTab = { id: string; label: string };
-        type NavGroup = {
+        // ── BCG IA redesign (Jun 2026) — left-sidebar module navigation ──
+        // The dashboard previously rendered ~30 tabs as horizontal "lanes"
+        // (Restaurant / Hotel / General). Owners reported feeling lost. We
+        // now group every destination into SIX left-sidebar modules by
+        // operator job-to-be-done. The activeTab state machine and all
+        // ~30 view components are untouched — only the nav chrome changed.
+        type NavTab = { id: string; label: string; mode?: 'RESTAURANT' | 'HOTEL'; requires?: 'hotel' | 'restaurant' };
+        type NavModule = {
           id: string;
           label: string;
           icon: React.ReactNode;
           tabs: NavTab[];
           visible: boolean;
         };
-        // Operational summary tabs that belong to BOTH sides of the
-        // business — Command Center / Analytics / Invoices live at the
-        // top of whichever lane is currently active. We don't keep them
-        // in General because that would mean a BOTH-mode tenant sees
-        // them twice (once in General, once in their active lane). Each
-        // tab is internally mode-aware: e.g. Command & Control already
-        // shows restaurant tables when isRestaurantEnabled and hotel
-        // rooms when isHotelEnabled.
-        const operationalSummary: NavTab[] = [
-          { id: 'MONITOR',  label: 'Command & Control' },
-          { id: 'REPORTS',  label: 'Analytics & Reports' },
-          { id: 'INVOICES', label: 'Invoices' },
+
+        // The mode-stamped operational trio (Command Centre / Analytics /
+        // Invoices) is duplicated into each ops module for BOTH-mode
+        // tenants — so there is NO separate Restaurant/Hotel toggle.
+        // Clicking a trio entry also sets dashboardMode, which is what the
+        // shared MONITOR/REPORTS/INVOICES views branch on, AND keeps the
+        // mode-switch safety-net effect from redirecting us (the new
+        // activeTab always matches the mode we just set).
+        const opsTrio = (mode: 'RESTAURANT' | 'HOTEL'): NavTab[] => [
+          { id: 'MONITOR',  label: 'Command Centre',      mode },
+          { id: 'REPORTS',  label: 'Analytics & Reports', mode },
+          { id: 'INVOICES', label: 'Invoices',            mode },
         ];
 
-        const navGroups: NavGroup[] = [
-          // RESTAURANT lane shown first so MONITOR stays at the top-
-          // left of the nav (preserves the muscle memory that Command
-          // & Control is the home tab). For hotel-only tenants the
-          // HOTEL lane takes this slot; for restaurant-only it's
-          // RESTAURANT; for BOTH it's whichever the mode toggle picks.
+        const modules: NavModule[] = [
           {
-            id: 'RESTAURANT', label: 'Restaurant',
-            icon: <Utensils size={12} />,
-            // Shown when: tenant has Restaurant enabled AND
-            //   • the tenant isn't BOTH-mode (so there's no mode toggle), OR
-            //   • the toggle is currently on Restaurant.
-            visible: isRestaurantEnabled && (!bothEnabled || dashboardMode === 'RESTAURANT'),
+            // Single-mode tenants have an unambiguous dashboardMode, so the
+            // operational trio lives in its own Overview module. BOTH-mode
+            // tenants get the trio inside each ops module instead.
+            id: 'OVERVIEW', label: 'Overview', icon: <LayoutDashboard size={16} />,
+            visible: !bothEnabled,
             tabs: [
-              ...operationalSummary,
-              { id: 'MENU',      label: 'Menu Management' },
+              { id: 'MONITOR',  label: 'Command Centre' },
+              { id: 'REPORTS',  label: 'Analytics & Reports' },
+              { id: 'INVOICES', label: 'Invoices' },
+            ],
+          },
+          {
+            id: 'FRONT_DESK', label: 'Front Desk', icon: <Bed size={16} />,
+            visible: isHotelEnabled,
+            tabs: [
+              ...(bothEnabled ? opsTrio('HOTEL') : []),
+              { id: 'HOTEL_BOOKINGS',       label: 'Reservations' },
+              { id: 'ROOMS',                label: 'Rooms & Availability' },
+              { id: 'FRONT_OFFICE_REPORTS', label: 'Stay View / Front Office' },
+              { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
+              { id: 'SERVICES',             label: 'Service Catalogue' },
+              { id: 'FOLIOS',               label: 'Folios & Settlement' },
+              { id: 'COMPLIANCE',           label: 'Guest Compliance' },
+              { id: 'CONCIERGE_FAQ',        label: 'Concierge' },
+            ],
+          },
+          {
+            id: 'RESTAURANT', label: 'Restaurant', icon: <Utensils size={16} />,
+            visible: isRestaurantEnabled,
+            tabs: [
+              ...(bothEnabled ? opsTrio('RESTAURANT') : []),
+              { id: 'ORDERS',    label: 'Orders' },
+              { id: 'MENU',      label: 'Menu' },
+              { id: 'QR',        label: 'QR & Tables' },
+              { id: 'BOOKINGS',  label: 'Table Bookings' },
               { id: 'INVENTORY', label: 'Inventory' },
               { id: 'DELIVERY',  label: 'Delivery Partners' },
-              { id: 'QR',        label: 'QR Management' },
-              { id: 'BOOKINGS',  label: 'Bookings' },
-              { id: 'ORDERS',    label: 'Orders' },
             ],
           },
           {
-            id: 'HOTEL', label: 'Hotel',
-            icon: <Bed size={12} />,
-            // Same gating logic, mirrored for Hotel.
-            visible: isHotelEnabled && (!bothEnabled || dashboardMode === 'HOTEL'),
-            // BCG client request 8 Jun 2026: Front Office Reports moved
-            // adjacent to Command & Control. Stay View + 4 ops reports
-            // are the receptionist's most-used screens, so they sit
-            // next to MONITOR for muscle memory.
-            tabs: [
-              ...operationalSummary,
-              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk' },
-              { id: 'CHANNEL_MANAGER',      label: 'Channel Manager' },
-              { id: 'PUBLIC_BOOKING_PAGE',  label: 'Public Booking Page' },
-              { id: 'ROOMS',                label: 'Rooms' },
-              { id: 'HOTEL_BOOKINGS',       label: 'Hotel Bookings' },
-              { id: 'SERVICES',             label: 'Services' },
-              { id: 'SERVICE_REQUESTS',     label: 'Service Requests' },
-              { id: 'FOLIOS',               label: 'Folios' },
-              { id: 'COMPLIANCE',           label: 'Compliance' },
-              { id: 'CONCIERGE_FAQ',        label: 'Concierge FAQ' },
-            ],
-          },
-          // GENERAL lane is now everything cross-cutting that ISN'T a
-          // per-side operational summary: people, customers, finance
-          // admin, system. Sits below the active mode lane.
-          {
-            id: 'GENERAL', label: 'General',
-            icon: <LayoutDashboard size={12} />,
+            id: 'SALES', label: 'Sales & Distribution', icon: <TrendingUp size={16} />,
             visible: true,
             tabs: [
-              { id: 'LOYALTY',       label: 'Loyalty Program' },
-              { id: 'STAFF',         label: 'Staff Management' },
-              // STAFF_ACCESS is OWNER-only — dropped from the array entirely
-              // for non-owners. Combined with the isTabVisible() pass below
-              // and the auto-redirect effect, this means MANAGER / CASHIER /
-              // FRONT_DESK / CONCIERGE / CHEF / WAITER / HOUSEKEEPING /
-              // MAINTENANCE never see the tab in the nav, can't click it,
-              // and can't reach it by typing it as activeTab.
-              ...(isOwnerOrAdmin ? [{ id: 'STAFF_ACCESS', label: 'Staff Access' }] : []),
-              { id: 'ROSTER',        label: 'Roster' },
-              { id: 'TIMESHEET',     label: 'Timesheet' },
-              { id: 'ATTENDANCE',    label: 'Attendance' },
-              { id: 'HR_PAYROLL',    label: 'HR & Payroll' },
-              { id: 'FEEDBACK',      label: 'Feedback' },
-              { id: 'SUBSCRIPTION',  label: 'Subscription' },
+              // Channel Manager + Direct Booking are hotel-only — they hide
+              // for restaurant-only tenants via the `requires` filter below.
+              { id: 'CHANNEL_MANAGER',     label: 'Channel Manager',     requires: 'hotel' },
+              { id: 'PUBLIC_BOOKING_PAGE', label: 'Direct Booking Page', requires: 'hotel' },
+              { id: 'LOYALTY',             label: 'Loyalty' },
+              { id: 'FEEDBACK',            label: 'Guest Feedback' },
+            ],
+          },
+          {
+            id: 'WORKFORCE', label: 'Workforce', icon: <Users size={16} />,
+            visible: true,
+            tabs: [
+              { id: 'STAFF',      label: 'Staff Directory' },
+              { id: 'ATTENDANCE', label: 'Attendance' },
+              { id: 'ROSTER',     label: 'Roster' },
+              { id: 'TIMESHEET',  label: 'Timesheet' },
+              { id: 'HR_PAYROLL', label: 'HR & Payroll' },
+            ],
+          },
+          {
+            id: 'ADMIN', label: 'Administration', icon: <Settings size={16} />,
+            visible: true,
+            tabs: [
+              { id: 'SETTINGS', label: 'Brand & Settings' },
+              // STAFF_ACCESS stays OWNER-only: dropped from the array for
+              // non-owners (was the GENERAL-lane gate), plus the isVisible()
+              // pass + the content-branch Access-Denied panel below.
+              ...(isOwnerOrAdmin ? [{ id: 'STAFF_ACCESS', label: 'Staff Access' } as NavTab] : []),
               { id: 'NOTIFICATIONS', label: 'Notifications' },
-              { id: 'SETTINGS',      label: 'Brand & Settings' },
+              { id: 'SUBSCRIPTION',  label: 'Subscription' },
             ],
           },
         ];
 
-        // Auto-redirect of an active-but-now-hidden tab lives in a
-        // top-level useEffect (search "Mode-switch safety net"); we
-        // don't need to compute it here.
-
-        // Per-tab visibility — keep the grandfathering hacks that the
-        // old flat list used, just in one place now.
-        //
-        // RBAC-3: removed the previous short-circuit that ALWAYS returned
-        // true for ROOMS / SERVICES / SERVICE_REQUESTS regardless of the
-        // Staff Access matrix. That short-circuit silently overrode the
-        // owner's intent ("hide this tab from MAINTENANCE") and made the
-        // matrix UI misleading. Now isTabVisible is consulted uniformly
-        // for every tab — what the owner checks in Settings is what
-        // staff actually see.
-        //
+        // ── RBAC — identical semantics to before, applied per page ──────
         // RBAC-5b: when previewRole is set, route visibility through the
-        // matrix entry for that role instead of the user's own allowedTabs.
-        // Lets the owner verify "what does a WAITER see?" without logging
-        // out / re-logging in. Empty array → no restriction (sees all),
-        // matching the same semantics as a real WAITER without saved
-        // permissions. Falls back to own allowedTabs when not previewing.
+        // previewed role's matrix entry instead of the user's own list.
         const effectiveAllowedTabs = previewRole
           ? (staffAccess[previewRole] && staffAccess[previewRole].length > 0
               ? staffAccess[previewRole]
               : null)   // empty array means "no restriction" for that role
           : allowedTabs;
-        // STAFF_ACCESS hard-gate (founder request 7 Jun 2026): owners
-        // must ALWAYS see STAFF_ACCESS in the nav, even if their
-        // legacy/V2/V3 saved allowedTabs list does not include it. The
-        // tab is OWNER-only (it doesn't appear in the nav array at all
-        // for non-owners — see the GENERAL lane spread above), so this
-        // short-circuit is safe: any non-owner who somehow had
-        // STAFF_ACCESS in their allowedTabs would still be blocked
-        // earlier by the lane spread. Conversely, an owner with a tight
-        // V3 list that excluded STAFF_ACCESS would lose visibility
-        // without this bypass — the regression test catches it. Same
-        // safety logic as RBAC-3's ROOMS bypass, scoped narrowly to
-        // STAFF_ACCESS.
+        // STAFF_ACCESS hard-gate: owners always see it (it's dropped from
+        // the array for non-owners, so this short-circuit is owner-only).
         const isVisible = (id: string) => {
           if (id === 'STAFF_ACCESS' && isOwnerOrAdmin) return true;
           return isTabVisible(id, effectiveAllowedTabs);
         };
+        // A page shows when RBAC allows it AND the tenant has the relevant
+        // side of the business enabled.
+        const pageVisible = (t: NavTab) => {
+          if (t.requires === 'hotel' && !isHotelEnabled) return false;
+          if (t.requires === 'restaurant' && !isRestaurantEnabled) return false;
+          return isVisible(t.id);
+        };
+        // A mode-stamped trio entry is "active" only when BOTH the tab and
+        // the current dashboardMode match, so the duplicate Command Centre
+        // rows (one per ops module) highlight independently.
+        const isActivePage = (t: NavTab) => activeTab === t.id && (!t.mode || dashboardMode === t.mode);
+        const moduleHasActive = (m: NavModule) => m.tabs.some(isActivePage);
+        // Accordion: a module is open if the user toggled it open, else it
+        // auto-opens when it contains the active page.
+        const isExpanded = (m: NavModule) => expandedModules[m.id] ?? moduleHasActive(m);
+        const toggleModule = (m: NavModule) =>
+          setExpandedModules(prev => ({ ...prev, [m.id]: !(prev[m.id] ?? moduleHasActive(m)) }));
+        // Navigate — set the page and (for trio entries) the matching mode.
+        const goTo = (t: NavTab) => {
+          if (t.mode) setDashboardMode(t.mode);
+          setActiveTab(t.id as any);
+          setMobileNavOpen(false);
+        };
+
+        const visibleModules = modules
+          .filter(m => m.visible)
+          .map(m => ({ ...m, tabs: m.tabs.filter(pageVisible) }))
+          .filter(m => m.tabs.length > 0);
+
+        // Shared accordion renderer — desktop rail + mobile drawer.
+        // `collapsed` = icon-only rail (desktop power-user mode).
+        const renderModules = (collapsed: boolean) => visibleModules.map(m => {
+          const expanded = collapsed ? false : isExpanded(m);
+          const activeHere = moduleHasActive(m);
+          return (
+            <div key={m.id} className="mb-0.5">
+              <button
+                type="button"
+                title={m.label}
+                onClick={() => {
+                  if (collapsed) { setNavCollapsed(false); setExpandedModules(prev => ({ ...prev, [m.id]: true })); }
+                  else { toggleModule(m); }
+                }}
+                className={cn(
+                  "w-full flex items-center gap-2.5 rounded-xl transition-colors",
+                  collapsed ? "justify-center py-2.5" : "px-3 py-2.5",
+                  activeHere ? "text-[#cc5a16]" : "text-[#3d3128] hover:bg-[#faf7f2]"
+                )}
+              >
+                <span className={cn(activeHere ? "text-[#cc5a16]" : "text-[#9c8e85]")}>{m.icon}</span>
+                {!collapsed && (
+                  <>
+                    <span className="flex-1 text-left text-[11px] font-bold uppercase tracking-[0.14em]">{m.label}</span>
+                    {expanded ? <ChevronDown size={14} className="text-[#9c8e85]" /> : <ChevronRight size={14} className="text-[#9c8e85]" />}
+                  </>
+                )}
+              </button>
+              {!collapsed && expanded && (
+                <div className="mt-0.5 mb-1 ml-3 pl-2.5 border-l border-[#cc5a16]/10 space-y-0.5">
+                  {m.tabs.map(t => (
+                    <button
+                      key={t.id + (t.mode || '')}
+                      type="button"
+                      onClick={() => goTo(t)}
+                      className={cn(
+                        "w-full text-left px-3 py-2 rounded-xl text-[13px] font-semibold transition-colors flex items-center justify-between gap-2",
+                        isActivePage(t)
+                          ? "bg-[#cc5a16] text-white shadow-sm"
+                          : "text-[#6b5d52] hover:bg-[#faf7f2] hover:text-[#3d3128]"
+                      )}
+                    >
+                      {t.label}
+                      {isActivePage(t) && <Check size={13} />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        });
 
         return (
           <>
-            {/* ── Mode toggle (BOTH-mode tenants only) ─────────────────
-                Single pill switch — taps either side. Stays out of the
-                way for single-mode tenants (no need to switch when
-                there's only one mode). Persists per-tenant in
-                localStorage via the useEffect on dashboardMode.       */}
-            {bothEnabled && (
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-2 text-xs text-[#6b5d52]">
-                  <span className="hidden sm:inline font-mono uppercase tracking-widest text-[10px] font-bold">Viewing as</span>
-                </div>
-                <div className="inline-flex bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shadow-sm">
-                  {([
-                    { id: 'RESTAURANT', label: 'Restaurant', icon: <Utensils size={13} /> },
-                    { id: 'HOTEL',      label: 'Hotel',      icon: <Bed size={13} /> },
-                  ] as const).map(opt => {
-                    const active = dashboardMode === opt.id;
-                    return (
-                      <button
-                        key={opt.id}
-                        onClick={() => setDashboardMode(opt.id)}
-                        className={cn(
-                          "flex items-center gap-2 px-4 py-1.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all",
-                          active
-                            ? "bg-[#cc5a16] text-white shadow"
-                            : "text-[#6b5d52] hover:bg-[#faf7f2]"
-                        )}
-                      >
-                        {opt.icon} {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
+            {/* ── DESKTOP: left sidebar rail ─────────────────────────── */}
+            <aside
+              className={cn(
+                "hidden md:flex md:flex-col self-start sticky top-4 shrink-0 max-h-[calc(100vh-2rem)] overflow-y-auto rounded-3xl border border-[#cc5a16]/10 bg-white shadow-sm transition-[width] duration-200",
+                navCollapsed ? "w-[60px] p-1.5" : "w-56 lg:w-64 p-2.5"
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => setNavCollapsed(c => !c)}
+                title={navCollapsed ? 'Expand menu' : 'Collapse menu'}
+                className={cn(
+                  "flex items-center gap-2 rounded-xl text-[10px] font-bold uppercase tracking-[0.14em] text-[#9c8e85] hover:bg-[#faf7f2] transition-colors mb-1",
+                  navCollapsed ? "justify-center py-2" : "px-3 py-2"
+                )}
+              >
+                {navCollapsed ? <ChevronRight size={16} /> : <><ChevronLeft size={16} /> Collapse</>}
+              </button>
+              {renderModules(navCollapsed)}
+            </aside>
 
-            {/* ── MOBILE: Dropdown navigation menu — grouped ───────── */}
+            {/* ── MOBILE: slide-in drawer ────────────────────────────── */}
             {mobileNavOpen && (
-              <div className="md:hidden -mt-3 rounded-2xl bg-white border border-[#cc5a16]/10 shadow-lg overflow-hidden z-40 relative">
-                {navGroups.filter(g => g.visible).map((group, gi) => {
-                  const visibleTabs = group.tabs.filter(t => isVisible(t.id));
-                  if (visibleTabs.length === 0) return null;
-                  return (
-                    <div key={group.id}>
-                      {/* Group header — sticky-feel divider with icon */}
-                      <div
-                        className={cn(
-                          "px-5 py-2 flex items-center gap-2 bg-[#faf7f2] border-b border-[#cc5a16]/10",
-                          gi > 0 && "border-t-2 border-t-[#cc5a16]/15"
-                        )}
-                      >
-                        <span className="text-[#cc5a16]">{group.icon}</span>
-                        <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#cc5a16]">
-                          {group.label}
-                        </span>
-                      </div>
-                      {visibleTabs.map(t => (
-                        <button
-                          key={t.id}
-                          onClick={() => { setActiveTab(t.id); setMobileNavOpen(false); }}
-                          className={cn(
-                            "w-full text-left px-5 py-3.5 text-sm font-bold uppercase tracking-widest border-b border-[#cc5a16]/10 last:border-0 flex items-center justify-between transition-colors",
-                            activeTab === t.id
-                              ? "bg-[#cc5a16] text-white"
-                              : "text-[#6b5d52] hover:bg-[#cc5a16]/5"
-                          )}
-                        >
-                          {t.label}
-                          {activeTab === t.id && <Check size={14} />}
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })}
+              <div className="md:hidden fixed inset-0 z-[60] flex">
+                <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setMobileNavOpen(false)} />
+                <div className="relative w-72 max-w-[82vw] h-full bg-white shadow-2xl overflow-y-auto p-3">
+                  <div className="flex items-center justify-between px-2 pb-2 mb-1 border-b border-[#cc5a16]/10">
+                    <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#cc5a16]">Menu</span>
+                    <button type="button" onClick={() => setMobileNavOpen(false)} className="p-1.5 rounded-lg hover:bg-[#faf7f2]"><X size={18} className="text-[#1a1208]" /></button>
+                  </div>
+                  {renderModules(false)}
+                </div>
               </div>
             )}
-
-            {/* ── DESKTOP: One row per group, header label on the left ──
-                Each group is its own flex-wrap line so the visual
-                separation survives long tab lists. A small icon +
-                colour-coded label sits on the left of each lane.    */}
-            <div className="hidden md:block space-y-1.5">
-              {navGroups.filter(g => g.visible).map(group => {
-                const visibleTabs = group.tabs.filter(t => isVisible(t.id));
-                if (visibleTabs.length === 0) return null;
-                return (
-                  <div key={group.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[#cc5a16]/10 pb-1">
-                    {/* Section label chip — narrow, fixed width so the
-                        tabs line up cleanly across the three lanes */}
-                    <div className="flex items-center gap-1.5 pr-3 mr-1 border-r border-[#cc5a16]/15 shrink-0 min-w-[88px] lg:min-w-[104px]">
-                      <span className="text-[#cc5a16]">{group.icon}</span>
-                      <span className="text-[10px] lg:text-[11px] font-bold uppercase tracking-[0.18em] text-[#cc5a16]">
-                        {group.label}
-                      </span>
-                    </div>
-                    {visibleTabs.map(t => (
-                      <button
-                        key={t.id}
-                        onClick={() => setActiveTab(t.id)}
-                        className={cn(
-                          "pb-2 lg:pb-2.5 text-xs lg:text-sm font-bold uppercase tracking-widest transition-all whitespace-nowrap",
-                          activeTab === t.id
-                            ? "text-[#1a1208] border-b-2 border-[#cc5a16]"
-                            : "text-[#9c8e85] hover:text-[#3d3128]"
-                        )}
-                      >
-                        {t.label}
-                      </button>
-                    ))}
-                  </div>
-                );
-              })}
-            </div>
           </>
         );
       })()}
+      {/* ── CONTENT COLUMN — renders to the right of the sidebar ────── */}
+      <div className="flex-1 min-w-0 space-y-6 md:space-y-8">
+
 
       {allowedTabs && !isTabVisible(activeTab, allowedTabs) ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
@@ -28854,6 +28850,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           );
         })()}
 
+        </div>{/* /content column (left-sidebar layout) */}
     </div>
   );
 }
