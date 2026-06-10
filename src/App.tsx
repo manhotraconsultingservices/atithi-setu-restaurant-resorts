@@ -6702,6 +6702,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   //                   wins over the auto behaviour.
   const [navCollapsed, setNavCollapsed] = useState(false);
   const [expandedModules, setExpandedModules] = useState<Record<string, boolean>>({});
+  // Reports & Dashboards hub (client request 11 Jun 2026) — one place for all
+  // reporting, split by audience: FRONT_DESK (daily ops) vs OWNER (management).
+  const [reportAudience, setReportAudience] = useState<'FRONT_DESK' | 'OWNER'>('FRONT_DESK');
   const [notificationSettings, setNotificationSettings] = useState<any[]>([]);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [menu, setMenu] = useState<MenuItem[]>([]);
@@ -10901,7 +10904,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders',
-            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Rooms & Availability', FRONT_OFFICE_REPORTS: 'Stay View / Front Office', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Rooms & Availability', FRONT_OFFICE_REPORTS: 'Reports & Dashboards', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
             SETTINGS: 'Brand & Settings', STAFF_ACCESS: 'Staff Access', NOTIFICATIONS: 'Notifications', SUBSCRIPTION: 'Subscription'
@@ -10980,7 +10983,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ...(bothEnabled ? opsTrio('HOTEL') : []),
               { id: 'HOTEL_BOOKINGS',       label: 'Reservations' },
               { id: 'ROOMS',                label: 'Rooms & Availability' },
-              { id: 'FRONT_OFFICE_REPORTS', label: 'Stay View / Front Office' },
+              { id: 'FRONT_OFFICE_REPORTS', label: 'Reports & Dashboards' },
               { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
               { id: 'SERVICES',             label: 'Service Catalogue' },
               { id: 'FOLIOS',               label: 'Folios & Settlement' },
@@ -17721,15 +17724,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
            front-desk staff find it immediately — the previous placement was
            buried inside Hotel Bookings and required a "+ Show" click. */
         <div className="space-y-5">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
             <div>
-              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">📊 Front Desk</h2>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">📊 Reports &amp; Dashboards</h2>
               <p className="text-sm text-[#6b5d52] mt-1">
-                Live Stay View, plus Arrival / Departure / Room Status / Night Audit reports for any date range. Each report downloads as CSV ready for Excel / Tally.
+                Every report in one place. Switch between the front-desk daily reports and the owner / manager management dashboards. Each downloads as CSV ready for Excel / Tally.
               </p>
             </div>
+            {/* Audience toggle — Front Desk (daily ops) vs Owner / Manager (management). */}
+            <div className="inline-flex bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shadow-sm shrink-0">
+              {([
+                { id: 'FRONT_DESK', label: 'Front Desk' },
+                { id: 'OWNER', label: 'Owner / Manager' },
+              ] as const).map(opt => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setReportAudience(opt.id)}
+                  className={cn('px-4 py-1.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all whitespace-nowrap',
+                    reportAudience === opt.id ? 'bg-[#cc5a16] text-white shadow' : 'text-[#6b5d52] hover:bg-[#faf7f2]')}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
           </div>
-          {(() => {
+          {reportAudience === 'FRONT_DESK' && (() => {
             const fmtINR = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
             // REPORT-TABLE (client request 7 Jun 2026): clicking a report
             // card now FETCHES + DISPLAYS the data inline as a table.
@@ -18235,7 +18255,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* Management reports (payments, revenue, occupancy, guests,
               purchase) + petty-cash ledger — client request 11 Jun 2026.
               Self-contained component; owns its own state. */}
-          <ManagementReports restaurantId={restaurantId} token={token} />
+          <ManagementReports restaurantId={restaurantId} token={token} audience={reportAudience} onOpenTab={(t) => setActiveTab(t as any)} />
         </div>
       ) : activeTab === 'CHANNEL_MANAGER' && isHotelEnabled ? (
         /* ════════════════ CHANNEL MANAGER (top-level tab) ════════════════
@@ -32493,7 +32513,7 @@ const HotelLateFeeBanner: React.FC<{
 // occupancy trend, guest directory, purchase spend) plus a petty-cash ledger.
 // Keeps ALL its own state so it never touches the owner dashboard's state bag
 // or the existing report switch — low blast radius by design.
-function ManagementReports({ restaurantId, token }: { restaurantId: string; token: string }) {
+function ManagementReports({ restaurantId, token, audience, onOpenTab }: { restaurantId: string; token: string; audience: 'FRONT_DESK' | 'OWNER'; onOpenTab: (tab: string) => void }) {
   const today = new Date().toISOString().slice(0, 10);
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const [from, setFrom] = useState(monthAgo);
@@ -32517,26 +32537,32 @@ function ManagementReports({ restaurantId, token }: { restaurantId: string; toke
     return res.json();
   };
 
-  const REPORTS = [
-    { key: 'payment-received', label: 'Payment Received', desc: 'Cash collected — by day/week/month, method, guest vs OTA', path: () => `/hotel/reports/payment-received?from=${from}&to=${to}&grain=${grain}` },
-    { key: 'revenue-by-room-type', label: 'Revenue by Room Type', desc: 'Settled revenue, room nights, ADR per room type', path: () => `/hotel/reports/revenue-by-room-type?from=${from}&to=${to}` },
-    { key: 'occupancy-trend', label: 'Occupancy Trend', desc: 'Occupancy % per night across the range', path: () => `/hotel/reports/occupancy-trend?from=${from}&to=${to}` },
-    { key: 'customers', label: 'Guest Directory', desc: 'Every guest — stays, total spend, last visit', path: () => `/hotel/reports/customers` },
-    { key: 'cancellations', label: 'Cancelled Reservations', desc: 'Cancelled bookings — when, why, refund', path: () => `/hotel/reports/cancellations?from=${from}&to=${to}` },
-    { key: 'purchase', label: 'Purchase Spend', desc: 'Purchase-order spend by supplier + period', path: () => `/reports/purchase?from=${from}&to=${to}` },
-    { key: 'petty-cash', label: 'Petty Cash', desc: 'Cash in/out ledger with running balance', path: () => `/petty-cash?from=${from}&to=${to}` },
+  // Each report is tagged with its audience so the hub toggle can show the
+  // right set. FRONT_DESK = daily money ops; OWNER = management dashboards.
+  const ALL_REPORTS = [
+    { key: 'payment-received', aud: 'FRONT_DESK', label: 'Payment Received', desc: 'Cash collected — by day/week/month, method, guest vs OTA', path: () => `/hotel/reports/payment-received?from=${from}&to=${to}&grain=${grain}` },
+    { key: 'cancellations', aud: 'FRONT_DESK', label: 'Cancelled Reservations', desc: 'Cancelled bookings — when, why, refund', path: () => `/hotel/reports/cancellations?from=${from}&to=${to}` },
+    { key: 'petty-cash', aud: 'FRONT_DESK', label: 'Petty Cash', desc: 'Cash in/out ledger with running balance', path: () => `/petty-cash?from=${from}&to=${to}` },
+    { key: 'revenue-by-room-type', aud: 'OWNER', label: 'Revenue by Room Type', desc: 'Settled revenue, room nights, ADR per room type', path: () => `/hotel/reports/revenue-by-room-type?from=${from}&to=${to}` },
+    { key: 'occupancy-trend', aud: 'OWNER', label: 'Occupancy Trend', desc: 'Occupancy % per night across the range', path: () => `/hotel/reports/occupancy-trend?from=${from}&to=${to}` },
+    { key: 'customers', aud: 'OWNER', label: 'Guest Directory', desc: 'Every guest — stays, total spend, last visit', path: () => `/hotel/reports/customers` },
+    { key: 'purchase', aud: 'OWNER', label: 'Purchase Spend', desc: 'Purchase-order spend by supplier + period', path: () => `/reports/purchase?from=${from}&to=${to}` },
   ];
+  const REPORTS = ALL_REPORTS.filter(r => r.aud === audience);
 
   const load = async (key: string) => {
     setActive(key); setLoading(true); setData(null);
     try {
-      const r = REPORTS.find(x => x.key === key)!;
+      const r = ALL_REPORTS.find(x => x.key === key)!;
       setData(await api(r.path()));
     } catch (e: any) { alert('Report failed: ' + (e?.message || 'error')); }
     finally { setLoading(false); }
   };
   // Re-run the active report when the date range / grain changes.
   useEffect(() => { if (active) load(active); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [from, to, grain]);
+  // Clear the open report when the audience toggle flips (its key may not
+  // belong to the newly-selected group).
+  useEffect(() => { setActive(null); setData(null); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [audience]);
 
   const addPettyCash = async () => {
     const amt = Number(pcForm.amount);
@@ -32674,8 +32700,8 @@ function ManagementReports({ restaurantId, token }: { restaurantId: string; toke
   return (
     <div className="mt-6 rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
       <div className="px-5 py-3 bg-[#faf7f2] border-b border-[#e8dccf]">
-        <h3 className="text-base font-bold font-serif text-[#1a1208]">📈 Management Reports</h3>
-        <p className="text-[11px] text-[#6b5d52] mt-0.5">Payments, revenue, occupancy, guests, purchases — plus the petty-cash ledger. Each exports to CSV.</p>
+        <h3 className="text-base font-bold font-serif text-[#1a1208]">{audience === 'OWNER' ? '📈 Owner / Manager Reports' : '🗂️ Front Desk Reports'}</h3>
+        <p className="text-[11px] text-[#6b5d52] mt-0.5">{audience === 'OWNER' ? 'Management dashboards — revenue, occupancy, guest directory, purchases, plus the full Analytics & OTA dashboards.' : 'Front-desk money reports — payments received, cancelled reservations, petty cash. Each exports to CSV.'}</p>
       </div>
       <div className="p-4 space-y-4">
         <div className="flex flex-wrap items-end gap-3">
@@ -32696,6 +32722,27 @@ function ManagementReports({ restaurantId, token }: { restaurantId: string; toke
           ))}
         </div>
 
+        {/* Owner / Manager — deep links to the full existing dashboards so
+            every report is reachable from this one hub. */}
+        {audience === 'OWNER' && (
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Full dashboards</p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {[
+                { tab: 'REPORTS', label: 'Analytics & Reports', desc: 'Sales, P&L, KPIs, trends →' },
+                { tab: 'CHANNEL_MANAGER', label: 'OTA 360° / Receivables', desc: 'Revenue by source, aging, outstanding →' },
+                { tab: 'INVOICES', label: 'Invoices', desc: 'All invoices + payment status →' },
+              ].map(l => (
+                <button key={l.tab} type="button" onClick={() => onOpenTab(l.tab)}
+                  className="text-left p-3 rounded-2xl border-2 border-[#e8dccf] bg-white hover:border-[#cc5a16]/40 transition-all">
+                  <span className="text-xs font-bold text-[#1a1208]">{l.label}</span>
+                  <p className="text-[10px] mt-0.5 leading-snug text-[#9c8e85]">{l.desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {active === 'petty-cash' && (
           <div className="rounded-2xl border border-[#e8dccf] p-3 bg-[#faf7f2]">
             <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Record cash movement</p>
@@ -32714,7 +32761,7 @@ function ManagementReports({ restaurantId, token }: { restaurantId: string; toke
         {!loading && data && active && (
           <div className="rounded-2xl border border-[#e8dccf] overflow-hidden">
             <div className="px-4 py-2 bg-[#faf7f2] border-b border-[#e8dccf] flex items-center justify-between">
-              <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{REPORTS.find(r => r.key === active)?.label} · {from === to ? from : `${from} → ${to}`}</span>
+              <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{ALL_REPORTS.find(r => r.key === active)?.label} · {from === to ? from : `${from} → ${to}`}</span>
               <button type="button" onClick={exportCsv} className="px-3 py-1.5 rounded-xl bg-[#1a1208] text-white text-[10px] font-bold uppercase tracking-widest flex items-center gap-1"><Download size={12} /> CSV</button>
             </div>
             <div className="p-3 overflow-x-auto">{renderTable()}</div>
