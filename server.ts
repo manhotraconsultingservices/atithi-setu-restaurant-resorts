@@ -5451,7 +5451,7 @@ async function startServer() {
           userName: req.user?.userName,
         },
         JWT_SECRET,
-        { expiresIn: '24h' }
+        { expiresIn: '7d' }  // 7d session — match cookie maxAge + login paths
       );
       res.json({
         token: newToken,
@@ -6404,7 +6404,9 @@ async function startServer() {
         const token = jwt.sign(
           { id: centralUser.id, restaurantId: centralUser.restaurant_id, role: centralUser.role },
           JWT_SECRET,
-          { expiresIn: "24h" }
+          // 7d session — matches the as_jwt cookie maxAge (7d) and the other
+          // login paths. Was 24h, which logged these users out daily.
+          { expiresIn: "7d" }
         );
         return res.json({ token, restaurantId: centralUser.restaurant_id, role: centralUser.role, name: centralUser.name });
       }
@@ -6441,7 +6443,7 @@ async function startServer() {
           const token = jwt.sign(
             { id: staffUser.id, restaurantId, role: staffUser.role },
             JWT_SECRET,
-            { expiresIn: "24h" }
+            { expiresIn: "7d" }  // 7d session — match cookie maxAge + other login paths
           );
           return res.json({ token, restaurantId, role: staffUser.role, name: staffUser.name });
         }
@@ -7187,7 +7189,7 @@ async function startServer() {
           const token = jwt.sign(
             { id: legacyUser.id, restaurantId, role: legacyUser.role },
             JWT_SECRET,
-            { expiresIn: '24h' }
+            { expiresIn: '7d' }  // 7d session — match cookie maxAge + other login paths
           );
           return res.json({
             success: true, token, restaurantId,
@@ -7211,7 +7213,7 @@ async function startServer() {
             const token = jwt.sign(
               { id: staff.id, restaurantId, role: staff.role },
               JWT_SECRET,
-              { expiresIn: '24h' }
+              { expiresIn: '7d' }  // 7d session — match cookie maxAge + other login paths
             );
             return res.json({
               success: true, token, restaurantId,

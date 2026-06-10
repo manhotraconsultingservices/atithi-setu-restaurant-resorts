@@ -446,6 +446,12 @@ export default function App() {
       /\/api\/auth\//, /\/api\/login/, /\/api\/logout/,
       /\/api\/admin\//, /billing-status/, /\/uploads\//,
     ];
+    // Auth-flow endpoints where a 401 is EXPECTED (wrong password, expired
+    // reset/setup token) — these must NOT trigger the session-expired
+    // bounce, or a failed login attempt would wipe the login screen.
+    const AUTH_FLOW_PATTERNS = [
+      /\/api\/auth\//, /\/api\/login/, /\/api\/logout/, /\/api\/register/,
+    ];
     const showReadOnlyToast = () => {
       // Throttle: at most one toast every 5s
       const w = window as any;
@@ -567,6 +573,50 @@ export default function App() {
           }
         } catch {}
       }
+
+      // ── Session expired / invalid token (24h JWT lapse) ───────────────
+      // The server issues 24h JWTs; once one lapses, authenticate() returns
+      // 401 "Invalid token" on EVERY authenticated call. Previously each
+      // data fetch silently .catch()'d that error and rendered an EMPTY
+      // page — so a user returning after >24h saw "no data loading
+      // anywhere" with zero hint to re-authenticate. Detect the auth-failure
+      // 401 and bounce to a clean login so a fresh token is minted. Scoped
+      // to our own /api, excludes the auth flow (so a wrong-password 401
+      // never wipes the login screen), and is one-shot + token-gated so it
+      // can never loop.
+      if (res.status === 401 && /\/api\//.test(url) && !AUTH_FLOW_PATTERNS.some(rx => rx.test(url))) {
+        try {
+          const clone = res.clone();
+          const data = await clone.json().catch(() => null);
+          const msg = String(data?.error || '').toLowerCase();
+          // authenticate() emits "Invalid token" / "No token provided"
+          if (msg.includes('token')) {
+            const hasToken = (() => { try { return !!localStorage.getItem('token'); } catch { return false; } })();
+            const w = window as any;
+            if (hasToken && !w.__atithiSessionExpiredHandled) {
+              w.__atithiSessionExpiredHandled = true;
+              try { localStorage.removeItem('token'); } catch {}
+              try { localStorage.removeItem('role'); } catch {}
+              const toast = document.createElement('div');
+              toast.style.cssText = [
+                'position:fixed','top:96px','right:16px','z-index:99999',
+                'max-width:360px','padding:14px 16px','border-radius:14px',
+                'background:linear-gradient(135deg,#cc5a16,#a84612)','color:white',
+                'font-family:DM Sans,system-ui,sans-serif','font-size:13px',
+                'box-shadow:0 12px 32px rgba(204,90,22,0.4)','line-height:1.45',
+              ].join(';');
+              toast.innerHTML = `
+                <div style="font-weight:800;margin-bottom:4px;">Session expired</div>
+                <div style="opacity:0.95;">Please sign in again to continue.</div>`;
+              document.body.appendChild(toast);
+              // Brief beat so the toast paints, then reload. With the token
+              // cleared, the app boots to the landing / login screen.
+              setTimeout(() => { window.location.reload(); }, 1400);
+            }
+          }
+        } catch {}
+      }
+
       return res;
     };
     window.fetch = patched as typeof window.fetch;
