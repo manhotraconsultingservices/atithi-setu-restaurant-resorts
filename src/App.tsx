@@ -44052,6 +44052,49 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
   }
   const run = runs.find(r => r.id === selectedRunId);
 
+  async function openPayslipPdf(payslipId: string) {
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/payroll/payslips/${payslipId}/pdf`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert(body.error || `Failed to download payslip (HTTP ${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to download payslip');
+    }
+  }
+
+  async function downloadEpfEcr(runId: string) {
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/payroll/runs/${runId}/epf-ecr.txt`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert(body.error || `Failed to download EPF ECR (HTTP ${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `epf-ecr-${runId}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to download EPF ECR');
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="bg-white rounded-3xl border border-[#e8dccf] p-4">
@@ -44094,7 +44137,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
               {run.status === 'APPROVED' && <button onClick={() => runAction('lock')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-purple-600 text-white text-xs font-bold">Lock</button>}
               {(run.status === 'APPROVED' || run.status === 'LOCKED') && <button onClick={() => runAction('mark-paid')} disabled={busy} className="px-3 py-1.5 rounded-xl bg-green-600 text-white text-xs font-bold">Mark paid</button>}
               <a href={`/api/restaurant/${restaurantId}/payroll/runs/${run.id}/export.csv`} target="_blank" rel="noopener" className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">Bank advice CSV</a>
-              <a href={`/api/restaurant/${restaurantId}/payroll/runs/${run.id}/epf-ecr.txt`} target="_blank" rel="noopener" className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">EPF ECR</a>
+              <button onClick={() => downloadEpfEcr(run.id)} className="px-3 py-1.5 rounded-xl border border-[#e8dccf] text-xs">EPF ECR</button>
             </div>
           </div>
           <div className="grid grid-cols-3 gap-3 text-xs mb-3">
@@ -44128,7 +44171,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
                       <td className="py-1.5 pr-2">{cur(Number(p.tds))}</td>
                       <td className="py-1.5 pr-2 font-bold">{cur(Number(p.net_pay))}</td>
                       <td className="py-1.5">
-                        <a href={`/api/restaurant/${restaurantId}/payroll/payslips/${p.id}/pdf`} target="_blank" rel="noopener" className="text-[10px] text-[#cc5a16] hover:underline">PDF</a>
+                        <button onClick={() => openPayslipPdf(p.id)} className="text-[10px] text-[#cc5a16] hover:underline">PDF</button>
                       </td>
                     </tr>
                   ))}
@@ -44245,6 +44288,24 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
     });
     refresh();
   }
+  async function openOfferLetterPdf(offerId: string) {
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hr/offer-letters/${offerId}/pdf`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        alert(body.error || `Failed to download offer letter (HTTP ${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to download offer letter');
+    }
+  }
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
@@ -44266,7 +44327,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
                   <td className="p-3">{o.joining_date}</td>
                   <td className="p-3">{o.status}</td>
                   <td className="p-3 space-x-1">
-                    <a href={`/api/restaurant/${restaurantId}/hr/offer-letters/${o.id}/pdf`} target="_blank" rel="noopener" className="text-[10px] text-[#cc5a16] hover:underline">PDF</a>
+                    <button onClick={() => openOfferLetterPdf(o.id)} className="text-[10px] text-[#cc5a16] hover:underline">PDF</button>
                     {(o.status === 'DRAFT' || o.status === 'SENT') && <button onClick={() => sendOffer(o.id)} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Send</button>}
                   </td>
                 </tr>
