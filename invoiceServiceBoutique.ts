@@ -388,6 +388,17 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
         displayedGrand = rounded;
       }
 
+      // Paid + Balance Due (hotel folio) — show how much the guest has paid
+      // and what is still owed. Skipped for credit notes.
+      if (!data.isCreditNote) {
+        if (data.folio.amountPaid != null && data.folio.amountPaid > 0) {
+          drawMiniRow('Paid', `− ${money(data.tenant, data.folio.amountPaid)}`);
+        }
+        if (data.folio.balanceDue != null) {
+          drawMiniRow('Balance Due', money(data.tenant, data.folio.balanceDue), true);
+        }
+      }
+
       // ── Right column: BOXED GRAND TOTAL ──
       // The signature element of the Boutique template. Big, framed,
       // unmissable from any distance.

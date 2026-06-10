@@ -525,6 +525,17 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       }
       drawTotalRow(label('GRAND_TOTAL').en, m(displayedGrand * sign), true);
 
+      // Paid + Balance Due (hotel folio) — show amount received and what
+      // remains owed. Skipped for credit notes.
+      if (!data.isCreditNote) {
+        if (data.folio.amountPaid != null && data.folio.amountPaid > 0) {
+          drawTotalRow('Paid', `− ${m(data.folio.amountPaid)}`);
+        }
+        if (data.folio.balanceDue != null) {
+          drawTotalRow('Balance Due', m(data.folio.balanceDue), true);
+        }
+      }
+
       y += 10;
 
       // Amount in words

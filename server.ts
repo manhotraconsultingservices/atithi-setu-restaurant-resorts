@@ -20426,6 +20426,326 @@ ${data.tenant.name}`;
     }
   });
 
+  // ════════════════════════════════════════════════════════════════════
+  // MANAGEMENT REPORTS (client request 11 Jun 2026)
+  // Payment-received · revenue-by-room-type · occupancy-trend · guest
+  // directory · purchase spend · petty-cash ledger. Built to COMPLEMENT
+  // (not duplicate) the existing Front Office / Receivables / OTA-360
+  // reports. All are date-ranged and the frontend exports each to CSV.
+  // ════════════════════════════════════════════════════════════════════
+
+  // Date-grain → Postgres TO_CHAR format (whitelisted — safe to interpolate).
+  const _grainFmt = (g: string) =>
+    g === 'monthly' ? 'YYYY-MM'
+    : g === 'weekly' ? 'IYYY-"W"IW'
+    : 'YYYY-MM-DD';
+
+  // 1) PAYMENT RECEIVED — actual cash collected into guest folios, grouped
+  //    by day/week/month, split by method and by DIRECT-vs-OTA source, net
+  //    of refunds. (OTA *commission receivables* live in the Outstanding /
+  //    Receivables reports — this one is money actually received.)
+  app.get("/api/restaurant/:id/hotel/reports/payment-received", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const grain = String(req.query.grain || 'daily');
+      const fmt = _grainFmt(grain);
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query(
+        `SELECT TO_CHAR(p.recorded_at, '${fmt}') AS period,
+                COALESCE(p.payment_method,'OTHER') AS method,
+                CASE WHEN b.booking_source IS NULL
+                          OR b.booking_source IN ('DIRECT','WALK_IN','DIRECT_WEB','PHONE','')
+                     THEN 'DIRECT' ELSE 'OTA' END AS source,
+                SUM(CASE WHEN p.payment_type='REFUND' THEN -ABS(p.amount) ELSE ABS(p.amount) END)::float AS amount,
+                COUNT(*)::int AS txns
+           FROM folio_payments p
+           LEFT JOIN folios f ON f.id = p.folio_id
+           LEFT JOIN room_bookings b ON b.id = f.booking_id
+          WHERE (p.is_voided IS NULL OR p.is_voided = 0)
+            AND TO_CHAR(p.recorded_at,'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY period, method, source
+          ORDER BY period DESC`,
+        [from, to]
+      ).catch(() => []);
+      const periodMap: Record<string, any> = {};
+      let grandTotal = 0, guestTotal = 0, otaTotal = 0;
+      const methodTotals: Record<string, number> = {};
+      for (const r of rows) {
+        const amt = Number(r.amount || 0);
+        grandTotal += amt;
+        if (r.source === 'OTA') otaTotal += amt; else guestTotal += amt;
+        methodTotals[r.method] = (methodTotals[r.method] || 0) + amt;
+        const pm = (periodMap[r.period] = periodMap[r.period] || { period: r.period, total: 0, direct: 0, ota: 0, by_method: {} as Record<string, number> });
+        pm.total += amt;
+        if (r.source === 'OTA') pm.ota += amt; else pm.direct += amt;
+        pm.by_method[r.method] = (pm.by_method[r.method] || 0) + amt;
+      }
+      const periods = Object.values(periodMap).sort((a: any, b: any) => String(b.period).localeCompare(String(a.period)));
+      res.json({
+        from, to, grain, rows, periods,
+        methods: Object.keys(methodTotals).sort(),
+        summary: {
+          total: Math.round(grandTotal * 100) / 100,
+          guest_total: Math.round(guestTotal * 100) / 100,
+          ota_total: Math.round(otaTotal * 100) / 100,
+          by_method: methodTotals,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build payment-received report" });
+    }
+  });
+
+  // 2) REVENUE BY ROOM TYPE — settled-folio revenue, room nights, ADR.
+  app.get("/api/restaurant/:id/hotel/reports/revenue-by-room-type", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query(
+        `SELECT COALESCE(rt.name, r.type, 'Uncategorised') AS room_type,
+                COUNT(DISTINCT f.id)::int AS stays,
+                COALESCE(SUM(f.grand_total),0)::float AS revenue,
+                COALESCE(SUM(GREATEST((b.check_out_date::date - b.check_in_date::date),1)),0)::int AS room_nights
+           FROM folios f
+           LEFT JOIN room_bookings b ON b.id = f.booking_id
+           LEFT JOIN rooms r ON r.id = f.room_id
+           LEFT JOIN room_types rt ON rt.id = r.type_id
+          WHERE f.status='settled' AND (f.doc_type IS NULL OR f.doc_type='INVOICE')
+            AND TO_CHAR(f.settled_at,'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY room_type
+          ORDER BY revenue DESC`,
+        [from, to]
+      ).catch(() => []);
+      const result = rows.map((r: any) => ({
+        ...r,
+        adr: Number(r.room_nights) > 0 ? Math.round((Number(r.revenue) / Number(r.room_nights)) * 100) / 100 : 0,
+      }));
+      const totalRev = result.reduce((s: number, r: any) => s + Number(r.revenue || 0), 0);
+      res.json({ from, to, rows: result, total_revenue: Math.round(totalRev * 100) / 100 });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build revenue-by-room-type report" });
+    }
+  });
+
+  // 3) OCCUPANCY TREND — occupancy % per night over the range.
+  app.get("/api/restaurant/:id/hotel/reports/occupancy-trend", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const from = String(req.query.from || new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const tenantDb = await getTenantDb(req.params.id);
+      const totalRow: any = await tenantDb.get(`SELECT COUNT(*)::int AS n FROM rooms`);
+      const totalRooms = Number(totalRow?.n || 0);
+      const rows: any[] = await tenantDb.query(
+        `SELECT TO_CHAR(d,'YYYY-MM-DD') AS night,
+                (SELECT COUNT(*) FROM room_bookings b
+                   WHERE b.status <> 'CANCELLED'
+                     AND b.check_in_date <= d::date AND b.check_out_date > d::date)::int AS occupied
+           FROM generate_series(?::date, ?::date, '1 day') d
+          ORDER BY night`,
+        [from, to]
+      ).catch(() => []);
+      const result = rows.map((r: any) => ({
+        night: r.night,
+        occupied: Number(r.occupied || 0),
+        total_rooms: totalRooms,
+        occupancy_pct: totalRooms > 0 ? Math.round((Number(r.occupied) / totalRooms) * 1000) / 10 : 0,
+      }));
+      const avgOcc = result.length ? Math.round((result.reduce((s: number, r: any) => s + r.occupancy_pct, 0) / result.length) * 10) / 10 : 0;
+      res.json({ from, to, total_rooms: totalRooms, rows: result, avg_occupancy_pct: avgOcc });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build occupancy trend report" });
+    }
+  });
+
+  // 4) CUSTOMERS / GUEST DIRECTORY — lifetime stays + spend per guest.
+  app.get("/api/restaurant/:id/hotel/reports/customers", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query(
+        `SELECT b.guest_name,
+                MAX(b.guest_phone) AS guest_phone,
+                MAX(b.guest_email) AS guest_email,
+                COUNT(*)::int AS stays,
+                COALESCE(SUM(b.total_amount),0)::float AS total_spend,
+                MAX(b.check_in_date) AS last_visit
+           FROM room_bookings b
+          WHERE b.status <> 'CANCELLED' AND COALESCE(b.guest_name,'') <> ''
+          GROUP BY b.guest_name
+          ORDER BY total_spend DESC
+          LIMIT 1000`
+      ).catch(() => []);
+      res.json({ rows, count: rows.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build customers report" });
+    }
+  });
+
+  // 4b) CANCELLED RESERVATIONS — answers "how to identify a cancellation":
+  //     bookings with status='CANCELLED', with when / who / why / refund.
+  //     (Cancellations are excluded from arrival/departure by design.)
+  app.get("/api/restaurant/:id/hotel/reports/cancellations", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query(
+        `SELECT b.id, b.guest_name, b.guest_phone, b.check_in_date, b.check_out_date,
+                b.total_amount, b.booking_source,
+                b.cancelled_at, b.cancelled_by, b.cancellation_reason,
+                b.cancellation_refund_pct, b.cancellation_refund_amount,
+                r.name AS room_name
+           FROM room_bookings b
+           LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE b.status = 'CANCELLED'
+            AND TO_CHAR(COALESCE(b.cancelled_at, b.check_in_date),'YYYY-MM-DD') BETWEEN ? AND ?
+          ORDER BY b.cancelled_at DESC NULLS LAST`,
+        [from, to]
+      ).catch(() => []);
+      const refundTotal = rows.reduce((s: number, r: any) => s + Number(r.cancellation_refund_amount || 0), 0);
+      const lostRevenue = rows.reduce((s: number, r: any) => s + Number(r.total_amount || 0), 0);
+      res.json({
+        from, to, rows, count: rows.length,
+        refund_total: Math.round(refundTotal * 100) / 100,
+        lost_revenue: Math.round(lostRevenue * 100) / 100,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build cancellations report" });
+    }
+  });
+
+  // 5) PURCHASE SPEND — purchase-order spend by supplier + period.
+  app.get("/api/restaurant/:id/reports/purchase", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query(
+        `SELECT po.id, po.status, po.raised_at,
+                COALESCE(po.grand_total, po.total_amount, 0)::float AS amount,
+                COALESCE(s.name, po.supplier_id) AS supplier_name
+           FROM purchase_orders po
+           LEFT JOIN suppliers s ON s.id = po.supplier_id
+          WHERE TO_CHAR(po.raised_at,'YYYY-MM-DD') BETWEEN ? AND ?
+            AND po.status <> 'CANCELLED'
+          ORDER BY po.raised_at DESC`,
+        [from, to]
+      ).catch(() => []);
+      const bySupplier: Record<string, any> = {};
+      let total = 0;
+      for (const r of rows) {
+        const amt = Number(r.amount || 0); total += amt;
+        const k = r.supplier_name || '—';
+        const s = (bySupplier[k] = bySupplier[k] || { supplier: k, orders: 0, amount: 0 });
+        s.orders += 1; s.amount += amt;
+      }
+      res.json({
+        from, to, rows,
+        by_supplier: Object.values(bySupplier).sort((a: any, b: any) => b.amount - a.amount),
+        total: Math.round(total * 100) / 100,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to build purchase report" });
+    }
+  });
+
+  // 6) PETTY CASH — cash in/out ledger with running balance.
+  const _ensurePettyCash = async (tenantDb: any) => {
+    await tenantDb.exec(`CREATE TABLE IF NOT EXISTS petty_cash (
+      id TEXT PRIMARY KEY,
+      entry_date DATE NOT NULL,
+      direction TEXT NOT NULL,
+      category TEXT,
+      amount DOUBLE PRECISION NOT NULL,
+      notes TEXT,
+      recorded_by TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`).catch(() => {});
+  };
+
+  app.post("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await _ensurePettyCash(tenantDb);
+      const direction = String(req.body?.direction || '').toUpperCase() === 'OUT' ? 'OUT' : 'IN';
+      const amount = Math.abs(Number(req.body?.amount || 0));
+      if (!(amount > 0)) return res.status(400).json({ error: 'amount must be greater than 0' });
+      const entry_date = String(req.body?.entry_date || new Date().toISOString().slice(0, 10));
+      const id = `PC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO petty_cash (id, entry_date, direction, category, amount, notes, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, entry_date, direction, req.body?.category || null, amount, req.body?.notes || null,
+         req.user?.id || req.user?.email || null]
+      );
+      res.json({ success: true, id });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to record petty cash entry" });
+    }
+  });
+
+  app.get("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await _ensurePettyCash(tenantDb);
+      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const rows: any[] = await tenantDb.query(
+        `SELECT * FROM petty_cash
+          WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?
+          ORDER BY entry_date DESC, created_at DESC`,
+        [from, to]
+      ).catch(() => []);
+      let totalIn = 0, totalOut = 0;
+      for (const r of rows) {
+        if (r.direction === 'OUT') totalOut += Number(r.amount || 0);
+        else totalIn += Number(r.amount || 0);
+      }
+      const openRow: any = await tenantDb.get(
+        `SELECT COALESCE(SUM(CASE WHEN direction='OUT' THEN -amount ELSE amount END),0)::float AS bal
+           FROM petty_cash WHERE TO_CHAR(entry_date,'YYYY-MM-DD') < ?`, [from]
+      ).catch(() => ({ bal: 0 }));
+      const opening = Number(openRow?.bal || 0);
+      res.json({
+        from, to, rows,
+        summary: {
+          opening_balance: Math.round(opening * 100) / 100,
+          total_in: Math.round(totalIn * 100) / 100,
+          total_out: Math.round(totalOut * 100) / 100,
+          closing_balance: Math.round((opening + totalIn - totalOut) * 100) / 100,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to load petty cash" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/petty-cash/:entryId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const role = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role)) {
+        return res.status(403).json({ error: 'Only an owner or manager can delete a petty-cash entry.' });
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      await _ensurePettyCash(tenantDb);
+      await tenantDb.run(`DELETE FROM petty_cash WHERE id = ?`, [req.params.entryId]);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to delete petty cash entry" });
+    }
+  });
+
   // REQ 5 — Returning-guest lookup: aggregate every past stay for a phone
   // number. Surfaces lifetime stays, total spend, and the most recent
   // stay so the front desk can welcome a returning guest with context.
@@ -25301,7 +25621,11 @@ ${data.tenant.name}`;
               type: 'FINAL',
               reference: additionalRef,
               recordedBy: req.user?.id || req.user?.email || null,
-              notes: 'Final payment at check-out',
+              // Staff comment (client request 11 Jun 2026), falls back to a
+              // sensible default when no note was entered.
+              notes: (req.body?.additional_payment_note && String(req.body.additional_payment_note).trim())
+                ? String(req.body.additional_payment_note).trim()
+                : 'Final payment at check-out',
             });
           } catch (e) {
             console.warn('[hotel-checkout] final-payment record failed:', e);
@@ -25431,6 +25755,7 @@ ${data.tenant.name}`;
             }
           }
 
+          const _out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
           const pdf = await generateInvoicePdf({
             hotel: { name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number, phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined, fssai: hotel.fssai_license_number || null, fssaiValidUntil: hotel.fssai_license_valid_until || null },
             guest: { name: b.guest_name || 'Guest', phone: b.guest_phone, email: b.guest_email, nationality: b.guest_nationality, state: b.guest_state },
@@ -25448,6 +25773,8 @@ ${data.tenant.name}`;
               subtotal: Number(folio.subtotal || 0), discount: Number(folio.discount || 0),
               gstAmount: Number(folio.gst_amount || 0), grandTotal: Number(folio.grand_total || 0),
               paymentMethod: folio.payment_method, settledAt: folio.settled_at, status: folio.status,
+              amountPaid: _out ? _out.total_paid : 0, amountRefunded: _out ? _out.total_refunded : 0,
+              balanceDue: _out ? _out.outstanding : Math.max(0, Number(folio.grand_total || 0)),
             },
             entries: entries.map(e => ({
               description: e.description, entryType: e.entry_type,
@@ -26866,6 +27193,8 @@ ${data.tenant.name}`;
       // R-3 — pull IRN row attached to this folio (any/all may be null
       // when the GSP hasn't returned yet).
       const _irnRow: any = folio;
+      // Folio payment ledger → Paid / Balance Due lines on the invoice.
+      const _out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
       const pdf = await generateInvoicePdf({
         hotel: {
           name:     hotel.name,
@@ -26906,6 +27235,9 @@ ${data.tenant.name}`;
           paymentMethod:  folio.payment_method,
           settledAt:      folio.settled_at,
           status:         folio.status,
+          amountPaid:     _out ? _out.total_paid : 0,
+          amountRefunded: _out ? _out.total_refunded : 0,
+          balanceDue:     _out ? _out.outstanding : Math.max(0, Number(folio.grand_total || 0)),
         },
         entries: entries.map(e => ({
           description: e.description,
@@ -27013,6 +27345,8 @@ ${data.tenant.name}`;
       // R-3 — pull IRN row attached to this folio (any/all may be null
       // when the GSP hasn't returned yet).
       const _irnRow: any = folio;
+      // Folio payment ledger → Paid / Balance Due lines on the emailed invoice.
+      const _out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
       const pdf = await generateInvoicePdf({
         hotel: { name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number, phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined, fssai: hotel.fssai_license_number || null, fssaiValidUntil: hotel.fssai_license_valid_until || null },
         guest: { name: folio.guest_name || 'Guest', phone: folio.guest_phone, email: folio.guest_email, nationality: folio.guest_nationality, state: folio.guest_state },
@@ -27030,6 +27364,8 @@ ${data.tenant.name}`;
           subtotal: Number(folio.subtotal || 0), discount: Number(folio.discount || 0),
           gstAmount: Number(folio.gst_amount || 0), grandTotal: Number(folio.grand_total || 0),
           paymentMethod: folio.payment_method, settledAt: folio.settled_at, status: folio.status,
+          amountPaid: _out ? _out.total_paid : 0, amountRefunded: _out ? _out.total_refunded : 0,
+          balanceDue: _out ? _out.outstanding : Math.max(0, Number(folio.grand_total || 0)),
         },
         entries: entries.map(e => ({
           description: e.description, entryType: e.entry_type,

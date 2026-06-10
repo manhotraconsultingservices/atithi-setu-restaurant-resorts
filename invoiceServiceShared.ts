@@ -139,6 +139,13 @@ export interface InvoiceData {
     paymentMethod?: string;
     settledAt?: string;
     status: string;
+    // Hotel folio payment ledger summary (from getFolioOutstanding). When
+    // present, the templates render a "Paid" and "Balance Due" line so the
+    // guest sees how much was received and what remains. Omitted for plain
+    // restaurant invoices (which are paid in full at issue).
+    amountPaid?: number;
+    amountRefunded?: number;
+    balanceDue?: number;
   };
   entries: Array<{
     description: string;

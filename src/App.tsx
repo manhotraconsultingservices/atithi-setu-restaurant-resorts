@@ -18231,6 +18231,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             );
           })()}
+
+          {/* Management reports (payments, revenue, occupancy, guests,
+              purchase) + petty-cash ledger — client request 11 Jun 2026.
+              Self-contained component; owns its own state. */}
+          <ManagementReports restaurantId={restaurantId} token={token} />
         </div>
       ) : activeTab === 'CHANNEL_MANAGER' && isHotelEnabled ? (
         /* ════════════════ CHANNEL MANAGER (top-level tab) ════════════════
@@ -32049,6 +32054,7 @@ const CheckoutModal: React.FC<{
           additional_payment_amount: previewPay > 0 ? previewPay : 0,
           additional_payment_method: previewPay > 0 ? payNow.method.toUpperCase() : null,
           additional_payment_reference: previewPay > 0 ? payNow.reference || null : null,
+          additional_payment_note: previewPay > 0 ? (payNow.note || null) : null,
           waive,
         }),
       });
@@ -32288,6 +32294,18 @@ const CheckoutModal: React.FC<{
                       />
                     </div>
                   </div>
+                  {/* Comment box (client request 11 Jun 2026) — free-text note
+                      stored on the payment record (folio_payments.notes). */}
+                  <div className="mt-2">
+                    <label className="block text-[10px] font-bold text-[#6b5d52] mb-1">Comment / note (optional)</label>
+                    <input
+                      type="text"
+                      value={payNow.note || ''}
+                      onChange={e => setPayNow({ ...payNow, note: e.target.value })}
+                      placeholder="e.g. collected at front desk, balance split on card"
+                      className="w-full bg-white border-none rounded-xl px-3 py-2 text-sm outline-none"
+                    />
+                  </div>
                   {previewPay > 0 && (
                     <p className="text-[11px] mt-2 text-amber-900">
                       After this payment, remaining outstanding: <strong className="font-mono">{fmt(effectiveOutstanding)}</strong>
@@ -32468,6 +32486,244 @@ const HotelLateFeeBanner: React.FC<{
     </div>
   );
 };
+
+// ─── Management Reports + Petty Cash (client request 11 Jun 2026) ──────────
+// Self-contained section rendered at the bottom of Front Office Reports.
+// Surfaces five management reports (payment received, revenue by room type,
+// occupancy trend, guest directory, purchase spend) plus a petty-cash ledger.
+// Keeps ALL its own state so it never touches the owner dashboard's state bag
+// or the existing report switch — low blast radius by design.
+function ManagementReports({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const [from, setFrom] = useState(monthAgo);
+  const [to, setTo] = useState(today);
+  const [grain, setGrain] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+  const [active, setActive] = useState<string | null>(null);
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [pcForm, setPcForm] = useState<any>({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today });
+  const [pcSaving, setPcSaving] = useState(false);
+  const role = (localStorage.getItem('role') || '').toUpperCase();
+  const canDeletePc = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role);
+
+  const cur = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+  const api = async (path: string, opts: any = {}) => {
+    const res = await fetch(`/api/restaurant/${restaurantId}${path}`, {
+      ...opts,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(opts.headers || {}) },
+    });
+    if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error || `HTTP ${res.status}`); }
+    return res.json();
+  };
+
+  const REPORTS = [
+    { key: 'payment-received', label: 'Payment Received', desc: 'Cash collected — by day/week/month, method, guest vs OTA', path: () => `/hotel/reports/payment-received?from=${from}&to=${to}&grain=${grain}` },
+    { key: 'revenue-by-room-type', label: 'Revenue by Room Type', desc: 'Settled revenue, room nights, ADR per room type', path: () => `/hotel/reports/revenue-by-room-type?from=${from}&to=${to}` },
+    { key: 'occupancy-trend', label: 'Occupancy Trend', desc: 'Occupancy % per night across the range', path: () => `/hotel/reports/occupancy-trend?from=${from}&to=${to}` },
+    { key: 'customers', label: 'Guest Directory', desc: 'Every guest — stays, total spend, last visit', path: () => `/hotel/reports/customers` },
+    { key: 'cancellations', label: 'Cancelled Reservations', desc: 'Cancelled bookings — when, why, refund', path: () => `/hotel/reports/cancellations?from=${from}&to=${to}` },
+    { key: 'purchase', label: 'Purchase Spend', desc: 'Purchase-order spend by supplier + period', path: () => `/reports/purchase?from=${from}&to=${to}` },
+    { key: 'petty-cash', label: 'Petty Cash', desc: 'Cash in/out ledger with running balance', path: () => `/petty-cash?from=${from}&to=${to}` },
+  ];
+
+  const load = async (key: string) => {
+    setActive(key); setLoading(true); setData(null);
+    try {
+      const r = REPORTS.find(x => x.key === key)!;
+      setData(await api(r.path()));
+    } catch (e: any) { alert('Report failed: ' + (e?.message || 'error')); }
+    finally { setLoading(false); }
+  };
+  // Re-run the active report when the date range / grain changes.
+  useEffect(() => { if (active) load(active); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [from, to, grain]);
+
+  const addPettyCash = async () => {
+    const amt = Number(pcForm.amount);
+    if (!(amt > 0)) { alert('Enter an amount greater than 0'); return; }
+    setPcSaving(true);
+    try {
+      await api('/petty-cash', { method: 'POST', body: JSON.stringify({ ...pcForm, amount: amt }) });
+      setPcForm({ direction: pcForm.direction, amount: '', category: '', notes: '', entry_date: pcForm.entry_date });
+      load('petty-cash');
+    } catch (e: any) { alert('Save failed: ' + (e?.message || 'error')); }
+    finally { setPcSaving(false); }
+  };
+  const deletePettyCash = async (id: string) => {
+    if (!confirm('Delete this petty-cash entry?')) return;
+    try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); load('petty-cash'); }
+    catch (e: any) { alert('Delete failed: ' + (e?.message || 'error')); }
+  };
+
+  const exportCsv = () => {
+    if (!data || !active) return;
+    const stamp = from === to ? from : `${from}_to_${to}`;
+    if (active === 'payment-received') {
+      downloadCsv(`payment-received-${stamp}.csv`, ['Period', 'Total', 'Guest (Direct)', 'OTA'],
+        (data.periods || []).map((p: any) => [p.period, p.total, p.direct, p.ota]));
+    } else if (active === 'revenue-by-room-type') {
+      downloadCsv(`revenue-by-room-type-${stamp}.csv`, ['Room Type', 'Stays', 'Room Nights', 'Revenue', 'ADR'],
+        (data.rows || []).map((r: any) => [r.room_type, r.stays, r.room_nights, r.revenue, r.adr]));
+    } else if (active === 'occupancy-trend') {
+      downloadCsv(`occupancy-trend-${stamp}.csv`, ['Night', 'Occupied', 'Total Rooms', 'Occupancy %'],
+        (data.rows || []).map((r: any) => [r.night, r.occupied, r.total_rooms, r.occupancy_pct]));
+    } else if (active === 'customers') {
+      downloadCsv('guest-directory.csv', ['Guest', 'Phone', 'Email', 'Stays', 'Total Spend', 'Last Visit'],
+        (data.rows || []).map((r: any) => [r.guest_name, r.guest_phone, r.guest_email, r.stays, r.total_spend, String(r.last_visit || '').slice(0, 10)]));
+    } else if (active === 'cancellations') {
+      downloadCsv(`cancelled-reservations-${stamp}.csv`, ['Booking', 'Guest', 'Phone', 'Room', 'Check-in', 'Cancelled At', 'Reason', 'Refund %', 'Refund Amount'],
+        (data.rows || []).map((r: any) => [r.id, r.guest_name, r.guest_phone, r.room_name, String(r.check_in_date || '').slice(0, 10), String(r.cancelled_at || '').slice(0, 10), r.cancellation_reason, r.cancellation_refund_pct, r.cancellation_refund_amount]));
+    } else if (active === 'purchase') {
+      downloadCsv(`purchase-spend-${stamp}.csv`, ['Date', 'PO', 'Supplier', 'Status', 'Amount'],
+        (data.rows || []).map((r: any) => [String(r.raised_at || '').slice(0, 10), r.id, r.supplier_name, r.status, r.amount]));
+    } else if (active === 'petty-cash') {
+      downloadCsv(`petty-cash-${stamp}.csv`, ['Date', 'Direction', 'Category', 'Amount', 'Notes'],
+        (data.rows || []).map((r: any) => [String(r.entry_date || '').slice(0, 10), r.direction, r.category, r.amount, r.notes]));
+    }
+  };
+
+  const kpi = (label: string, v: any) => (
+    <div className="bg-[#faf7f2] rounded-xl px-3 py-2 border border-[#e8dccf]">
+      <span className="text-[10px] uppercase tracking-widest text-[#9c8e85]">{label}</span>
+      <p className="text-sm font-bold font-mono text-[#1a1208] mt-0.5">{v}</p>
+    </div>
+  );
+  const empty = () => <p className="text-xs italic text-[#9c8e85] py-4 text-center">No data for this range.</p>;
+  const th = (c: string) => <th key={c} className="text-left py-1.5 px-3 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{c}</th>;
+
+  const renderTable = () => {
+    if (!data) return null;
+    if (active === 'payment-received') {
+      const periods = data.periods || [];
+      return (<>
+        <div className="grid grid-cols-3 gap-2 mb-3">{kpi('Total received', cur(data.summary?.total))}{kpi('Guest (Direct)', cur(data.summary?.guest_total))}{kpi('OTA-sourced', cur(data.summary?.ota_total))}</div>
+        {periods.length === 0 ? empty() : (
+          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Period', 'Total', 'Guest', 'OTA'].map(th)}</tr></thead>
+            <tbody>{periods.map((p: any) => (<tr key={p.period} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3 font-mono">{p.period}</td><td className="py-1.5 px-3 font-bold">{cur(p.total)}</td><td className="py-1.5 px-3">{cur(p.direct)}</td><td className="py-1.5 px-3">{cur(p.ota)}</td></tr>))}</tbody></table>
+        )}
+      </>);
+    }
+    if (active === 'revenue-by-room-type') {
+      const rows = data.rows || [];
+      return (<>
+        <div className="grid grid-cols-1 gap-2 mb-3">{kpi('Total revenue', cur(data.total_revenue))}</div>
+        {rows.length === 0 ? empty() : (
+          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Room Type', 'Stays', 'Room Nights', 'Revenue', 'ADR'].map(th)}</tr></thead>
+            <tbody>{rows.map((r: any, i: number) => (<tr key={i} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3 font-semibold">{r.room_type}</td><td className="py-1.5 px-3">{r.stays}</td><td className="py-1.5 px-3">{r.room_nights}</td><td className="py-1.5 px-3 font-bold">{cur(r.revenue)}</td><td className="py-1.5 px-3">{cur(r.adr)}</td></tr>))}</tbody></table>
+        )}
+      </>);
+    }
+    if (active === 'occupancy-trend') {
+      const rows = data.rows || [];
+      return (<>
+        <div className="grid grid-cols-2 gap-2 mb-3">{kpi('Avg occupancy', `${data.avg_occupancy_pct ?? 0}%`)}{kpi('Total rooms', data.total_rooms ?? 0)}</div>
+        {rows.length === 0 ? empty() : (
+          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Night', 'Occupied', 'Total Rooms', 'Occupancy %'].map(th)}</tr></thead>
+            <tbody>{rows.map((r: any) => (<tr key={r.night} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3 font-mono">{r.night}</td><td className="py-1.5 px-3">{r.occupied}</td><td className="py-1.5 px-3">{r.total_rooms}</td><td className="py-1.5 px-3 font-bold">{r.occupancy_pct}%</td></tr>))}</tbody></table>
+        )}
+      </>);
+    }
+    if (active === 'customers') {
+      const rows = data.rows || [];
+      return (<>
+        <div className="grid grid-cols-1 gap-2 mb-3">{kpi('Guests', data.count ?? 0)}</div>
+        {rows.length === 0 ? empty() : (
+          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Guest', 'Phone', 'Stays', 'Total Spend', 'Last Visit'].map(th)}</tr></thead>
+            <tbody>{rows.map((r: any, i: number) => (<tr key={i} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3 font-semibold">{r.guest_name}</td><td className="py-1.5 px-3">{r.guest_phone || '—'}</td><td className="py-1.5 px-3">{r.stays}</td><td className="py-1.5 px-3 font-bold">{cur(r.total_spend)}</td><td className="py-1.5 px-3">{String(r.last_visit || '').slice(0, 10)}</td></tr>))}</tbody></table>
+        )}
+      </>);
+    }
+    if (active === 'cancellations') {
+      const rows = data.rows || [];
+      return (<>
+        <div className="grid grid-cols-3 gap-2 mb-3">{kpi('Cancelled', data.count ?? 0)}{kpi('Lost revenue', cur(data.lost_revenue))}{kpi('Refunded', cur(data.refund_total))}</div>
+        {rows.length === 0 ? empty() : (
+          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Guest', 'Room', 'Check-in', 'Cancelled', 'Reason', 'Refund'].map(th)}</tr></thead>
+            <tbody>{rows.map((r: any) => (<tr key={r.id} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3 font-semibold">{r.guest_name}</td><td className="py-1.5 px-3">{r.room_name || '—'}</td><td className="py-1.5 px-3">{String(r.check_in_date || '').slice(0, 10)}</td><td className="py-1.5 px-3">{String(r.cancelled_at || '').slice(0, 10) || '—'}</td><td className="py-1.5 px-3 text-[#6b5d52]">{r.cancellation_reason || '—'}</td><td className="py-1.5 px-3 font-bold">{cur(r.cancellation_refund_amount)}</td></tr>))}</tbody></table>
+        )}
+      </>);
+    }
+    if (active === 'purchase') {
+      const rows = data.rows || [];
+      return (<>
+        <div className="grid grid-cols-1 gap-2 mb-3">{kpi('Total spend', cur(data.total))}</div>
+        {(data.by_supplier || []).length > 0 && (
+          <div className="mb-3"><p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">By supplier</p>
+            <div className="flex flex-wrap gap-2">{(data.by_supplier || []).map((s: any, i: number) => (<span key={i} className="text-[11px] bg-[#faf7f2] border border-[#e8dccf] rounded-lg px-2 py-1">{s.supplier}: <b>{cur(s.amount)}</b> ({s.orders})</span>))}</div></div>
+        )}
+        {rows.length === 0 ? empty() : (
+          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Date', 'PO', 'Supplier', 'Status', 'Amount'].map(th)}</tr></thead>
+            <tbody>{rows.map((r: any) => (<tr key={r.id} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3">{String(r.raised_at || '').slice(0, 10)}</td><td className="py-1.5 px-3 font-mono text-[10px]">{r.id}</td><td className="py-1.5 px-3">{r.supplier_name}</td><td className="py-1.5 px-3">{r.status}</td><td className="py-1.5 px-3 font-bold">{cur(r.amount)}</td></tr>))}</tbody></table>
+        )}
+      </>);
+    }
+    if (active === 'petty-cash') {
+      const rows = data.rows || [];
+      const s = data.summary || {};
+      return (<>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">{kpi('Opening', cur(s.opening_balance))}{kpi('Cash in', cur(s.total_in))}{kpi('Cash out', cur(s.total_out))}{kpi('Closing', cur(s.closing_balance))}</div>
+        {rows.length === 0 ? empty() : (
+          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Date', 'Type', 'Category', 'Amount', 'Notes', ''].map(th)}</tr></thead>
+            <tbody>{rows.map((r: any) => (<tr key={r.id} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3">{String(r.entry_date || '').slice(0, 10)}</td><td className={cn('py-1.5 px-3 font-bold', r.direction === 'OUT' ? 'text-rose-700' : 'text-emerald-700')}>{r.direction === 'OUT' ? 'OUT' : 'IN'}</td><td className="py-1.5 px-3">{r.category || '—'}</td><td className="py-1.5 px-3 font-bold">{cur(r.amount)}</td><td className="py-1.5 px-3 text-[#6b5d52]">{r.notes || '—'}</td><td className="py-1.5 px-3">{canDeletePc && <button type="button" onClick={() => deletePettyCash(r.id)} className="text-[10px] text-rose-600 hover:underline">Delete</button>}</td></tr>))}</tbody></table>
+        )}
+      </>);
+    }
+    return null;
+  };
+
+  return (
+    <div className="mt-6 rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
+      <div className="px-5 py-3 bg-[#faf7f2] border-b border-[#e8dccf]">
+        <h3 className="text-base font-bold font-serif text-[#1a1208]">📈 Management Reports</h3>
+        <p className="text-[11px] text-[#6b5d52] mt-0.5">Payments, revenue, occupancy, guests, purchases — plus the petty-cash ledger. Each exports to CSV.</p>
+      </div>
+      <div className="p-4 space-y-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-xs text-[#6b5d52]">From<input type="date" value={from} onChange={e => setFrom(e.target.value)} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf] text-xs" /></label>
+          <label className="text-xs text-[#6b5d52]">To<input type="date" value={to} onChange={e => setTo(e.target.value)} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf] text-xs" /></label>
+          {active === 'payment-received' && (
+            <label className="text-xs text-[#6b5d52]">Group by<select value={grain} onChange={e => setGrain(e.target.value as any)} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf] text-xs"><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option></select></label>
+          )}
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {REPORTS.map(r => (
+            <button key={r.key} type="button" onClick={() => load(r.key)}
+              className={cn('text-left p-3 rounded-2xl border-2 transition-all',
+                active === r.key ? 'bg-[#cc5a16] border-[#cc5a16]' : 'bg-[#faf7f2] border-[#e8dccf] hover:border-[#cc5a16]/40')}>
+              <span className={cn('text-xs font-bold', active === r.key ? 'text-white' : 'text-[#1a1208]')}>{r.label}</span>
+              <p className={cn('text-[10px] mt-0.5 leading-snug', active === r.key ? 'text-white/85' : 'text-[#9c8e85]')}>{r.desc}</p>
+            </button>
+          ))}
+        </div>
+
+        {active === 'petty-cash' && (
+          <div className="rounded-2xl border border-[#e8dccf] p-3 bg-[#faf7f2]">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Record cash movement</p>
+            <div className="flex flex-wrap items-end gap-2 text-xs">
+              <label>Date<input type="date" value={pcForm.entry_date} onChange={e => setPcForm({ ...pcForm, entry_date: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <label>Type<select value={pcForm.direction} onChange={e => setPcForm({ ...pcForm, direction: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]"><option value="OUT">Cash Out</option><option value="IN">Cash In</option></select></label>
+              <label>Amount<input type="number" value={pcForm.amount} onChange={e => setPcForm({ ...pcForm, amount: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf] w-28" /></label>
+              <label>Category<input value={pcForm.category} onChange={e => setPcForm({ ...pcForm, category: e.target.value })} placeholder="e.g. Stationery" className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <label className="flex-1 min-w-[160px]">Notes<input value={pcForm.notes} onChange={e => setPcForm({ ...pcForm, notes: e.target.value })} className="block mt-1 w-full px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
+              <button type="button" disabled={pcSaving} onClick={addPettyCash} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold disabled:opacity-50">{pcSaving ? 'Saving…' : '+ Add'}</button>
+            </div>
+          </div>
+        )}
+
+        {loading && <p className="text-xs text-[#9c8e85] italic">Loading…</p>}
+        {!loading && data && active && (
+          <div className="rounded-2xl border border-[#e8dccf] overflow-hidden">
+            <div className="px-4 py-2 bg-[#faf7f2] border-b border-[#e8dccf] flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{REPORTS.find(r => r.key === active)?.label} · {from === to ? from : `${from} → ${to}`}</span>
+              <button type="button" onClick={exportCsv} className="px-3 py-1.5 rounded-xl bg-[#1a1208] text-white text-[10px] font-bold uppercase tracking-widest flex items-center gap-1"><Download size={12} /> CSV</button>
+            </div>
+            <div className="p-3 overflow-x-auto">{renderTable()}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // --- CHEF DASHBOARD ---
 function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: string }) {
