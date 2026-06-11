@@ -14087,7 +14087,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['CHANNELS', 'Channels & Pricing', deliveryChannels.filter((c: any) => c.is_active).length],
               ['LIVE_ORDERS', 'Live Orders', deliveryOrders.length],
               ['SETTLEMENTS', 'Settlements', settlements.filter(s => !s.reconciled).length],
-              ['CHANNEL_PNL', 'Channel P&L', 0],
+              // Channel P&L folded into Restaurant Reports (11 Jun 2026) — the
+              // Delivery tab stays purely operational.
             ] as [typeof deliverySubTab, string, number][]).map(([id, label, count]) => (
               <button
                 key={id}
@@ -14416,8 +14417,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
 
-          {/* ── CHANNEL_PNL sub-view ── */}
-          {deliverySubTab === 'CHANNEL_PNL' && (
+          {/* ── CHANNEL_PNL sub-view — folded into Restaurant Reports (11 Jun
+              2026). Disabled here (no sub-tab button reaches it); the live
+              view is <ChannelPnlReport> under Restaurant Reports → Owner. ── */}
+          {false && deliverySubTab === 'CHANNEL_PNL' && (
             <div className="space-y-3">
               <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 flex flex-wrap gap-3 items-end">
                 <div>
@@ -17762,6 +17765,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="p-4">
               <AnalyticsDashboard restaurantId={restaurantId} token={token} feedback={feedback} restaurant={restaurant} onDateRangeChange={() => {}} hideHotelSection />
             </div>
+          </details>
+          {/* Delivery channel P&L folded out of the operational Delivery tab. */}
+          <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
+            <summary className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden">🛵 Delivery Channel P&amp;L — profitability by aggregator <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand)</span></summary>
+            <div className="p-4"><ChannelPnlReport restaurantId={restaurantId} token={token} /></div>
           </details>
         </div>
       ) : activeTab === 'FRONT_OFFICE_REPORTS' && isHotelEnabled ? (
@@ -32825,6 +32833,80 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
   );
 }
 
+// ─── Delivery Channel P&L (folded out of the Delivery tab — 11 Jun 2026) ────
+// Self-fetching so it lives inside Restaurant Reports instead of the
+// operational Delivery tab. Endpoint: /integrations/analytics/channel-pnl.
+function ChannelPnlReport({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+  const [to, setTo] = useState(new Date().toISOString().slice(0, 10));
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(false);
+  const run = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/integrations/analytics/channel-pnl?from=${from}&to=${to}`, { headers: { Authorization: `Bearer ${token}` } });
+      setData(res.ok ? await res.json() : null);
+    } catch { setData(null); } finally { setLoading(false); }
+  };
+  useEffect(() => { run(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  return (
+    <div className="space-y-3">
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 flex flex-wrap gap-3 items-end">
+        <div><label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">From</label><input type="date" value={from} onChange={e => setFrom(e.target.value)} className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" /></div>
+        <div><label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">To</label><input type="date" value={to} onChange={e => setTo(e.target.value)} className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" /></div>
+        <button onClick={run} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase">Run Report</button>
+      </div>
+      {loading ? (
+        <div className="text-center py-12 bg-white rounded-3xl border border-[#cc5a16]/10"><p className="text-sm text-[#9c8e85]">Loading…</p></div>
+      ) : !data ? (
+        <div className="text-center py-12 bg-white rounded-3xl border border-[#cc5a16]/10"><p className="text-sm text-[#9c8e85]">No data — run the report for a date range.</p></div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {[
+              { label: 'Gross',      value: '₹' + Math.round(data.totals?.gross || 0).toLocaleString('en-IN'), accent: '#1a1208' },
+              { label: 'Commission', value: '₹' + Math.round(data.totals?.commission || 0).toLocaleString('en-IN'), accent: '#cc5a16' },
+              { label: 'Food Cost',  value: '₹' + Math.round(data.totals?.food_cost || 0).toLocaleString('en-IN'), accent: '#b45309' },
+              { label: `Profit (${data.totals?.profit_pct || 0}%)`, value: '₹' + Math.round(data.totals?.profit || 0).toLocaleString('en-IN'), accent: '#10b981' },
+            ].map(k => (
+              <div key={k.label} className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4"><p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">{k.label}</p><p className="text-2xl font-bold font-mono mt-1" style={{ color: k.accent }}>{k.value}</p></div>
+            ))}
+          </div>
+          <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10"><tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                <th className="px-4 py-2">Channel</th><th className="px-4 py-2 text-right">Orders</th><th className="px-4 py-2 text-right">Gross</th><th className="px-4 py-2 text-right">Commission</th><th className="px-4 py-2 text-right">Net Payout</th><th className="px-4 py-2 text-right">Food Cost</th><th className="px-4 py-2 text-right">Profit</th><th className="px-4 py-2 text-right">Margin %</th><th className="px-4 py-2 text-right">₹/Order</th>
+              </tr></thead>
+              <tbody>
+                {(data.by_channel || []).length === 0 ? (
+                  <tr><td colSpan={9} className="px-4 py-12 text-center text-[#9c8e85]">No platform orders in the selected range.</td></tr>
+                ) : (data.by_channel || []).map((row: any) => {
+                  const theme = CHANNEL_THEME[row.channel] || { color: '#6b5d52', bg: '#f3f4f6', label: row.channel };
+                  const profitColor = row.profit >= 0 ? 'text-emerald-700' : 'text-red-700';
+                  return (
+                    <tr key={row.channel} className="border-b border-[#cc5a16]/5">
+                      <td className="px-4 py-2"><span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase" style={{ background: theme.bg, color: theme.color, border: `1px solid ${theme.color}40` }}>{theme.label}</span></td>
+                      <td className="px-4 py-2 text-right font-mono">{row.order_count}</td>
+                      <td className="px-4 py-2 text-right font-mono">₹{Math.round(row.gross).toLocaleString('en-IN')}</td>
+                      <td className="px-4 py-2 text-right font-mono text-[#cc5a16]">₹{Math.round(row.commission).toLocaleString('en-IN')}</td>
+                      <td className="px-4 py-2 text-right font-mono">₹{Math.round(row.net_payout).toLocaleString('en-IN')}</td>
+                      <td className="px-4 py-2 text-right font-mono text-[#b45309]">₹{Math.round(row.food_cost).toLocaleString('en-IN')}</td>
+                      <td className={cn("px-4 py-2 text-right font-mono font-bold", profitColor)}>₹{Math.round(row.profit).toLocaleString('en-IN')}</td>
+                      <td className={cn("px-4 py-2 text-right font-mono", profitColor)}>{row.profit_pct}%</td>
+                      <td className={cn("px-4 py-2 text-right font-mono", profitColor)}>₹{row.per_order_profit}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="bg-emerald-50/40 border border-emerald-200 rounded-2xl p-4 text-xs text-emerald-900"><strong>How to read this:</strong> Net Payout = gross minus the platform's commission. Food Cost = stock movements × ingredient unit price for orders in range. Profit = Net Payout − Food Cost.</div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Restaurant Reports (separate line from Hotel — BCG review 11 Jun 2026) ──
 // Restaurant is a distinct product line, so it gets its own reporting home
 // (parallel to the Hotel Reports hub). Reuses the rich /reports endpoint —
@@ -32995,7 +33077,6 @@ function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: s
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {[
                 { tab: 'INVENTORY', label: 'Inventory Insights', desc: 'COGS, margin, variance →' },
-                { tab: 'DELIVERY', label: 'Delivery P&L', desc: 'Channel profitability →' },
                 { tab: 'INVOICES', label: 'Invoices', desc: 'All invoices →' },
               ].map(l => (
                 <button key={l.tab} type="button" onClick={() => onOpenTab(l.tab)}
