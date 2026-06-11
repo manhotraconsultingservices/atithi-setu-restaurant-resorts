@@ -6641,6 +6641,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'CHANNEL_MANAGER'                           // OTA credentials + iCal feeds + webhook log + room mappings
     | 'PUBLIC_BOOKING_PAGE'                       // Marriott-grade direct-booking page profile + galleries
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
+    | 'RESTAURANT_REPORTS'                        // F&B reporting hub (separate from Hotel Reports)
   >('MONITOR');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
   const [inventorySubTab, setInventorySubTab] = useState<
@@ -10903,8 +10904,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <span className="text-sm font-bold text-[#1a1208]">
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
-            MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders',
-            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Rooms & Availability', FRONT_OFFICE_REPORTS: 'Reports & Dashboards', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Rooms & Availability', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
             SETTINGS: 'Brand & Settings', STAFF_ACCESS: 'Staff Access', NOTIFICATIONS: 'Notifications', SUBSCRIPTION: 'Subscription'
@@ -10983,7 +10984,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ...(bothEnabled ? opsTrio('HOTEL') : []),
               { id: 'HOTEL_BOOKINGS',       label: 'Reservations' },
               { id: 'ROOMS',                label: 'Rooms & Availability' },
-              { id: 'FRONT_OFFICE_REPORTS', label: 'Reports & Dashboards' },
+              { id: 'FRONT_OFFICE_REPORTS', label: 'Hotel Reports' },
               { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
               { id: 'SERVICES',             label: 'Service Catalogue' },
               { id: 'FOLIOS',               label: 'Folios & Settlement' },
@@ -11002,6 +11003,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'BOOKINGS',  label: 'Table Bookings' },
               { id: 'INVENTORY', label: 'Inventory' },
               { id: 'DELIVERY',  label: 'Delivery Partners' },
+              { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports' },
             ],
           },
           {
@@ -17717,6 +17719,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
           </>)}{/* /bookingsView === 'LIST' */}
         </div>
+      ) : activeTab === 'RESTAURANT_REPORTS' && isRestaurantEnabled ? (
+        /* ════════════ RESTAURANT REPORTS (separate line from Hotel) ════════════ */
+        <div className="space-y-5">
+          <div>
+            <h2 className="text-3xl font-bold font-serif text-[#1a1208]">🍽️ Restaurant Reports</h2>
+            <p className="text-sm text-[#6b5d52] mt-1">
+              All F&amp;B reporting in one place — sales, products, payments and operations. (Hotel reporting lives under Hotel Reports.) Each report exports to CSV.
+            </p>
+          </div>
+          <RestaurantReports restaurantId={restaurantId} token={token} onOpenTab={(t) => setActiveTab(t as any)} />
+        </div>
       ) : activeTab === 'FRONT_OFFICE_REPORTS' && isHotelEnabled ? (
         /* ════════════════ FRONT OFFICE REPORTS (top-level tab) ════════════════
            Four classic hotel-ops reports: Arrival / Departure / Room Status /
@@ -17726,9 +17739,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <div className="space-y-5">
           <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
             <div>
-              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">📊 Reports &amp; Dashboards</h2>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">🏨 Hotel Reports</h2>
               <p className="text-sm text-[#6b5d52] mt-1">
-                Every report in one place. Switch between the front-desk daily reports and the owner / manager management dashboards. Each downloads as CSV ready for Excel / Tally.
+                All hotel reporting in one place. Switch between the front-desk daily reports and the owner / manager management dashboards. (Restaurant reporting lives under Restaurant Reports.) Each downloads as CSV.
               </p>
             </div>
             {/* Audience toggle — Front Desk (daily ops) vs Owner / Manager (management). */}
@@ -32767,6 +32780,202 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
             <div className="p-3 overflow-x-auto">{renderTable()}</div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Restaurant Reports (separate line from Hotel — BCG review 11 Jun 2026) ──
+// Restaurant is a distinct product line, so it gets its own reporting home
+// (parallel to the Hotel Reports hub). Reuses the rich /reports endpoint —
+// one call powers daily sales, product-wise, category, payment methods, peak
+// hours and order status — plus the shared petty-cash ledger, and deep-links
+// the heavy dashboards (full Analytics, Inventory insights, Delivery P&L,
+// Invoices). Self-contained state; mirrors the Operations/Management split.
+function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: string; token: string; onOpenTab: (tab: string) => void }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const [from, setFrom] = useState(monthAgo);
+  const [to, setTo] = useState(today);
+  const [audience, setAudience] = useState<'OPS' | 'MGMT'>('OPS');
+  const [active, setActive] = useState<string>('daily-sales');
+  const [grain, setGrain] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+  const [data, setData] = useState<any>(null);
+  const [petty, setPetty] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+
+  const cur = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+  const api = async (path: string) => {
+    const res = await fetch(`/api/restaurant/${restaurantId}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error || `HTTP ${res.status}`); }
+    return res.json();
+  };
+
+  // One /reports call powers most restaurant reports; reload on range change.
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api(`/reports?from=${from}&to=${to}`)
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [from, to]);
+  useEffect(() => {
+    if (active !== 'petty-cash') return;
+    api(`/petty-cash?from=${from}&to=${to}`).then(setPetty).catch(() => setPetty(null));
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [active, from, to]);
+
+  const OPS = [
+    { key: 'daily-sales', label: 'Daily Sales', desc: 'Revenue & orders per day' },
+    { key: 'payment-methods', label: 'Payment Methods', desc: 'Collections by Cash / Card / UPI / Online' },
+    { key: 'peak-hours', label: 'Peak Hours', desc: 'Order volume by hour of day' },
+    { key: 'order-status', label: 'Order Status', desc: 'Orders by status' },
+    { key: 'petty-cash', label: 'Petty Cash', desc: 'Cash in/out ledger + balance' },
+  ];
+  const MGMT = [
+    { key: 'sales-trend', label: 'Sales Trend', desc: 'Daily / weekly / monthly revenue' },
+    { key: 'product-wise', label: 'Product-wise', desc: 'Top items by qty & revenue' },
+    { key: 'category-wise', label: 'Category-wise', desc: 'Revenue by menu category' },
+  ];
+  const CARDS = audience === 'OPS' ? OPS : MGMT;
+  // Keep the open report valid when the audience flips.
+  useEffect(() => {
+    const keys = (audience === 'OPS' ? OPS : MGMT).map(c => c.key);
+    if (!keys.includes(active)) setActive(keys[0]);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [audience]);
+
+  const kpi = (label: string, v: any) => (
+    <div className="bg-[#faf7f2] rounded-xl px-3 py-2 border border-[#e8dccf]">
+      <span className="text-[10px] uppercase tracking-widest text-[#9c8e85]">{label}</span>
+      <p className="text-sm font-bold font-mono text-[#1a1208] mt-0.5">{v}</p>
+    </div>
+  );
+  const empty = () => <p className="text-xs italic text-[#9c8e85] py-4 text-center">No data for this range.</p>;
+  const th = (c: string) => <th key={c} className="text-left py-1.5 px-3 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{c}</th>;
+  const simpleTable = (cols: string[], rows: any[][]) => rows.length === 0 ? empty() : (
+    <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{cols.map(th)}</tr></thead>
+      <tbody>{rows.map((r, i) => (<tr key={i} className="border-b border-[#f1ece3]">{r.map((c, j) => <td key={j} className={cn('py-1.5 px-3', j > 0 && 'font-mono')}>{c}</td>)}</tr>))}</tbody></table>
+  );
+
+  const trendRows = () => {
+    if (!data) return [] as any[];
+    if (grain === 'weekly') return (data.weeklySales || []).map((r: any) => ({ period: r.week, revenue: r.revenue, orders: r.orders }));
+    if (grain === 'monthly') return (data.monthlySales || []).map((r: any) => ({ period: r.month, revenue: r.revenue, orders: r.orders }));
+    return (data.dailySales || []).map((r: any) => ({ period: r.date, revenue: r.revenue, orders: r.orders }));
+  };
+
+  const exportCsv = () => {
+    const stamp = from === to ? from : `${from}_to_${to}`;
+    if (active === 'daily-sales') downloadCsv(`daily-sales-${stamp}.csv`, ['Date', 'Revenue', 'Orders'], (data?.dailySales || []).map((r: any) => [r.date, r.revenue, r.orders]));
+    else if (active === 'sales-trend') downloadCsv(`sales-${grain}-${stamp}.csv`, ['Period', 'Revenue', 'Orders'], trendRows().map((r: any) => [r.period, r.revenue, r.orders]));
+    else if (active === 'product-wise') downloadCsv(`product-wise-${stamp}.csv`, ['Item', 'Qty', 'Revenue'], (data?.topItems || []).map((r: any) => [r.name, r.count, r.revenue]));
+    else if (active === 'category-wise') downloadCsv(`category-wise-${stamp}.csv`, ['Category', 'Qty', 'Revenue'], (data?.salesByCategory || []).map((r: any) => [r.category, r.count, r.revenue]));
+    else if (active === 'payment-methods') downloadCsv(`payment-methods-${stamp}.csv`, ['Method', 'Txns', 'Revenue'], (data?.paymentBreakdown || []).map((r: any) => [r.method, r.count, r.revenue]));
+    else if (active === 'peak-hours') downloadCsv(`peak-hours-${stamp}.csv`, ['Hour', 'Orders'], (data?.peakHours || []).map((r: any) => [r.label, r.count]));
+    else if (active === 'order-status') downloadCsv(`order-status-${stamp}.csv`, ['Status', 'Orders'], (data?.orderStatusBreakdown || []).map((r: any) => [r.status, r.count]));
+    else if (active === 'petty-cash') downloadCsv(`petty-cash-${stamp}.csv`, ['Date', 'Direction', 'Category', 'Amount', 'Notes'], (petty?.rows || []).map((r: any) => [String(r.entry_date || '').slice(0, 10), r.direction, r.category, r.amount, r.notes]));
+  };
+
+  const renderTable = () => {
+    if (active === 'petty-cash') {
+      const s = petty?.summary || {};
+      return (<>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">{kpi('Opening', cur(s.opening_balance))}{kpi('Cash in', cur(s.total_in))}{kpi('Cash out', cur(s.total_out))}{kpi('Closing', cur(s.closing_balance))}</div>
+        {simpleTable(['Date', 'Type', 'Category', 'Amount', 'Notes'], (petty?.rows || []).map((r: any) => [String(r.entry_date || '').slice(0, 10), r.direction, r.category || '—', cur(r.amount), r.notes || '—']))}
+      </>);
+    }
+    if (loading) return <p className="text-xs text-[#9c8e85] italic">Loading…</p>;
+    if (!data) return empty();
+    if (active === 'daily-sales') return simpleTable(['Date', 'Revenue', 'Orders'], (data.dailySales || []).map((r: any) => [r.date, cur(r.revenue), r.orders]));
+    if (active === 'sales-trend') return (<>
+      <div className="inline-flex bg-[#faf7f2] rounded-xl p-1 border border-[#e8dccf] mb-3">
+        {(['daily', 'weekly', 'monthly'] as const).map(g => (
+          <button key={g} type="button" onClick={() => setGrain(g)} className={cn('px-3 py-1 rounded-lg text-[11px] font-bold capitalize', grain === g ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52]')}>{g}</button>
+        ))}
+      </div>
+      {simpleTable(['Period', 'Revenue', 'Orders'], trendRows().map((r: any) => [r.period, cur(r.revenue), r.orders]))}
+    </>);
+    if (active === 'product-wise') return simpleTable(['Item', 'Qty', 'Revenue'], (data.topItems || []).map((r: any) => [r.name, r.count, cur(r.revenue)]));
+    if (active === 'category-wise') return simpleTable(['Category', 'Qty', 'Revenue'], (data.salesByCategory || []).map((r: any) => [r.category, r.count, cur(r.revenue)]));
+    if (active === 'payment-methods') return simpleTable(['Method', 'Txns', 'Revenue'], (data.paymentBreakdown || []).map((r: any) => [r.method, r.count, cur(r.revenue)]));
+    if (active === 'peak-hours') return simpleTable(['Hour', 'Orders'], (data.peakHours || []).filter((r: any) => r.count > 0).map((r: any) => [r.label, r.count]));
+    if (active === 'order-status') return simpleTable(['Status', 'Orders'], (data.orderStatusBreakdown || []).map((r: any) => [r.status, r.count]));
+    return null;
+  };
+
+  const k = data?.kpi || {};
+  return (
+    <div className="mt-6 rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
+      <div className="px-5 py-3 bg-[#faf7f2] border-b border-[#e8dccf] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h3 className="text-base font-bold font-serif text-[#1a1208]">🍽️ Restaurant Reports</h3>
+          <p className="text-[11px] text-[#6b5d52] mt-0.5">Sales, products, payments and operations for the F&amp;B business. Each report exports to CSV.</p>
+        </div>
+        <div className="inline-flex bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shadow-sm shrink-0">
+          {([{ id: 'OPS', label: 'Operations' }, { id: 'MGMT', label: 'Owner / Manager' }] as const).map(opt => (
+            <button key={opt.id} type="button" onClick={() => setAudience(opt.id)}
+              className={cn('px-3 py-1.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all whitespace-nowrap', audience === opt.id ? 'bg-[#cc5a16] text-white shadow' : 'text-[#6b5d52] hover:bg-[#faf7f2]')}>
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="p-4 space-y-4">
+        {/* KPI strip */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+          {kpi('Total revenue', cur(k.totalRevenue))}
+          {kpi('Paid revenue', cur(k.paidRevenue))}
+          {kpi('Orders', k.totalOrders ?? 0)}
+          {kpi('Avg order value', cur(k.avgOrderValue))}
+          {kpi('Today', cur(k.todayRevenue))}
+        </div>
+        {/* Date range */}
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-xs text-[#6b5d52]">From<input type="date" value={from} onChange={e => setFrom(e.target.value)} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf] text-xs" /></label>
+          <label className="text-xs text-[#6b5d52]">To<input type="date" value={to} onChange={e => setTo(e.target.value)} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf] text-xs" /></label>
+        </div>
+        {/* Report cards */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {CARDS.map(r => (
+            <button key={r.key} type="button" onClick={() => setActive(r.key)}
+              className={cn('text-left p-3 rounded-2xl border-2 transition-all', active === r.key ? 'bg-[#cc5a16] border-[#cc5a16]' : 'bg-[#faf7f2] border-[#e8dccf] hover:border-[#cc5a16]/40')}>
+              <span className={cn('text-xs font-bold', active === r.key ? 'text-white' : 'text-[#1a1208]')}>{r.label}</span>
+              <p className={cn('text-[10px] mt-0.5 leading-snug', active === r.key ? 'text-white/85' : 'text-[#9c8e85]')}>{r.desc}</p>
+            </button>
+          ))}
+        </div>
+        {/* Management deep-links */}
+        {audience === 'MGMT' && (
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Full dashboards</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[
+                { tab: 'REPORTS', label: 'Analytics & Reports', desc: 'KPIs, charts, cohorts →' },
+                { tab: 'INVENTORY', label: 'Inventory Insights', desc: 'COGS, margin, variance →' },
+                { tab: 'DELIVERY', label: 'Delivery P&L', desc: 'Channel profitability →' },
+                { tab: 'INVOICES', label: 'Invoices', desc: 'All invoices →' },
+              ].map(l => (
+                <button key={l.tab} type="button" onClick={() => onOpenTab(l.tab)}
+                  className="text-left p-3 rounded-2xl border-2 border-[#e8dccf] bg-white hover:border-[#cc5a16]/40 transition-all">
+                  <span className="text-xs font-bold text-[#1a1208]">{l.label}</span>
+                  <p className="text-[10px] mt-0.5 leading-snug text-[#9c8e85]">{l.desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* Active report */}
+        <div className="rounded-2xl border border-[#e8dccf] overflow-hidden">
+          <div className="px-4 py-2 bg-[#faf7f2] border-b border-[#e8dccf] flex items-center justify-between">
+            <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">{CARDS.find(c => c.key === active)?.label} · {from === to ? from : `${from} → ${to}`}</span>
+            <button type="button" onClick={exportCsv} className="px-3 py-1.5 rounded-xl bg-[#1a1208] text-white text-[10px] font-bold uppercase tracking-widest flex items-center gap-1"><Download size={12} /> CSV</button>
+          </div>
+          <div className="p-3 overflow-x-auto">{renderTable()}</div>
+        </div>
       </div>
     </div>
   );
