@@ -1097,6 +1097,32 @@ export default function App() {
     }
   }, []);
 
+  // ── Silent token refresh ──────────────────────────────────────────
+  // Re-issue the 7-day session token every few hours while a tab stays open
+  // so a long-lived session never silently lapses. A failed refresh is
+  // harmless: the next real API 401 routes through the global interceptor's
+  // clean re-login (and /api/auth/refresh is excluded from that bounce, so a
+  // stale-token refresh just no-ops rather than forcing a logout).
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    const refresh = async () => {
+      try {
+        const res = await window.fetch('/api/auth/refresh', {
+          method: 'POST', headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const d = await res.json().catch(() => null);
+        if (alive && d && d.token) {
+          try { localStorage.setItem('token', d.token); } catch {}
+          setToken(d.token);
+        }
+      } catch { /* network blip — try again next interval */ }
+    };
+    const iv = setInterval(refresh, 6 * 60 * 60 * 1000); // every 6h while open
+    return () => { alive = false; clearInterval(iv); };
+  }, [token]);
+
   useEffect(() => {
     if (restaurantId && typeof restaurantId === 'string' && restaurantId !== 'null' && restaurantId !== 'undefined' && restaurantId !== '' && restaurantId !== '[object Object]') {
       fetch(`/api/restaurant/${restaurantId}`)
@@ -4843,11 +4869,12 @@ const CHART_COLORS = ['#6366f1','#ec4899','#f59e0b','#10b981','#3b82f6','#ef4444
 const PAYMENT_COLORS: Record<string, string> = { CASH:'#10b981', CARD:'#3b82f6', UPI:'#8b5cf6', ONLINE:'#f59e0b', Unknown:'#94a3b8', UNKNOWN:'#94a3b8' };
 
 function AnalyticsDashboard({
-  restaurantId, token, feedback, onDateRangeChange, restaurant,
+  restaurantId, token, feedback, onDateRangeChange, restaurant, hideHotelSection,
 }: {
   restaurantId: string; token: string; feedback: any[];
   onDateRangeChange: (from: string, to: string) => void;
   restaurant?: Restaurant | null;
+  hideHotelSection?: boolean;   // embedded in Restaurant Reports → F&B KPIs only
 }) {
   const [reports, setReports]         = useState<any>(null);
   const [loading, setLoading]         = useState(true);
@@ -4858,7 +4885,7 @@ function AnalyticsDashboard({
   });
   const [dateTo, setDateTo] = useState(() => new Date().toISOString().slice(0, 10));
   // Hotel analytics state (Phase 3)
-  const isHotelEnabled = !!restaurant && ((restaurant as any).property_type === 'HOTEL' || (restaurant as any).property_type === 'BOTH');
+  const isHotelEnabled = !hideHotelSection && !!restaurant && ((restaurant as any).property_type === 'HOTEL' || (restaurant as any).property_type === 'BOTH');
   const [hotelAnalytics, setHotelAnalytics] = useState<any>(null);
   useEffect(() => {
     if (!isHotelEnabled) return;
@@ -10958,10 +10985,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // shared MONITOR/REPORTS/INVOICES views branch on, AND keeps the
         // mode-switch safety-net effect from redirecting us (the new
         // activeTab always matches the mode we just set).
+        // Analytics & Reports was folded into the Hotel/Restaurant report tabs
+        // (BCG consolidation 11 Jun 2026), so the ops trio is now a duo.
         const opsTrio = (mode: 'RESTAURANT' | 'HOTEL'): NavTab[] => [
-          { id: 'MONITOR',  label: 'Command Centre',      mode },
-          { id: 'REPORTS',  label: 'Analytics & Reports', mode },
-          { id: 'INVOICES', label: 'Invoices',            mode },
+          { id: 'MONITOR',  label: 'Command Centre', mode },
+          { id: 'INVOICES', label: 'Invoices',       mode },
         ];
 
         const modules: NavModule[] = [
@@ -10973,7 +11001,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             visible: !bothEnabled,
             tabs: [
               { id: 'MONITOR',  label: 'Command Centre' },
-              { id: 'REPORTS',  label: 'Analytics & Reports' },
               { id: 'INVOICES', label: 'Invoices' },
             ],
           },
@@ -17729,6 +17756,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </p>
           </div>
           <RestaurantReports restaurantId={restaurantId} token={token} onOpenTab={(t) => setActiveTab(t as any)} />
+          {/* Full KPI dashboard folded in from the old Analytics tab (F&B only). */}
+          <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
+            <summary className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden">📊 Full KPI Dashboard — charts, trends &amp; cohorts <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand)</span></summary>
+            <div className="p-4">
+              <AnalyticsDashboard restaurantId={restaurantId} token={token} feedback={feedback} restaurant={restaurant} onDateRangeChange={() => {}} hideHotelSection />
+            </div>
+          </details>
         </div>
       ) : activeTab === 'FRONT_OFFICE_REPORTS' && isHotelEnabled ? (
         /* ════════════════ FRONT OFFICE REPORTS (top-level tab) ════════════════
@@ -18269,6 +18303,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               purchase) + petty-cash ledger — client request 11 Jun 2026.
               Self-contained component; owns its own state. */}
           <ManagementReports restaurantId={restaurantId} token={token} audience={reportAudience} onOpenTab={(t) => setActiveTab(t as any)} />
+          {/* Full hotel KPI dashboard folded in from the old Analytics tab. */}
+          <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
+            <summary className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden">📊 Full Hotel KPI Dashboard — occupancy, ADR, RevPAR &amp; ancillary <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand)</span></summary>
+            <div className="p-4">
+              <HotelAnalyticsDashboard restaurantId={restaurantId} token={token!} />
+            </div>
+          </details>
         </div>
       ) : activeTab === 'CHANNEL_MANAGER' && isHotelEnabled ? (
         /* ════════════════ CHANNEL MANAGER (top-level tab) ════════════════
@@ -32742,7 +32783,6 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
             <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Full dashboards</p>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {[
-                { tab: 'REPORTS', label: 'Analytics & Reports', desc: 'Sales, P&L, KPIs, trends →' },
                 { tab: 'CHANNEL_MANAGER', label: 'OTA 360° / Receivables', desc: 'Revenue by source, aging, outstanding →' },
                 { tab: 'INVOICES', label: 'Invoices', desc: 'All invoices + payment status →' },
               ].map(l => (
@@ -32952,9 +32992,8 @@ function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: s
         {audience === 'MGMT' && (
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Full dashboards</p>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {[
-                { tab: 'REPORTS', label: 'Analytics & Reports', desc: 'KPIs, charts, cohorts →' },
                 { tab: 'INVENTORY', label: 'Inventory Insights', desc: 'COGS, margin, variance →' },
                 { tab: 'DELIVERY', label: 'Delivery P&L', desc: 'Channel profitability →' },
                 { tab: 'INVOICES', label: 'Invoices', desc: 'All invoices →' },

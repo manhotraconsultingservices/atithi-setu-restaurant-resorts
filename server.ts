@@ -5433,6 +5433,26 @@ async function startServer() {
     }
   });
 
+  // POST — silent token refresh. Re-issues a fresh 7-day token with the same
+  // claims so an always-open SPA session never silently expires. authenticate()
+  // requires the CURRENT token to still be valid; temp/setup tokens (which
+  // carry a `purpose` claim) cannot be upgraded to a full session token.
+  app.post("/api/auth/refresh", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const u: any = req.user || {};
+      if (u.purpose) return res.status(400).json({ error: 'Temporary tokens cannot be refreshed' });
+      const claims: any = {};
+      for (const k of ['id', 'restaurantId', 'role', 'email', 'userName', 'phone']) {
+        if (u[k] !== undefined && u[k] !== null) claims[k] = u[k];
+      }
+      const token = jwt.sign(claims, JWT_SECRET, { expiresIn: '7d' });
+      try { _setJwtCookie(res, token); } catch {}
+      res.json({ token });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Token refresh failed' });
+    }
+  });
+
   // POST — switch the JWT to a different restaurant the user can access
   app.post("/api/auth/switch-restaurant", authenticate, async (req: AuthRequest, res: Response) => {
     try {
