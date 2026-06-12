@@ -26995,6 +26995,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 );
               })()}
             </div>
+            {/* Payment / advance ledger — every advance the guest paid, with
+                date + time (IST) and method. Multiple payments → multiple rows. */}
+            {Array.isArray(viewFolio.payments) && viewFolio.payments.length > 0 && (
+              <div className="mt-4 bg-[#faf7f2] rounded-2xl p-4">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Payments received ({viewFolio.payments.length})</p>
+                <table className="w-full text-xs">
+                  <thead className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                    <tr><th className="text-left py-1">When (IST)</th><th className="text-left py-1">Type</th><th className="text-left py-1">Method</th><th className="text-right py-1">Amount</th></tr>
+                  </thead>
+                  <tbody>
+                    {viewFolio.payments.map((p: any) => (
+                      <tr key={p.id} className="border-t border-[#cc5a16]/10">
+                        <td className="py-1.5 whitespace-nowrap">{p.recorded_at ? new Date(p.recorded_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '—'}</td>
+                        <td className="py-1.5">
+                          <span className={cn('px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase',
+                            p.payment_type === 'REFUND' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700')}>
+                            {p.payment_type === 'ADVANCE' ? 'Advance' : (p.payment_type || 'Payment')}
+                          </span>
+                        </td>
+                        <td className="py-1.5 text-[#6b5d52]">{(p.payment_method || '—').replace(/_/g, ' ')}{p.reference_number ? ` · ${p.reference_number}` : ''}</td>
+                        <td className={cn('py-1.5 text-right font-mono font-semibold', p.payment_type === 'REFUND' ? 'text-rose-700' : 'text-emerald-700')}>
+                          {p.payment_type === 'REFUND' ? '+' : '−'}₹{Number(p.amount || 0).toLocaleString('en-IN')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
             <div className="mt-5 space-y-2">
               {/* Row 1 — Close / Print / Download */}
               <div className="flex gap-2 flex-wrap">

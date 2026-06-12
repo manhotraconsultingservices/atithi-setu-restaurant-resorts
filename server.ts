@@ -21200,7 +21200,7 @@ ${data.tenant.name}`;
         notes,
       });
       const updatedFolio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folioId]);
-      const payments: any[] = await tenantDb.query("SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0 ORDER BY created_at", [folioId]);
+      const payments: any[] = await tenantDb.query("SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0 ORDER BY recorded_at", [folioId]);
       const totalPaid = payments.filter((p: any) => p.payment_type !== 'REFUND').reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
       res.json({ ok: true, folio_id: folioId, total_advance_paid: totalPaid, folio: updatedFolio });
     } catch (err: any) {
@@ -26851,13 +26851,20 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const status = (req.query.status as string) || null;
+      // CRITICAL: honour the booking_id filter. The checkout / advance views
+      // call /folios?booking_id=X then pick the open folio — if this param is
+      // ignored the query returns EVERY folio and the caller grabs the most
+      // recent open one (another guest's), so one guest's advance / outstanding
+      // showed up on a different guest at checkout. Scope it to the booking.
+      const bookingId = (req.query.booking_id as string) || null;
       let sql = `SELECT f.*, b.guest_name, b.check_in_date, b.check_out_date, r.name AS room_name
                  FROM folios f
                  LEFT JOIN room_bookings b ON b.id = f.booking_id
                  LEFT JOIN rooms r ON r.id = f.room_id
                  WHERE 1 = 1`;
       const params: any[] = [];
-      if (status) { sql += ` AND f.status = ?`; params.push(status); }
+      if (status)    { sql += ` AND f.status = ?`;     params.push(status); }
+      if (bookingId) { sql += ` AND f.booking_id = ?`; params.push(bookingId); }
       sql += ` ORDER BY f.created_at DESC`;
       res.json(await tenantDb.query(sql, params));
     } catch (err) {
