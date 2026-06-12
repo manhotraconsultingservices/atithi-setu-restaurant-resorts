@@ -7480,13 +7480,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     extra_children_no_mattress?: number;
   }): {
     per_night: Array<{ date: string; base_rate: number; extras: number; season_id: string | null; source: string }>;
+    extra_lines: Array<{ type: string; label: string; count: number; total: number }>;
     base_total: number;
     extras_total: number;
     total: number;
     matrix_used: boolean;
   } | null => {
     if (tariffData.tariff_model !== 'MATRIX') return null;
-    if (!opts.meal_plan_id) return null;
+    // No meal-plan guard: still preview the per-night BASE rate so staff see
+    // pricing even with "None" selected. Extra-person charges resolve only
+    // when a plan is chosen (they're keyed by meal-plan), but the extra-person
+    // COUNTS are always itemised in extra_lines below.
     const room = hotelRooms.find(r => r.id === opts.room_id);
     if (!room?.type_id) return null;
     const ci = String(opts.check_in_date || '').slice(0, 10);
@@ -7526,6 +7530,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       CHILD_NO_MATTRESS:   Math.max(0, Number(opts.extra_children_no_mattress || 0)),
     };
     const perNight: Array<{ date: string; base_rate: number; extras: number; season_id: string | null; source: string }> = [];
+    const extraTotalsByType: Record<string, number> = {};
     let anyMatrix = false;
     for (const d of dates) {
       const seasonId = seasonForDate(d);
@@ -7566,7 +7571,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               r.person_type === pt && r.season_id === seasonId && r.meal_plan_id === opts.meal_plan_id
             );
             if (row) {
-              extrasForNight += Number(row.charge || 0) * count;
+              const add = Number(row.charge || 0) * count;
+              extrasForNight += add;
+              extraTotalsByType[pt] = (extraTotalsByType[pt] || 0) + add;
               anyMatrix = true;
             }
           }
@@ -7576,8 +7583,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
     const baseTotal   = Math.round(perNight.reduce((s, n) => s + n.base_rate, 0) * 100) / 100;
     const extrasTotal = Math.round(perNight.reduce((s, n) => s + n.extras,    0) * 100) / 100;
+    // Itemise the extra persons so the live preview can show each added
+    // adult / child line (count + ₹), even when the per-person charge is
+    // ₹0 because it isn't configured yet for this season / meal-plan.
+    const PT_LABELS: Record<string, string> = {
+      ADULT: 'Extra adult',
+      CHILD_WITH_MATTRESS: 'Extra child (mattress)',
+      CHILD_NO_MATTRESS: 'Extra child (no mattress)',
+    };
+    const extra_lines = (Object.entries(extras) as [string, number][])
+      .filter(([, c]) => c > 0)
+      .map(([pt, c]) => ({ type: pt, label: PT_LABELS[pt] || pt, count: c, total: Math.round((extraTotalsByType[pt] || 0) * 100) / 100 }));
     return {
       per_night: perNight,
+      extra_lines,
       base_total: baseTotal,
       extras_total: extrasTotal,
       total: Math.round((baseTotal + extrasTotal) * 100) / 100,
@@ -24529,7 +24548,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           and a click-to-pick action; unavailable rooms show "Available
           from DD-MM" with the blocker reason. */}
       {findRoomsOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+        // z-[60] — sits ABOVE the New/Edit Booking modal (z-50). Without this
+        // the find-rooms overlay rendered behind the booking modal (it's later
+        // in the DOM) so staff couldn't see it ("opens below the screen").
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
           <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b border-[#cc5a16]/10 shrink-0">
               <div>
@@ -25907,6 +25929,135 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   Determines GST split on invoice: same state as hotel → CGST+SGST, different state → IGST
                 </p>
               </div>
+              {/* Booking type — overnight vs day-use. Default OVERNIGHT
+                  for existing bookings so nothing changes for legacy rows.
+                  Moved ABOVE the room section (client request) so dates are
+                  chosen first and the room availability reflects them. */}
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Booking Type *</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { id: 'OVERNIGHT', label: 'Overnight', sub: 'Check-out > check-in' },
+                    { id: 'DAY_USE',   label: 'Day-Use',   sub: 'Same-day in/out' },
+                  ] as const).map(opt => {
+                    const active = (editingBooking.booking_type || 'OVERNIGHT') === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          // When switching to DAY_USE, snap check_out to
+                          // match check_in so the form validates. Reverse
+                          // for OVERNIGHT — bump check_out one day ahead
+                          // if it's the same as check_in.
+                          const next: any = { ...editingBooking, booking_type: opt.id };
+                          if (opt.id === 'DAY_USE' && next.check_in_date) {
+                            next.check_out_date = next.check_in_date;
+                          }
+                          if (opt.id === 'OVERNIGHT' && next.check_in_date && next.check_out_date && next.check_out_date <= next.check_in_date) {
+                            const d = new Date(next.check_in_date);
+                            d.setDate(d.getDate() + 1);
+                            next.check_out_date = d.toISOString().slice(0, 10);
+                          }
+                          setEditingBooking(next);
+                        }}
+                        className={cn(
+                          'p-3 rounded-2xl border-2 text-left transition-all',
+                          active ? 'border-[#cc5a16] bg-[#cc5a16]/5' : 'border-[#cc5a16]/10 bg-[#faf7f2] hover:border-[#cc5a16]/30'
+                        )}
+                      >
+                        <p className={cn('text-sm font-bold', active ? 'text-[#1a1208]' : 'text-[#3d3128]')}>{opt.label}</p>
+                        <p className="text-[10px] text-[#9c8e85] mt-0.5">{opt.sub}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-[#9c8e85] mt-1">
+                  Day-use bookings are billed as 1 unit at the rate below (set a discounted day rate manually if applicable).
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in *</label>
+                  <input
+                    required
+                    type="date"
+                    // Bug 3 — block past dates at the input level. Server
+                    // enforces the same rule in validateBookingRequest()
+                    // for direct API callers. We allow today, not just
+                    // tomorrow, since same-day check-ins are common.
+                    min={new Date().toISOString().slice(0, 10)}
+                    value={(editingBooking.check_in_date || '').slice(0,10)}
+                    onChange={e => {
+                      const v = e.target.value;
+                      const next: any = { ...editingBooking, check_in_date: v };
+                      const bt = editingBooking.booking_type || 'OVERNIGHT';
+                      const minNights = Math.max(1, Number(hotelSettings.min_stay_nights || 1));
+                      // Auto-sync sibling date so the form stays valid:
+                      //   • DAY_USE  → check_out = check_in
+                      //   • OVERNIGHT → bump check_out to at least min-stay nights ahead
+                      if (bt === 'DAY_USE') {
+                        next.check_out_date = v;
+                      } else {
+                        const minOut = (() => {
+                          const d = new Date(v); d.setDate(d.getDate() + minNights);
+                          return d.toISOString().slice(0, 10);
+                        })();
+                        if (!next.check_out_date || next.check_out_date < minOut) {
+                          next.check_out_date = minOut;
+                        }
+                      }
+                      setEditingBooking(next);
+                    }}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out *</label>
+                  <input
+                    required
+                    type="date"
+                    disabled={(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE'}
+                    // HTML5 min — overnight: day AFTER check-in + min-stay
+                    // nights (per tenant config). Day-use: same day.
+                    min={(() => {
+                      const ci = (editingBooking.check_in_date || '').slice(0, 10);
+                      if (!ci) return undefined;
+                      if ((editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE') return ci;
+                      const minNights = Math.max(1, Number(hotelSettings.min_stay_nights || 1));
+                      const d = new Date(ci); d.setDate(d.getDate() + minNights);
+                      return d.toISOString().slice(0, 10);
+                    })()}
+                    // HTML5 max — overnight + max-stay nights (per tenant config).
+                    max={(() => {
+                      const ci = (editingBooking.check_in_date || '').slice(0, 10);
+                      if (!ci) return undefined;
+                      if ((editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE') return ci;
+                      const maxNights = hotelSettings.max_stay_nights == null
+                        ? null : Math.max(1, Number(hotelSettings.max_stay_nights || 0));
+                      if (maxNights == null) return undefined;
+                      const d = new Date(ci); d.setDate(d.getDate() + maxNights);
+                      return d.toISOString().slice(0, 10);
+                    })()}
+                    value={(editingBooking.check_out_date || '').slice(0,10)}
+                    onChange={e => setEditingBooking({...editingBooking, check_out_date: e.target.value})}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
+                  />
+                  {(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE' ? (
+                    <p className="text-[10px] text-[#9c8e85] mt-1">Locked to check-in date for day-use bookings.</p>
+                  ) : (
+                    (hotelSettings.min_stay_nights > 1 || hotelSettings.max_stay_nights != null) && (
+                      <p className="text-[10px] text-[#9c8e85] mt-1">
+                        {hotelSettings.min_stay_nights > 1 && <>Min {hotelSettings.min_stay_nights} night{hotelSettings.min_stay_nights > 1 ? 's' : ''}</>}
+                        {hotelSettings.min_stay_nights > 1 && hotelSettings.max_stay_nights != null && ' · '}
+                        {hotelSettings.max_stay_nights != null && <>Max {hotelSettings.max_stay_nights} night{hotelSettings.max_stay_nights > 1 ? 's' : ''}</>}
+                      </p>
+                    )
+                  )}
+                </div>
+              </div>
+
               <div>
                 <div className="flex items-baseline justify-between mb-1">
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Room *</label>
@@ -26233,6 +26384,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <div className="text-[#9c8e85] italic">… +{preview.per_night.length - 3} more night{preview.per_night.length - 3 === 1 ? '' : 's'}</div>
                           )}
                         </div>
+                        {/* Itemised extra persons — so added adult / child (mat / no-mat)
+                            always show in the preview, with their ₹ when priced. */}
+                        {preview.extra_lines.length > 0 && (
+                          <div className="text-[10px] text-[#3d3128] space-y-0.5 pt-1 border-t border-[#cc5a16]/10">
+                            <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Extra persons (per stay)</p>
+                            {preview.extra_lines.map((x) => (
+                              <div key={x.type} className="flex justify-between">
+                                <span>{x.count} × {x.label}</span>
+                                <span className="font-mono">{x.total > 0 ? `+ ₹${x.total.toLocaleString('en-IN')}` : '—'}</span>
+                              </div>
+                            ))}
+                            {preview.extra_lines.some(x => x.total === 0) && (
+                              <p className="text-[9px] italic text-amber-700">₹0 = no extra-person charge set for this season / meal-plan (Settings → Tariff). Pick a meal plan to price extras.</p>
+                            )}
+                          </div>
+                        )}
                         <div className="grid grid-cols-3 gap-2 text-[10px] pt-2 border-t border-[#cc5a16]/10">
                           <div>
                             <p className="text-[#9c8e85] uppercase tracking-widest">Base</p>
@@ -26259,132 +26426,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               )}
 
-              {/* Booking type — overnight vs day-use. Default OVERNIGHT
-                  for existing bookings so nothing changes for legacy rows. */}
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Booking Type *</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {([
-                    { id: 'OVERNIGHT', label: 'Overnight', sub: 'Check-out > check-in' },
-                    { id: 'DAY_USE',   label: 'Day-Use',   sub: 'Same-day in/out' },
-                  ] as const).map(opt => {
-                    const active = (editingBooking.booking_type || 'OVERNIGHT') === opt.id;
-                    return (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => {
-                          // When switching to DAY_USE, snap check_out to
-                          // match check_in so the form validates. Reverse
-                          // for OVERNIGHT — bump check_out one day ahead
-                          // if it's the same as check_in.
-                          const next: any = { ...editingBooking, booking_type: opt.id };
-                          if (opt.id === 'DAY_USE' && next.check_in_date) {
-                            next.check_out_date = next.check_in_date;
-                          }
-                          if (opt.id === 'OVERNIGHT' && next.check_in_date && next.check_out_date && next.check_out_date <= next.check_in_date) {
-                            const d = new Date(next.check_in_date);
-                            d.setDate(d.getDate() + 1);
-                            next.check_out_date = d.toISOString().slice(0, 10);
-                          }
-                          setEditingBooking(next);
-                        }}
-                        className={cn(
-                          'p-3 rounded-2xl border-2 text-left transition-all',
-                          active ? 'border-[#cc5a16] bg-[#cc5a16]/5' : 'border-[#cc5a16]/10 bg-[#faf7f2] hover:border-[#cc5a16]/30'
-                        )}
-                      >
-                        <p className={cn('text-sm font-bold', active ? 'text-[#1a1208]' : 'text-[#3d3128]')}>{opt.label}</p>
-                        <p className="text-[10px] text-[#9c8e85] mt-0.5">{opt.sub}</p>
-                      </button>
-                    );
-                  })}
-                </div>
-                <p className="text-[10px] text-[#9c8e85] mt-1">
-                  Day-use bookings are billed as 1 unit at the rate below (set a discounted day rate manually if applicable).
-                </p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in *</label>
-                  <input
-                    required
-                    type="date"
-                    // Bug 3 — block past dates at the input level. Server
-                    // enforces the same rule in validateBookingRequest()
-                    // for direct API callers. We allow today, not just
-                    // tomorrow, since same-day check-ins are common.
-                    min={new Date().toISOString().slice(0, 10)}
-                    value={(editingBooking.check_in_date || '').slice(0,10)}
-                    onChange={e => {
-                      const v = e.target.value;
-                      const next: any = { ...editingBooking, check_in_date: v };
-                      const bt = editingBooking.booking_type || 'OVERNIGHT';
-                      const minNights = Math.max(1, Number(hotelSettings.min_stay_nights || 1));
-                      // Auto-sync sibling date so the form stays valid:
-                      //   • DAY_USE  → check_out = check_in
-                      //   • OVERNIGHT → bump check_out to at least min-stay nights ahead
-                      if (bt === 'DAY_USE') {
-                        next.check_out_date = v;
-                      } else {
-                        const minOut = (() => {
-                          const d = new Date(v); d.setDate(d.getDate() + minNights);
-                          return d.toISOString().slice(0, 10);
-                        })();
-                        if (!next.check_out_date || next.check_out_date < minOut) {
-                          next.check_out_date = minOut;
-                        }
-                      }
-                      setEditingBooking(next);
-                    }}
-                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-out *</label>
-                  <input
-                    required
-                    type="date"
-                    disabled={(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE'}
-                    // HTML5 min — overnight: day AFTER check-in + min-stay
-                    // nights (per tenant config). Day-use: same day.
-                    min={(() => {
-                      const ci = (editingBooking.check_in_date || '').slice(0, 10);
-                      if (!ci) return undefined;
-                      if ((editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE') return ci;
-                      const minNights = Math.max(1, Number(hotelSettings.min_stay_nights || 1));
-                      const d = new Date(ci); d.setDate(d.getDate() + minNights);
-                      return d.toISOString().slice(0, 10);
-                    })()}
-                    // HTML5 max — overnight + max-stay nights (per tenant config).
-                    max={(() => {
-                      const ci = (editingBooking.check_in_date || '').slice(0, 10);
-                      if (!ci) return undefined;
-                      if ((editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE') return ci;
-                      const maxNights = hotelSettings.max_stay_nights == null
-                        ? null : Math.max(1, Number(hotelSettings.max_stay_nights || 0));
-                      if (maxNights == null) return undefined;
-                      const d = new Date(ci); d.setDate(d.getDate() + maxNights);
-                      return d.toISOString().slice(0, 10);
-                    })()}
-                    value={(editingBooking.check_out_date || '').slice(0,10)}
-                    onChange={e => setEditingBooking({...editingBooking, check_out_date: e.target.value})}
-                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
-                  />
-                  {(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE' ? (
-                    <p className="text-[10px] text-[#9c8e85] mt-1">Locked to check-in date for day-use bookings.</p>
-                  ) : (
-                    (hotelSettings.min_stay_nights > 1 || hotelSettings.max_stay_nights != null) && (
-                      <p className="text-[10px] text-[#9c8e85] mt-1">
-                        {hotelSettings.min_stay_nights > 1 && <>Min {hotelSettings.min_stay_nights} night{hotelSettings.min_stay_nights > 1 ? 's' : ''}</>}
-                        {hotelSettings.min_stay_nights > 1 && hotelSettings.max_stay_nights != null && ' · '}
-                        {hotelSettings.max_stay_nights != null && <>Max {hotelSettings.max_stay_nights} night{hotelSettings.max_stay_nights > 1 ? 's' : ''}</>}
-                      </p>
-                    )
-                  )}
-                </div>
-              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
