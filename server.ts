@@ -6729,6 +6729,11 @@ async function startServer() {
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_id TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS posted_to_folio_at TIMESTAMP;
+        -- RS-FIX: flags a CHARGE_TO_ROOM order whose folio post couldn't be
+        -- resolved at order time (e.g. room not yet linked to a checked-in
+        -- booking). The order STILL goes to the kitchen; the front desk
+        -- reconciles the charge later (Folios → Add F&B charge).
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_post_status TEXT;
         CREATE INDEX IF NOT EXISTS idx_orders_room ON orders (room_id);
         CREATE INDEX IF NOT EXISTS idx_orders_folio ON orders (folio_id);
         CREATE TABLE IF NOT EXISTS table_sessions (
@@ -19957,6 +19962,14 @@ ${data.tenant.name}`;
       if (!room_id) return res.status(400).json({ error: "room_id is required" });
       const tenantDb = await getTenantDb(req.params.id);
 
+      // Resolve the room's CURRENT checked-in guest so the QR app already
+      // KNOWS the name (it must NOT ask the guest to type it again) and so
+      // room-service orders have a booking to charge the folio against.
+      const activeBooking: any = await tenantDb.get(
+        "SELECT id, guest_name, guest_phone FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' ORDER BY actual_checkin_at DESC LIMIT 1",
+        [room_id]
+      );
+
       // Try to resume by token
       if (session_token) {
         const existing: any = await tenantDb.get(
@@ -19964,28 +19977,31 @@ ${data.tenant.name}`;
           [session_token]
         );
         if (existing) {
+          // Backfill the booking + guest from the live check-in. Handles a
+          // session created BEFORE the guest checked in (cached token): once
+          // they're checked in, the QR app picks up the name + folio link
+          // without the guest re-entering anything.
+          const resolvedBooking = existing.booking_id || activeBooking?.id || null;
+          const resolvedName  = guest_name  || existing.guest_name  || activeBooking?.guest_name  || null;
+          const resolvedPhone = guest_phone || existing.guest_phone || activeBooking?.guest_phone || null;
           await tenantDb.run(
-            "UPDATE room_sessions SET last_activity_at = CURRENT_TIMESTAMP, guest_name = COALESCE(?, guest_name), guest_phone = COALESCE(?, guest_phone) WHERE id = ?",
-            [guest_name || null, guest_phone || null, existing.id]
+            "UPDATE room_sessions SET last_activity_at = CURRENT_TIMESTAMP, booking_id = ?, guest_name = ?, guest_phone = ? WHERE id = ?",
+            [resolvedBooking, resolvedName, resolvedPhone, existing.id]
           );
-          return res.json({ ...existing, guest_name: guest_name || existing.guest_name, guest_phone: guest_phone || existing.guest_phone });
+          return res.json({ ...existing, booking_id: resolvedBooking, guest_name: resolvedName, guest_phone: resolvedPhone });
         }
       }
 
-      // Create new session
+      // Create new session — seed the guest name/phone from the checked-in booking.
       const sessionId = `RSES-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const newToken = `rt_${Math.random().toString(36).slice(2, 15)}${Date.now().toString(36)}`;
-
-      // Try to link to active booking if any
-      const activeBooking: any = await tenantDb.get(
-        "SELECT id FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' ORDER BY actual_checkin_at DESC LIMIT 1",
-        [room_id]
-      );
+      const seedName  = guest_name  || activeBooking?.guest_name  || null;
+      const seedPhone = guest_phone || activeBooking?.guest_phone || null;
 
       await tenantDb.run(
         `INSERT INTO room_sessions (id, room_id, booking_id, session_token, status, guest_name, guest_phone)
          VALUES (?, ?, ?, ?, 'active', ?, ?)`,
-        [sessionId, room_id, activeBooking?.id || null, newToken, guest_name || null, guest_phone || null]
+        [sessionId, room_id, activeBooking?.id || null, newToken, seedName, seedPhone]
       );
       const row = await tenantDb.get("SELECT * FROM room_sessions WHERE id = ?", [sessionId]);
       res.status(201).json(row);
@@ -29932,16 +29948,23 @@ ${data.tenant.name}`;
           folioOk = false;
         }
         if (!folioOk) {
-          // Compensating rollback — undo the orders INSERT.
-          await db.run("DELETE FROM orders WHERE id = ?", [id]).catch((err: any) => {
-            console.error(`[orders-post] CRITICAL: rollback DELETE failed for ${id}:`, err);
-          });
-          console.warn(`[orders-post] T1-L3 rolled back order ${id} because folio post failed (${folioResult?.reason})`);
-          return res.status(409).json({
-            success: false,
-            error: "Could not charge to room. No active folio for this room/booking, or the folio is locked.",
-            reason: folioResult?.reason || 'unknown',
-          });
+          // RS-FIX (room-service QR): do NOT discard the order. A guest who
+          // ordered food MUST get it — the kitchen always receives the order
+          // (it stays CONFIRMED / kitchen_status='queued' and shows on the
+          // KDS). We just couldn't auto-attach the charge to a room folio
+          // (e.g. the room isn't linked to a checked-in booking yet). Flag it
+          // so the front desk reconciles the charge later (Folios → Add F&B
+          // charge); the guest is told the kitchen has it and the desk will
+          // add it to their bill.
+          //
+          // This intentionally supersedes the earlier T1-L3 hard-rollback,
+          // which deleted the order entirely — leaving it neither billed NOR
+          // cooked (the guest saw "order received" but nothing happened). The
+          // flag preserves the revenue trail so the charge is never silently
+          // lost; it just moves reconciliation to staff instead of dropping
+          // the order.
+          await db.run("UPDATE orders SET folio_post_status = 'PENDING_MANUAL' WHERE id = ?", [id]).catch(() => {});
+          console.warn(`[orders-post] CHARGE_TO_ROOM order ${id} kept + queued to kitchen; folio post failed (${folioResult?.reason}) — flagged PENDING_MANUAL for front-desk charge.`);
         }
       }
 

@@ -35443,7 +35443,7 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
   const [cart, setCart] = useState<Record<string, number>>({}); // itemId → quantity
   const [foodCategory, setFoodCategory] = useState<string>('ALL');
   const [placingFoodOrder, setPlacingFoodOrder] = useState(false);
-  const [foodOrderConfirm, setFoodOrderConfirm] = useState<{ folioId?: string; reason?: string } | null>(null);
+  const [foodOrderConfirm, setFoodOrderConfirm] = useState<{ placed?: boolean; folioId?: string; reason?: string } | null>(null);
   // Bug 2 fix — the previous form rendered conditionally on `!guestName`
   // so the input element unmounted the moment the user typed their first
   // character, making it appear that the screen "auto-saved" after one
@@ -35574,13 +35574,17 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
       // The backend returns `room_service: { ok, folio_id, reason }` when
       // payment_method=CHARGE_TO_ROOM. Show a confirmation that matches.
       const rs = data?.room_service || {};
+      // placed=true → the order reached the kitchen (200 OK). folioId present
+      // → it was also charged to the room. placed && !folioId → kitchen has
+      // it but the charge needs front-desk reconciliation.
       setFoodOrderConfirm({
+        placed: true,
         folioId: rs.folio_id,
         reason: rs.ok ? undefined : (rs.reason || 'no-folio'),
       });
       setCart({});  // clear cart on success
     } catch (err: any) {
-      setFoodOrderConfirm({ reason: err?.message || 'Order failed' });
+      setFoodOrderConfirm({ placed: false, reason: err?.message || 'Order failed' });
     } finally {
       setPlacingFoodOrder(false);
     }
@@ -35875,34 +35879,47 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
             )}
 
             {/* Confirmation / error toast */}
-            {foodOrderConfirm && (
+            {foodOrderConfirm && (() => {
+              // Three states: charged (folio) → green; sent-to-kitchen-but-
+              // charge-pending → amber (still a success: the food is coming);
+              // genuine failure (order didn't place) → red.
+              const charged = !!foodOrderConfirm.folioId;
+              const kitchenOnly = !charged && foodOrderConfirm.placed;
+              const failed = !foodOrderConfirm.placed;
+              return (
               <div className={cn(
                 "fixed top-20 left-5 right-5 max-w-md mx-auto z-50 rounded-2xl p-4 shadow-2xl border-2",
-                foodOrderConfirm.folioId ? "bg-emerald-50 border-emerald-300 text-emerald-900" : "bg-rose-50 border-rose-300 text-rose-900"
+                charged ? "bg-emerald-50 border-emerald-300 text-emerald-900"
+                  : kitchenOnly ? "bg-amber-50 border-amber-300 text-amber-900"
+                  : "bg-rose-50 border-rose-300 text-rose-900"
               )}>
                 <div className="flex items-start gap-3">
-                  {foodOrderConfirm.folioId
+                  {charged
                     ? <CheckCircle2 size={20} className="text-emerald-700 mt-0.5 shrink-0" />
-                    : <AlertCircle size={20} className="text-rose-700 mt-0.5 shrink-0" />}
+                    : <AlertCircle size={20} className={cn("mt-0.5 shrink-0", kitchenOnly ? "text-amber-700" : "text-rose-700")} />}
                   <div className="flex-1 min-w-0">
-                    {foodOrderConfirm.folioId ? (
+                    {charged ? (
                       <>
-                        <p className="font-bold text-sm">Added to your room bill</p>
-                        <p className="text-xs mt-0.5">Your kitchen will start preparing shortly. View everything together at check-out.</p>
+                        <p className="font-bold text-sm">Added to your room bill ✓</p>
+                        <p className="text-xs mt-0.5">The kitchen has your order and will start preparing shortly. See everything together at check-out.</p>
+                      </>
+                    ) : kitchenOnly ? (
+                      <>
+                        <p className="font-bold text-sm">Order sent to the kitchen ✓</p>
+                        <p className="text-xs mt-0.5">Your food is being prepared. We couldn't add it to your room bill automatically{foodOrderConfirm.reason === 'no-open-folio-for-room-or-booking' ? " (this room isn't linked to a checked-in booking yet)" : ''} — the front desk will add it to your bill.</p>
                       </>
                     ) : (
                       <>
-                        <p className="font-bold text-sm">Order received but not yet on the folio</p>
-                        <p className="text-xs mt-0.5">{foodOrderConfirm.reason === 'no-open-folio-for-room-or-booking'
-                          ? "Please ask the front desk to link this room to a booking — they can settle the charge then."
-                          : (foodOrderConfirm.reason || 'Please ask the front desk.')}</p>
+                        <p className="font-bold text-sm">Order could not be placed</p>
+                        <p className="text-xs mt-0.5">{foodOrderConfirm.reason || 'Please try again or call the front desk.'}</p>
                       </>
                     )}
                   </div>
                   <button onClick={() => setFoodOrderConfirm(null)} className="text-current opacity-60 hover:opacity-100"><X size={16} /></button>
                 </div>
               </div>
-            )}
+              );
+            })()}
           </>
         )}
 
