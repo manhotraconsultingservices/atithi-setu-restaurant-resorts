@@ -10196,7 +10196,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const isNew = !data.id;
     if (isNew) await hotelApi('/bookings', { method: 'POST', body: JSON.stringify(data) });
     else await hotelApi(`/bookings/${data.id}`, { method: 'PATCH', body: JSON.stringify(data) });
-    await fetchHotelBookings();
+    // RES-FIX: re-fetch with the ACTIVE list filter, not a naked fetch. A
+    // bare fetchHotelBookings() returns the default future-ordered LIMIT-200
+    // list, which can push the just-edited booking off-screen (the staff
+    // then had to re-click "Today" to see it again). Preserving the current
+    // search / status / date-range filter keeps the row in view.
+    await fetchHotelBookings({
+      search: bookingHistoryFilter.search || undefined,
+      status: bookingHistoryFilter.status || undefined,
+      from:   bookingHistoryFilter.from   || undefined,
+      to:     bookingHistoryFilter.to     || undefined,
+    });
     markAvailabilityDirty();
   };
   const checkInBooking = async (
@@ -27062,6 +27072,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const b = advancePayTarget;
         const amtNum = Number(advanceDraft.amount || 0);
         const canSubmit = amtNum > 0 && advanceDraft.method;
+        // RES-FIX: show the full money picture — total, already-collected
+        // advances, and current outstanding — so staff aren't collecting blind.
+        const advTotal = Number(b.total_amount || 0);
+        const advPaidPrev = Number(b.advance_paid || 0);
+        const advOutstanding = Math.max(0, advTotal - advPaidPrev);
         const submit = async () => {
           if (!canSubmit) return;
           try {
@@ -27098,6 +27113,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
 
               <div className="space-y-3">
+                {/* Money summary — Total / Paid / Outstanding so far. */}
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="bg-[#faf7f2] rounded-xl p-2">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Total</p>
+                    <p className="text-sm font-bold text-[#1a1208]">₹{advTotal.toLocaleString('en-IN')}</p>
+                  </div>
+                  <div className="bg-emerald-50 rounded-xl p-2">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-800">Paid</p>
+                    <p className="text-sm font-bold text-emerald-700">₹{advPaidPrev.toLocaleString('en-IN')}</p>
+                  </div>
+                  <div className="bg-rose-50 rounded-xl p-2">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-rose-800">Outstanding</p>
+                    <p className="text-sm font-bold text-rose-700">₹{advOutstanding.toLocaleString('en-IN')}</p>
+                  </div>
+                </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Amount (₹) <span className="text-[#c13b3b]">*</span></label>
                   <input
@@ -27141,8 +27171,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       ✓ ₹{amtNum.toLocaleString('en-IN')} will be recorded as ADVANCE.
                     </p>
                     <p className="text-[10px] text-[#6b5d52] mt-0.5">
-                      Outstanding at checkout reduces by this amount.
-                      {Number(b.advance_paid || 0) > 0 && ` (₹${Number(b.advance_paid).toLocaleString('en-IN')} already collected)`}
+                      Outstanding after this payment: <strong>₹{Math.max(0, advOutstanding - amtNum).toLocaleString('en-IN')}</strong>
+                      {advPaidPrev > 0 && ` · ₹${advPaidPrev.toLocaleString('en-IN')} already collected`}
                     </p>
                   </div>
                 )}
@@ -31357,6 +31387,14 @@ const CheckInWizardModal: React.FC<{
       const ci = String(booking.check_in_date || '').slice(0, 10);
       const co = String(booking.check_out_date || '').slice(0, 10);
       const qs = new URLSearchParams({ start: ci, end: co, guests: String(draft.num_guests || 1) });
+      // Quote each candidate room with THIS booking's meal plan + extra
+      // persons so the picker shows the meal-plan-adjusted rate + stay total
+      // (not the bare base rate). The booking carries these fields.
+      if (booking.meal_plan_id) qs.set('meal_plan_id', booking.meal_plan_id);
+      if (booking.extra_adults) qs.set('extra_adults', String(booking.extra_adults));
+      if (booking.extra_children_with_mattress) qs.set('extra_children_with_mattress', String(booking.extra_children_with_mattress));
+      if (booking.extra_children_no_mattress) qs.set('extra_children_no_mattress', String(booking.extra_children_no_mattress));
+      if (booking.booking_type) qs.set('booking_type', booking.booking_type);
       const res = await fetch(`/api/restaurant/${restaurantId}/hotel/find-available-rooms?${qs.toString()}`,
         { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
@@ -31371,6 +31409,16 @@ const CheckInWizardModal: React.FC<{
     updateDraft({ room_id: r.id, room_rate: 0 });
     setRoomPickerOpen(false);
   };
+  // Money picture for the wizard — used by the room picker (new-room cost) and
+  // the advance-payment section (total / paid / outstanding). When a different
+  // room is picked we use its meal-plan-adjusted quote; otherwise the booking's
+  // stored total. advance_paid + total_amount come from the bookings-list row.
+  const pickedRoom = (availRooms || []).find((r: any) => r.id === draft.room_id);
+  const stayTotal = (draft.room_id !== booking.room_id && pickedRoom?.quoted_total != null)
+    ? Number(pickedRoom.quoted_total)
+    : Number(booking.total_amount || 0);
+  const advPaid = Number(booking.advance_paid || 0);
+  const outstanding = Math.max(0, stayTotal - advPaid);
 
   // Re-fetch document count whenever the embedded widget refreshes.
   useEffect(() => {
@@ -31601,7 +31649,7 @@ const CheckInWizardModal: React.FC<{
               </div>
               {draft.room_id !== booking.room_id && (
                 <p className="text-[10px] text-[#9c8e85] mt-1">
-                  The new room's tariff will apply on the folio.{' '}
+                  New room tariff{pickedRoom?.quoted_total != null ? <> — <strong className="text-[#cc5a16]">₹{Number(pickedRoom.quoted_total).toLocaleString('en-IN')}</strong> for the stay</> : ''} applies on the folio.{' '}
                   <button type="button" className="underline font-semibold" onClick={() => updateDraft({ room_id: booking.room_id, room_rate: booking.room_rate ?? 0 })}>Undo</button>
                 </p>
               )}
@@ -31630,9 +31678,13 @@ const CheckInWizardModal: React.FC<{
                               <p className="text-sm font-bold text-[#1a1208] truncate">{r.name || r.room_number}</p>
                               {isCurrent && <span className="text-[9px] font-bold text-[#9c8e85] uppercase tracking-wider shrink-0">Current</span>}
                             </div>
-                            <p className="text-[10px] text-[#6b5d52]">
-                              {r.type_name || 'Untagged'} · Sleeps {r.capacity}
-                              {r.base_rate ? ` · ₹${Number(r.base_rate).toLocaleString('en-IN')}/night` : ''}
+                            <p className="text-[10px] text-[#6b5d52]">{r.type_name || 'Untagged'} · Sleeps {r.capacity}</p>
+                            <p className="text-[11px] font-bold text-[#cc5a16] mt-0.5">
+                              {(() => {
+                                // Prefer the meal-plan-adjusted quote; fall back to base_rate.
+                                const perNight = r.quoted_per_night != null ? r.quoted_per_night : r.base_rate;
+                                return <>₹{Number(perNight || 0).toLocaleString('en-IN')}/night{r.quoted_total != null ? <span className="font-normal text-[#6b5d52]"> · ₹{Number(r.quoted_total).toLocaleString('en-IN')} total</span> : ''}</>;
+                              })()}
                             </p>
                           </button>
                         );
@@ -31758,6 +31810,21 @@ const CheckInWizardModal: React.FC<{
               <p className="text-[10px] text-[#6b5d52] mb-2">
                 Collect a partial / full payment now. Skip if none — guest pays everything at check-out.
               </p>
+              {/* Money picture so staff see all costs before collecting. */}
+              <div className="grid grid-cols-3 gap-2 mb-2 text-center">
+                <div className="bg-white rounded-xl p-2 border border-amber-200/70">
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Total</p>
+                  <p className="text-sm font-bold text-[#1a1208]">₹{stayTotal.toLocaleString('en-IN')}</p>
+                </div>
+                <div className="bg-white rounded-xl p-2 border border-amber-200/70">
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-800">Paid</p>
+                  <p className="text-sm font-bold text-emerald-700">₹{advPaid.toLocaleString('en-IN')}</p>
+                </div>
+                <div className="bg-white rounded-xl p-2 border border-amber-200/70">
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-rose-800">Outstanding</p>
+                  <p className="text-sm font-bold text-rose-700">₹{outstanding.toLocaleString('en-IN')}</p>
+                </div>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div>
                   <label className="block text-[10px] font-bold text-[#6b5d52] mb-1">Amount (₹)</label>

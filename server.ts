@@ -19583,6 +19583,33 @@ ${data.tenant.name}`;
         };
       });
 
+      // Check-in room picker (+ booking modal) — when meal_plan_id is passed,
+      // quote each AVAILABLE room's stay total + per-night rate through the
+      // SAME resolver the folio uses, so staff see the meal-plan-adjusted
+      // price (incl. extra persons), not the bare base_rate. Only runs when a
+      // meal plan is supplied, so the plain availability search stays cheap.
+      const quoteMealPlanId = (req.query.meal_plan_id as string) || null;
+      if (quoteMealPlanId) {
+        const qExtraAdults   = Math.max(0, Number(req.query.extra_adults || 0));
+        const qExtraChildMat = Math.max(0, Number(req.query.extra_children_with_mattress || 0));
+        const qExtraChildNo  = Math.max(0, Number(req.query.extra_children_no_mattress || 0));
+        const qBookingType   = String(req.query.booking_type || 'OVERNIGHT').toUpperCase();
+        await Promise.all(results.filter((r: any) => r.available).map(async (r: any) => {
+          try {
+            const bd = await computeBookingTotalWithExtras(req.params.id, r.id, start, end, {
+              mealPlanId: quoteMealPlanId,
+              extraAdults: qExtraAdults,
+              extraChildrenWithMattress: qExtraChildMat,
+              extraChildrenNoMattress: qExtraChildNo,
+              bookingType: qBookingType,
+            });
+            r.quoted_total = bd.total;
+            r.quoted_per_night = bd.per_night?.[0]?.base_rate ?? null;
+            r.quoted_nights = bd.per_night?.length ?? null;
+          } catch { /* leave base_rate as the fallback */ }
+        }));
+      }
+
       // Sprint C1 — category-level rollup so the modal can show
       // "Deluxe: 3 of 5 available · ₹2,500" cards above the per-room list.
       // Synthesised entirely from the per-room results so we don't query
