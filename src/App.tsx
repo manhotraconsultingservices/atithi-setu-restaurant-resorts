@@ -5385,7 +5385,7 @@ function AnalyticsDashboard({
                     customerName:   order.customer_name || undefined,
                     customerPhone:  order.customer_phone || undefined,
                     date:           dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
-                    time:           dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+                    time:           dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
                     rounds: [{
                       items: norm.items.map((it: any) => ({
                         name:  it.name,
@@ -7105,7 +7105,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         default:       return String(b.check_in_date || '');
       }
     };
+    const STATUS_RANK: Record<string, number> = { CHECKED_IN: 0, BOOKED: 1, CHECKED_OUT: 2, CANCELLED: 3 };
     return [...rows].sort((a, b) => {
+      // Default view (sorting by check-in) floats in-house (CHECKED_IN) then
+      // upcoming guests to the top so front desk always sees current guests
+      // first; an explicit column sort (guest/room/status/total) overrides this.
+      if (bookingSort.col === 'check_in') {
+        const ra = STATUS_RANK[a.status] ?? 9, rb = STATUS_RANK[b.status] ?? 9;
+        if (ra !== rb) return ra - rb;
+      }
       const av = keyOf(a), bv = keyOf(b);
       if (av < bv) return -1 * dir;
       if (av > bv) return 1 * dir;
@@ -8491,7 +8499,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       customerName:         order.customerName || order.customer_name || undefined,
       customerPhone:        order.customerPhone || order.customer_phone || undefined,
       date:                 dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
-      time:                 dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+      time:                 dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
       rounds:               [{ items: items.map(it => ({ name: it.name || it.item_name || '', qty: Number(it.quantity || 1), price: Number(it.price || 0) })) }],
       subtotal:             afterDiscount,
       discountAmount:       discount > 0 ? discount : undefined,
@@ -8862,7 +8870,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const buildInvoiceHTML = (inv: any, tpl: typeof invoiceTemplate): string => {
     const dt = new Date(inv.createdAt || inv.created_at || Date.now());
     const dateStr = dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-    const timeStr = dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    const timeStr = dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
     const disc    = Number(inv.discount_amount || 0);
     const svcPct  = Number(inv.service_charge_percent || 0);
     const gstPct  = Number(inv.gst_percent || 0);
@@ -9567,7 +9575,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const tableData = liveTables.find(lt => lt.name === String(o.tableNumber) || lt.name === o.table_name);
     const waiterName = tableData?.assigned_waiter_name || '';
     const dt = new Date(o.createdAt || o.created_at);
-    const timeStr = dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    const timeStr = dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
     const html = buildKitchenSlipHTML({
       orderId:      String(o.id),
       tableNumber:  o.tableNumber || o.table_number,
@@ -13622,7 +13630,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <tr><td colSpan={7} className="px-4 py-8 text-center text-[#9c8e85]">No movements match the filters.</td></tr>
                         ) : auditLog.map(m => (
                           <tr key={m.id} className="border-b border-[#cc5a16]/5">
-                            <td className="px-4 py-2 text-xs whitespace-nowrap">{new Date(m.recorded_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                            <td className="px-4 py-2 text-xs whitespace-nowrap">{new Date(m.recorded_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' })}</td>
                             <td className="px-4 py-2 font-semibold">{m.ingredient_name || m.ingredient_id}</td>
                             <td className="px-4 py-2">
                               <span className={cn(
@@ -14354,7 +14362,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               ) : '—'}
                             </td>
                             <td className="px-4 py-2 text-xs text-[#6b5d52] whitespace-nowrap">
-                              {new Date(o.created_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' })}
+                              {new Date(o.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' })}
                             </td>
                           </tr>
                         );
@@ -26948,6 +26956,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="flex justify-between"><span className="text-[#6b5d52]">GST</span><span className="font-mono">₹{Number(viewFolio.gst_amount).toLocaleString('en-IN')}</span></div>
               {viewFolio.discount > 0 && <div className="flex justify-between text-rose-600"><span>Discount</span><span className="font-mono">−₹{Number(viewFolio.discount).toLocaleString('en-IN')}</span></div>}
               <div className="flex justify-between text-lg font-bold pt-2 border-t border-[#cc5a16]/10 text-[#1a1208]"><span>Grand Total</span><span className="font-mono text-[#cc5a16]">₹{Number(viewFolio.grand_total).toLocaleString('en-IN')}</span></div>
+              {/* Advance / paid (DEDUCTED) + outstanding, so the folio shows the full money picture. */}
+              {Number(viewFolio.amount_paid || 0) > 0 && (
+                <div className="flex justify-between text-emerald-700"><span>Advance / Paid</span><span className="font-mono">−₹{Number(viewFolio.amount_paid).toLocaleString('en-IN')}</span></div>
+              )}
+              {Number(viewFolio.amount_refunded || 0) > 0 && (
+                <div className="flex justify-between text-[#6b5d52]"><span>Refunded</span><span className="font-mono">+₹{Number(viewFolio.amount_refunded).toLocaleString('en-IN')}</span></div>
+              )}
+              {(() => {
+                const out = Number(viewFolio.outstanding != null ? viewFolio.outstanding : viewFolio.grand_total);
+                const cls = out > 0.01 ? 'text-rose-700' : 'text-emerald-700';
+                return (
+                  <div className="flex justify-between text-base font-bold pt-2 border-t border-[#cc5a16]/10">
+                    <span className={cls}>Outstanding</span>
+                    <span className={cn('font-mono', cls)}>₹{out.toLocaleString('en-IN')}</span>
+                  </div>
+                );
+              })()}
             </div>
             <div className="mt-5 space-y-2">
               {/* Row 1 — Close / Print / Download */}
@@ -30120,7 +30145,7 @@ const AvailabilityDashboard: React.FC<{
           <div className="flex items-center gap-2">
             {lastRefresh && (
               <span className="text-[10px] text-[#9c8e85]">
-                Updated {lastRefresh.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                Updated {lastRefresh.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
               </span>
             )}
             <button
@@ -30519,7 +30544,7 @@ const AvailabilityCalendar: React.FC<{
           </button>
           {lastRefresh && (
             <span className="text-[10px] text-[#9c8e85] whitespace-nowrap">
-              Updated {lastRefresh.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              Updated {lastRefresh.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
             </span>
           )}
         </div>
@@ -33779,7 +33804,7 @@ function InventoryInsightsReport({ restaurantId, token }: { restaurantId: string
                           <tr><td colSpan={7} className="px-4 py-8 text-center text-[#9c8e85]">No movements match the filters.</td></tr>
                         ) : auditLog.map(m => (
                           <tr key={m.id} className="border-b border-[#cc5a16]/5">
-                            <td className="px-4 py-2 text-xs whitespace-nowrap">{new Date(m.recorded_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                            <td className="px-4 py-2 text-xs whitespace-nowrap">{new Date(m.recorded_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' })}</td>
                             <td className="px-4 py-2 font-semibold">{m.ingredient_name || m.ingredient_id}</td>
                             <td className="px-4 py-2">
                               <span className={cn(
@@ -35974,7 +35999,7 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold text-[#1a1208] truncate">{r.service_name}</p>
                   <p className="text-[11px] text-[#9c8e85]">
-                    {new Date(r.requested_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                    {new Date(r.requested_at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}
                   </p>
                 </div>
                 <span className={cn(
@@ -36960,7 +36985,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         customerName:   order.customerName || undefined,
         customerPhone:  order.customerPhone || undefined,
         date:           dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
-        time:           dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+        time:           dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
         rounds: [{
           items: (Array.isArray(order.items) ? order.items : []).map((it: any) => ({
             name:  it.name,
@@ -37268,7 +37293,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       customerName:   session.customer_name || undefined,
       customerPhone:  session.customer_phone || undefined,
       date:           dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
-      time:           dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+      time:           dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
       rounds,
       subtotal:      sessionRunningTotal,
       gstAmount:     sessionGstTotal,
@@ -42661,7 +42686,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
       customerName: session.customer_name || undefined,
       customerPhone: session.customer_phone || undefined,
       date: dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
-      time: dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+      time: dt.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
       rounds: roundData,
       subtotal: rawSubtotal,
       discountAmount: discount > 0 ? discount : undefined,

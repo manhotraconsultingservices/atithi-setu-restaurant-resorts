@@ -20227,7 +20227,12 @@ ${data.tenant.name}`;
       if (fromDate) { sql += ` AND b.check_out_date > ?`;  params.push(fromDate); }
       if (toDate)   { sql += ` AND b.check_in_date  <= ?`; params.push(toDate); }
 
-      sql += ` ORDER BY b.check_in_date DESC, b.created_at DESC LIMIT ?`;
+      // Float in-house (CHECKED_IN) then upcoming (BOOKED) bookings to the top
+      // so the LIMIT never pushes a CURRENT guest off the list. Bug: a checked-
+      // in guest with a past check-in date (e.g. "Lal Singh") sorted below all
+      // future bookings and got cut off by LIMIT — so the front desk couldn't
+      // see in-house guests at all.
+      sql += ` ORDER BY (CASE b.status WHEN 'CHECKED_IN' THEN 0 WHEN 'BOOKED' THEN 1 WHEN 'CHECKED_OUT' THEN 2 ELSE 3 END), b.check_in_date DESC, b.created_at DESC LIMIT ?`;
       params.push(limit);
 
       let rows = await tenantDb.query(sql, params).catch((e: any) => {
@@ -26988,7 +26993,17 @@ ${data.tenant.name}`;
       const entries = await tenantDb.query(
         "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC", [req.params.folioId]
       );
-      res.json({ ...folio, entries });
+      // Payment ledger so the folio view shows Total / Advance-paid /
+      // Outstanding (advance DEDUCTED), not just the grand total.
+      const _out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
+      res.json({
+        ...folio,
+        entries,
+        amount_paid:     _out ? _out.total_paid : 0,
+        amount_refunded: _out ? _out.total_refunded : 0,
+        outstanding:     _out ? _out.outstanding : Math.max(0, Number(folio.grand_total || 0)),
+        payments:        _out ? _out.payments : [],
+      });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch folio" });
     }
