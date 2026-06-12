@@ -26910,7 +26910,7 @@ ${data.tenant.name}`;
                   ORDER BY f.created_at DESC LIMIT 1) AS open_folio_id
            FROM orders o
            LEFT JOIN rooms r ON r.id = o.room_id
-          WHERE o.folio_post_status = 'PENDING_MANUAL'
+          WHERE o.folio_post_status IN ('PENDING_MANUAL', 'AWAITING_DELIVERY')
             AND o.folio_id IS NULL
             AND o.deleted_at IS NULL
           ORDER BY o.created_at DESC`
@@ -30085,49 +30085,19 @@ ${data.tenant.name}`;
       // divergence. Hard-delete (not soft-delete) because the order was
       // never observable to a downstream consumer — there's no audit
       // trail to preserve. We log the rollback for forensics.
+      // ── Room-service F&B posts to the folio ON DELIVERY, not at order time ──
+      // Hotel workflow (client request): an in-room QR / CHARGE_TO_ROOM order is
+      // sent to the kitchen now (status CONFIRMED, kitchen_status='queued') and
+      // the F&B charge is added to the guest's folio only when the food is
+      // marked DELIVERED (PATCH /api/orders/:id). This way a cancelled or
+      // never-delivered order never hits the bill. We flag it AWAITING_DELIVERY
+      // so the delivery transition knows to post; on delivery, success → POSTED,
+      // failure → PENDING_MANUAL (front desk reconciles via /orders/pending-folio,
+      // which also surfaces AWAITING_DELIVERY orders so none is missed at checkout).
       let folioResult: { ok: boolean; folio_id?: string; reason?: string } | null = null;
       if (isChargeToRoom && (finalRoomId || finalBookingId)) {
-        let folioOk = false;
-        try {
-          const itemsForFolio: FolioOrderItem[] = (Array.isArray(items) ? items : []).map((it: any) => ({
-            name: it.name || it.menuName || 'Item',
-            quantity: Number(it.quantity || it.qty || 1),
-            unitPrice: Number(it.price || it.unitPrice || it.unit_price || 0),
-            gstRate: it.gstRate != null ? Number(it.gstRate) : undefined,
-          }));
-          folioResult = await postOrderToFolio(req.params.id, {
-            id, room_id: finalRoomId, booking_id: finalBookingId,
-            items: itemsForFolio, subtype: 'IRD',
-            posted_by: 'CUSTOMER_QR',
-          });
-          folioOk = !!folioResult?.ok;
-          if (!folioOk) {
-            console.warn(`[orders-post] CHARGE_TO_ROOM order ${id} could not post to folio: ${folioResult?.reason}`);
-          }
-        } catch (e) {
-          console.error(`[orders-post] CHARGE_TO_ROOM folio posting threw for ${id}:`, e);
-          folioResult = { ok: false, reason: 'exception' };
-          folioOk = false;
-        }
-        if (!folioOk) {
-          // RS-FIX (room-service QR): do NOT discard the order. A guest who
-          // ordered food MUST get it — the kitchen always receives the order
-          // (it stays CONFIRMED / kitchen_status='queued' and shows on the
-          // KDS). We just couldn't auto-attach the charge to a room folio
-          // (e.g. the room isn't linked to a checked-in booking yet). Flag it
-          // so the front desk reconciles the charge later (Folios → Add F&B
-          // charge); the guest is told the kitchen has it and the desk will
-          // add it to their bill.
-          //
-          // This intentionally supersedes the earlier T1-L3 hard-rollback,
-          // which deleted the order entirely — leaving it neither billed NOR
-          // cooked (the guest saw "order received" but nothing happened). The
-          // flag preserves the revenue trail so the charge is never silently
-          // lost; it just moves reconciliation to staff instead of dropping
-          // the order.
-          await db.run("UPDATE orders SET folio_post_status = 'PENDING_MANUAL' WHERE id = ?", [id]).catch(() => {});
-          console.warn(`[orders-post] CHARGE_TO_ROOM order ${id} kept + queued to kitchen; folio post failed (${folioResult?.reason}) — flagged PENDING_MANUAL for front-desk charge.`);
-        }
+        await db.run("UPDATE orders SET folio_post_status = 'AWAITING_DELIVERY' WHERE id = ?", [id]).catch(() => {});
+        folioResult = { ok: false, reason: 'awaiting-delivery' };
       }
 
       res.json({
@@ -30904,6 +30874,38 @@ ${data.tenant.name}`;
             }
           });
         }
+      }
+
+      // ── Charge room-service F&B to the folio ON DELIVERY ──────────────
+      // A CHARGE_TO_ROOM order (in-room QR) posts to the guest folio only when
+      // the food is actually DELIVERED — not at order time — so cancelled or
+      // undelivered orders never hit the bill. Idempotent (skips if already on
+      // a folio); on failure we flag PENDING_MANUAL for front-desk reconcile.
+      try {
+        const deliveredNow = (String(status || '').toUpperCase() === 'DELIVERED')
+          || (String(kitchen_status || '').toLowerCase() === 'delivered');
+        if (deliveredNow && updatedOrder
+            && String(updatedOrder.payment_method || '').toUpperCase() === 'CHARGE_TO_ROOM'
+            && !updatedOrder.folio_id
+            && (updatedOrder.room_id || updatedOrder.booking_id)) {
+          let parsedItems: any[] = [];
+          try { parsedItems = typeof updatedOrder.items === 'string' ? JSON.parse(updatedOrder.items) : (updatedOrder.items || []); } catch { parsedItems = []; }
+          const folioItems: FolioOrderItem[] = (Array.isArray(parsedItems) ? parsedItems : []).map((it: any) => ({
+            name: it.name || it.menuName || 'Item',
+            quantity: Number(it.quantity || it.qty || 1),
+            unitPrice: Number(it.price || it.unitPrice || it.unit_price || 0),
+            gstRate: it.gstRate != null ? Number(it.gstRate) : (it.gst_rate != null ? Number(it.gst_rate) : undefined),
+          }));
+          const posted = await postOrderToFolio(req.user!.restaurantId, {
+            id: updatedOrder.id, room_id: updatedOrder.room_id, booking_id: updatedOrder.booking_id,
+            items: folioItems, subtype: 'IRD', posted_by: req.user?.id || 'KDS_DELIVERY',
+          });
+          await db.run("UPDATE orders SET folio_post_status = ? WHERE id = ?",
+            [posted?.ok ? 'POSTED' : 'PENDING_MANUAL', updatedOrder.id]).catch(() => {});
+          if (!posted?.ok) console.warn(`[orders] delivered CHARGE_TO_ROOM order ${updatedOrder.id} could not post to folio (${posted?.reason}) — flagged PENDING_MANUAL`);
+        }
+      } catch (e) {
+        console.warn('[orders] folio-on-delivery post failed (non-fatal):', e);
       }
 
       // ── Phase 4: enqueue STATUS_PUSH for platform-originated orders ──

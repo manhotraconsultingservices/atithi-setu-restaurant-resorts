@@ -17622,10 +17622,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </div>
                           <div className="text-[11px] text-[#9c8e85]">{b.guest_phone || '—'} {b.guest_nationality ? `· ${b.guest_nationality}` : ''}</div>
                         </td>
-                        <td className="px-4 py-3 text-[#3d3128]">{b.room_name || b.room_id}</td>
-                        <td className="px-4 py-3 text-xs text-[#3d3128]">
-                          {formatDateForTenant(b.check_in_date, restaurant?.date_format)} →<br />
-                          {formatDateForTenant(b.check_out_date, restaurant?.date_format)}
+                        <td className="px-4 py-3 text-[#3d3128] whitespace-nowrap">{b.room_name || b.room_id}</td>
+                        {/* Dates — whitespace-nowrap + min-width so each date shows in full
+                            (the column was too narrow and the date wrapped/clipped). */}
+                        <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap min-w-[150px]">
+                          <div className="font-medium">{formatDateForTenant(b.check_in_date, restaurant?.date_format)}</div>
+                          <div className="text-[#9c8e85]">→ {formatDateForTenant(b.check_out_date, restaurant?.date_format)}</div>
                         </td>
                         <td className="px-4 py-3">
                           <span
@@ -36111,7 +36113,9 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
                     ) : kitchenOnly ? (
                       <>
                         <p className="font-bold text-sm">Order sent to the kitchen ✓</p>
-                        <p className="text-xs mt-0.5">Your food is being prepared. We couldn't add it to your room bill automatically{foodOrderConfirm.reason === 'no-open-folio-for-room-or-booking' ? " (this room isn't linked to a checked-in booking yet)" : ''} — the front desk will add it to your bill.</p>
+                        <p className="text-xs mt-0.5">{foodOrderConfirm.reason === 'awaiting-delivery'
+                          ? "Your food is being prepared — it'll be added to your room bill once it's delivered."
+                          : `Your food is being prepared. We couldn't add it to your room bill automatically${foodOrderConfirm.reason === 'no-open-folio-for-room-or-booking' ? " (this room isn't linked to a checked-in booking yet)" : ''} — the front desk will add it to your bill.`}</p>
                       </>
                     ) : (
                       <>
