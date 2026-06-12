@@ -103,11 +103,14 @@ function bookingTotal(roomId, ci, co, plan, ex, dayUse) {
   return { perNight, base_total: r2(baseTotal), extras_total: r2(extrasTotal), total: r2(baseTotal + extrasTotal) };
 }
 
-// createFolioWithRoomCharges — extra-person SPLIT (exact mirror of the edit)
+// createFolioWithRoomCharges — extra-person SPLIT, now PER-TYPE (exact mirror
+// of the 12 Jun 2026 edit: one folio line per extra-person type per night,
+// last line absorbs the rounding remainder so Σ stays exact).
 function buildFolioEntries(roomId, ci, co, plan, ex, dayUse) {
   const { perNight } = bookingTotal(roomId, ci, co, plan, ex, dayUse);
   const entries = [];
   for (const n of perNight) {
+    const s = seasonFor(n.date);
     const lineAmount = r2(n.base_rate + n.extras);
     const gstPct = gstSlab(lineAmount);
     const lineGst = r2(lineAmount * gstPct / 100);
@@ -116,8 +119,23 @@ function buildFolioEntries(roomId, ci, co, plan, ex, dayUse) {
     const extrasGst = extrasAmount > 0 ? r2(extrasAmount * gstPct / 100) : 0;
     const baseGst = r2(lineGst - extrasGst);
     entries.push({ type: 'ROOM_CHARGE', desc: `Room charge · ${n.date}`, amount: baseAmount, gst: baseGst, gstPct });
-    if (extrasAmount > 0) entries.push({ type: 'ROOM_CHARGE', desc: `Extra persons · ${n.date}`, amount: extrasAmount, gst: extrasGst, gstPct });
-    // carry the combined for reconciliation
+    if (extrasAmount > 0) {
+      const types = [
+        { code: 'ADULT',               count: ex.adults    || 0, label: 'Extra adult' },
+        { code: 'CHILD_WITH_MATTRESS', count: ex.childMat  || 0, label: 'Extra child (with mattress)' },
+        { code: 'CHILD_NO_MATTRESS',   count: ex.childNoMat|| 0, label: 'Extra child (no mattress)' },
+      ].filter(t => t.count > 0);
+      const rawAmts = types.map(t => r2((EXTRA[`${t.code}|${s}|${plan}`] || 0) * t.count));
+      let allocAmt = 0, allocGst = 0;
+      types.forEach((t, ti) => {
+        const isLast = ti === types.length - 1;
+        const amt = isLast ? r2(extrasAmount - allocAmt) : rawAmts[ti];
+        const gst = isLast ? r2(extrasGst - allocGst) : r2(amt * gstPct / 100);
+        allocAmt = r2(allocAmt + amt); allocGst = r2(allocGst + gst);
+        entries.push({ type: 'ROOM_CHARGE', desc: `${t.label} · ${n.date}`, amount: amt, gst, gstPct });
+      });
+    }
+    // carry the combined for reconciliation (on the last line of this night)
     entries[entries.length - 1]._combinedAmount = lineAmount;
     entries[entries.length - 1]._combinedGst = lineGst;
   }

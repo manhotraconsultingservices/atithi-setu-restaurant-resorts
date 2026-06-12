@@ -388,10 +388,23 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
         displayedGrand = rounded;
       }
 
-      // Paid + Balance Due (hotel folio) — show how much the guest has paid
-      // and what is still owed. Skipped for credit notes.
+      // Paid + Balance Due (hotel folio). Itemise each payment/advance when
+      // the ledger is supplied so the guest sees the full receipt trail
+      // (advance at check-in, interim, final, refund); else fall back to the
+      // lumped "Paid" total. Skipped for credit notes.
       if (!data.isCreditNote) {
-        if (data.folio.amountPaid != null && data.folio.amountPaid > 0) {
+        const pays = (data.folio.payments || []).filter(p => Math.abs(Number(p.amount || 0)) > 0);
+        if (pays.length > 0) {
+          for (const p of pays) {
+            const isRefund = String(p.payment_type || '').toUpperCase() === 'REFUND';
+            const raw = String(p.payment_type || 'PAYMENT');
+            const tl = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+            const method = p.payment_method ? ` · ${p.payment_method}` : '';
+            const dt = p.recorded_at ? ` · ${String(p.recorded_at).slice(0, 10)}` : '';
+            const amt = Math.abs(Number(p.amount || 0));
+            drawMiniRow(`${tl}${method}${dt}`, `${isRefund ? '+ ' : '− '}${money(data.tenant, amt)}`);
+          }
+        } else if (data.folio.amountPaid != null && data.folio.amountPaid > 0) {
           drawMiniRow('Paid', `− ${money(data.tenant, data.folio.amountPaid)}`);
         }
         if (data.folio.balanceDue != null) {

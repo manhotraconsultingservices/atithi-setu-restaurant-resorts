@@ -1639,17 +1639,41 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
         [roomEntryId, folioId, `Room charge · ${dateStr}${labelSuffix}`, baseAmount, baseAmount, gstPct, baseGst]
       );
       if (extrasAmount > 0) {
-        const extrasBreakdown = [
-          xpAdults  > 0 ? `${xpAdults} extra adult${xpAdults > 1 ? 's' : ''}` : null,
-          xpChildM  > 0 ? `${xpChildM} child${xpChildM > 1 ? 'ren' : ''} w/mattress` : null,
-          xpChildN  > 0 ? `${xpChildN} child${xpChildN > 1 ? 'ren' : ''} no mattress` : null,
-        ].filter(Boolean).join(', ');
-        const extraEntryId = `FE-${Date.now()}-${i}-X-${tag}`;
-        await tenantDb.run(
-          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
-           VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
-          [extraEntryId, folioId, `Extra persons · ${extrasBreakdown} · ${dateStr}`, extrasAmount, extrasAmount, gstPct, extrasGst]
-        );
+        // INVOICE CLARITY (12 Jun 2026): emit ONE folio line PER extra-person
+        // TYPE (extra adult / child w-mat / child no-mat) for this night, so
+        // the invoice itemises each charge instead of a single lumped "Extra
+        // persons" line. Still sum-preserving — the LAST type's amount + GST
+        // absorb the rounding remainder so Σ(base + per-type) === lineAmount
+        // and Σ(baseGst + per-type GST) === lineGst exactly.
+        const extraTypes = [
+          { code: 'ADULT',                count: xpAdults, label: 'Extra adult' },
+          { code: 'CHILD_WITH_MATTRESS',  count: xpChildM, label: 'Extra child (with mattress)' },
+          { code: 'CHILD_NO_MATTRESS',    count: xpChildN, label: 'Extra child (no mattress)' },
+        ].filter(t => t.count > 0);
+        // Raw per-type amount = per-person charge × heads (for this night).
+        const rawAmts: number[] = [];
+        for (const t of extraTypes) {
+          const per = await getExtraPersonChargeForDate(restaurantId, dateStr, booking.meal_plan_id, t.code).catch(() => 0);
+          rawAmts.push(Math.round(Number(per || 0) * t.count * 100) / 100);
+        }
+        let allocAmt = 0, allocGst = 0;
+        for (let ti = 0; ti < extraTypes.length; ti++) {
+          const t = extraTypes[ti];
+          const isLast = ti === extraTypes.length - 1;
+          // Last line takes the exact remainder so the per-night total is preserved.
+          const amt = isLast ? Math.round((extrasAmount - allocAmt) * 100) / 100 : rawAmts[ti];
+          const gst = isLast ? Math.round((extrasGst - allocGst) * 100) / 100
+                             : Math.round((amt * gstPct / 100) * 100) / 100;
+          allocAmt = Math.round((allocAmt + amt) * 100) / 100;
+          allocGst = Math.round((allocGst + gst) * 100) / 100;
+          const unit = t.count > 0 ? Math.round((amt / t.count) * 100) / 100 : amt;
+          const extraEntryId = `FE-${Date.now()}-${i}-X${ti}-${tag}`;
+          await tenantDb.run(
+            `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+             VALUES (?, ?, 'ROOM_CHARGE', ?, ?, ?, ?, ?, ?)`,
+            [extraEntryId, folioId, `${t.label}${t.count > 1 ? ` × ${t.count}` : ''} · ${dateStr}`, t.count, unit, amt, gstPct, gst]
+          );
+        }
       }
       // Service charge line — % of THIS night's full line (base + extras)
       // so the percent matches real-world hotel billing on the full room
@@ -26523,6 +26547,7 @@ ${data.tenant.name}`;
               paymentMethod: folio.payment_method, settledAt: folio.settled_at, status: folio.status,
               amountPaid: _out ? _out.total_paid : 0, amountRefunded: _out ? _out.total_refunded : 0,
               balanceDue: _out ? _out.outstanding : Math.max(0, Number(folio.grand_total || 0)),
+              payments: _out ? _out.payments : [],
             },
             entries: entries.map(e => ({
               description: e.description, entryType: e.entry_type,
@@ -28143,6 +28168,7 @@ ${data.tenant.name}`;
           amountPaid:     _out ? _out.total_paid : 0,
           amountRefunded: _out ? _out.total_refunded : 0,
           balanceDue:     _out ? _out.outstanding : Math.max(0, Number(folio.grand_total || 0)),
+          payments:       _out ? _out.payments : [],
         },
         entries: entries.map(e => ({
           description: e.description,
@@ -28271,6 +28297,7 @@ ${data.tenant.name}`;
           paymentMethod: folio.payment_method, settledAt: folio.settled_at, status: folio.status,
           amountPaid: _out ? _out.total_paid : 0, amountRefunded: _out ? _out.total_refunded : 0,
           balanceDue: _out ? _out.outstanding : Math.max(0, Number(folio.grand_total || 0)),
+          payments: _out ? _out.payments : [],
         },
         entries: entries.map(e => ({
           description: e.description, entryType: e.entry_type,

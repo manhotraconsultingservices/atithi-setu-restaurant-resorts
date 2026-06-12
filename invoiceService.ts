@@ -533,10 +533,24 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       }
       drawTotalRow(label('GRAND_TOTAL').en, m(displayedGrand * sign), true);
 
-      // Paid + Balance Due (hotel folio) — show amount received and what
-      // remains owed. Skipped for credit notes.
+      // Paid + Balance Due (hotel folio). When the per-payment ledger is
+      // supplied, itemise every receipt (advance at check-in, interim, final,
+      // refund) as its own line so the guest sees the full payment trail and
+      // exactly how the balance was reached — not just a lumped "Paid" total.
+      // Skipped for credit notes.
       if (!data.isCreditNote) {
-        if (data.folio.amountPaid != null && data.folio.amountPaid > 0) {
+        const pays = (data.folio.payments || []).filter(p => Math.abs(Number(p.amount || 0)) > 0);
+        if (pays.length > 0) {
+          for (const p of pays) {
+            const isRefund = String(p.payment_type || '').toUpperCase() === 'REFUND';
+            const raw = String(p.payment_type || 'PAYMENT');
+            const tl = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+            const method = p.payment_method ? ` · ${p.payment_method}` : '';
+            const dt = p.recorded_at ? ` · ${String(p.recorded_at).slice(0, 10)}` : '';
+            const amt = Math.abs(Number(p.amount || 0));
+            drawTotalRow(`${tl}${method}${dt}`, `${isRefund ? '+ ' : '− '}${m(amt)}`);
+          }
+        } else if (data.folio.amountPaid != null && data.folio.amountPaid > 0) {
           drawTotalRow('Paid', `− ${m(data.folio.amountPaid)}`);
         }
         if (data.folio.balanceDue != null) {

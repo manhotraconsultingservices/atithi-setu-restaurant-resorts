@@ -146,6 +146,16 @@ export interface InvoiceData {
     amountPaid?: number;
     amountRefunded?: number;
     balanceDue?: number;
+    // Individual payment/advance transactions (folio_payments rows) so the
+    // invoice can itemise each receipt — advance at check-in, interim, final,
+    // refund — for full transparency, not just the lumped "Paid" total.
+    payments?: Array<{
+      amount: number;
+      payment_method?: string | null;
+      payment_type?: string | null;   // ADVANCE | INTERIM | FINAL | REFUND
+      reference_number?: string | null;
+      recorded_at?: string | null;
+    }>;
   };
   entries: Array<{
     description: string;
