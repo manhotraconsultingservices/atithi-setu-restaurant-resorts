@@ -1972,6 +1972,67 @@ async function reverseOrderFolioPosting(
   return { ok: true, reversed_count: reversed, folio_id: order.folio_id };
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  postPendingRoomOrdersToFolio — sweep unpaid room F&B onto the folio
+//
+//  A guest's in-room QR F&B order is CHARGE_TO_ROOM by default. It posts to
+//  the folio on delivery, but if it was never marked delivered (or the post
+//  failed) it must STILL land on the bill. This sweep is the catch-all: it
+//  posts EVERY charge-to-room order for the booking/room that is not yet on a
+//  folio and has not been settled in the room (folio_post_status PAID_IN_ROOM).
+//  Catches AWAITING_DELIVERY, PENDING_MANUAL, and NULL-status rows — the gap
+//  that previously left F&B off the invoice. Idempotent: once an order's
+//  folio_id is set it is skipped, so running this on every folio view / at
+//  checkout never double-charges. Returns how many it posted.
+// ════════════════════════════════════════════════════════════════════════
+async function postPendingRoomOrdersToFolio(
+  restaurantId: string,
+  opts: { bookingId?: string | null; roomId?: string | null; postedBy?: string | null }
+): Promise<{ posted: number; failed: number }> {
+  const bookingId = opts.bookingId || null;
+  const roomId = opts.roomId || null;
+  if (!bookingId && !roomId) return { posted: 0, failed: 0 };
+  const tenantDb = await getTenantDb(restaurantId);
+  let pending: any[] = [];
+  try {
+    pending = await tenantDb.query(
+      `SELECT * FROM orders
+        WHERE deleted_at IS NULL
+          AND folio_id IS NULL
+          AND UPPER(COALESCE(payment_method, '')) = 'CHARGE_TO_ROOM'
+          AND COALESCE(folio_post_status, '') NOT IN ('POSTED', 'PAID_IN_ROOM')
+          AND ( (? IS NOT NULL AND booking_id = ?) OR (? IS NOT NULL AND room_id = ?) )`,
+      [bookingId, bookingId, roomId, roomId]
+    );
+  } catch (e: any) {
+    console.warn(`[room-fnb sweep] query failed for ${restaurantId} (booking=${bookingId} room=${roomId}): ${e?.message || e}`);
+    return { posted: 0, failed: 0 };
+  }
+  let posted = 0, failed = 0;
+  for (const o of pending) {
+    let parsed: any[] = [];
+    try { parsed = JSON.parse(o.items || '[]'); } catch { parsed = []; }
+    const fItems: FolioOrderItem[] = (Array.isArray(parsed) ? parsed : []).map((it: any) => ({
+      name: it.name || it.menuName || 'Item',
+      quantity: Number(it.quantity || it.qty || 1),
+      unitPrice: Number(it.price || it.unitPrice || it.unit_price || 0),
+      gstRate: it.gstRate != null ? Number(it.gstRate) : (it.gst_rate != null ? Number(it.gst_rate) : undefined),
+    }));
+    if (fItems.length === 0) continue;
+    const res = await postOrderToFolio(restaurantId, {
+      id: o.id, room_id: o.room_id || roomId, booking_id: o.booking_id || bookingId,
+      items: fItems, subtype: 'IRD', posted_by: opts.postedBy || 'ROOM_FNB_SWEEP',
+    });
+    await tenantDb.run("UPDATE orders SET folio_post_status = ? WHERE id = ?",
+      [res?.ok ? 'POSTED' : 'PENDING_MANUAL', o.id]).catch(() => {});
+    if (res?.ok) posted++; else failed++;
+  }
+  if (posted || failed) {
+    console.log(`[room-fnb sweep] ${restaurantId} booking=${bookingId} room=${roomId}: posted=${posted} failed=${failed}`);
+  }
+  return { posted, failed };
+}
+
 /**
  * Build a guest-facing payment-link payload for a booking. Combines:
  *   • current folio breakup (one row per entry_type, totals + GST)
@@ -6898,6 +6959,12 @@ async function startServer() {
         -- booking). The order STILL goes to the kitchen; the front desk
         -- reconciles the charge later (Folios → Add F&B charge).
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_post_status TEXT;
+        -- Room F&B paid IN THE ROOM (cash/UPI collected on delivery). Staff
+        -- mark it via /orders/:id/mark-paid-in-room → folio_post_status
+        -- 'PAID_IN_ROOM' so the folio sweep + checkout skip it (and reverse it
+        -- if it had already posted). These columns record that settlement.
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_paid_at TIMESTAMP;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_payment_method TEXT;
         CREATE INDEX IF NOT EXISTS idx_orders_room ON orders (room_id);
         CREATE INDEX IF NOT EXISTS idx_orders_folio ON orders (folio_id);
         CREATE TABLE IF NOT EXISTS table_sessions (
@@ -26340,40 +26407,15 @@ ${data.tenant.name}`;
         "SELECT id FROM folios WHERE booking_id = ? AND status = 'open'", [b.id]
       );
       if (openFolio?.id) {
-        // INVOICE-FIX (F&B missing): post any room-service orders for this
-        // room/booking that reached the kitchen but aren't on a folio yet
-        // (folio_post_status AWAITING_DELIVERY / PENDING_MANUAL — e.g. ordered
-        // via the room QR but never marked delivered). The guest is leaving,
-        // so their ordered F&B MUST be billed and appear on the invoice. Each
-        // posts via postOrderToFolio (idempotent) and is flagged POSTED.
-        try {
-          const pendingOrders: any[] = await tenantDb.query(
-            `SELECT * FROM orders
-              WHERE folio_id IS NULL AND deleted_at IS NULL
-                AND folio_post_status IN ('AWAITING_DELIVERY','PENDING_MANUAL')
-                AND (booking_id = ? OR (room_id IS NOT NULL AND room_id = ?))`,
-            [b.id, b.room_id]
-          ).catch(() => []);
-          for (const o of pendingOrders) {
-            let parsed: any[] = [];
-            try { parsed = JSON.parse(o.items || '[]'); } catch { parsed = []; }
-            const fItems: FolioOrderItem[] = (Array.isArray(parsed) ? parsed : []).map((it: any) => ({
-              name: it.name || it.menuName || 'Item',
-              quantity: Number(it.quantity || it.qty || 1),
-              unitPrice: Number(it.price || it.unitPrice || it.unit_price || 0),
-              gstRate: it.gstRate != null ? Number(it.gstRate) : (it.gst_rate != null ? Number(it.gst_rate) : undefined),
-            }));
-            if (fItems.length === 0) continue;
-            const posted = await postOrderToFolio(req.params.id, {
-              id: o.id, room_id: o.room_id || b.room_id, booking_id: o.booking_id || b.id,
-              items: fItems, subtype: 'IRD', posted_by: req.user?.id || 'CHECKOUT_AUTOPOST',
-            });
-            await tenantDb.run("UPDATE orders SET folio_post_status = ? WHERE id = ?",
-              [posted?.ok ? 'POSTED' : 'PENDING_MANUAL', o.id]).catch(() => {});
-          }
-        } catch (e) {
-          console.warn('[hotel-checkout] auto-post pending room orders failed (non-fatal):', e);
-        }
+        // INVOICE-FIX (F&B missing): the guest is leaving, so EVERY unpaid
+        // in-room F&B order MUST be on the bill. The shared sweep posts any
+        // charge-to-room order for this booking/room that isn't already on a
+        // folio and wasn't settled in-room — catching never-delivered orders
+        // and any with a NULL post-status (the gap that previously dropped
+        // F&B from the invoice). Idempotent.
+        await postPendingRoomOrdersToFolio(req.params.id, {
+          bookingId: b.id, roomId: b.room_id, postedBy: req.user?.id || 'CHECKOUT_AUTOPOST',
+        });
         // Recompute totals one more time to capture any in-flight F&B
         // that landed in folio_entries since the modal was opened.
         await recomputeFolioTotals(tenantDb, openFolio.id);
@@ -27732,6 +27774,48 @@ ${data.tenant.name}`;
     }
   });
 
+  // Mark a room F&B order as PAID IN THE ROOM (guest handed cash/UPI to the
+  // person delivering). The charge is then EXCLUDED from the folio: if it had
+  // already posted, we reverse the folio entry; either way it is flagged
+  // PAID_IN_ROOM so the sweep + checkout never re-add it. This is how a guest
+  // "pays the F&B bill in the room" instead of at checkout.
+  app.post("/api/restaurant/:id/hotel/orders/:orderId/mark-paid-in-room", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_paid_at TIMESTAMP").catch(() => {});
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_payment_method TEXT").catch(() => {});
+      const order: any = await tenantDb.get(
+        "SELECT * FROM orders WHERE id = ? AND deleted_at IS NULL", [req.params.orderId]
+      );
+      if (!order) return res.status(404).json({ error: 'Order not found.' });
+      if (String(order.folio_post_status || '').toUpperCase() === 'PAID_IN_ROOM') {
+        return res.json({ success: true, already: true });
+      }
+      const method = String(req.body?.payment_method || 'CASH').toUpperCase().trim() || 'CASH';
+
+      // If it already posted to a folio, reverse that posting so the guest
+      // isn't billed twice (charged on folio AND paid cash in room).
+      let reversed = 0;
+      if (order.folio_id) {
+        const rev = await reverseOrderFolioPosting(
+          req.params.id, order.id, 'Paid in room', req.user?.id || 'FRONT_DESK'
+        );
+        reversed = rev.reversed_count;
+      }
+      await tenantDb.run(
+        "UPDATE orders SET folio_post_status = 'PAID_IN_ROOM', room_paid_at = CURRENT_TIMESTAMP, room_payment_method = ? WHERE id = ?",
+        [method, order.id]
+      );
+      console.log(`[room-fnb] order ${order.id} marked PAID_IN_ROOM (${method}) by ${req.user?.id || 'staff'}; reversed ${reversed} folio line(s)`);
+      res.json({ success: true, order_id: order.id, payment_method: method, reversed_folio_lines: reversed });
+    } catch (err: any) {
+      console.error('mark-paid-in-room error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to mark order paid in room' });
+    }
+  });
+
   // ════════════════════════════════════════════════════════════════════
   // Folio payments ledger (10 Jun 2026 critical fix)
   // ════════════════════════════════════════════════════════════════════
@@ -27749,6 +27833,14 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
+      // Sweep any unpaid in-room F&B onto this folio FIRST, so the bill the
+      // staff/guest see always reflects ordered food — even orders that were
+      // never marked delivered (which would otherwise stay invisible until
+      // checkout). Idempotent; paid-in-room orders are skipped.
+      try {
+        const _f: any = await tenantDb.get("SELECT booking_id, room_id FROM folios WHERE id = ?", [req.params.folioId]);
+        if (_f) await postPendingRoomOrdersToFolio(req.params.id, { bookingId: _f.booking_id, roomId: _f.room_id, postedBy: req.user?.id || 'FOLIO_VIEW' });
+      } catch { /* non-fatal */ }
       // Recompute totals first — guarantees we read a fresh grand_total
       // that includes any F&B / extras posted since the modal opened.
       await recomputeFolioTotals(tenantDb, req.params.folioId);
@@ -27857,6 +27949,12 @@ ${data.tenant.name}`;
          LEFT JOIN rooms r ON r.id = f.room_id
          WHERE f.id = ?`, [req.params.folioId]);
       if (!folio) return res.status(404).json({ error: "Folio not found" });
+      // Sweep any unpaid in-room F&B onto the folio so the viewer always
+      // reflects ordered food (idempotent; paid-in-room orders skipped).
+      try {
+        await postPendingRoomOrdersToFolio(req.params.id, { bookingId: folio.booking_id, roomId: folio.room_id, postedBy: req.user?.id || 'FOLIO_VIEW' });
+        await recomputeFolioTotals(tenantDb, req.params.folioId);
+      } catch { /* non-fatal */ }
       const entries = await tenantDb.query(
         "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC", [req.params.folioId]
       );
@@ -31608,6 +31706,7 @@ ${data.tenant.name}`;
           || (String(kitchen_status || '').toLowerCase() === 'delivered');
         if (deliveredNow && updatedOrder
             && String(updatedOrder.payment_method || '').toUpperCase() === 'CHARGE_TO_ROOM'
+            && String(updatedOrder.folio_post_status || '').toUpperCase() !== 'PAID_IN_ROOM'
             && !updatedOrder.folio_id
             && (updatedOrder.room_id || updatedOrder.booking_id)) {
           let parsedItems: any[] = [];

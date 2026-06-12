@@ -32448,6 +32448,29 @@ const PendingRoomOrdersAlert: React.FC<{
     }
   };
 
+  // Guest paid this F&B bill in the room (cash/UPI handed to staff on
+  // delivery). Mark it paid → it stays OFF the folio (reversed if already
+  // posted), so it isn't billed again at checkout.
+  const markPaid = async (order: any) => {
+    const method = window.prompt('Guest paid in the room — payment method? (CASH / UPI / CARD)', 'CASH');
+    if (method == null) return;
+    setError(''); setBusyId(order.id);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/orders/${order.id}/mark-paid-in-room`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ payment_method: (method || 'CASH').toUpperCase() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
+      await onReconciled();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to mark paid in room');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <div className="bg-amber-50 border-2 border-amber-300 rounded-[24px] p-5 shadow-sm">
       <div className="flex items-center gap-2 mb-2">
@@ -32455,9 +32478,9 @@ const PendingRoomOrdersAlert: React.FC<{
         <h3 className="text-base font-bold text-amber-900">Unbilled room orders ({orders.length})</h3>
       </div>
       <p className="text-xs text-amber-800/90 mb-4 leading-relaxed">
-        These room-service orders reached the kitchen but their F&amp;B charge couldn&rsquo;t be auto-attached to a folio
-        (the room wasn&rsquo;t linked to a checked-in booking at order time). Charge each onto the guest&rsquo;s open folio so
-        it isn&rsquo;t missed at checkout.
+        These in-room F&amp;B orders aren&rsquo;t on a folio yet. <strong>Charge to folio</strong> adds it to the guest&rsquo;s room
+        bill (they pay at checkout). <strong>💵 Paid in room</strong> if the guest already paid cash/UPI on delivery — that keeps
+        it off the folio. Either way it won&rsquo;t be missed at checkout.
       </p>
       {error && <p className="text-xs text-[#c13b3b] bg-white/70 rounded-xl px-3 py-2 mb-3">{error}</p>}
       <div className="space-y-2">
@@ -32499,6 +32522,15 @@ const PendingRoomOrdersAlert: React.FC<{
                 className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 disabled:opacity-50 whitespace-nowrap"
               >
                 {busyId === o.id ? 'Charging…' : 'Charge to folio'}
+              </button>
+              <button
+                type="button"
+                onClick={() => markPaid(o)}
+                disabled={busyId === o.id}
+                title="Guest paid this F&B bill in the room — keep it off the folio"
+                className="px-3 py-2 rounded-xl border border-emerald-600 text-emerald-700 bg-white text-xs font-bold hover:bg-emerald-50 disabled:opacity-50 whitespace-nowrap"
+              >
+                💵 Paid in room
               </button>
             </div>
           );
