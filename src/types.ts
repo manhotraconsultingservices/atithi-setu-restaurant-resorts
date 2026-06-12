@@ -2,7 +2,9 @@ export type UserRole =
   | 'SUPER_ADMIN' | 'OWNER' | 'CHEF' | 'WAITER' | 'CUSTOMER'
   | 'SALES_REP'   | 'CTO'   | 'MANAGER'
   // Hospitality module roles (Phase 1+):
-  | 'HOUSEKEEPING' | 'FRONT_DESK' | 'CONCIERGE' | 'MAINTENANCE';
+  | 'HOUSEKEEPING' | 'FRONT_DESK' | 'CONCIERGE' | 'MAINTENANCE'
+  // B2B partner portal roles — read-only commission-bumped rate sheet:
+  | 'OTA' | 'AGENT';
 export type DietaryType = 'VEG' | 'VEGAN' | 'NON_VEG';
 export type ItemSize = 'HALF' | 'FULL';
 export type CheckoutMode = 'prepaid' | 'postpaid';

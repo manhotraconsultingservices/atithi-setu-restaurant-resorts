@@ -846,6 +846,37 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_partner_payments_invoice
       ON partner_payments (allocated_to_invoice_id);
 
+    -- ─── Partner portal logins — OTA / Travel-Agent B2B view (12 Jun 2026) ──
+    -- A partner (an OTA channel or a travel agent) gets a login to a
+    -- READ-ONLY rate + live-availability sheet. On login the rates they
+    -- see are automatically bumped by their commission:
+    --   • OTA   → gross-up  rate / (1 − c)   (commission comes off the sell
+    --             price, so the hotel still nets its rate)
+    --   • AGENT → markup    rate × (1 + c)   (agent buys at net, adds margin)
+    -- partner_ref links to the commission source:
+    --   • OTA   → channel_credentials.channel  ('BOOKING' / 'MMT' / …)
+    --   • AGENT → travel_agents.id             ('AGT-001' / …)
+    -- commission_pct here is an OPTIONAL per-login override; when NULL the
+    -- live commission is resolved from the linked channel/agent each time,
+    -- so updating the channel's commission updates the partner view too.
+    CREATE TABLE IF NOT EXISTS partner_accounts (
+      id             TEXT PRIMARY KEY,           -- 'PARTNER-…'
+      partner_type   TEXT NOT NULL,              -- 'OTA' | 'AGENT'
+      partner_ref    TEXT,                        -- channel code OR travel_agents.id
+      display_name   TEXT NOT NULL,
+      login_id       TEXT NOT NULL,
+      password       TEXT,                        -- bcrypt hash (matches attendance_staff col)
+      commission_pct DOUBLE PRECISION,            -- NULL → resolve live from source
+      is_active      INT DEFAULT 1,
+      last_login_at  TIMESTAMP,
+      created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_partner_accounts_login
+      ON partner_accounts (login_id);
+    CREATE INDEX IF NOT EXISTS idx_partner_accounts_active
+      ON partner_accounts (is_active, partner_type);
+
     -- ─── Public Booking Page galleries (9 Jun 2026) ──────────────────
     -- Marriott / Taj / Lemon Tree-grade direct booking page needs rich
     -- imagery. The single image_url on room_types is kept for the card
@@ -3024,6 +3055,63 @@ async function computeBookingTotalWithExtras(
     total: Math.round((baseTotal + extrasTotal) * 100) / 100,
     per_night: perNight,
   };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  PARTNER PRICING — OTA / Travel-Agent commission bump (12 Jun 2026)
+//
+//  The partner rate-sheet portal shows the hotel's rates *bumped* by the
+//  partner's commission, using the industry-correct convention per type:
+//
+//    • OTA   → GROSS-UP:  sell = base / (1 − c)
+//      OTA commission is taken off the sell price, so to still net `base`
+//      the displayed price must be grossed-up. (e.g. base ₹2000, c=20% →
+//      ₹2500; the OTA's 20% of ₹2500 = ₹500, hotel keeps ₹2000.)
+//
+//    • AGENT → MARKUP:   sell = base × (1 + c)
+//      The agent buys at the net rate and adds their margin on top.
+//      (e.g. base ₹2000, c=20% → ₹2400, agent keeps the ₹400.)
+//
+//  Commission for c is capped at [0, 99.99]% so the gross-up divisor never
+//  hits zero. Output is rounded to 2 dp (paisa).
+// ════════════════════════════════════════════════════════════════════════
+function applyPartnerBump(baseAmount: number, partnerType: string, commissionPct: number): number {
+  const amt = Number(baseAmount) || 0;
+  const c = Math.max(0, Math.min(99.99, Number(commissionPct) || 0)) / 100;
+  if (c <= 0 || amt <= 0) return Math.round(amt * 100) / 100;
+  const bumped = String(partnerType).toUpperCase() === 'OTA'
+    ? amt / (1 - c)          // gross-up
+    : amt * (1 + c);         // markup (AGENT)
+  return Math.round(bumped * 100) / 100;
+}
+
+// Resolve the effective commission % for a partner login. A per-login
+// override (partner_accounts.commission_pct) wins; otherwise the live
+// commission is read from the linked source — channel_credentials for an
+// OTA, travel_agents for an agent — so the partner view tracks whatever
+// the owner sets there. Returns 0 when nothing is configured.
+async function resolvePartnerCommission(restaurantId: string, partner: any): Promise<number> {
+  if (partner && partner.commission_pct != null) {
+    return Math.max(0, Math.min(99.99, Number(partner.commission_pct) || 0));
+  }
+  try {
+    const db = await getTenantDb(restaurantId);
+    if (partner?.partner_type === 'OTA' && partner.partner_ref) {
+      const ch: any = await db.get(
+        "SELECT commission_pct FROM channel_credentials WHERE channel = ?",
+        [String(partner.partner_ref).toUpperCase()]
+      );
+      return Math.max(0, Math.min(99.99, Number(ch?.commission_pct || 0)));
+    }
+    if (partner?.partner_type === 'AGENT' && partner.partner_ref) {
+      const ag: any = await db.get(
+        "SELECT commission_pct FROM travel_agents WHERE id = ?",
+        [partner.partner_ref]
+      );
+      return Math.max(0, Math.min(99.99, Number(ag?.commission_pct || 0)));
+    }
+  } catch { /* fall through to 0 */ }
+  return 0;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -7292,6 +7380,42 @@ async function startServer() {
       } catch (tenantErr) {
         // Tenant schema might not have attendance_staff yet — fall through to 401
         console.error("tenant-login: tenant lookup failed:", tenantErr);
+      }
+
+      // ── Source 4: partner_accounts (OTA / AGENT B2B rate-sheet portal) ──
+      // A partner logs in with the same slug + identifier + password form;
+      // we resolve their account and hand back role 'OTA' or 'AGENT' so the
+      // frontend renders the read-only commission-bumped rate sheet.
+      try {
+        const pdb = await getTenantDb(restaurantId);
+        const partner: any = await pdb.get(
+          `SELECT * FROM partner_accounts WHERE login_id = ? AND is_active = 1`,
+          [cleanIdentifier]
+        );
+        if (partner && partner.password) {
+          const okPartner = await bcrypt.compare(password, partner.password);
+          if (okPartner) {
+            await pdb.run(
+              `UPDATE partner_accounts SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?`,
+              [partner.id]
+            ).catch(() => {});
+            const role = partner.partner_type === 'OTA' ? 'OTA' : 'AGENT';
+            const token = jwt.sign(
+              { id: partner.id, restaurantId, role, partnerType: partner.partner_type },
+              JWT_SECRET,
+              { expiresIn: '7d' }
+            );
+            return res.json({
+              success: true, token, restaurantId,
+              restaurantName: rest.name, slug: rest.slug,
+              role, name: partner.display_name,
+            });
+          }
+          return res.status(401).json({ error: "Invalid credentials" });
+        }
+      } catch (partnerErr) {
+        // Tenant schema might not have partner_accounts yet — fall through to 401
+        console.error("tenant-login: partner lookup failed:", partnerErr);
       }
 
       return res.status(401).json({ error: "Invalid credentials" });
@@ -19677,6 +19801,231 @@ ${data.tenant.name}`;
     }
   });
 
+  // ════════════════════════════════════════════════════════════════════
+  // ─── PARTNER PORTAL — OTA / Travel-Agent read-only rate sheet ──────────
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // A partner (role OTA or AGENT, authenticated via partner_accounts) gets
+  // a LIVE, commission-bumped view of the hotel's rates + availability.
+  // They cannot book or mutate anything — this is a rate sheet only.
+  //
+  // Tenant isolation is already enforced inside authenticate() (JWT
+  // restaurantId must equal :id), so a partner can only ever read their own
+  // hotel. requireRole here additionally blocks staff/owner tokens from
+  // hitting the partner surface and vice-versa keeps the contract clean.
+
+  // Resolve the partner_accounts row for the logged-in token. Returns null
+  // if the token isn't a partner or the account is gone/disabled.
+  const loadPartnerForRequest = async (req: AuthRequest): Promise<any | null> => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const partner: any = await db.get(
+        "SELECT * FROM partner_accounts WHERE id = ? AND is_active = 1",
+        [req.user?.id]
+      );
+      return partner || null;
+    } catch {
+      return null;
+    }
+  };
+
+  // GET /partner/me — the logged-in partner's profile + effective commission.
+  app.get("/api/restaurant/:id/partner/me", authenticate, requireRole(['OTA', 'AGENT']), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const partner = await loadPartnerForRequest(req);
+      if (!partner) return res.status(404).json({ error: "Partner account not found or disabled." });
+      const commissionPct = await resolvePartnerCommission(req.params.id, partner);
+      // Friendly name of the linked source (channel name / agent name).
+      let sourceName: string | null = null;
+      try {
+        const db = await getTenantDb(req.params.id);
+        if (partner.partner_type === 'AGENT' && partner.partner_ref) {
+          const ag: any = await db.get("SELECT name FROM travel_agents WHERE id = ?", [partner.partner_ref]);
+          sourceName = ag?.name || partner.partner_ref;
+        } else if (partner.partner_type === 'OTA' && partner.partner_ref) {
+          sourceName = String(partner.partner_ref);
+        }
+      } catch { /* leave null */ }
+      res.json({
+        display_name: partner.display_name,
+        partner_type: partner.partner_type,
+        partner_ref: partner.partner_ref,
+        source_name: sourceName,
+        commission_pct: commissionPct,
+        convention: partner.partner_type === 'OTA' ? 'GROSS_UP' : 'MARKUP',
+      });
+    } catch (err: any) {
+      console.error("partner/me error:", err);
+      res.status(500).json({ error: "Failed to load partner profile" });
+    }
+  });
+
+  // GET /partner/inventory?start=&end=&guests=&meal_plan_id=
+  // The live rate sheet. Every price is bumped by the partner's commission
+  // BEFORE it leaves the server — the raw net/base rate is never exposed.
+  app.get("/api/restaurant/:id/partner/inventory", authenticate, requireRole(['OTA', 'AGENT']), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const partner = await loadPartnerForRequest(req);
+      if (!partner) return res.status(404).json({ error: "Partner account not found or disabled." });
+      const pType = String(partner.partner_type).toUpperCase();
+      const commissionPct = await resolvePartnerCommission(req.params.id, partner);
+
+      const start = (req.query.start as string) || '';
+      const end   = (req.query.end as string)   || '';
+      const guests = Math.max(1, Number(req.query.guests) || 1);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+        return res.status(400).json({ error: "start and end must be YYYY-MM-DD" });
+      }
+      if (end < start) return res.status(400).json({ error: "end must be on or after start" });
+      // Nights — at least 1 (a same-day pair = one day-use night).
+      const nights = Math.max(1, Math.round((Date.parse(end + 'T00:00:00Z') - Date.parse(start + 'T00:00:00Z')) / 86400000) || 1);
+      const mealPlanId = (req.query.meal_plan_id as string) || null;
+
+      const tenantDb = await getTenantDb(req.params.id);
+      const rooms: any[] = await tenantDb.query(
+        `SELECT r.*, t.name AS type_name, t.image_url AS type_image_url,
+                t.amenities AS type_amenities, t.description AS type_description,
+                t.base_rate AS type_base_rate
+           FROM rooms r
+      LEFT JOIN room_types t ON t.id = r.type_id
+       ORDER BY r.floor, r.room_number, r.name`
+      );
+      const bookingConflicts: any[] = await tenantDb.query(
+        `SELECT room_id, check_out_date AS conflict_end
+           FROM room_bookings
+          WHERE status NOT IN ('CANCELLED', 'CHECKED_OUT')
+            AND check_in_date < ? AND check_out_date > ?`,
+        [end, start]
+      );
+      const holdConflicts: any[] = await tenantDb.query(
+        `SELECT room_id, kind, end_date AS conflict_end
+           FROM room_holds
+          WHERE start_date < ? AND end_date > ?`,
+        [end, start]
+      );
+      const iso = (v: any): string => {
+        if (!v) return '';
+        if (v instanceof Date) return v.toISOString().slice(0, 10);
+        const s = String(v);
+        return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : new Date(s).toISOString().slice(0, 10);
+      };
+      const conflictByRoom: Record<string, { end: string; reason: string }> = {};
+      for (const c of bookingConflicts) {
+        const end0 = iso(c.conflict_end);
+        // Partners must NOT see guest names — just that the room is occupied.
+        if (!conflictByRoom[c.room_id] || end0 > conflictByRoom[c.room_id].end) {
+          conflictByRoom[c.room_id] = { end: end0, reason: 'Booked' };
+        }
+      }
+      for (const c of holdConflicts) {
+        const end0 = iso(c.conflict_end);
+        if (!conflictByRoom[c.room_id] || end0 > conflictByRoom[c.room_id].end) {
+          conflictByRoom[c.room_id] = { end: end0, reason: 'On hold' };
+        }
+      }
+
+      // Optional meal-plan quoting — quote AVAILABLE rooms through the same
+      // resolver the folio uses, then bump. Keyed by room id.
+      const quoteByRoom: Record<string, { perNight: number; total: number }> = {};
+      const baseResults = rooms.map((r: any) => {
+        const capacity = Number(r.capacity || 2);
+        const blocked = r.status === 'MAINTENANCE' || r.status === 'BLOCKED';
+        const conflict = conflictByRoom[r.id];
+        const fits = capacity >= guests;
+        const available = fits && !blocked && !conflict;
+        return { r, capacity, blocked, conflict, fits, available };
+      });
+      if (mealPlanId) {
+        await Promise.all(baseResults.filter(x => x.available).map(async (x) => {
+          try {
+            const bd = await computeBookingTotalWithExtras(req.params.id, x.r.id, start, end, {
+              mealPlanId, bookingType: 'OVERNIGHT',
+            });
+            quoteByRoom[x.r.id] = {
+              perNight: bd.per_night?.[0]?.base_rate ?? Number(x.r.base_rate || x.r.type_base_rate || 0),
+              total: bd.base_total,
+            };
+          } catch { /* leave to base-rate fallback */ }
+        }));
+      }
+
+      const results = baseResults.map(({ r, capacity, blocked, conflict, fits, available }) => {
+        const baseRate = Number(r.base_rate || r.type_base_rate || 0);
+        const q = quoteByRoom[r.id];
+        const netPerNight = q ? q.perNight : baseRate;
+        const netTotal = q ? q.total : Math.round(baseRate * nights * 100) / 100;
+        return {
+          id: r.id, name: r.name, room_number: r.room_number, floor: r.floor,
+          type_id: r.type_id, type_name: r.type_name,
+          capacity,
+          amenities: r.amenities || r.type_amenities,
+          description: r.type_description,
+          image_url: r.type_image_url,
+          available,
+          fits_capacity: fits,
+          blocked_by_status: blocked ? r.status : null,
+          available_from: conflict?.end || null,
+          conflict_reason: conflict?.reason || null,
+          // Commission-bumped sell prices ONLY — net rate intentionally omitted.
+          sell_per_night: applyPartnerBump(netPerNight, pType, commissionPct),
+          sell_total: applyPartnerBump(netTotal, pType, commissionPct),
+        };
+      });
+
+      // Category rollup — bumped starting-from rate + available count.
+      const catMap: Record<string, {
+        type_id: string | null; type_name: string;
+        total: number; available: number; sell_from: number; image_url: string | null;
+      }> = {};
+      for (const r of results) {
+        const key = r.type_id || '__untagged__';
+        if (!catMap[key]) {
+          catMap[key] = {
+            type_id: r.type_id || null,
+            type_name: r.type_name || 'Untagged Rooms',
+            total: 0, available: 0, sell_from: r.sell_per_night, image_url: r.image_url || null,
+          };
+        }
+        catMap[key].total++;
+        if (r.available) catMap[key].available++;
+        if (r.sell_per_night > 0 && (catMap[key].sell_from === 0 || r.sell_per_night < catMap[key].sell_from)) {
+          catMap[key].sell_from = r.sell_per_night;
+        }
+      }
+      const categories = Object.values(catMap).sort((a, b) => {
+        if ((b.available > 0 ? 1 : 0) !== (a.available > 0 ? 1 : 0)) {
+          return (b.available > 0 ? 1 : 0) - (a.available > 0 ? 1 : 0);
+        }
+        return a.type_name.localeCompare(b.type_name);
+      });
+
+      const mealPlans: any[] = await tenantDb.query(
+        "SELECT id, code, name FROM meal_plans WHERE is_active = 1 ORDER BY display_order, name"
+      ).catch(() => []);
+
+      res.json({
+        partner: {
+          display_name: partner.display_name,
+          partner_type: pType,
+          commission_pct: commissionPct,
+          convention: pType === 'OTA' ? 'GROSS_UP' : 'MARKUP',
+        },
+        start, end, nights, guests,
+        meal_plan_id: mealPlanId,
+        rooms: results,
+        categories,
+        meal_plans: mealPlans,
+      });
+    } catch (err: any) {
+      console.error("partner/inventory error:", err);
+      res.status(500).json({ error: "Failed to load partner inventory" });
+    }
+  });
+
   // ─── ROOM TYPES — Sprint B2 ─────────────────────────────────────────
   // Reusable property-level categories (Standard / Deluxe / Suite / etc.)
   // that physical rooms can belong to. Metadata only at this stage — the
@@ -21415,6 +21764,136 @@ ${data.tenant.name}`;
       res.json({ success: true });
     } catch {
       res.status(500).json({ error: "Failed to delete channel credentials" });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // ─── PARTNER PORTAL LOGINS (owner-managed) ────────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // Owner-side CRUD for the partner_accounts that power the OTA / Agent
+  // read-only rate-sheet portal. A partner logs in via the normal tenant
+  // login form (slug + login_id + password) and is routed to the partner
+  // view because their JWT role is 'OTA' / 'AGENT'. Commission is resolved
+  // live from the linked channel/agent unless an override is set here.
+  app.get("/api/restaurant/:id/hotel/partner-accounts", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows: any[] = await tenantDb.query(
+        `SELECT id, partner_type, partner_ref, display_name, login_id,
+                commission_pct, is_active, last_login_at, created_at
+           FROM partner_accounts ORDER BY is_active DESC, partner_type, display_name`
+      ).catch(() => []);
+      // Never return the password hash. has_password tells the UI whether a
+      // credential is set without leaking it.
+      const full: any[] = await tenantDb.query("SELECT id, password FROM partner_accounts").catch(() => []);
+      const pwMap = new Map(full.map((r: any) => [r.id, !!r.password]));
+      res.json(rows.map(r => ({ ...r, has_password: pwMap.get(r.id) || false })));
+    } catch (err) {
+      console.error("list partner-accounts error:", err);
+      res.status(500).json({ error: "Failed to fetch partner accounts" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/partner-accounts", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const b = req.body || {};
+      const partnerType = String(b.partner_type || '').toUpperCase().trim();
+      if (partnerType !== 'OTA' && partnerType !== 'AGENT') {
+        return res.status(400).json({ error: "partner_type must be 'OTA' or 'AGENT'." });
+      }
+      const displayName = String(b.display_name || '').trim();
+      const loginId = String(b.login_id || '').trim();
+      if (!displayName) return res.status(400).json({ error: "display_name is required." });
+      if (!loginId)    return res.status(400).json({ error: "login_id is required." });
+
+      const commissionPct = b.commission_pct == null || b.commission_pct === ''
+        ? null
+        : Math.max(0, Math.min(99.99, Number(b.commission_pct) || 0));
+      const isActive = b.is_active == null ? 1 : (b.is_active ? 1 : 0);
+
+      const tenantDb = await getTenantDb(req.params.id);
+
+      // Guard against a login_id that collides with a staff account — the
+      // login resolver checks attendance_staff (Source 3) before partner
+      // accounts (Source 4), so such a partner could never log in.
+      const staffClash: any = await tenantDb.get(
+        "SELECT id FROM attendance_staff WHERE login_id = ?", [loginId]
+      ).catch(() => null);
+      if (staffClash) {
+        return res.status(409).json({ error: "That login ID is already used by a staff account. Choose a different one." });
+      }
+
+      const existing: any = b.id
+        ? await tenantDb.get("SELECT * FROM partner_accounts WHERE id = ?", [b.id])
+        : await tenantDb.get("SELECT * FROM partner_accounts WHERE login_id = ?", [loginId]);
+
+      // Ensure login_id stays unique across partner accounts.
+      const loginClash: any = await tenantDb.get(
+        "SELECT id FROM partner_accounts WHERE login_id = ? AND id != ?",
+        [loginId, existing?.id || '__none__']
+      ).catch(() => null);
+      if (loginClash) {
+        return res.status(409).json({ error: "Another partner already uses that login ID." });
+      }
+
+      const rawPassword = b.password ? String(b.password) : '';
+      const passwordHash = rawPassword ? await bcrypt.hash(rawPassword, 10) : null;
+
+      if (existing) {
+        await tenantDb.run(
+          `UPDATE partner_accounts
+              SET partner_type   = ?,
+                  partner_ref    = ?,
+                  display_name   = ?,
+                  login_id       = ?,
+                  password       = COALESCE(?, password),
+                  commission_pct = ?,
+                  is_active      = ?,
+                  updated_at     = CURRENT_TIMESTAMP
+            WHERE id = ?`,
+          [partnerType, b.partner_ref || null, displayName, loginId,
+           passwordHash, commissionPct, isActive, existing.id]
+        );
+        return res.json({ success: true, id: existing.id });
+      }
+
+      // New account — a password is mandatory so the partner can log in.
+      if (!passwordHash) {
+        return res.status(400).json({ error: "A password is required when creating a partner login." });
+      }
+      const id = `PARTNER-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO partner_accounts
+           (id, partner_type, partner_ref, display_name, login_id, password, commission_pct, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, partnerType, b.partner_ref || null, displayName, loginId, passwordHash, commissionPct, isActive]
+      );
+      res.json({ success: true, id });
+    } catch (err: any) {
+      console.error("save partner-account error:", err);
+      res.status(500).json({ error: "Failed to save partner account" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/hotel/partner-accounts/:accountId", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      // Soft-disable so an accidental delete can be reversed and any audit
+      // trail (last_login_at) survives.
+      await tenantDb.run(
+        "UPDATE partner_accounts SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [req.params.accountId]
+      );
+      res.json({ success: true });
+    } catch {
+      res.status(500).json({ error: "Failed to remove partner account" });
     }
   });
 

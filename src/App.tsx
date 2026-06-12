@@ -1086,7 +1086,7 @@ export default function App() {
 
   useEffect(() => {
     const savedRole = localStorage.getItem('role');
-    const validRoles: UserRole[] = ['SUPER_ADMIN', 'OWNER', 'CHEF', 'WAITER', 'CUSTOMER', 'SALES_REP', 'CTO'];
+    const validRoles: UserRole[] = ['SUPER_ADMIN', 'OWNER', 'CHEF', 'WAITER', 'CUSTOMER', 'SALES_REP', 'CTO', 'MANAGER', 'HOUSEKEEPING', 'FRONT_DESK', 'CONCIERGE', 'MAINTENANCE', 'OTA', 'AGENT'];
     if (savedRole && !validRoles.includes(savedRole as UserRole)) {
       if (savedRole === 'ADMIN') {
         setRole('SUPER_ADMIN');
@@ -2114,7 +2114,7 @@ export default function App() {
         <div className="flex items-center gap-3">
           {/* Phase B1 — Multi-location switcher. Only renders for owners
               who actually have access to more than one restaurant. */}
-          {token && restaurantId && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && (
+          {token && restaurantId && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && role !== 'OTA' && role !== 'AGENT' && (
             <LocationSwitcher
               token={token}
               currentRestaurantId={restaurantId}
@@ -2142,14 +2142,14 @@ export default function App() {
       </nav>
 
       {/* Billing banner / lock screen for non-admin tenants. Polls hourly. */}
-      {restaurantId && restaurantId !== 'SYSTEM' && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && (
+      {restaurantId && restaurantId !== 'SYSTEM' && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && role !== 'OTA' && role !== 'AGENT' && (
         <BillingNotice restaurantId={restaurantId} token={token!} />
       )}
 
       {/* Phase B2 — brand announcements banner. Renders any active brand
           announcements above the dashboard for every location under the
           brand. No-op for tenants not linked to a brand. */}
-      {restaurantId && restaurantId !== 'SYSTEM' && token && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && (
+      {restaurantId && restaurantId !== 'SYSTEM' && token && role !== 'SUPER_ADMIN' && role !== 'CTO' && role !== 'SALES_REP' && role !== 'CUSTOMER' && role !== 'OTA' && role !== 'AGENT' && (
         <BrandAnnouncementBanner restaurantId={restaurantId} token={token} />
       )}
 
@@ -2172,6 +2172,11 @@ export default function App() {
           guestRoomId
             ? <RoomGuestInterface restaurantId={restaurantId!} roomId={guestRoomId} />
             : <CustomerInterface restaurantId={restaurantId!} />
+        )}
+        {/* B2B partner portal — OTA / Travel-Agent read-only rate + availability
+            sheet with commission-bumped pricing. */}
+        {(role === 'OTA' || role === 'AGENT') && (
+          <PartnerPortal restaurantId={restaurantId!} token={token!} restaurantName={restaurantName} />
         )}
       </main>
     </div>
@@ -18530,6 +18535,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             );
           })()}
+
+          {/* ── PARTNER PORTAL LOGINS — OTA / Agent read-only rate sheet ── */}
+          <PartnerLoginsManager restaurantId={restaurantId} token={token!} />
 
           {/* ════ OTA 360° DASHBOARD — MOVED to Hotel Reports → "🎯 OTA 360° & Receivables" (<Ota360Report>).
               Disabled here (false-guarded, unreachable) so the heavy analytical scorecard lives under
@@ -45850,6 +45858,464 @@ function TaxCurrencyPanel({ restaurantId, token }: { restaurantId: string; token
 // when the tenant hasn't migrated yet. Currently used by new screens that
 // surface currency to international tenants; the existing ₹-hardcoded
 // screens continue to work for Indian tenants.
+// ════════════════════════════════════════════════════════════════════
+// PartnerPortal — B2B OTA / Travel-Agent read-only rate + availability sheet
+// ════════════════════════════════════════════════════════════════════
+// Rendered when the logged-in role is OTA or AGENT. Every price the partner
+// sees is already bumped by their commission server-side (OTA → gross-up,
+// AGENT → markup); the hotel's net rate is never sent to the client. The
+// partner cannot book or mutate anything — this is a live rate card only.
+function PartnerPortal({ restaurantId, token, restaurantName }: { restaurantId: string; token: string; restaurantName: string; }) {
+  const isoDate = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  const today = useMemo(() => new Date(), []);
+  const tomorrow = useMemo(() => new Date(Date.now() + 86400000), []);
+
+  const [profile, setProfile] = useState<any | null>(null);
+  const [start, setStart] = useState<string>(() => isoDate(today));
+  const [end, setEnd] = useState<string>(() => isoDate(tomorrow));
+  const [guests, setGuests] = useState<number>(1);
+  const [mealPlanId, setMealPlanId] = useState<string>('');
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string>('');
+  const [onlyAvailable, setOnlyAvailable] = useState<boolean>(true);
+
+  const money = (n: number) => `₹${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+
+  const api = useCallback(async (path: string) => {
+    const res = await fetch(`/api/restaurant/${restaurantId}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.error || `Request failed (${res.status})`);
+    }
+    return res.json();
+  }, [restaurantId, token]);
+
+  // Load the partner profile once (commission %, convention, source name).
+  useEffect(() => {
+    let alive = true;
+    api('/partner/me')
+      .then(p => { if (alive) setProfile(p); })
+      .catch(() => { /* non-fatal; inventory response also carries partner ctx */ });
+    return () => { alive = false; };
+  }, [api]);
+
+  const loadInventory = useCallback(async () => {
+    if (!start || !end) return;
+    if (end < start) { setError('Check-out must be on or after check-in.'); return; }
+    setLoading(true); setError('');
+    try {
+      const qs = new URLSearchParams({ start, end, guests: String(guests) });
+      if (mealPlanId) qs.set('meal_plan_id', mealPlanId);
+      const resp = await api(`/partner/inventory?${qs.toString()}`);
+      setData(resp);
+      if (resp?.partner && !profile) setProfile(resp.partner);
+    } catch (e: any) {
+      setError(e.message || 'Failed to load availability.');
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [api, start, end, guests, mealPlanId, profile]);
+
+  // Auto-load on first mount with the default (tonight) dates.
+  useEffect(() => { loadInventory(); /* eslint-disable-next-line */ }, []);
+
+  const commissionPct = Number(profile?.commission_pct ?? data?.partner?.commission_pct ?? 0);
+  const convention = profile?.convention ?? data?.partner?.convention ?? 'MARKUP';
+  const partnerType = profile?.partner_type ?? data?.partner?.partner_type ?? 'AGENT';
+
+  const visibleRooms: any[] = useMemo(() => {
+    const rooms = data?.rooms || [];
+    return onlyAvailable ? rooms.filter((r: any) => r.available) : rooms;
+  }, [data, onlyAvailable]);
+
+  const exportCsv = () => {
+    if (!data?.rooms?.length) return;
+    downloadCsv(
+      `rate-sheet_${start}_to_${end}.csv`,
+      ['Room', 'Category', 'Capacity', 'Status', 'Available From', `Sell/Night (₹)`, `Sell Total ${data.nights}n (₹)`],
+      data.rooms.map((r: any) => [
+        r.name || r.room_number || r.id,
+        r.type_name || '',
+        r.capacity,
+        r.available ? 'Available' : (r.conflict_reason || (r.fits_capacity ? 'Unavailable' : 'Too small')),
+        r.available_from ? formatDateForTenant(r.available_from, 'DD-MMM-YYYY') : '',
+        Number(r.sell_per_night || 0).toFixed(2),
+        Number(r.sell_total || 0).toFixed(2),
+      ])
+    );
+  };
+
+  return (
+    <div className="space-y-5">
+      {/* Header band */}
+      <div className="rounded-2xl bg-gradient-to-r from-[#1a1208] to-[#3a2a18] text-white p-5 sm:p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-[#f0c896] text-xs font-bold uppercase tracking-widest">
+              <Globe size={14} /> {partnerType === 'OTA' ? 'OTA Partner' : 'Travel-Agent'} Portal
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-bold font-serif mt-1 truncate">{restaurantName || 'Live Rate Sheet'}</h1>
+            <p className="text-sm text-white/70 mt-1">
+              {profile?.display_name ? <>Signed in as <span className="font-semibold text-white">{profile.display_name}</span>{profile?.source_name ? ` · ${profile.source_name}` : ''}. </> : null}
+              Live availability &amp; your contracted rates.
+            </p>
+          </div>
+          <div className="text-right shrink-0">
+            <div className="inline-flex items-center gap-1.5 bg-white/10 rounded-xl px-3 py-2">
+              <TrendingUp size={16} className="text-[#f0c896]" />
+              <span className="text-lg font-bold">{commissionPct}%</span>
+              <span className="text-[11px] text-white/70 uppercase tracking-wide">commission</span>
+            </div>
+            <p className="text-[11px] text-white/60 mt-1 max-w-[220px]">
+              {partnerType === 'OTA'
+                ? 'Rates are grossed-up so your commission is built in.'
+                : 'Rates already include your markup.'}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Search bar */}
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4 sm:p-5 shadow-sm">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          <label className="text-xs font-semibold text-[#6b5d52]">
+            <span className="flex items-center gap-1 mb-1"><Calendar size={12}/> Check-in</span>
+            <input type="date" value={start} min={isoDate(today)} onChange={e => setStart(e.target.value)}
+              className="w-full border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm text-[#1a1208]" />
+          </label>
+          <label className="text-xs font-semibold text-[#6b5d52]">
+            <span className="flex items-center gap-1 mb-1"><Calendar size={12}/> Check-out</span>
+            <input type="date" value={end} min={start} onChange={e => setEnd(e.target.value)}
+              className="w-full border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm text-[#1a1208]" />
+          </label>
+          <label className="text-xs font-semibold text-[#6b5d52]">
+            <span className="flex items-center gap-1 mb-1"><Users size={12}/> Guests</span>
+            <input type="number" min={1} value={guests} onChange={e => setGuests(Math.max(1, Number(e.target.value) || 1))}
+              className="w-full border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm text-[#1a1208]" />
+          </label>
+          <label className="text-xs font-semibold text-[#6b5d52]">
+            <span className="flex items-center gap-1 mb-1"><Bed size={12}/> Meal plan</span>
+            <select value={mealPlanId} onChange={e => setMealPlanId(e.target.value)}
+              className="w-full border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm text-[#1a1208] bg-white">
+              <option value="">Room only</option>
+              {(data?.meal_plans || []).map((mp: any) => (
+                <option key={mp.id} value={mp.id}>{mp.name} ({mp.code})</option>
+              ))}
+            </select>
+          </label>
+          <div className="flex items-end">
+            <button onClick={loadInventory} disabled={loading}
+              className="w-full bg-[#cc5a16] text-white rounded-lg px-3 py-2 text-sm font-bold flex items-center justify-center gap-2 hover:bg-[#a84612] transition-colors disabled:opacity-60">
+              {loading ? <RefreshCw size={16} className="animate-spin" /> : <Search size={16} />}
+              {loading ? 'Checking…' : 'Check rates'}
+            </button>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 mt-3">
+          <label className="flex items-center gap-2 text-xs text-[#6b5d52] cursor-pointer">
+            <input type="checkbox" checked={onlyAvailable} onChange={e => setOnlyAvailable(e.target.checked)} />
+            Show available rooms only
+          </label>
+          <button onClick={exportCsv} disabled={!data?.rooms?.length}
+            className="text-xs font-semibold text-[#a84612] flex items-center gap-1 hover:underline disabled:opacity-40 disabled:no-underline">
+            <Download size={13} /> Export rate sheet (CSV)
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm flex items-center gap-2">
+          <AlertCircle size={16} /> {error}
+        </div>
+      )}
+
+      {/* Category rollup cards */}
+      {data?.categories?.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+          {data.categories.map((c: any) => (
+            <div key={c.type_id || c.type_name} className="bg-white rounded-xl border border-[#cc5a16]/10 p-3">
+              <div className="text-sm font-bold text-[#1a1208] truncate">{c.type_name}</div>
+              <div className={`text-xs mt-0.5 ${c.available > 0 ? 'text-green-700' : 'text-red-500'}`}>
+                {c.available} of {c.total} available
+              </div>
+              <div className="text-lg font-bold text-[#a84612] mt-1">{money(c.sell_from)}<span className="text-[11px] font-normal text-[#9c8e85]"> /night</span></div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Per-room rate sheet */}
+      <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden shadow-sm">
+        <div className="px-4 py-3 border-b border-[#f0e8de] flex items-center justify-between">
+          <h3 className="text-sm font-bold text-[#1a1208] flex items-center gap-2"><Bed size={16}/> Rooms — {data ? `${data.nights} night${data.nights === 1 ? '' : 's'}` : ''}</h3>
+          {data && <span className="text-xs text-[#9c8e85]">{visibleRooms.length} shown</span>}
+        </div>
+        {!loading && data && visibleRooms.length === 0 && (
+          <div className="p-8 text-center text-sm text-[#9c8e85]">
+            No {onlyAvailable ? 'available ' : ''}rooms for these dates. Try widening the date range or clearing the “available only” filter.
+          </div>
+        )}
+        {visibleRooms.length > 0 && (
+          <div className="divide-y divide-[#f4ede4]">
+            {visibleRooms.map((r: any) => (
+              <div key={r.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-[#1a1208] truncate">{r.name || r.room_number}</div>
+                  <div className="text-xs text-[#9c8e85] truncate">
+                    {r.type_name || 'Room'} · sleeps {r.capacity}
+                    {!r.available && (
+                      <span className="text-red-500 ml-1">
+                        · {r.conflict_reason || (r.fits_capacity ? 'Unavailable' : 'Too small for party')}
+                        {r.available_from ? ` until ${formatDateForTenant(r.available_from, 'DD-MMM-YYYY')}` : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-base font-bold text-[#a84612]">{money(r.sell_per_night)}<span className="text-[11px] font-normal text-[#9c8e85]"> /night</span></div>
+                  {data?.nights > 1 && <div className="text-[11px] text-[#6b5d52]">{money(r.sell_total)} total</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <p className="text-[11px] text-[#9c8e85] text-center pb-4 flex items-center justify-center gap-1">
+        <Info size={12} /> All prices include your {commissionPct}% {partnerType === 'OTA' ? 'commission (grossed-up)' : 'markup'}. Rates &amp; availability are live and may change. Read-only view — to confirm a booking, contact the property.
+      </p>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PartnerLoginsManager — owner-side CRUD for OTA / Agent portal logins
+// ════════════════════════════════════════════════════════════════════
+// Lives inside the Channel Manager. Each login powers the read-only
+// PartnerPortal rate sheet; commission is resolved live from the linked
+// channel/agent unless an override is set here.
+function PartnerLoginsManager({ restaurantId, token }: { restaurantId: string; token: string; }) {
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [channels, setChannels] = useState<any[]>([]);
+  const [agents, setAgents] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const blankForm = { id: '', partner_type: 'AGENT', partner_ref: '', display_name: '', login_id: '', password: '', commission_pct: '', is_active: 1 };
+  const [form, setForm] = useState<any>(blankForm);
+  const [saving, setSaving] = useState(false);
+
+  const api = useCallback(async (path: string, init?: RequestInit) => {
+    const res = await fetch(`/api/restaurant/${restaurantId}/hotel${path}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init?.headers || {}) },
+      credentials: 'include',
+    });
+    if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || `Request failed (${res.status})`); }
+    return res.json();
+  }, [restaurantId, token]);
+
+  const loadAll = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const [acc, ch, ag] = await Promise.all([
+        api('/partner-accounts').catch(() => []),
+        api('/channel-credentials').catch(() => []),
+        api('/agents').catch(() => []),
+      ]);
+      setAccounts(Array.isArray(acc) ? acc : []);
+      setChannels(Array.isArray(ch) ? ch : []);
+      setAgents(Array.isArray(ag) ? ag.filter((a: any) => a.is_active !== 0) : []);
+    } catch (e: any) {
+      setError(e.message || 'Failed to load partner logins.');
+    } finally { setLoading(false); }
+  }, [api]);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  const openNew = () => { setForm(blankForm); setShowForm(true); };
+  const openEdit = (a: any) => {
+    setForm({
+      id: a.id, partner_type: a.partner_type, partner_ref: a.partner_ref || '',
+      display_name: a.display_name || '', login_id: a.login_id || '',
+      password: '', commission_pct: a.commission_pct == null ? '' : String(a.commission_pct),
+      is_active: a.is_active == null ? 1 : a.is_active,
+    });
+    setShowForm(true);
+  };
+
+  const save = async () => {
+    if (!form.display_name.trim()) { setError('Display name is required.'); return; }
+    if (!form.login_id.trim())     { setError('Login ID is required.'); return; }
+    if (!form.id && !form.password) { setError('A password is required for a new login.'); return; }
+    setSaving(true); setError('');
+    try {
+      await api('/partner-accounts', { method: 'POST', body: JSON.stringify({
+        id: form.id || undefined,
+        partner_type: form.partner_type,
+        partner_ref: form.partner_ref || null,
+        display_name: form.display_name.trim(),
+        login_id: form.login_id.trim(),
+        password: form.password || undefined,
+        commission_pct: form.commission_pct === '' ? null : Number(form.commission_pct),
+        is_active: form.is_active ? 1 : 0,
+      }) });
+      setShowForm(false); setForm(blankForm);
+      await loadAll();
+    } catch (e: any) { setError(e.message || 'Failed to save.'); }
+    finally { setSaving(false); }
+  };
+
+  const disableAccount = async (a: any) => {
+    if (!window.confirm(`Disable the login for "${a.display_name}"? They will no longer be able to sign in.`)) return;
+    try { await api(`/partner-accounts/${a.id}`, { method: 'DELETE' }); await loadAll(); }
+    catch (e: any) { setError(e.message || 'Failed to disable.'); }
+  };
+
+  const sourceLabel = (a: any) => {
+    if (a.partner_type === 'AGENT') {
+      const ag = agents.find((x: any) => x.id === a.partner_ref);
+      return ag ? ag.name : (a.partner_ref || '—');
+    }
+    return a.partner_ref || '—';
+  };
+
+  return (
+    <div className="bg-white rounded-[32px] border-2 border-[#e8dccf] overflow-hidden">
+      <div className="px-5 py-4 bg-[#faf7f2] flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-lg font-bold font-serif text-[#1a1208] flex items-center gap-2"><Globe size={18} /> Partner Portal Logins</h3>
+          <p className="text-xs text-[#6b5d52] mt-0.5 max-w-2xl">
+            Give an OTA or travel agent a read-only login to your live rates &amp; availability. Prices they see are auto-bumped by their commission
+            (OTA → grossed-up so you keep your rate; agent → markup added on top).
+          </p>
+        </div>
+        <button onClick={openNew} className="bg-[#cc5a16] text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-[#a84612] transition-colors shrink-0">
+          + Add partner login
+        </button>
+      </div>
+
+      {error && <div className="mx-5 mt-3 bg-red-50 border border-red-200 text-red-700 rounded-xl px-3 py-2 text-xs flex items-center gap-2"><AlertCircle size={14} /> {error}</div>}
+
+      <div className="p-5">
+        {loading ? (
+          <p className="text-sm text-[#9c8e85] italic">Loading…</p>
+        ) : accounts.length === 0 ? (
+          <p className="text-sm text-[#9c8e85] italic">No partner logins yet. Add one to share live rates with an OTA or agent.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] border-b border-[#f0e8de]">
+                  <th className="py-2 pr-3">Partner</th>
+                  <th className="py-2 pr-3">Type</th>
+                  <th className="py-2 pr-3">Linked to</th>
+                  <th className="py-2 pr-3">Login ID</th>
+                  <th className="py-2 pr-3">Commission</th>
+                  <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accounts.map((a: any) => (
+                  <tr key={a.id} className={cn('border-b border-[#f7f1e9]', a.is_active ? '' : 'opacity-50')}>
+                    <td className="py-2 pr-3 font-semibold text-[#1a1208]">{a.display_name}</td>
+                    <td className="py-2 pr-3">{a.partner_type}</td>
+                    <td className="py-2 pr-3 text-[#6b5d52]">{sourceLabel(a)}</td>
+                    <td className="py-2 pr-3 font-mono text-xs">{a.login_id}{!a.has_password && <span className="ml-1 text-amber-600" title="No password set">⚠</span>}</td>
+                    <td className="py-2 pr-3">{a.commission_pct == null ? <span className="text-[#9c8e85] italic">from source</span> : `${a.commission_pct}%`}</td>
+                    <td className="py-2 pr-3">{a.is_active ? <span className="text-green-700 text-xs font-semibold">Active</span> : <span className="text-red-500 text-xs">Disabled</span>}</td>
+                    <td className="py-2 pr-3 text-right whitespace-nowrap">
+                      <button onClick={() => openEdit(a)} className="text-[#a84612] text-xs font-semibold hover:underline mr-3">Edit</button>
+                      {a.is_active ? <button onClick={() => disableAccount(a)} className="text-red-500 text-xs font-semibold hover:underline">Disable</button> : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {showForm && (
+        <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={() => !saving && setShowForm(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-lg p-5 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h4 className="text-lg font-bold font-serif text-[#1a1208] mb-4">{form.id ? 'Edit partner login' : 'New partner login'}</h4>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <label className="text-xs font-semibold text-[#6b5d52]">Type
+                  <select value={form.partner_type} onChange={e => setForm({ ...form, partner_type: e.target.value, partner_ref: '' })}
+                    className="w-full mt-1 border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm bg-white">
+                    <option value="AGENT">Travel Agent (markup)</option>
+                    <option value="OTA">OTA (gross-up)</option>
+                  </select>
+                </label>
+                <label className="text-xs font-semibold text-[#6b5d52]">Linked {form.partner_type === 'OTA' ? 'channel' : 'agent'}
+                  <select value={form.partner_ref} onChange={e => setForm({ ...form, partner_ref: e.target.value })}
+                    className="w-full mt-1 border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm bg-white">
+                    <option value="">— none (use override %) —</option>
+                    {form.partner_type === 'OTA'
+                      ? channels.map((c: any) => <option key={c.channel} value={c.channel}>{c.channel} ({Number(c.commission_pct || 0)}%)</option>)
+                      : agents.map((a: any) => <option key={a.id} value={a.id}>{a.name} ({Number(a.commission_pct || 0)}%)</option>)}
+                  </select>
+                </label>
+              </div>
+              <label className="block text-xs font-semibold text-[#6b5d52]">Display name
+                <input value={form.display_name} onChange={e => setForm({ ...form, display_name: e.target.value })}
+                  placeholder="e.g. MakeMyTrip / Cox & Kings Goa"
+                  className="w-full mt-1 border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm" />
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="text-xs font-semibold text-[#6b5d52]">Login ID
+                  <input value={form.login_id} onChange={e => setForm({ ...form, login_id: e.target.value })}
+                    placeholder="partner login id"
+                    className="w-full mt-1 border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm font-mono" />
+                </label>
+                <label className="text-xs font-semibold text-[#6b5d52]">Password {form.id && <span className="font-normal text-[#9c8e85]">(blank = keep)</span>}
+                  <input type="text" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })}
+                    placeholder={form.id ? '••••••••' : 'set a password'}
+                    className="w-full mt-1 border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm font-mono" />
+                </label>
+              </div>
+              <div className="grid grid-cols-2 gap-3 items-end">
+                <label className="text-xs font-semibold text-[#6b5d52]">Commission override %
+                  <input type="number" min={0} max={99.99} step={0.5} value={form.commission_pct}
+                    onChange={e => setForm({ ...form, commission_pct: e.target.value })}
+                    placeholder="leave blank → use source"
+                    className="w-full mt-1 border border-[#e7ddd2] rounded-lg px-2 py-2 text-sm" />
+                </label>
+                <label className="flex items-center gap-2 text-xs font-semibold text-[#6b5d52] pb-2">
+                  <input type="checkbox" checked={!!form.is_active} onChange={e => setForm({ ...form, is_active: e.target.checked ? 1 : 0 })} />
+                  Active
+                </label>
+              </div>
+              <p className="text-[11px] text-[#9c8e85] flex items-center gap-1">
+                <Info size={12} /> The partner signs in at your tenant login with this Login ID &amp; password.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <button onClick={() => setShowForm(false)} disabled={saving} className="px-4 py-2 rounded-xl text-sm font-semibold text-[#6b5d52] hover:bg-[#faf7f2]">Cancel</button>
+              <button onClick={save} disabled={saving} className="px-4 py-2 rounded-xl text-sm font-bold bg-[#cc5a16] text-white hover:bg-[#a84612] disabled:opacity-60">
+                {saving ? 'Saving…' : 'Save login'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function useTenantFormatter(restaurant: any) {
   return useMemo(() => {
     const symbol = restaurant?.currency_symbol || '₹';
