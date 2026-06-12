@@ -7160,6 +7160,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [viewFolio, setViewFolio] = useState<any>(null);
   // Sprint RS — F&B charge modal state (phone-in room service, minibar, banquet)
   const [fnbChargeFolio, setFnbChargeFolio] = useState<any>(null);
+  // RS-FIX — unbilled room-service orders (folio_post_status='PENDING_MANUAL')
+  // awaiting front-desk reconciliation onto a folio.
+  const [pendingFolioOrders, setPendingFolioOrders] = useState<any[]>([]);
   // Phase 4
   const [hotelFaqs, setHotelFaqs] = useState<any[]>([]);
   const [editingFaq, setEditingFaq] = useState<any>(null);
@@ -10187,6 +10190,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!isHotelEnabled) return;
     try { setHotelFolios(await hotelApi('/folios')); } catch (err: any) { setHotelError(err.message); }
   };
+  // RS-FIX — room-service orders the kitchen received but couldn't auto-bill
+  // to a folio. Silent on failure (it only drives a badge, never blocks).
+  const fetchPendingFolioOrders = async () => {
+    if (!isHotelEnabled) return;
+    try { setPendingFolioOrders(await hotelApi('/orders/pending-folio')); } catch { /* non-critical */ }
+  };
   const fetchComplianceList = async () => {
     if (!isHotelEnabled) return;
     try { setComplianceList(await hotelApi('/compliance/foreign-guests')); } catch (err: any) { setHotelError(err.message); }
@@ -10504,7 +10513,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'ROOMS') { fetchHotelRooms(); fetchHotelRoomTypes(); fetchRateOverrides(); }
     if (activeTab === 'SERVICES') fetchHotelServices();
     if (activeTab === 'SERVICE_REQUESTS') fetchHotelRequests();
-    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); fetchTariff(); }
+    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); fetchTariff(); fetchPendingFolioOrders(); }
     // BCG client request 8 Jun 2026 — Front Desk tab now embeds Stay View
     // (AvailabilityCalendar). The cell-click handler resolves room.base_rate
     // from hotelRooms, so we eagerly fetch rooms + bookings + tariff when
@@ -10514,7 +10523,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // Eagerly load credentials + iCal feeds + recent webhook events when
     // the tab is opened so the page renders with data, not loading spinners.
     if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); fetchTravelAgents(); fetchReceivablesAging(); fetchPartnerInvoices(); fetchOutstandingReport(); }
-    if (activeTab === 'FOLIOS') fetchHotelFolios();
+    if (activeTab === 'FOLIOS') { fetchHotelFolios(); fetchPendingFolioOrders(); }
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
     if (activeTab === 'REPORTS' && isHotelEnabled) fetchHotelAnalytics();
@@ -19893,6 +19902,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Folios</h2>
             <p className="text-sm text-[#6b5d52] mt-1">Per-booking ledgers. Charges auto-post on check-in and when chargeable services complete.</p>
           </div>
+          {/* RS-FIX — unbilled room orders awaiting reconciliation onto a folio */}
+          <PendingRoomOrdersAlert
+            orders={pendingFolioOrders}
+            openFolios={hotelFolios.filter((f: any) => f.status === 'open')}
+            restaurantId={restaurantId}
+            token={token}
+            onReconciled={async () => { await fetchPendingFolioOrders(); await fetchHotelFolios(); }}
+          />
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-hidden shadow-sm">
             {hotelFolios.length === 0 ? (
               <div className="p-12 text-center text-sm text-[#6b5d52]">No folios yet. Folios are created automatically on check-in.</div>
@@ -26871,6 +26888,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           }}
           loyaltyBanner={<HotelLoyaltyBanner restaurantId={restaurantId!} token={token!} guestPhone={(checkoutBooking as any).guest_phone || ''} manualDiscountActive={false} />}
           lateFeeBanner={<HotelLateFeeBanner restaurantId={restaurantId!} token={token!} bookingId={checkoutBooking.id} />}
+          pendingRoomOrders={pendingFolioOrders.filter((o: any) =>
+            (o.room_id && o.room_id === checkoutBooking.room_id) ||
+            (o.booking_id && o.booking_id === checkoutBooking.id)
+          )}
         />
       )}
 
@@ -32108,6 +32129,116 @@ const CheckInChecklistModal: React.FC<{
    synthetic order (so reversal still works via reference_number)
    and routes through postOrderToFolio for the actual entry inserts.
 */
+/* RS-FIX — Front-desk "Unbilled room orders" reconciliation surface.
+   Lists CHARGE_TO_ROOM orders that reached the kitchen but couldn't be
+   auto-attached to a folio at order time (room not linked to a checked-in
+   booking → flagged folio_post_status='PENDING_MANUAL', commit 5274f17).
+   The charge isn't on any folio yet, so it would be missed at checkout. Each
+   row one-click posts to the room's open folio (auto) or a folio the staff
+   picks, via POST /hotel/orders/:orderId/post-to-folio (reuses the RS-3
+   postOrderToFolio path). Renders nothing when there's nothing to reconcile. */
+const PendingRoomOrdersAlert: React.FC<{
+  orders: any[];
+  openFolios: any[];
+  restaurantId: string;
+  token: string;
+  onReconciled: () => void | Promise<void>;
+}> = ({ orders, openFolios, restaurantId, token, onReconciled }) => {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  const [error, setError] = useState('');
+
+  if (!orders || orders.length === 0) return null;
+
+  const summarize = (raw: any): string => {
+    try {
+      const arr = JSON.parse(raw || '[]');
+      if (!Array.isArray(arr) || arr.length === 0) return '—';
+      return arr.map((i: any) => `${Number(i.quantity || i.qty || 1)}× ${i.name || i.menuName || 'Item'}`).join(', ');
+    } catch { return '—'; }
+  };
+
+  const charge = async (order: any) => {
+    setError(''); setBusyId(order.id);
+    try {
+      // Explicit pick wins; else fall back to the server-supplied open folio
+      // for the room; else send nothing and let the backend resolve/ensure.
+      const folioId = picks[order.id] || order.open_folio_id || '';
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/orders/${order.id}/post-to-folio`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(folioId ? { folio_id: folioId } : {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
+      await onReconciled();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to charge to folio');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="bg-amber-50 border-2 border-amber-300 rounded-[24px] p-5 shadow-sm">
+      <div className="flex items-center gap-2 mb-2">
+        <AlertCircle size={18} className="text-amber-600 shrink-0" />
+        <h3 className="text-base font-bold text-amber-900">Unbilled room orders ({orders.length})</h3>
+      </div>
+      <p className="text-xs text-amber-800/90 mb-4 leading-relaxed">
+        These room-service orders reached the kitchen but their F&amp;B charge couldn&rsquo;t be auto-attached to a folio
+        (the room wasn&rsquo;t linked to a checked-in booking at order time). Charge each onto the guest&rsquo;s open folio so
+        it isn&rsquo;t missed at checkout.
+      </p>
+      {error && <p className="text-xs text-[#c13b3b] bg-white/70 rounded-xl px-3 py-2 mb-3">{error}</p>}
+      <div className="space-y-2">
+        {orders.map((o) => {
+          const hasAuto = !!o.open_folio_id || openFolios.some((f) => f.room_id && f.room_id === o.room_id);
+          return (
+            <div key={o.id} className="bg-white rounded-2xl border border-amber-200 p-3 flex flex-wrap items-center gap-3">
+              <div className="flex-1 min-w-[220px]">
+                <div className="text-sm font-semibold text-[#1a1208]">
+                  {o.room_name ? `Room ${o.room_name}` : (o.table_number ? `Table ${o.table_number}` : (o.room_id || '—'))}
+                  {o.current_guest_name && <span className="ml-2 text-[11px] font-normal text-[#6b5d52]">· {o.current_guest_name}</span>}
+                </div>
+                <div className="text-[11px] text-[#6b5d52] mt-0.5">{summarize(o.items)}</div>
+                <div className="text-[10px] text-[#9c8e85] mt-0.5">
+                  {o.created_at ? new Date(o.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' }) : ''}
+                  {o.customer_phone ? ` · ${o.customer_phone}` : ''}
+                </div>
+              </div>
+              <div className="font-mono text-sm font-bold text-[#1a1208] whitespace-nowrap">
+                ₹{Number(o.total_amount || 0).toLocaleString('en-IN')}
+              </div>
+              <select
+                value={picks[o.id] || ''}
+                onChange={(e) => setPicks((prev) => ({ ...prev, [o.id]: e.target.value }))}
+                className="bg-[#faf7f2] border border-amber-200 rounded-xl px-2 py-2 text-xs outline-none max-w-[180px]"
+                title="Target folio — leave on Auto to use the room's open folio"
+              >
+                <option value="">{hasAuto ? 'Auto (room’s folio)' : 'Pick an open folio…'}</option>
+                {openFolios.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {(f.room_name || f.room_id || 'Folio')} · {f.guest_name || String(f.id).slice(-6)}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => charge(o)}
+                disabled={busyId === o.id}
+                className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 disabled:opacity-50 whitespace-nowrap"
+              >
+                {busyId === o.id ? 'Charging…' : 'Charge to folio'}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 const FnbChargeModal: React.FC<{
   folio: any;
   restaurantId: string;
@@ -32412,7 +32543,8 @@ const CheckoutModal: React.FC<{
   onSettled: (result: any) => void | Promise<void>;
   loyaltyBanner: React.ReactNode;
   lateFeeBanner: React.ReactNode;
-}> = ({ booking, restaurant, restaurantId, token, fetchFolioOutstanding, hotelApi, onClose, onSettled, loyaltyBanner, lateFeeBanner }) => {
+  pendingRoomOrders?: any[];
+}> = ({ booking, restaurant, restaurantId, token, fetchFolioOutstanding, hotelApi, onClose, onSettled, loyaltyBanner, lateFeeBanner, pendingRoomOrders = [] }) => {
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [discount, setDiscount] = useState(0);
@@ -32495,6 +32627,25 @@ const CheckoutModal: React.FC<{
 
           {lateFeeBanner}
           {loyaltyBanner}
+
+          {/* RS-FIX — warn if room-service charges for this room aren't on the
+              folio yet. Non-blocking; staff reconcile them via Folios →
+              Unbilled room orders before settling. */}
+          {pendingRoomOrders.length > 0 && (
+            <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-3">
+              <div className="flex items-start gap-2">
+                <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs font-bold text-amber-900">
+                    {pendingRoomOrders.length} unbilled room order{pendingRoomOrders.length === 1 ? '' : 's'} for this room
+                  </p>
+                  <p className="text-[11px] text-amber-800/90 mt-0.5 leading-relaxed">
+                    These room-service charges aren&rsquo;t on the folio yet. Post them via <strong>Folios &rarr; Unbilled room orders</strong> before settling, or the revenue will be missed.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {loading && <p className="text-center text-sm text-[#9c8e85] py-4 italic">Loading folio…</p>}
 
