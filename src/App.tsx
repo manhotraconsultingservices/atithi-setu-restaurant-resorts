@@ -16187,6 +16187,34 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 });
               };
 
+              // Permanently delete a meal plan from the system. The server
+              // hard-deletes it (+ its tariff-matrix / extra-person cells)
+              // when unused, or archives it if existing bookings reference it
+              // (so their invoices stay intact). Either way it vanishes from
+              // every selector. Refetch so the list reflects the DB truth.
+              const deleteMealPlan = async (m: any) => {
+                const reply = prompt(
+                  `Permanently delete "${m.code} · ${m.name}"?\n\n` +
+                  `It is removed from the system entirely, including its tariff-matrix and extra-person rate cells. ` +
+                  `If any past booking used this plan it will be archived instead (kept so those invoices stay readable).\n\n` +
+                  `To confirm, type DELETE:`
+                );
+                if (reply == null) return;
+                if (String(reply).trim().toUpperCase() !== 'DELETE') {
+                  alert('Not deleted — confirmation text did not match.');
+                  return;
+                }
+                try {
+                  const resp: any = await hotelApi(`/tariff/meal-plans/${m.id}`, { method: 'DELETE' });
+                  await fetchTariff();
+                  alert(resp?.archived ? (resp.error || 'Plan archived.') : `"${m.code}" permanently deleted.`);
+                } catch (err: any) {
+                  // 409 = referenced by bookings → server archived it instead.
+                  await fetchTariff();
+                  alert(err?.message || 'Delete failed.');
+                }
+              };
+
               const PERSON_TYPES = [
                 { id: 'ADULT',                label: 'Extra Adult (w/ mattress)' },
                 { id: 'CHILD_WITH_MATTRESS',  label: 'Extra Child 5-12 (w/ mattress)' },
@@ -16363,11 +16391,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                       </td>
                                       <td className="px-2 py-1.5 text-right pr-3">
                                         {showActions === 'archived' ? (
-                                          <button
-                                            type="button"
-                                            onClick={() => updateMealPlan(m.id, { is_active: 1 })}
-                                            className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
-                                          >↻ Restore</button>
+                                          <div className="inline-flex items-center gap-1.5">
+                                            <button
+                                              type="button"
+                                              onClick={() => updateMealPlan(m.id, { is_active: 1 })}
+                                              className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                            >↻ Restore</button>
+                                            <button
+                                              type="button"
+                                              onClick={() => deleteMealPlan(m)}
+                                              title="Permanently delete this meal plan from the system"
+                                              className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-md bg-red-50 text-red-700 hover:bg-red-100 border border-red-200"
+                                            >🗑 Delete</button>
+                                          </div>
                                         ) : m._new ? (
                                           <button
                                             type="button"
@@ -16427,7 +16463,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
                                     <div>
                                       <h5 className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85]">📁 Archived Meal Plans ({archivedList.length})</h5>
-                                      <p className="text-[10px] text-[#9c8e85] mt-0.5">These plans are hidden from booking forms but still exist in the DB. Historical invoices referencing them stay readable. Click <strong>↻ Restore</strong> on any row to bring it back to active.</p>
+                                      <p className="text-[10px] text-[#9c8e85] mt-0.5">These plans are hidden from booking forms but still exist in the DB. Historical invoices referencing them stay readable. Click <strong>↻ Restore</strong> to bring one back, or <strong>🗑 Delete</strong> to remove it from the system entirely (kept only if past bookings used it).</p>
                                     </div>
                                   </div>
                                   {renderEditableTable(archivedList, 'archived')}

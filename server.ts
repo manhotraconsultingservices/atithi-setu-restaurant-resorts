@@ -27085,6 +27085,49 @@ ${data.tenant.name}`;
     }
   );
 
+  // DELETE a meal plan permanently. Safe-delete semantics:
+  //   • If any room_bookings reference it → hard-delete would orphan their
+  //     folio/invoice meal-plan reference, so we ARCHIVE it instead
+  //     (is_active=0) and tell the caller. It stays out of every selector but
+  //     historical invoices remain readable.
+  //   • If unused → hard-delete the plan AND its tariff-matrix +
+  //     extra-person config rows (pure configuration, no historical value).
+  app.delete("/api/restaurant/:id/hotel/tariff/meal-plans/:mealPlanId", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
+    (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
+    async (req: AuthRequest, res: Response) => {
+      const check = await ensureHotelEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      try {
+        const tenantDb = await getTenantDb(req.params.id);
+        const mpId = String(req.params.mealPlanId);
+        const mp: any = await tenantDb.get("SELECT id, code, name FROM meal_plans WHERE id = ?", [mpId]);
+        if (!mp) return res.status(404).json({ error: "Meal plan not found." });
+
+        const used: any = await tenantDb.get(
+          "SELECT COUNT(*) AS n FROM room_bookings WHERE meal_plan_id = ?", [mpId]
+        ).catch(() => ({ n: 0 }));
+        const bookingCount = Number(used?.n || 0);
+        if (bookingCount > 0) {
+          await tenantDb.run("UPDATE meal_plans SET is_active = 0 WHERE id = ?", [mpId]);
+          return res.status(409).json({
+            error: `"${mp.code} · ${mp.name}" is used by ${bookingCount} booking(s), so it can't be permanently deleted without breaking their invoices. It has been archived instead — hidden from new bookings and the tariff matrix.`,
+            archived: true,
+            booking_count: bookingCount,
+          });
+        }
+
+        // Unused — clean up its config rows then remove the plan itself.
+        await tenantDb.run("DELETE FROM room_tariffs WHERE meal_plan_id = ?", [mpId]).catch(() => {});
+        await tenantDb.run("DELETE FROM extra_person_charges WHERE meal_plan_id = ?", [mpId]).catch(() => {});
+        await tenantDb.run("DELETE FROM meal_plans WHERE id = ?", [mpId]);
+        res.json({ ok: true, deleted: mpId });
+      } catch (err: any) {
+        console.error("delete meal-plan error:", err);
+        res.status(500).json({ error: err?.message || "Failed to delete meal plan" });
+      }
+    }
+  );
+
   app.put("/api/restaurant/:id/hotel/tariff/room-tariffs", authenticate, hotelStaff, requireTabAccess('SETTINGS'),
     (req, res, next) => requireTariffOwner(req as AuthRequest, res, next),
     async (req: AuthRequest, res: Response) => {
