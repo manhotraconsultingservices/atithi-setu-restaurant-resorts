@@ -7073,6 +7073,45 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   } | null>(null);
   // Phase 2 & 3 state
   const [hotelBookings, setHotelBookings] = useState<any[]>([]);
+  // Reservations table — client-side sort + live filter (13 Jun 2026 fix).
+  // The "All bookings" table had no sort and clipped its right-hand columns,
+  // so checked-in guests were hard to locate. displayedBookings sorts +
+  // filters the loaded rows in-browser so column sort and name search work
+  // instantly, on top of the existing backend search.
+  const [bookingSort, setBookingSort] = useState<{ col: string; dir: 'asc' | 'desc' }>({ col: 'check_in', dir: 'desc' });
+  const toggleBookingSort = (col: string) =>
+    setBookingSort(s => (s.col === col ? { col, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' }));
+  const displayedBookings = useMemo(() => {
+    const q = (bookingHistoryFilter.search || '').trim().toLowerCase();
+    const qd = q.replace(/\D/g, '');
+    let rows = hotelBookings;
+    if (q) {
+      rows = rows.filter((b: any) =>
+        String(b.guest_name || '').toLowerCase().includes(q) ||
+        String(b.guest_email || '').toLowerCase().includes(q) ||
+        String(b.id || '').toLowerCase().includes(q) ||
+        String(b.invoice_number || '').toLowerCase().includes(q) ||
+        (qd.length >= 3 && String(b.guest_phone || '').replace(/\D/g, '').includes(qd))
+      );
+    }
+    const dir = bookingSort.dir === 'asc' ? 1 : -1;
+    const keyOf = (b: any): string | number => {
+      switch (bookingSort.col) {
+        case 'guest':  return String(b.guest_name || '').toLowerCase();
+        case 'room':   return String(b.room_name || b.room_id || '').toLowerCase();
+        case 'status': return String(b.status || '');
+        case 'total':  return Number(b.total_amount || 0);
+        case 'check_in':
+        default:       return String(b.check_in_date || '');
+      }
+    };
+    return [...rows].sort((a, b) => {
+      const av = keyOf(a), bv = keyOf(b);
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      return 0;
+    });
+  }, [hotelBookings, bookingHistoryFilter.search, bookingSort]);
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
   const [complianceList, setComplianceList] = useState<any[]>([]);
   const [hotelAnalytics, setHotelAnalytics] = useState<any>(null);
@@ -17424,9 +17463,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
 
-          {/* All bookings list */}
-          <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-hidden shadow-sm">
-            {hotelBookings.length === 0 ? (
+          {/* All bookings list — overflow-x-auto so the wide table scrolls
+              horizontally instead of clipping its right-hand columns. */}
+          <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-x-auto shadow-sm">
+            {displayedBookings.length === 0 ? (
               <div className="p-12 text-center text-sm text-[#6b5d52]">
                 {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to)
                   ? 'No bookings match your filters. Try a wider date range or clear the search.'
@@ -17435,7 +17475,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ) : (<>
               <div className="flex items-center justify-between px-5 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
                 <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
-                  {hotelBookings.length} booking{hotelBookings.length === 1 ? '' : 's'}
+                  {displayedBookings.length}{displayedBookings.length !== hotelBookings.length ? ` of ${hotelBookings.length}` : ''} booking{displayedBookings.length === 1 ? '' : 's'}
                 </span>
                 <button
                   type="button"
@@ -17469,21 +17509,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <Download size={12} /> Export CSV
                 </button>
               </div>
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[920px]">
                 <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
                   <tr>
-                    <th className="text-left px-4 py-3">Guest</th>
-                    <th className="text-left px-4 py-3">Room</th>
-                    <th className="text-left px-4 py-3">Dates</th>
-                    <th className="text-left px-4 py-3">Status</th>
-                    <th className="text-right px-4 py-3">Total</th>
+                    {([
+                      { label: 'Guest',  col: 'guest',    align: 'left'  },
+                      { label: 'Room',   col: 'room',     align: 'left'  },
+                      { label: 'Dates',  col: 'check_in', align: 'left'  },
+                      { label: 'Status', col: 'status',   align: 'left'  },
+                      { label: 'Total',  col: 'total',    align: 'right' },
+                    ] as const).map(h => (
+                      <th
+                        key={h.col}
+                        onClick={() => toggleBookingSort(h.col)}
+                        className={cn('px-4 py-3 cursor-pointer select-none hover:text-[#cc5a16]', h.align === 'right' ? 'text-right' : 'text-left')}
+                        title="Click to sort"
+                      >
+                        {h.label}{bookingSort.col === h.col ? (bookingSort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                      </th>
+                    ))}
                     <th className="text-right px-4 py-3" title="Advance payments already collected">Advance</th>
                     <th className="text-center px-4 py-3">Pay link</th>
                     <th className="text-right px-4 py-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {hotelBookings.map((b: any) => {
+                  {displayedBookings.map((b: any) => {
                     // LIFECYCLE-PILL (client request 7 Jun 2026):
                     // pill now reflects the four-state Stay-View
                     // lifecycle (Assigned / Checked-in / Checking out /
