@@ -11805,7 +11805,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['GOODS_RECEIPTS', 'Goods Receipts', inventoryGRNs.length],
               ['WASTAGE', 'Wastage', inventoryWastage.length],
               ['PHYSICAL_COUNTS', 'Physical Counts', inventoryCounts.length],
-              ['INSIGHTS', 'Insights', 0],
               ['SETTINGS', 'Settings', 0],
             ] as [typeof inventorySubTab, string, number][]).map(([id, label, count]) => (
               <button
@@ -13487,8 +13486,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
 
-          {/* ── INSIGHTS sub-tab — Audit Log · Variance Report · COGS · Supplier Prices · Stock Batches ── */}
-          {inventorySubTab === 'INSIGHTS' && (
+          {/* ── INSIGHTS sub-tab — SUPERSEDED: folded into <InventoryInsightsReport> under Restaurant Reports.
+                 Disabled here so the heavy analytical surface lives under reporting, not the operational
+                 Inventory tab. Block kept (unreachable) to preserve state/fetcher refs; safe to delete later. ── */}
+          {false && inventorySubTab === 'INSIGHTS' && (
             <div className="space-y-4">
               <div className="flex flex-wrap gap-2 border-b border-[#cc5a16]/10 pb-2">
                 {([
@@ -17828,6 +17829,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
             <summary className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden">🛵 Delivery Channel P&amp;L — profitability by aggregator <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand)</span></summary>
             <div className="p-4"><ChannelPnlReport restaurantId={restaurantId} token={token} /></div>
+          </details>
+          {/* Inventory Insights folded out of the operational Inventory tab — audit, variance, COGS, prices, batches, margin. */}
+          <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
+            <summary className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden">📦 Inventory Insights — audit log, variance, COGS, supplier prices, batches &amp; margins <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand)</span></summary>
+            <div className="p-4"><InventoryInsightsReport restaurantId={restaurantId} token={token} /></div>
           </details>
         </div>
       ) : activeTab === 'FRONT_OFFICE_REPORTS' && isHotelEnabled ? (
@@ -32894,6 +32900,547 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
 // ─── Delivery Channel P&L (folded out of the Delivery tab — 11 Jun 2026) ────
 // Self-fetching so it lives inside Restaurant Reports instead of the
 // operational Delivery tab. Endpoint: /integrations/analytics/channel-pnl.
+// ── Inventory Insights (folded out of the operational Inventory tab into Restaurant Reports). ──
+//    Self-fetching: owns the six insight panels (Audit Log / Variance / COGS / Supplier Prices /
+//    Stock Batches / Margin) and their data, mirroring the ChannelPnlReport fold pattern so the
+//    full analytical surface lives under reporting rather than the operational Inventory tab.
+function InventoryInsightsReport({ restaurantId, token }: { restaurantId: string; token: string }) {
+  type InsightsPanel = 'AUDIT' | 'VARIANCE' | 'COGS' | 'PRICES' | 'BATCHES' | 'MARGIN';
+  const [insightsPanel, setInsightsPanel] = useState<InsightsPanel>('AUDIT');
+  const [auditLog, setAuditLog] = useState<any[]>([]);
+  const [auditFilter, setAuditFilter] = useState<{ ingredient_id?: string; type?: string; from?: string; to?: string }>({});
+  const [varianceReport, setVarianceReport] = useState<any | null>(null);
+  const [varianceRange, setVarianceRange] = useState<{ from: string; to: string }>({
+    from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
+    to: new Date().toISOString().slice(0, 10),
+  });
+  const [cogsReport, setCogsReport] = useState<any | null>(null);
+  const [cogsRange, setCogsRange] = useState<{ from: string; to: string }>({
+    from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
+    to: new Date().toISOString().slice(0, 10),
+  });
+  const [costPerDish, setCostPerDish] = useState<any | null>(null);
+  const [supplierPrices, setSupplierPrices] = useState<any[]>([]);
+  const [stockBatches, setStockBatches] = useState<any[]>([]);
+  const [inventoryIngredients, setInventoryIngredients] = useState<any[]>([]);
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const fetchAuditLog = async () => {
+    if (!restaurantId) return;
+    try {
+      const params = new URLSearchParams();
+      if (auditFilter.ingredient_id) params.set('ingredient_id', auditFilter.ingredient_id);
+      if (auditFilter.type) params.set('type', auditFilter.type);
+      if (auditFilter.from) params.set('from', auditFilter.from);
+      if (auditFilter.to) params.set('to', auditFilter.to);
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/audit-log?${params}`, { headers: auth });
+      const data = await res.json();
+      setAuditLog(Array.isArray(data) ? data : []);
+    } catch { setAuditLog([]); }
+  };
+  const fetchVarianceReport = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/variance-report?from=${varianceRange.from}&to=${varianceRange.to}`, { headers: auth });
+      setVarianceReport(await res.json());
+    } catch { setVarianceReport(null); }
+  };
+  const fetchCogsReport = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/cogs-report?from=${cogsRange.from}&to=${cogsRange.to}`, { headers: auth });
+      setCogsReport(await res.json());
+    } catch { setCogsReport(null); }
+  };
+  const fetchCostPerDish = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/cost-per-dish`, { headers: auth });
+      setCostPerDish(await res.json());
+    } catch { setCostPerDish(null); }
+  };
+  const fetchSupplierPrices = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/supplier-prices`, { headers: auth });
+      const data = await res.json();
+      setSupplierPrices(Array.isArray(data) ? data : []);
+    } catch { setSupplierPrices([]); }
+  };
+  const fetchStockBatches = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/batches`, { headers: auth });
+      const data = await res.json();
+      setStockBatches(Array.isArray(data) ? data : []);
+    } catch { setStockBatches([]); }
+  };
+  const fetchInventoryIngredients = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/inventory/ingredients`, { headers: auth });
+      const data = await res.json();
+      setInventoryIngredients(Array.isArray(data) ? data : []);
+    } catch { setInventoryIngredients([]); }
+  };
+  useEffect(() => {
+    fetchInventoryIngredients();
+    fetchAuditLog();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restaurantId]);
+
+  return (
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2 border-b border-[#cc5a16]/10 pb-2">
+                {([
+                  ['AUDIT', 'Audit Log'],
+                  ['VARIANCE', 'Variance Report'],
+                  ['COGS', 'COGS Report'],
+                  ['PRICES', 'Supplier Prices'],
+                  ['BATCHES', 'Stock Batches (FIFO)'],
+                  ['MARGIN', 'Margin / Cost-per-dish'],
+                ] as [InsightsPanel, string][]).map(([id, label]) => (
+                  <button
+                    key={id}
+                    onClick={() => {
+                      setInsightsPanel(id);
+                      if (id === 'AUDIT') fetchAuditLog();
+                      if (id === 'VARIANCE') fetchVarianceReport();
+                      if (id === 'COGS') fetchCogsReport();
+                      if (id === 'PRICES') fetchSupplierPrices();
+                      if (id === 'BATCHES') fetchStockBatches();
+                      if (id === 'MARGIN') fetchCostPerDish();
+                    }}
+                    className={cn(
+                      "px-4 py-2 rounded-2xl text-xs font-bold uppercase tracking-wider border transition-all",
+                      insightsPanel === id
+                        ? "bg-[#cc5a16] text-white border-[#cc5a16]"
+                        : "bg-white text-[#6b5d52] border-[#cc5a16]/15 hover:bg-[#faf7f2]"
+                    )}
+                  >{label}</button>
+                ))}
+              </div>
+
+              {/* — Audit Log — */}
+              {insightsPanel === 'AUDIT' && (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="p-4 flex flex-wrap gap-3 items-end border-b border-[#cc5a16]/10 bg-[#faf7f2]/50">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Type</label>
+                      <select
+                        value={auditFilter.type || ''}
+                        onChange={e => setAuditFilter({ ...auditFilter, type: e.target.value || undefined })}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm"
+                      >
+                        <option value="">All types</option>
+                        <option value="CONSUMPTION">Consumption</option>
+                        <option value="GRN">Goods Receipt</option>
+                        <option value="WASTAGE">Wastage</option>
+                        <option value="COUNT_ADJUSTMENT">Count Adjustment</option>
+                        <option value="MANUAL_REVERSAL">Reversal</option>
+                        <option value="MANUAL">Manual</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Ingredient</label>
+                      <select
+                        value={auditFilter.ingredient_id || ''}
+                        onChange={e => setAuditFilter({ ...auditFilter, ingredient_id: e.target.value || undefined })}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm min-w-[200px]"
+                      >
+                        <option value="">All ingredients</option>
+                        {inventoryIngredients.map(i => (<option key={i.id} value={i.id}>{i.name}</option>))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">From</label>
+                      <input type="date" value={auditFilter.from || ''}
+                        onChange={e => setAuditFilter({ ...auditFilter, from: e.target.value || undefined })}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">To</label>
+                      <input type="date" value={auditFilter.to || ''}
+                        onChange={e => setAuditFilter({ ...auditFilter, to: e.target.value || undefined })}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <button onClick={fetchAuditLog}
+                      className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase">Apply</button>
+                  </div>
+                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10 sticky top-0">
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                          <th className="px-4 py-2">When</th>
+                          <th className="px-4 py-2">Ingredient</th>
+                          <th className="px-4 py-2">Type</th>
+                          <th className="px-4 py-2 text-right">Δ Qty</th>
+                          <th className="px-4 py-2 text-right">Balance</th>
+                          <th className="px-4 py-2">Reference</th>
+                          <th className="px-4 py-2">Notes</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {auditLog.length === 0 ? (
+                          <tr><td colSpan={7} className="px-4 py-8 text-center text-[#9c8e85]">No movements match the filters.</td></tr>
+                        ) : auditLog.map(m => (
+                          <tr key={m.id} className="border-b border-[#cc5a16]/5">
+                            <td className="px-4 py-2 text-xs whitespace-nowrap">{new Date(m.recorded_at).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' })}</td>
+                            <td className="px-4 py-2 font-semibold">{m.ingredient_name || m.ingredient_id}</td>
+                            <td className="px-4 py-2">
+                              <span className={cn(
+                                "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                                m.movement_type === 'GRN' ? "bg-emerald-100 text-emerald-700" :
+                                m.movement_type === 'CONSUMPTION' ? "bg-blue-100 text-blue-700" :
+                                m.movement_type === 'WASTAGE' ? "bg-red-100 text-red-700" :
+                                m.movement_type === 'MANUAL_REVERSAL' ? "bg-amber-100 text-amber-700" :
+                                "bg-gray-100 text-gray-700"
+                              )}>{m.movement_type}</span>
+                            </td>
+                            <td className={cn("px-4 py-2 text-right font-mono", m.qty_delta < 0 ? "text-red-700" : "text-emerald-700")}>
+                              {m.qty_delta > 0 ? '+' : ''}{Number(m.qty_delta).toFixed(3)} {m.unit}
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono">{Number(m.balance_after).toFixed(3)}</td>
+                            <td className="px-4 py-2 text-xs text-[#6b5d52]">
+                              {m.reference_type ? `${m.reference_type}/${m.reference_id || '—'}` : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-xs text-[#9c8e85]">{m.notes || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* — Variance Report — */}
+              {insightsPanel === 'VARIANCE' && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap gap-3 items-end bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">From</label>
+                      <input type="date" value={varianceRange.from} onChange={e => setVarianceRange(r => ({ ...r, from: e.target.value }))}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">To</label>
+                      <input type="date" value={varianceRange.to} onChange={e => setVarianceRange(r => ({ ...r, to: e.target.value }))}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <button onClick={fetchVarianceReport}
+                      className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase">Run Report</button>
+                  </div>
+                  {varianceReport && (
+                    <>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Shrinkage Value</div>
+                          <div className="text-2xl font-bold text-red-700 mt-1">₹{Number(varianceReport.totals?.shrinkage_value || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Surplus Value</div>
+                          <div className="text-2xl font-bold text-emerald-700 mt-1">₹{Number(varianceReport.totals?.surplus_value || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Net Δ</div>
+                          <div className={cn("text-2xl font-bold mt-1", Number(varianceReport.totals?.net_value || 0) < 0 ? "text-red-700" : "text-emerald-700")}>₹{Number(varianceReport.totals?.net_value || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Ingredients</div>
+                          <div className="text-2xl font-bold text-[#1a1208] mt-1">{varianceReport.totals?.ingredients || 0}</div>
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
+                              <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                                <th className="px-4 py-2">Ingredient</th>
+                                <th className="px-4 py-2">Category</th>
+                                <th className="px-4 py-2 text-right">Variance</th>
+                                <th className="px-4 py-2 text-right">Unit Price</th>
+                                <th className="px-4 py-2 text-right">₹ Impact</th>
+                                <th className="px-4 py-2 text-right">Counts</th>
+                                <th className="px-4 py-2">Last Count</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(varianceReport.rows || []).length === 0 ? (
+                                <tr><td colSpan={7} className="px-4 py-8 text-center text-[#9c8e85]">No completed counts in this range.</td></tr>
+                              ) : varianceReport.rows.map((r: any) => (
+                                <tr key={r.ingredient_id} className="border-b border-[#cc5a16]/5">
+                                  <td className="px-4 py-2 font-semibold">{r.ingredient_name}</td>
+                                  <td className="px-4 py-2 text-xs text-[#6b5d52]">{r.category || '—'}</td>
+                                  <td className={cn("px-4 py-2 text-right font-mono", Number(r.total_variance) < 0 ? "text-red-700" : "text-emerald-700")}>
+                                    {Number(r.total_variance) > 0 ? '+' : ''}{Number(r.total_variance).toFixed(3)} {r.unit}
+                                  </td>
+                                  <td className="px-4 py-2 text-right font-mono">₹{Number(r.unit_price).toFixed(2)}</td>
+                                  <td className={cn("px-4 py-2 text-right font-mono font-bold", Number(r.variance_value) < 0 ? "text-red-700" : "text-emerald-700")}>
+                                    ₹{Math.abs(Number(r.variance_value)).toFixed(0)}
+                                  </td>
+                                  <td className="px-4 py-2 text-right">{r.counts}</td>
+                                  <td className="px-4 py-2 text-xs">{r.last_count_date ? new Date(r.last_count_date).toLocaleDateString('en-IN') : '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* — COGS Report — */}
+              {insightsPanel === 'COGS' && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap gap-3 items-end bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">From</label>
+                      <input type="date" value={cogsRange.from} onChange={e => setCogsRange(r => ({ ...r, from: e.target.value }))}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">To</label>
+                      <input type="date" value={cogsRange.to} onChange={e => setCogsRange(r => ({ ...r, to: e.target.value }))}
+                        className="px-3 py-2 rounded-xl border border-[#cc5a16]/15 text-sm" />
+                    </div>
+                    <button onClick={fetchCogsReport}
+                      className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold uppercase">Run Report</button>
+                  </div>
+                  {cogsReport && (
+                    <>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Revenue</div>
+                          <div className="text-2xl font-bold text-[#1a1208] mt-1">₹{Number(cogsReport.revenue || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">COGS</div>
+                          <div className="text-2xl font-bold text-[#cc5a16] mt-1">₹{Number(cogsReport.cogs || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Gross Margin</div>
+                          <div className="text-2xl font-bold text-emerald-700 mt-1">{cogsReport.gross_margin_pct}%</div>
+                          <div className="text-xs text-[#9c8e85]">₹{Number(cogsReport.gross_margin || 0).toFixed(0)}</div>
+                        </div>
+                        <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Food Cost %</div>
+                          <div className="text-2xl font-bold text-[#1a1208] mt-1">{cogsReport.food_cost_pct}%</div>
+                          <div className="text-xs text-[#9c8e85]">Wastage {cogsReport.wastage_pct_of_cogs}% of COGS</div>
+                        </div>
+                      </div>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+                          <h3 className="text-sm font-bold text-[#1a1208] mb-3">By Category</h3>
+                          <div className="space-y-2">
+                            {(cogsReport.by_category || []).map((c: any) => (
+                              <div key={c.category} className="flex items-center justify-between text-sm">
+                                <span>{c.category}</span>
+                                <div className="flex items-center gap-2 flex-1 mx-3">
+                                  <div className="flex-1 h-2 bg-[#faf7f2] rounded-full overflow-hidden">
+                                    <div className="h-full bg-[#cc5a16]" style={{ width: `${c.pct}%` }} />
+                                  </div>
+                                  <span className="text-xs font-bold text-[#cc5a16] w-12 text-right">{c.pct}%</span>
+                                </div>
+                                <span className="font-mono text-xs">₹{Number(c.cogs).toFixed(0)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-4">
+                          <h3 className="text-sm font-bold text-[#1a1208] mb-3">Top Ingredients (by ₹)</h3>
+                          <div className="overflow-y-auto max-h-[300px]">
+                            <table className="w-full text-xs">
+                              <thead className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                                <tr><th className="text-left px-2 py-1">Ingredient</th><th className="text-right px-2 py-1">Qty</th><th className="text-right px-2 py-1">COGS</th><th className="text-right px-2 py-1">%</th></tr>
+                              </thead>
+                              <tbody>
+                                {(cogsReport.by_ingredient || []).slice(0, 30).map((r: any) => (
+                                  <tr key={r.ingredient_id} className="border-b border-[#cc5a16]/5">
+                                    <td className="px-2 py-1 font-semibold">{r.ingredient_name}</td>
+                                    <td className="px-2 py-1 text-right font-mono">{Number(r.qty).toFixed(2)} {r.unit}</td>
+                                    <td className="px-2 py-1 text-right font-mono">₹{Number(r.cogs).toFixed(0)}</td>
+                                    <td className="px-2 py-1 text-right">{r.pct}%</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* — Supplier Prices — */}
+              {insightsPanel === 'PRICES' && (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10 sticky top-0">
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                          <th className="px-4 py-2">Date</th>
+                          <th className="px-4 py-2">Supplier</th>
+                          <th className="px-4 py-2">Ingredient</th>
+                          <th className="px-4 py-2 text-right">Unit Price</th>
+                          <th className="px-4 py-2 text-right">Qty</th>
+                          <th className="px-4 py-2">Source</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {supplierPrices.length === 0 ? (
+                          <tr><td colSpan={6} className="px-4 py-8 text-center text-[#9c8e85]">No price observations yet. They auto-record on every Goods Receipt.</td></tr>
+                        ) : supplierPrices.map(p => (
+                          <tr key={p.id} className="border-b border-[#cc5a16]/5">
+                            <td className="px-4 py-2 text-xs">{new Date(p.observed_at).toLocaleDateString('en-IN')}</td>
+                            <td className="px-4 py-2 font-semibold">{p.supplier_name || p.supplier_id}</td>
+                            <td className="px-4 py-2">{p.ingredient_name || p.ingredient_id}</td>
+                            <td className="px-4 py-2 text-right font-mono">₹{Number(p.unit_price).toFixed(2)} / {p.unit}</td>
+                            <td className="px-4 py-2 text-right font-mono">{p.qty_purchased == null ? '—' : Number(p.qty_purchased).toFixed(2)}</td>
+                            <td className="px-4 py-2 text-xs text-[#6b5d52]">{p.source_type} {p.source_id ? `(${p.source_id})` : ''}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* — Stock Batches (FIFO) — */}
+              {insightsPanel === 'BATCHES' && (
+                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
+                  <div className="px-4 py-3 bg-[#faf7f2]/50 border-b border-[#cc5a16]/10 text-xs text-[#6b5d52]">
+                    Batches are sorted by FIFO consumption order (oldest received first; expiring within 7 days jump the queue).
+                  </div>
+                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10 sticky top-0">
+                        <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                          <th className="px-4 py-2">Received</th>
+                          <th className="px-4 py-2">Ingredient</th>
+                          <th className="px-4 py-2">Batch #</th>
+                          <th className="px-4 py-2">Expiry</th>
+                          <th className="px-4 py-2 text-right">Received Qty</th>
+                          <th className="px-4 py-2 text-right">Remaining</th>
+                          <th className="px-4 py-2">Supplier</th>
+                          <th className="px-4 py-2">Condition</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {stockBatches.length === 0 ? (
+                          <tr><td colSpan={8} className="px-4 py-8 text-center text-[#9c8e85]">No active batches. They auto-create on every Goods Receipt.</td></tr>
+                        ) : stockBatches.map(b => {
+                          const isExpiringSoon = b.expiry_date && new Date(b.expiry_date) <= new Date(Date.now() + 7 * 86400000);
+                          return (
+                            <tr key={b.id} className={cn("border-b border-[#cc5a16]/5", isExpiringSoon && "bg-amber-50/40")}>
+                              <td className="px-4 py-2 text-xs">{new Date(b.received_at).toLocaleDateString('en-IN')}</td>
+                              <td className="px-4 py-2 font-semibold">{b.ingredient_name || b.ingredient_id}</td>
+                              <td className="px-4 py-2 text-xs">{b.batch_number || '—'}</td>
+                              <td className={cn("px-4 py-2 text-xs", isExpiringSoon && "font-bold text-amber-700")}>
+                                {b.expiry_date ? new Date(b.expiry_date).toLocaleDateString('en-IN') : '—'}
+                                {isExpiringSoon && ' ⚠️'}
+                              </td>
+                              <td className="px-4 py-2 text-right font-mono">{Number(b.qty_received).toFixed(3)} {b.unit}</td>
+                              <td className="px-4 py-2 text-right font-mono font-bold">{Number(b.remaining_qty).toFixed(3)} {b.unit}</td>
+                              <td className="px-4 py-2 text-xs">{b.supplier_name || '—'}</td>
+                              <td className="px-4 py-2">
+                                <span className={cn(
+                                  "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                                  b.condition === 'GOOD' ? "bg-emerald-100 text-emerald-700" :
+                                  b.condition === 'DAMAGED' ? "bg-red-100 text-red-700" :
+                                  "bg-amber-100 text-amber-700"
+                                )}>{b.condition}</span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* — MARGIN / Cost-per-dish (Phase OP1) — */}
+              {insightsPanel === 'MARGIN' && (
+                <div className="space-y-4">
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
+                    <p className="text-xs text-[#6b5d52]">
+                      For every menu item that has a recipe, this shows the ingredient cost (sum of recipe qty × ingredient price), the sell price, and your margin. Items <strong>without a recipe</strong> are listed at the bottom — add recipes via the Menu tab to see their costs here.
+                    </p>
+                    {costPerDish?.summary && (
+                      <div className="mt-3 flex flex-wrap gap-4 text-xs">
+                        <span><strong className="text-[#cc5a16]">{costPerDish.summary.with_recipe}</strong> items have recipes</span>
+                        <span><strong className="text-[#9c8e85]">{costPerDish.summary.without_recipe}</strong> need a recipe</span>
+                        <span>Avg margin: <strong className={cn(
+                          costPerDish.summary.avg_margin_pct >= 60 ? 'text-emerald-700' :
+                          costPerDish.summary.avg_margin_pct >= 30 ? 'text-orange-600' : 'text-red-600'
+                        )}>{Number(costPerDish.summary.avg_margin_pct || 0).toFixed(1)}%</strong></span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+                    <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10 sticky top-0">
+                          <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                            <th className="px-4 py-2">Dish</th>
+                            <th className="px-4 py-2">Category</th>
+                            <th className="px-4 py-2 text-right">Sell price</th>
+                            <th className="px-4 py-2 text-right">Ingredient cost</th>
+                            <th className="px-4 py-2 text-right">Margin</th>
+                            <th className="px-4 py-2 text-right">Margin %</th>
+                            <th className="px-4 py-2">Recipe</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {!costPerDish || !costPerDish.items || costPerDish.items.length === 0 ? (
+                            <tr><td colSpan={7} className="px-4 py-8 text-center text-[#9c8e85] italic">
+                              {!costPerDish ? 'Loading…' : 'No menu items yet — add some in the MENU tab first.'}
+                            </td></tr>
+                          ) : (
+                            costPerDish.items.map((it: any) => (
+                              <tr key={it.menu_item_id} className={cn(
+                                "border-t border-[#cc5a16]/5",
+                                !it.has_recipe && "bg-[#faf7f2]/30"
+                              )}>
+                                <td className="px-4 py-2 font-bold text-[#1a1208]">{it.name}</td>
+                                <td className="px-4 py-2 text-[10px] uppercase tracking-widest text-[#9c8e85]">{it.category || '—'}</td>
+                                <td className="px-4 py-2 text-right font-mono">₹{Number(it.sell_price).toFixed(0)}</td>
+                                <td className="px-4 py-2 text-right font-mono text-[#6b5d52]">
+                                  {it.has_recipe ? `₹${Number(it.ingredient_cost).toFixed(0)}` : <span className="italic text-[#cbb9a8]">—</span>}
+                                </td>
+                                <td className="px-4 py-2 text-right font-mono font-bold">
+                                  {it.has_recipe ? `₹${Number(it.margin_amount).toFixed(0)}` : <span className="italic text-[#cbb9a8]">—</span>}
+                                </td>
+                                <td className={cn("px-4 py-2 text-right font-bold",
+                                  !it.has_recipe ? "text-[#cbb9a8]" :
+                                  it.margin_pct >= 60 ? "text-emerald-700" :
+                                  it.margin_pct >= 30 ? "text-orange-600" : "text-red-600"
+                                )}>
+                                  {it.has_recipe ? `${Number(it.margin_pct).toFixed(1)}%` : '—'}
+                                </td>
+                                <td className="px-4 py-2 text-xs">
+                                  {it.has_recipe ? (
+                                    <span className="text-emerald-700 font-bold">✓ {it.contributors?.length || 0}</span>
+                                  ) : (
+                                    <span className="text-[#9c8e85] italic">Add recipe</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+  );
+}
+
 function ChannelPnlReport({ restaurantId, token }: { restaurantId: string; token: string }) {
   const [from, setFrom] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
   const [to, setTo] = useState(new Date().toISOString().slice(0, 10));
