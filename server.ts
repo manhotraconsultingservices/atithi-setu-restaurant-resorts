@@ -26866,6 +26866,146 @@ ${data.tenant.name}`;
   });
 
   // ════════════════════════════════════════════════════════════════════
+  // Front-desk reconciliation — unbilled room-service orders (RS-FIX)
+  // ════════════════════════════════════════════════════════════════════
+  // CHARGE_TO_ROOM orders that reached the kitchen but whose F&B charge
+  // could NOT be auto-attached to a folio at order time (e.g. the room
+  // wasn't yet linked to a checked-in booking) are flagged
+  // folio_post_status='PENDING_MANUAL' instead of being dropped (commit
+  // 5274f17 — never lose the guest's food order). The charge is NOT yet on
+  // any folio, so without reconciliation it is silently missed at checkout
+  // — a revenue leak. These two endpoints power the front desk's "Unbilled
+  // room orders" surface: list them, and one-click post each onto a folio.
+  app.get("/api/restaurant/:id/hotel/orders/pending-folio", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      // Defensive — the RS bridge columns are added inline on the
+      // create-user schema path; ALTER here too so this query never throws
+      // on a tenant that predates them.
+      await tenantDb.exec(
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT;
+         ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT;
+         ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_id TEXT;
+         ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_post_status TEXT;`
+      ).catch(() => {});
+      const rows = await tenantDb.query(
+        `SELECT o.id, o.table_number, o.items, o.total_amount, o.gst_amount,
+                o.room_id, o.booking_id, o.created_at, o.customer_name,
+                o.customer_phone, o.status, o.folio_post_status,
+                r.name AS room_name,
+                (SELECT b.guest_name FROM room_bookings b
+                  WHERE b.room_id = o.room_id AND b.status = 'CHECKED_IN'
+                  ORDER BY b.actual_checkin_at DESC LIMIT 1) AS current_guest_name,
+                (SELECT f.id FROM folios f
+                  WHERE f.room_id = o.room_id AND f.status = 'open'
+                  ORDER BY f.created_at DESC LIMIT 1) AS open_folio_id
+           FROM orders o
+           LEFT JOIN rooms r ON r.id = o.room_id
+          WHERE o.folio_post_status = 'PENDING_MANUAL'
+            AND o.folio_id IS NULL
+            AND o.deleted_at IS NULL
+          ORDER BY o.created_at DESC`
+      );
+      res.json(rows);
+    } catch (err: any) {
+      console.error('pending-folio list error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to list unbilled room orders' });
+    }
+  });
+
+  // One-click "Charge to folio" for a PENDING_MANUAL room order. Re-uses
+  // postOrderToFolio() (the same RS-3 path the order-time auto-post uses) so
+  // GST resolution + folio creation behaviour is identical. Optionally
+  // accepts an explicit folio_id to target a specific open folio; without
+  // one, the helper resolves/ensures the room's open folio. Idempotent — a
+  // second call after success returns 409 'already posted'.
+  app.post("/api/restaurant/:id/hotel/orders/:orderId/post-to-folio", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.exec(
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT;
+         ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT;
+         ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_id TEXT;
+         ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_post_status TEXT;`
+      ).catch(() => {});
+      const order: any = await tenantDb.get(
+        "SELECT * FROM orders WHERE id = ? AND deleted_at IS NULL", [req.params.orderId]
+      );
+      if (!order) return res.status(404).json({ error: "Order not found" });
+      if (order.folio_id) {
+        return res.status(409).json({ error: "This order is already posted to a folio." });
+      }
+
+      // Decide where to post. An explicit folio_id (front desk picked a
+      // specific open folio) wins — we pass its booking/room so the
+      // postOrderToFolio resolver lands exactly on it. Otherwise the helper
+      // resolves the room's open folio (creating one if it's checked-in).
+      let roomId: string | null = order.room_id || null;
+      let bookingId: string | null = order.booking_id || null;
+      const explicitFolioId = req.body?.folio_id ? String(req.body.folio_id) : null;
+      if (explicitFolioId) {
+        const folio: any = await tenantDb.get(
+          "SELECT id, room_id, booking_id, status FROM folios WHERE id = ?", [explicitFolioId]
+        );
+        if (!folio) return res.status(404).json({ error: "Target folio not found" });
+        if (folio.status !== 'open') {
+          return res.status(409).json({ error: `Folio is ${folio.status}; only open folios can take new charges.` });
+        }
+        bookingId = folio.booking_id || bookingId;
+        roomId = folio.room_id || roomId;
+      }
+
+      // Re-hydrate the stored order line items into the FolioOrderItem shape
+      // (orders persist items with name + quantity/qty + price/unitPrice).
+      let parsedItems: any[] = [];
+      try { parsedItems = JSON.parse(order.items || '[]'); } catch { parsedItems = []; }
+      const items: FolioOrderItem[] = (Array.isArray(parsedItems) ? parsedItems : []).map((it: any) => ({
+        name: it.name || it.menuName || 'Item',
+        quantity: Number(it.quantity || it.qty || 1),
+        unitPrice: Number(it.price || it.unitPrice || it.unit_price || 0),
+        gstRate: it.gstRate != null ? Number(it.gstRate)
+               : (it.gst_rate != null ? Number(it.gst_rate) : undefined),
+      }));
+      if (items.length === 0) {
+        return res.status(400).json({ error: "Order has no line items to post." });
+      }
+
+      const rawSubtype = String(req.body?.subtype || 'IRD').toUpperCase();
+      const subtype = (['IRD', 'RESTAURANT', 'BAR', 'MINIBAR', 'BANQUET'].includes(rawSubtype)
+        ? rawSubtype : 'IRD') as 'IRD' | 'RESTAURANT' | 'BAR' | 'MINIBAR' | 'BANQUET';
+
+      const result = await postOrderToFolio(req.params.id, {
+        id: order.id,
+        room_id: roomId,
+        booking_id: bookingId,
+        items,
+        subtype,
+        posted_by: req.user?.id || req.user?.email || 'FRONT_DESK_RECON',
+      });
+      if (!result.ok) {
+        return res.status(409).json({
+          error: result.reason === 'no-open-folio-for-room-or-booking'
+            ? "No open folio for this room — check the guest in first, or pick a specific open folio."
+            : (result.reason || 'Failed to post charge to folio'),
+        });
+      }
+      // Clear the reconciliation flag — the charge is now on a folio.
+      await tenantDb.run(
+        "UPDATE orders SET folio_post_status = 'POSTED' WHERE id = ?", [order.id]
+      );
+      console.log(`[pending-folio] order ${order.id} reconciled onto folio ${result.folio_id} by ${req.user?.id || 'staff'}`);
+      res.json({ success: true, folio_id: result.folio_id, entry_ids: result.entry_ids, order_id: order.id });
+    } catch (err: any) {
+      console.error('post-to-folio error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to post order to folio' });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
   // Folio payments ledger (10 Jun 2026 critical fix)
   // ════════════════════════════════════════════════════════════════════
   // Surfaces the new folio_payments table to the UI so the staff can:
