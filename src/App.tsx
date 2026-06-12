@@ -10254,7 +10254,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // Open the wizard for every check-in, whether or not data is
     // already complete. Staff often want to double-check phone /
     // ID number even if the row looks clean.
-    setCheckInChecklistTarget(b);
+    //
+    // FIX (#1 — booked guest count not reflecting at check-in): always
+    // open the wizard against the freshest FULL booking row from the
+    // bookings list (num_guests, room_id, room_rate, room_name, dates),
+    // not whatever partial object triggered the action (an arrivals-
+    // worklist or calendar cell can be thin). This guarantees the guest
+    // count pre-fills and the room reassignment picker has its inputs.
+    const full = hotelBookings.find((x: any) => x.id === b.id) || b;
+    setCheckInChecklistTarget(full);
   };
 
   // Confirm button on the early-check-in modal. Sends force=true so the
@@ -31275,6 +31283,12 @@ const CheckInWizardModal: React.FC<{
     guest_gstin:       booking.guest_gstin || '',
     num_guests:        booking.num_guests || 1,
     special_requests:  booking.special_requests || '',
+    // FIX (#2/#4) — room assignment is editable in the wizard so staff can
+    // reassign or upgrade the room at check-in. room_id is only LOCKED by
+    // the server AFTER status flips to CHECKED_IN, so a pre-check-in PATCH
+    // from saveAndNext() lands fine.
+    room_id:           booking.room_id || '',
+    room_rate:         booking.room_rate ?? 0,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -31286,6 +31300,36 @@ const CheckInWizardModal: React.FC<{
   // gets posted as a folio_payments row with payment_type='ADVANCE'
   // by the backend. Reduces outstanding shown at checkout.
   const [advance, setAdvance] = useState({ amount: '', method: 'CASH', reference: '' });
+  // FIX (#2 + #4) — reassign / upgrade the room at check-in. Staff can move
+  // the guest to ANY room free for the booking's dates (incl. a higher
+  // category = upgrade). On pick we set room_rate = 0 so the folio resolver
+  // bills the NEW room's per-night rate (incl. season / matrix), mirroring
+  // the Edit-Booking room picker. saveAndNext() PATCHes the changed room_id
+  // (+ room_rate) before the check-in POST, while the booking is still
+  // BOOKED (room_id is only locked AFTER check-in).
+  const [roomPickerOpen, setRoomPickerOpen] = useState(false);
+  const [availRooms, setAvailRooms] = useState<any[] | null>(null);
+  const [availLoading, setAvailLoading] = useState(false);
+  const loadAvailableRooms = async () => {
+    setAvailLoading(true);
+    try {
+      const ci = String(booking.check_in_date || '').slice(0, 10);
+      const co = String(booking.check_out_date || '').slice(0, 10);
+      const qs = new URLSearchParams({ start: ci, end: co, guests: String(draft.num_guests || 1) });
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/find-available-rooms?${qs.toString()}`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      setAvailRooms(Array.isArray(data?.rooms) ? data.rooms : []);
+    } catch { setAvailRooms([]); }
+    finally { setAvailLoading(false); }
+  };
+  const openRoomPicker = () => { setRoomPickerOpen(true); if (availRooms == null) loadAvailableRooms(); };
+  const pickRoom = (r: any) => {
+    // room_rate = 0 → server resolves the new room's per-night rate when the
+    // folio is created at check-in (handles upgrade / season / matrix pricing).
+    updateDraft({ room_id: r.id, room_rate: 0 });
+    setRoomPickerOpen(false);
+  };
 
   // Re-fetch document count whenever the embedded widget refreshes.
   useEffect(() => {
@@ -31487,6 +31531,75 @@ const CheckInWizardModal: React.FC<{
                   className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
                 />
               </div>
+            </div>
+
+            {/* FIX (#2/#4) — Room assignment: reassign or upgrade during check-in.
+                Shows the assigned room with a picker over rooms free for the
+                booking's dates. Picking a different category = upgrade. */}
+            <div className="rounded-2xl border border-[#cc5a16]/15 bg-[#faf7f2]/60 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-0.5">Room</label>
+                  <p className="text-sm font-bold text-[#1a1208] truncate">
+                    {(() => {
+                      const picked = (availRooms || []).find((r: any) => r.id === draft.room_id);
+                      const name = picked ? (picked.name || picked.room_number) : (booking.room_name || booking.room_id || '—');
+                      const cat = picked?.type_name ? ` · ${picked.type_name}` : '';
+                      return `${name}${cat}`;
+                    })()}
+                    {draft.room_id !== booking.room_id && (
+                      <span className="ml-2 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full uppercase tracking-wider align-middle">Reassigned</span>
+                    )}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={openRoomPicker}
+                  className="px-3 py-1.5 rounded-xl bg-white border border-[#cc5a16]/25 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5 whitespace-nowrap"
+                >Change / Upgrade</button>
+              </div>
+              {draft.room_id !== booking.room_id && (
+                <p className="text-[10px] text-[#9c8e85] mt-1">
+                  The new room's tariff will apply on the folio.{' '}
+                  <button type="button" className="underline font-semibold" onClick={() => updateDraft({ room_id: booking.room_id, room_rate: booking.room_rate ?? 0 })}>Undo</button>
+                </p>
+              )}
+              {roomPickerOpen && (
+                <div className="mt-3 border-t border-[#cc5a16]/10 pt-3">
+                  {availLoading ? (
+                    <p className="text-xs text-[#9c8e85] italic">Finding rooms free for {String(booking.check_in_date || '').slice(0, 10)} → {String(booking.check_out_date || '').slice(0, 10)}…</p>
+                  ) : !availRooms || availRooms.filter((r: any) => r.available || r.id === booking.room_id).length === 0 ? (
+                    <p className="text-xs text-[#9c8e85] italic">No other rooms are free for these dates.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-60 overflow-y-auto">
+                      {availRooms.filter((r: any) => r.available || r.id === booking.room_id).map((r: any) => {
+                        const isCurrent = r.id === booking.room_id;
+                        const isSel = r.id === draft.room_id;
+                        return (
+                          <button
+                            type="button"
+                            key={r.id}
+                            onClick={() => pickRoom(r)}
+                            className={cn(
+                              'text-left rounded-xl border px-3 py-2 transition-all',
+                              isSel ? 'border-[#cc5a16] bg-[#cc5a16]/5' : 'border-[#cc5a16]/15 bg-white hover:border-[#cc5a16]/40'
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm font-bold text-[#1a1208] truncate">{r.name || r.room_number}</p>
+                              {isCurrent && <span className="text-[9px] font-bold text-[#9c8e85] uppercase tracking-wider shrink-0">Current</span>}
+                            </div>
+                            <p className="text-[10px] text-[#6b5d52]">
+                              {r.type_name || 'Untagged'} · Sleeps {r.capacity}
+                              {r.base_rate ? ` · ₹${Number(r.base_rate).toLocaleString('en-IN')}/night` : ''}
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* CHK-3: GSTIN for B2B ITC */}

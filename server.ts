@@ -2250,6 +2250,13 @@ async function validateBookingRequest(
     // NOT being changed — staff still need to edit other fields on
     // historical bookings (notes, room_rate, etc.).
     skipPastDateCheck?: boolean;
+    // Skip the per-room occupancy cap. Used by PATCH (edit / check-in flow):
+    // once a room is assigned, recording the ACTUAL headcount is a billing
+    // concern (extra-person charges), not an inventory rejection — so staff
+    // can check a guest in with more occupants than the per-room policy, or
+    // bump the count at the desk. Booking-CREATE keeps the cap so the
+    // availability search and initial sell stay honest.
+    skipCapacityCheck?: boolean;
   }
 ): Promise<{ ok: boolean; status: number; error: string }> {
   // Flat shape (not a discriminated union) so call sites can read
@@ -2347,19 +2354,21 @@ async function validateBookingRequest(
   // (tenant occupancy policy; default 2 + 2 + 2 = 6). The old guard used raw
   // rooms.capacity, which wrongly rejected legitimate extra-adult bookings
   // (e.g. 3 adults in a 2-capacity room, even though the policy allows +2).
-  const occRow: any = await centralDb.get(
-    "SELECT free_adults_per_room, max_extra_adults_per_room, max_children_per_room FROM restaurants WHERE id = ?",
-    [restaurantId]
-  );
-  const occ = resolveOccupancyPolicy(occRow);
-  const maxOccupancy = occ.free_adults_per_room + occ.max_extra_adults_per_room + occ.max_children_per_room;
-  if (numGuests > maxOccupancy) {
-    return {
-      ok: false, status: 400,
-      error: `This room accepts up to ${maxOccupancy} guest(s) per the occupancy policy `
-        + `(${occ.free_adults_per_room} included + ${occ.max_extra_adults_per_room} extra adult(s) + ${occ.max_children_per_room} child(ren)); `
-        + `${numGuests} requested. Split across rooms or raise the limit in Settings → Occupancy.`,
-    };
+  if (!opts.skipCapacityCheck) {
+    const occRow: any = await centralDb.get(
+      "SELECT free_adults_per_room, max_extra_adults_per_room, max_children_per_room FROM restaurants WHERE id = ?",
+      [restaurantId]
+    );
+    const occ = resolveOccupancyPolicy(occRow);
+    const maxOccupancy = occ.free_adults_per_room + occ.max_extra_adults_per_room + occ.max_children_per_room;
+    if (numGuests > maxOccupancy) {
+      return {
+        ok: false, status: 400,
+        error: `This room accepts up to ${maxOccupancy} guest(s) per the occupancy policy `
+          + `(${occ.free_adults_per_room} included + ${occ.max_extra_adults_per_room} extra adult(s) + ${occ.max_children_per_room} child(ren)); `
+          + `${numGuests} requested. Split across rooms or raise the limit in Settings → Occupancy.`,
+      };
+    }
   }
 
   // (overlap check + success return live below)
@@ -25040,6 +25049,12 @@ ${data.tenant.name}`;
           // num_guests, room_rate) on a historical booking shouldn't be
           // blocked just because the original date is in the past.
           skipPastDateCheck: !('check_in_date' in patch),
+          // Editing an existing booking (incl. the check-in wizard's room
+          // reassignment / guest-count update) must not hard-block on the
+          // per-room occupancy cap — extra occupants drive extra-person
+          // charges, not an inventory rejection. The overlap/double-book
+          // guard below still runs; booking-CREATE still enforces the cap.
+          skipCapacityCheck: true,
         });
         if (!v.ok) return res.status(v.status).json({ error: v.error });
       }
