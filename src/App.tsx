@@ -6819,6 +6819,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // tenants these stay at defaults (null + 0) and the booking flows
     // through the legacy path with byte-identical output.
     meal_plan_id: string | null;
+    // Total adults staying — extra_adults is derived from the room's capacity.
+    num_adults: number;
     extra_adults: number;
     // WALK-IN-FIX (client report 7 Jun 2026 "walk-in workflow not working"):
     // Task #56 (Req 1b) added a server-side block: check-in is rejected with
@@ -6878,6 +6880,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         ? (tariffData.meal_plans.filter((m: any) => m.is_active !== 0)
             .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))[0]?.id || null)
         : null,
+      // Default adults to the picked room's capacity (all included free);
+      // staff bump it up for extra adults, which the server then charges.
+      num_adults: Math.max(1, Number(pick?.capacity || 1)),
       extra_adults: 0,
       // ADV-PAY: advance collected at walk-in (defaults to 0 = no advance)
       advance_amount: 0,
@@ -6923,10 +6928,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           check_out_date: co,
           booking_type: 'OVERNIGHT',
           booking_source: 'WALKIN',
-          num_guests: 1 + (walkInDraft.extra_adults || 0),
+          // Send TOTAL adults; the server derives extra_adults from the
+          // room's capacity and sets num_guests = adults + children.
+          num_adults: Math.max(1, Number(walkInDraft.num_adults || 1)),
           room_rate: walkInDraft.room_rate || 0,
           meal_plan_id: walkInDraft.meal_plan_id || null,
-          extra_adults: walkInDraft.extra_adults || 0,
         }),
       });
       createdBookingId = created.id;
@@ -23896,7 +23902,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const selectCategory = (typeId: string) => {
                         const stats = categoryStats.find((s: any) => s.type_id === typeId);
                         if (!stats) { setDraft({ room_id: '' }); return; }
-                        setDraft({ room_id: stats.room_ids[0] });
+                        const rid = stats.room_ids[0];
+                        const cap = Math.max(1, Number(hotelRooms.find(r => r.id === rid)?.capacity || 1));
+                        const adults = Number(draft.num_adults) > 0 ? Number(draft.num_adults) : cap;
+                        setDraft({ room_id: rid, num_adults: adults, extra_adults: Math.max(0, adults - cap) });
                       };
                       const fmtRupee = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
                       return (
@@ -23920,7 +23929,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <span className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Room:</span>
                               <select
                                 value={draft.room_id}
-                                onChange={e => setDraft({ room_id: e.target.value })}
+                                onChange={e => { const rid = e.target.value; const cap = Math.max(1, Number(hotelRooms.find(r => r.id === rid)?.capacity || 1)); const adults = Number(draft.num_adults) > 0 ? Number(draft.num_adults) : cap; setDraft({ room_id: rid, num_adults: adults, extra_adults: Math.max(0, adults - cap) }); }}
                                 className="flex-1 bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[10px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
                               >
                                 {drillRooms.map((r: any) => (
@@ -23984,14 +23993,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           ))}
                       </select>
                       <div className="flex items-center gap-2">
-                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap">+ Adult</label>
-                        <input type="number" min={0} max={4}
-                          value={draft.extra_adults}
-                          onChange={e => { const v = parseInt(e.target.value, 10); setDraft({ extra_adults: isNaN(v) ? 0 : Math.max(0, Math.min(4, v)) }); }}
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap" title="Total adults staying">Adults</label>
+                        <input type="number" min={1} max={20}
+                          value={(() => { const cap = Math.max(1, Number(hotelRooms.find(r => r.id === draft.room_id)?.capacity || 1)); return draft.num_adults != null ? draft.num_adults : (cap + (draft.extra_adults || 0)); })()}
+                          onChange={e => { const v = parseInt(e.target.value, 10); const a = isNaN(v) ? 1 : Math.max(1, Math.min(20, v)); const cap = Math.max(1, Number(hotelRooms.find(r => r.id === draft.room_id)?.capacity || 1)); setDraft({ num_adults: a, extra_adults: Math.max(0, a - cap) }); }}
                           className="flex-1 bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
                         />
                       </div>
                     </div>
+                    {(() => {
+                      const cap = Math.max(1, Number(hotelRooms.find(r => r.id === draft.room_id)?.capacity || 1));
+                      const adults = draft.num_adults != null ? Number(draft.num_adults) : (cap + (draft.extra_adults || 0));
+                      const extraA = Math.max(0, adults - cap);
+                      return (
+                        <p className="text-[10px] text-[#6b5d52] leading-snug">
+                          Room includes <strong>{cap}</strong> adult{cap === 1 ? '' : 's'}.{' '}
+                          {extraA > 0
+                            ? <span className="text-amber-700 font-semibold">{extraA} extra adult{extraA === 1 ? '' : 's'} charged per tariff.</span>
+                            : <span className="text-green-700">Within capacity — no extra charge.</span>}
+                        </p>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -31589,6 +31611,10 @@ const CheckInWizardModal: React.FC<{
     guest_id_proof:    booking.guest_id_proof || '',
     guest_gstin:       booking.guest_gstin || '',
     num_guests:        booking.num_guests || 1,
+    // Total adults staying — editable at check-in. When changed (or the room
+    // is reassigned), the server re-derives the extra-adult charge from the
+    // new room's capacity. Empty for legacy bookings that never captured it.
+    num_adults:        booking.num_adults ?? '',
     special_requests:  booking.special_requests || '',
     // FIX (#2/#4) — room assignment is editable in the wizard so staff can
     // reassign or upgrade the room at check-in. room_id is only LOCKED by
@@ -31856,6 +31882,23 @@ const CheckInWizardModal: React.FC<{
                   className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
                 />
               </div>
+            </div>
+
+            {/* Total adults — editable at check-in. The server derives the
+                extra-adult charge from the (possibly reassigned) room's
+                capacity, so an upgrade here automatically drops/raises it. */}
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                Adults staying <span className="text-[9px] font-normal normal-case text-[#9c8e85]">— extra-adult charge auto-recalculated from room capacity</span>
+              </label>
+              <input
+                type="number" min="1" max="20"
+                value={draft.num_adults === '' || draft.num_adults == null ? '' : draft.num_adults}
+                placeholder={`${booking.num_adults ?? booking.num_guests ?? 1}`}
+                onChange={e => { const v = parseInt(e.target.value, 10); updateDraft({ num_adults: isNaN(v) ? '' : Math.max(1, Math.min(20, v)) }); }}
+                className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+              />
+              <p className="text-[10px] text-[#9c8e85] mt-1">Total adults in the room. Anything above the room's included capacity is billed as extra adults on the folio; children are billed per the tariff.</p>
             </div>
 
             {/* FIX (#2/#4) — Room assignment: reassign or upgrade during check-in.
