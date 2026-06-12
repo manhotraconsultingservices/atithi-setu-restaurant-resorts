@@ -17248,8 +17248,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               continue to show with a "Check Out" action. */}
           {(() => {
             const today = new Date().toISOString().slice(0,10);
+            // Include CHECKED_IN arrivals (not just BOOKED) so a guest the
+            // staff just checked in STAYS visible here with a "Checked in"
+            // badge — previously they vanished the instant check-in flipped
+            // the status, which read as "the guest disappeared".
             const arrivals = hotelBookings.filter((b: any) =>
-              b.status === 'BOOKED' && normaliseBookingDate(b.check_in_date) === today
+              (b.status === 'BOOKED' || b.status === 'CHECKED_IN') &&
+              normaliseBookingDate(b.check_in_date) === today
             );
             const departures = hotelBookings.filter((b: any) => {
               if (normaliseBookingDate(b.check_out_date) !== today) return false;
@@ -17270,7 +17275,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <p className="font-semibold text-[#1a1208] text-sm">{b.guest_name}</p>
                         <p className="text-xs text-[#9c8e85]">{b.room_name || b.room_id}</p>
                       </div>
-                      <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-[#0f766e] text-white text-xs font-bold hover:bg-[#0a5853]">Check In</button>
+                      {b.status === 'CHECKED_IN'
+                        ? <span className="px-3 py-1.5 rounded-lg bg-emerald-100 text-emerald-700 text-xs font-bold inline-flex items-center gap-1">✓ Checked in</span>
+                        : <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-[#0f766e] text-white text-xs font-bold hover:bg-[#0a5853]">Check In</button>}
                     </div>
                   ))}
                 </div>

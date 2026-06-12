@@ -2341,11 +2341,24 @@ async function validateBookingRequest(
     };
   }
 
-  // Capacity
-  if (Number(room.capacity) > 0 && numGuests > Number(room.capacity)) {
+  // Capacity — mirror the availability search's occupancy formula so a room
+  // OFFERED for N guests at search time can actually be BOOKED for N guests.
+  // Effective max occupancy = free_adults + max_extra_adults + max_children
+  // (tenant occupancy policy; default 2 + 2 + 2 = 6). The old guard used raw
+  // rooms.capacity, which wrongly rejected legitimate extra-adult bookings
+  // (e.g. 3 adults in a 2-capacity room, even though the policy allows +2).
+  const occRow: any = await centralDb.get(
+    "SELECT free_adults_per_room, max_extra_adults_per_room, max_children_per_room FROM restaurants WHERE id = ?",
+    [restaurantId]
+  );
+  const occ = resolveOccupancyPolicy(occRow);
+  const maxOccupancy = occ.free_adults_per_room + occ.max_extra_adults_per_room + occ.max_children_per_room;
+  if (numGuests > maxOccupancy) {
     return {
       ok: false, status: 400,
-      error: `Room capacity is ${room.capacity} guest(s); ${numGuests} requested.`,
+      error: `This room accepts up to ${maxOccupancy} guest(s) per the occupancy policy `
+        + `(${occ.free_adults_per_room} included + ${occ.max_extra_adults_per_room} extra adult(s) + ${occ.max_children_per_room} child(ren)); `
+        + `${numGuests} requested. Split across rooms or raise the limit in Settings → Occupancy.`,
     };
   }
 
