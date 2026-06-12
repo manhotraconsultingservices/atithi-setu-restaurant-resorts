@@ -32640,9 +32640,12 @@ const CheckoutModal: React.FC<{
   const fmt = (n: number) => `${sym}${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
-      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-xl my-8">
-        <div className="sticky top-0 bg-white border-b border-[#cc5a16]/10 px-6 py-4 flex items-center justify-between rounded-t-3xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      {/* Bounded flex-column: header + footer stay fixed, only the body scrolls.
+          Previously the panel had no max-height and the centered overlay clipped
+          tall checkouts so the top + the Settle button were unreachable. */}
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-xl max-h-[90vh] flex flex-col">
+        <div className="shrink-0 bg-white border-b border-[#cc5a16]/10 px-6 py-4 flex items-center justify-between rounded-t-3xl">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">Check out</p>
             <h3 className="text-xl font-bold font-serif text-[#1a1208]">{booking.guest_name}</h3>
@@ -32650,7 +32653,7 @@ const CheckoutModal: React.FC<{
           <button onClick={onClose} className="w-9 h-9 rounded-full bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#3d3128]">×</button>
         </div>
 
-        <div className="p-6 space-y-4">
+        <div className="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
           <div className="bg-[#faf7f2] rounded-2xl p-3 text-[12px] space-y-1">
             <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{booking.room_name || booking.room_id}</strong></div>
             <div className="flex justify-between"><span className="text-[#6b5d52]">Dates</span><span>{formatDateForTenant(booking.check_in_date, restaurant?.date_format)} → {formatDateForTenant(booking.check_out_date, restaurant?.date_format)}</span></div>
@@ -32933,7 +32936,7 @@ const CheckoutModal: React.FC<{
           )}
         </div>
 
-        <div className="sticky bottom-0 bg-white border-t border-[#cc5a16]/10 px-6 py-4 flex items-center justify-end gap-2 rounded-b-3xl">
+        <div className="shrink-0 bg-white border-t border-[#cc5a16]/10 px-6 py-4 flex items-center justify-end gap-2 rounded-b-3xl">
           <button onClick={onClose} className="px-4 py-2 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Cancel</button>
           <button
             onClick={settle}
