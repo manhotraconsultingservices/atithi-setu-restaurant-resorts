@@ -220,6 +220,25 @@ function deriveOccupancy(adults: number, capacity: number, childMat: number, chi
   return { extra_adults: Math.max(0, a - cap), num_guests: a + cm + cn };
 }
 
+// Reservation-table column registry (12 Jun 2026). Guest + Actions are
+// always shown (Guest pinned left, Actions pinned right); everything else is
+// toggleable via the Columns chooser and persisted per-browser. `def` is the
+// out-of-box visibility. Adding a key here makes it appear in the chooser.
+const BOOKING_COL_DEFS: { key: string; label: string; def: boolean }[] = [
+  { key: 'room',      label: 'Room',      def: true  },
+  { key: 'dates',     label: 'Dates',     def: true  },
+  { key: 'nights',    label: 'Nights',    def: false },
+  { key: 'guests',    label: 'Guests',    def: false },
+  { key: 'adults',    label: 'Adults',    def: false },
+  { key: 'meal_plan', label: 'Meal Plan', def: false },
+  { key: 'status',    label: 'Status',    def: true  },
+  { key: 'total',     label: 'Total',     def: true  },
+  { key: 'advance',   label: 'Advance',   def: true  },
+  { key: 'source',    label: 'Source',    def: false },
+  { key: 'created',   label: 'Created',   def: false },
+  { key: 'paylink',   label: 'Pay link',  def: true  },
+];
+
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = '', inQuote = false;
@@ -7099,6 +7118,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [bookingSort, setBookingSort] = useState<{ col: string; dir: 'asc' | 'desc' }>({ col: 'check_in', dir: 'desc' });
   const toggleBookingSort = (col: string) =>
     setBookingSort(s => (s.col === col ? { col, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' }));
+  // Reservation-table column visibility — merge saved prefs over defaults so a
+  // newly-added column inherits its `def` instead of vanishing. Persisted per
+  // browser so each user keeps their preferred view (enterprise-grid pattern).
+  const [bookingCols, setBookingCols] = useState<Record<string, boolean>>(() => {
+    const base: Record<string, boolean> = Object.fromEntries(BOOKING_COL_DEFS.map(c => [c.key, c.def]));
+    try {
+      const saved = JSON.parse(localStorage.getItem('hotelBookingCols') || 'null');
+      if (saved && typeof saved === 'object') return { ...base, ...saved };
+    } catch { /* ignore */ }
+    return base;
+  });
+  useEffect(() => { try { localStorage.setItem('hotelBookingCols', JSON.stringify(bookingCols)); } catch { /* ignore */ } }, [bookingCols]);
+  const [bookingColMenuOpen, setBookingColMenuOpen] = useState(false);
+  const colOn = (k: string) => bookingCols[k] !== false;
   const displayedBookings = useMemo(() => {
     const q = (bookingHistoryFilter.search || '').trim().toLowerCase();
     const qd = q.replace(/\D/g, '');
@@ -17550,6 +17583,47 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
                   {displayedBookings.length}{displayedBookings.length !== hotelBookings.length ? ` of ${hotelBookings.length}` : ''} booking{displayedBookings.length === 1 ? '' : 's'}
                 </span>
+                <div className="flex items-center gap-3">
+                {/* Columns chooser — enterprise-grid style show/hide, persisted
+                    per browser. Guest + Actions are always on (pinned). */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setBookingColMenuOpen(o => !o)}
+                    className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] hover:text-[#cc5a16] flex items-center gap-1 border border-[#cc5a16]/20 rounded-lg px-2.5 py-1.5 bg-white"
+                    title="Show / hide columns"
+                  >
+                    <Filter size={12} /> Columns
+                  </button>
+                  {bookingColMenuOpen && (
+                    <>
+                      <div className="fixed inset-0 z-[55]" onClick={() => setBookingColMenuOpen(false)} />
+                      <div className="absolute right-0 mt-1 z-[56] w-52 bg-white rounded-xl border border-[#cc5a16]/20 shadow-xl p-2">
+                        <div className="px-2 py-1 text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] flex items-center justify-between">
+                          <span>Columns</span>
+                          <button
+                            type="button"
+                            onClick={() => setBookingCols(Object.fromEntries(BOOKING_COL_DEFS.map(c => [c.key, c.def])))}
+                            className="text-[9px] text-[#cc5a16] hover:underline normal-case tracking-normal font-semibold"
+                          >Reset</button>
+                        </div>
+                        <div className="px-2 py-1 text-[10px] text-[#9c8e85] italic">Guest &amp; Actions are always shown.</div>
+                        <div className="max-h-64 overflow-y-auto">
+                          {BOOKING_COL_DEFS.map(c => (
+                            <label key={c.key} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-[#faf7f2] cursor-pointer text-xs text-[#3d3128]">
+                              <input
+                                type="checkbox"
+                                checked={colOn(c.key)}
+                                onChange={e => setBookingCols(prev => ({ ...prev, [c.key]: e.target.checked }))}
+                              />
+                              {c.label}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={() => {
@@ -17581,30 +17655,37 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 >
                   <Download size={12} /> Export CSV
                 </button>
+                </div>
               </div>
-              <table className="w-full text-sm min-w-[920px]">
+              <table className="w-full text-sm min-w-[680px]">
                 <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                  {(() => {
+                    const arrow = (c: string) => bookingSort.col === c ? (bookingSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+                    const sortableCls = 'px-4 py-3 cursor-pointer select-none hover:text-[#cc5a16]';
+                    return (
                   <tr>
-                    {([
-                      { label: 'Guest',  col: 'guest',    align: 'left'  },
-                      { label: 'Room',   col: 'room',     align: 'left'  },
-                      { label: 'Dates',  col: 'check_in', align: 'left'  },
-                      { label: 'Status', col: 'status',   align: 'left'  },
-                      { label: 'Total',  col: 'total',    align: 'right' },
-                    ] as const).map(h => (
-                      <th
-                        key={h.col}
-                        onClick={() => toggleBookingSort(h.col)}
-                        className={cn('px-4 py-3 cursor-pointer select-none hover:text-[#cc5a16]', h.align === 'right' ? 'text-right' : 'text-left')}
-                        title="Click to sort"
-                      >
-                        {h.label}{bookingSort.col === h.col ? (bookingSort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
-                      </th>
-                    ))}
-                    <th className="text-right px-4 py-3" title="Advance payments already collected">Advance</th>
-                    <th className="text-center px-4 py-3">Pay link</th>
-                    <th className="text-right px-4 py-3">Actions</th>
+                    {/* Guest — pinned left so the row's identity never scrolls away */}
+                    <th onClick={() => toggleBookingSort('guest')} title="Click to sort"
+                        className={cn(sortableCls, 'text-left sticky left-0 z-[2] bg-[#faf7f2] shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)]')}>
+                      Guest{arrow('guest')}
+                    </th>
+                    {colOn('room')      && <th onClick={() => toggleBookingSort('room')}     title="Click to sort" className={cn(sortableCls, 'text-left')}>Room{arrow('room')}</th>}
+                    {colOn('dates')     && <th onClick={() => toggleBookingSort('check_in')} title="Click to sort" className={cn(sortableCls, 'text-left')}>Dates{arrow('check_in')}</th>}
+                    {colOn('nights')    && <th className="px-4 py-3 text-right">Nights</th>}
+                    {colOn('guests')    && <th className="px-4 py-3 text-right">Guests</th>}
+                    {colOn('adults')    && <th className="px-4 py-3 text-right" title="Total adults (extra beyond capacity in brackets)">Adults</th>}
+                    {colOn('meal_plan') && <th className="px-4 py-3 text-left">Meal Plan</th>}
+                    {colOn('status')    && <th onClick={() => toggleBookingSort('status')} title="Click to sort" className={cn(sortableCls, 'text-left')}>Status{arrow('status')}</th>}
+                    {colOn('total')     && <th onClick={() => toggleBookingSort('total')}  title="Click to sort" className={cn(sortableCls, 'text-right')}>Total{arrow('total')}</th>}
+                    {colOn('advance')   && <th className="text-right px-4 py-3" title="Advance payments already collected">Advance</th>}
+                    {colOn('source')    && <th className="px-4 py-3 text-left">Source</th>}
+                    {colOn('created')   && <th className="px-4 py-3 text-left">Created</th>}
+                    {colOn('paylink')   && <th className="text-center px-4 py-3">Pay link</th>}
+                    {/* Actions — pinned right so staff never scroll to reach them */}
+                    <th className="text-right px-4 py-3 sticky right-0 z-[2] bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.12)]">Actions</th>
                   </tr>
+                    );
+                  })()}
                 </thead>
                 <tbody>
                   {displayedBookings.map((b: any) => {
@@ -17616,9 +17697,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     // the front desk sees who needs attention today.
                     const lifecycle = bookingLifecycleState(b);
                     const lcStyle = LIFECYCLE_PALETTE[lifecycle];
+                    const rowCi = String(b.check_in_date || '').slice(0, 10);
+                    const rowCo = String(b.check_out_date || '').slice(0, 10);
+                    const rowNights = rowCi && rowCo ? Math.max(1, Math.round((new Date(rowCo).getTime() - new Date(rowCi).getTime()) / 86400000)) : null;
                     return (
-                      <tr key={b.id} className="border-t border-[#cc5a16]/10 hover:bg-[#faf7f2]/50">
-                        <td className="px-4 py-3">
+                      <tr key={b.id} className="group border-t border-[#cc5a16]/10 hover:bg-[#faf7f2]">
+                        <td className="px-4 py-3 sticky left-0 z-[1] bg-white group-hover:bg-[#faf7f2] shadow-[2px_0_4px_-2px_rgba(0,0,0,0.08)]">
                           <div className="font-semibold text-[#1a1208] flex items-center gap-1.5 flex-wrap">
                             {b.guest_name}
                             {b.group_id && (
@@ -17640,28 +17724,40 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </div>
                           <div className="text-[11px] text-[#9c8e85]">{b.guest_phone || '—'} {b.guest_nationality ? `· ${b.guest_nationality}` : ''}</div>
                         </td>
-                        <td className="px-4 py-3 text-[#3d3128] whitespace-nowrap">{b.room_name || b.room_id}</td>
-                        {/* Dates — whitespace-nowrap + min-width so each date shows in full
-                            (the column was too narrow and the date wrapped/clipped). */}
-                        <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap min-w-[150px]">
-                          <div className="font-medium">{formatDateForTenant(b.check_in_date, restaurant?.date_format)}</div>
-                          <div className="text-[#9c8e85]">→ {formatDateForTenant(b.check_out_date, restaurant?.date_format)}</div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={cn("px-2 py-1 rounded-md text-[10px] font-bold uppercase border", lcStyle.bg, lcStyle.text, lcStyle.border)}
-                            title={`DB status: ${b.status}`}
-                          >{lcStyle.label}</span>
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>
+                        {colOn('room') && <td className="px-4 py-3 text-[#3d3128] whitespace-nowrap">{b.room_name || b.room_id}</td>}
+                        {/* Dates — whitespace-nowrap + min-width so each date shows in full. */}
+                        {colOn('dates') && (
+                          <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap min-w-[150px]">
+                            <div className="font-medium">{formatDateForTenant(b.check_in_date, restaurant?.date_format)}</div>
+                            <div className="text-[#9c8e85]">→ {formatDateForTenant(b.check_out_date, restaurant?.date_format)}</div>
+                          </td>
+                        )}
+                        {colOn('nights') && <td className="px-4 py-3 text-right text-xs text-[#3d3128]">{rowNights ?? '—'}</td>}
+                        {colOn('guests') && <td className="px-4 py-3 text-right text-xs text-[#3d3128]">{b.num_guests ?? '—'}</td>}
+                        {colOn('adults') && <td className="px-4 py-3 text-right text-xs text-[#3d3128]">{b.num_adults ?? '—'}{b.extra_adults ? <span className="text-amber-700"> (+{b.extra_adults})</span> : null}</td>}
+                        {colOn('meal_plan') && <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap">{b.meal_plan_snapshot || b.meal_plan_id || '—'}</td>}
+                        {colOn('status') && (
+                          <td className="px-4 py-3">
+                            <span
+                              className={cn("px-2 py-1 rounded-md text-[10px] font-bold uppercase border", lcStyle.bg, lcStyle.text, lcStyle.border)}
+                              title={`DB status: ${b.status}`}
+                            >{lcStyle.label}</span>
+                          </td>
+                        )}
+                        {colOn('total') && <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>}
                         {/* ADV-PAY: show advance collected so far. Green when >0. */}
-                        <td className="px-4 py-3 text-right">
-                          {Number(b.advance_paid || 0) > 0 ? (
-                            <span className="font-mono text-emerald-700 font-semibold text-xs">₹{Number(b.advance_paid).toLocaleString('en-IN')}</span>
-                          ) : (
-                            <span className="text-[10px] text-[#9c8e85]">—</span>
-                          )}
-                        </td>
+                        {colOn('advance') && (
+                          <td className="px-4 py-3 text-right">
+                            {Number(b.advance_paid || 0) > 0 ? (
+                              <span className="font-mono text-emerald-700 font-semibold text-xs">₹{Number(b.advance_paid).toLocaleString('en-IN')}</span>
+                            ) : (
+                              <span className="text-[10px] text-[#9c8e85]">—</span>
+                            )}
+                          </td>
+                        )}
+                        {colOn('source') && <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap">{b.booking_source || '—'}</td>}
+                        {colOn('created') && <td className="px-4 py-3 text-xs text-[#9c8e85] whitespace-nowrap">{b.created_at ? formatDateForTenant(b.created_at, restaurant?.date_format) : '—'}</td>}
+                        {colOn('paylink') && (
                         <td className="px-4 py-3 text-center">
                           {/* Pay-link send buttons — only on bookings
                               that aren't fully settled. Each button
@@ -17694,7 +17790,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <span className="text-[10px] text-[#9c8e85]">—</span>
                           )}
                         </td>
-                        <td className="px-4 py-3 text-right">
+                        )}
+                        <td className="px-4 py-3 text-right sticky right-0 z-[1] bg-white group-hover:bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.08)]">
                           <div className="flex items-center justify-end gap-1.5 flex-wrap">
                             {/* UI-1 / CHK-1 — Edit button: ONLY on BOOKED rows.
                                 After check-in (CHECKED_IN/OUT/CANCELLED) the
