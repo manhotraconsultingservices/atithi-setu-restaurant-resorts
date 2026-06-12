@@ -1578,22 +1578,41 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
       const gstPct = gstRateForTariff(lineAmount, cfg);
       const tag = Math.random().toString(36).slice(2, 5).toUpperCase();
 
-      // Build a descriptive line label: "Room charge · DATE [· PLAN] [· incl. extras]"
+      // Build a descriptive line label: "Room charge · DATE [· PLAN]"
       const labelSuffix = n.label ? ` · ${n.label}` : '';
-      const extrasDesc = (useMatrix && totalExtraHeads > 0)
-        ? ` · incl. ${[
-            xpAdults  > 0 ? `${xpAdults} adult${xpAdults > 1 ? 's' : ''}` : null,
-            xpChildM  > 0 ? `${xpChildM} child${xpChildM > 1 ? 'ren' : ''} w/mat` : null,
-            xpChildN  > 0 ? `${xpChildN} child${xpChildN > 1 ? 'ren' : ''} no-mat` : null,
-          ].filter(Boolean).join(', ')}`
-        : '';
       const lineGst = Math.round((lineAmount * gstPct / 100) * 100) / 100;
+
+      // INVOICE-FIX (extra-person breakup): emit the extra-person charge as a
+      // SEPARATE folio line so the invoice itemises it (extra adult / child
+      // w-mat / no-mat) instead of folding it into the room-charge text. The
+      // split is sum-preserving — base + extras === lineAmount and
+      // baseGst + extrasGst === lineGst (exact remainder) — so recompute keeps
+      // the folio grand total byte-identical. Legacy / no-extras stays a
+      // single ROOM_CHARGE line (extrasAmount = 0).
+      const extrasAmount = (useMatrix && totalExtraHeads > 0)
+        ? Math.round(n.extras * 100) / 100 : 0;
+      const baseAmount = Math.round((lineAmount - extrasAmount) * 100) / 100;
+      const extrasGst = extrasAmount > 0 ? Math.round((extrasAmount * gstPct / 100) * 100) / 100 : 0;
+      const baseGst = Math.round((lineGst - extrasGst) * 100) / 100;
       const roomEntryId = `FE-${Date.now()}-${i}-${tag}`;
       await tenantDb.run(
         `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
          VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
-        [roomEntryId, folioId, `Room charge · ${dateStr}${labelSuffix}${extrasDesc}`, lineAmount, lineAmount, gstPct, lineGst]
+        [roomEntryId, folioId, `Room charge · ${dateStr}${labelSuffix}`, baseAmount, baseAmount, gstPct, baseGst]
       );
+      if (extrasAmount > 0) {
+        const extrasBreakdown = [
+          xpAdults  > 0 ? `${xpAdults} extra adult${xpAdults > 1 ? 's' : ''}` : null,
+          xpChildM  > 0 ? `${xpChildM} child${xpChildM > 1 ? 'ren' : ''} w/mattress` : null,
+          xpChildN  > 0 ? `${xpChildN} child${xpChildN > 1 ? 'ren' : ''} no mattress` : null,
+        ].filter(Boolean).join(', ');
+        const extraEntryId = `FE-${Date.now()}-${i}-X-${tag}`;
+        await tenantDb.run(
+          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+           VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
+          [extraEntryId, folioId, `Extra persons · ${extrasBreakdown} · ${dateStr}`, extrasAmount, extrasAmount, gstPct, extrasGst]
+        );
+      }
       // Service charge line — % of THIS night's full line (base + extras)
       // so the percent matches real-world hotel billing on the full room
       // package. 0% service charge skips the row.
@@ -25698,6 +25717,40 @@ ${data.tenant.name}`;
         "SELECT id FROM folios WHERE booking_id = ? AND status = 'open'", [b.id]
       );
       if (openFolio?.id) {
+        // INVOICE-FIX (F&B missing): post any room-service orders for this
+        // room/booking that reached the kitchen but aren't on a folio yet
+        // (folio_post_status AWAITING_DELIVERY / PENDING_MANUAL — e.g. ordered
+        // via the room QR but never marked delivered). The guest is leaving,
+        // so their ordered F&B MUST be billed and appear on the invoice. Each
+        // posts via postOrderToFolio (idempotent) and is flagged POSTED.
+        try {
+          const pendingOrders: any[] = await tenantDb.query(
+            `SELECT * FROM orders
+              WHERE folio_id IS NULL AND deleted_at IS NULL
+                AND folio_post_status IN ('AWAITING_DELIVERY','PENDING_MANUAL')
+                AND (booking_id = ? OR (room_id IS NOT NULL AND room_id = ?))`,
+            [b.id, b.room_id]
+          ).catch(() => []);
+          for (const o of pendingOrders) {
+            let parsed: any[] = [];
+            try { parsed = JSON.parse(o.items || '[]'); } catch { parsed = []; }
+            const fItems: FolioOrderItem[] = (Array.isArray(parsed) ? parsed : []).map((it: any) => ({
+              name: it.name || it.menuName || 'Item',
+              quantity: Number(it.quantity || it.qty || 1),
+              unitPrice: Number(it.price || it.unitPrice || it.unit_price || 0),
+              gstRate: it.gstRate != null ? Number(it.gstRate) : (it.gst_rate != null ? Number(it.gst_rate) : undefined),
+            }));
+            if (fItems.length === 0) continue;
+            const posted = await postOrderToFolio(req.params.id, {
+              id: o.id, room_id: o.room_id || b.room_id, booking_id: o.booking_id || b.id,
+              items: fItems, subtype: 'IRD', posted_by: req.user?.id || 'CHECKOUT_AUTOPOST',
+            });
+            await tenantDb.run("UPDATE orders SET folio_post_status = ? WHERE id = ?",
+              [posted?.ok ? 'POSTED' : 'PENDING_MANUAL', o.id]).catch(() => {});
+          }
+        } catch (e) {
+          console.warn('[hotel-checkout] auto-post pending room orders failed (non-fatal):', e);
+        }
         // Recompute totals one more time to capture any in-flight F&B
         // that landed in folio_entries since the modal was opened.
         await recomputeFolioTotals(tenantDb, openFolio.id);

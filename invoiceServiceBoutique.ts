@@ -470,18 +470,25 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
 
       doc.font('Helvetica').fontSize(9).fillColor(INK_SOFT);
       billableEntries.forEach((e, i) => {
-        ensureSpace(ROW_H);
+        // PDF-FIX (description overflow): wrap the description + grow the row
+        // so long lines (e.g. room charge incl. extra-person breakdown) show
+        // fully instead of clipping into the next column / row.
+        const descW = colPositions.hsn - colPositions.desc - 8;
+        doc.font('Helvetica-Bold').fontSize(9);
+        const descH = doc.heightOfString(String(e.description || ''), { width: descW });
+        const rowH = Math.max(ROW_H, Math.ceil(descH) + 18);
+        ensureSpace(rowH);
         const rowY = y;
         const hsn = e.hsnCode || hsnForEntry(e.entryType);
         if (i % 2 === 1) {
-          doc.rect(M, y - 2, INNER_W, ROW_H).fill(HIGHLIGHT);
+          doc.rect(M, y - 2, INNER_W, rowH).fill(HIGHLIGHT);
         }
         doc.fillColor(INK_SOFT).font('Helvetica').fontSize(9);
         doc.text(String(i + 1), colPositions.num + 4, rowY + 7, { width: 20 });
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
-           .text(e.description, colPositions.desc + 4, rowY + 6, { width: colPositions.hsn - colPositions.desc - 8, ellipsis: true });
+           .text(String(e.description || ''), colPositions.desc + 4, rowY + 6, { width: descW });
         doc.fillColor(INK_SOFT).font('Helvetica').fontSize(8)
-           .text(entryTypeLabel(e.entryType), colPositions.desc + 4, rowY + 17);
+           .text(entryTypeLabel(e.entryType), colPositions.desc + 4, rowY + 6 + Math.ceil(descH) + 1);
         doc.fillColor(INK_SOFT).font('Helvetica').fontSize(9);
         doc.text(hsn,                      colPositions.hsn,      rowY + 7);
         doc.text(String(e.quantity),       colPositions.qty,      rowY + 7, { width: 28, align: 'right' });
@@ -489,7 +496,7 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
         doc.text(`${e.gstRate ?? 0}%`,                          colPositions.tax,  rowY + 7, { width: 30, align: 'right' });
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
            .text(moneyNumeric(data.tenant, e.amount * sign),    colPositions.amt - 20, rowY + 7, { width: 80, align: 'right' });
-        y += ROW_H;
+        y += rowH;
       });
 
       doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.5).strokeColor(HAIR).stroke();
