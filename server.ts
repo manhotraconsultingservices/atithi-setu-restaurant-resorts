@@ -25070,7 +25070,12 @@ ${data.tenant.name}`;
         'guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin',
         'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress',
       ];
-      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','check_in_date','check_out_date','room_rate','special_requests','status','booking_type',
+      // RES-FIX: room_id is editable PRE-check-in (room reassignment / upgrade
+      // in the check-in wizard + Edit Booking). It's in LOCKED_AFTER_CHECKIN
+      // above so it can't change once the guest is checked in. It was MISSING
+      // from this allow list, so reassignment PATCHes silently dropped room_id
+      // — the booking row, folio + invoice all kept the OLD room.
+      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','room_id','check_in_date','check_out_date','room_rate','special_requests','status','booking_type',
         'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress',
         // Receivables Phase 2 — agent + booking_source editable post-create
         // so owner can re-tag a misattributed booking. Not locked after
@@ -25126,9 +25131,49 @@ ${data.tenant.name}`;
         if (!v.ok) return res.status(v.status).json({ error: v.error });
       }
 
+      // RES-FIX: when the room / dates / rate / meal-plan / extra-person counts
+      // change (and the booking isn't finalized), recompute total_amount so the
+      // booking table + reports reflect the NEW room's charge WITH THE SAME
+      // adult / extra-adult / child counts. Uses the same resolver the folio
+      // uses at check-in, so the table total matches the eventual folio/invoice.
+      const rateAffecting = ['room_id','room_rate','check_in_date','check_out_date','booking_type',
+        'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress'];
+      if (!isFinalized && rateAffecting.some(f => f in patch)) {
+        try {
+          const post = { ...b, ...patch };
+          const bt = String(post.booking_type || 'OVERNIGHT').toUpperCase();
+          const ci = normaliseDateIso(post.check_in_date);
+          const co = normaliseDateIso(post.check_out_date);
+          const explicitRate = Number(post.room_rate) || 0;
+          const nights = bt === 'DAY_USE' ? 1
+            : Math.max(1, Math.ceil((new Date(co).getTime() - new Date(ci).getTime()) / 86400000));
+          let newTotal: number;
+          if (explicitRate > 0) {
+            newTotal = Math.round(explicitRate * nights * 100) / 100;
+          } else {
+            const bd = await computeBookingTotalWithExtras(req.params.id, post.room_id, ci, co, {
+              mealPlanId: post.meal_plan_id || null,
+              extraAdults: Math.max(0, Number(post.extra_adults || 0)),
+              extraChildrenWithMattress: Math.max(0, Number(post.extra_children_with_mattress || 0)),
+              extraChildrenNoMattress: Math.max(0, Number(post.extra_children_no_mattress || 0)),
+              bookingType: bt,
+            });
+            newTotal = bd.total;
+          }
+          patch.total_amount = newTotal;
+        } catch (e) {
+          console.warn('[booking-patch] total_amount recompute failed (non-fatal):', e);
+        }
+      }
+
       const setStr = Object.keys(patch).map(k => `${k} = ?`).join(', ');
       await tenantDb.run(`UPDATE room_bookings SET ${setStr} WHERE id = ?`, [...Object.values(patch), req.params.bookingId]);
-      const updated: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      // Return the room name (JOIN) so the booking table reflects the reassigned
+      // room immediately on the optimistic merge, not just after a refetch.
+      const updated: any = await tenantDb.get(
+        "SELECT b.*, r.name AS room_name FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id WHERE b.id = ?",
+        [req.params.bookingId]
+      );
       // Phase H1 — log channel re-sync for any business-field edit.
       if (businessTouched) {
         await logChannelSync(req.params.id, updated, 'BOOKING_UPDATED', { changed: Object.keys(patch) });
