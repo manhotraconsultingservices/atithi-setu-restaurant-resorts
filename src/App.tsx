@@ -207,6 +207,19 @@ function downloadCsv(filename: string, header: string[], rows: any[][]): void {
   document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
+// Adults-capacity workflow (12 Jun 2026) — given the TOTAL adults staying and
+// the room's capacity (= adults included in the base rate), derive the
+// chargeable extra adults and the total headcount. Mirrors the server's
+// deriveAdultExtras so the live preview matches what the backend will store.
+//   extra_adults = max(0, adults − capacity);  num_guests = adults + children
+function deriveOccupancy(adults: number, capacity: number, childMat: number, childNoMat: number): { extra_adults: number; num_guests: number } {
+  const a   = Math.max(1, Math.floor(Number(adults)   || 1));
+  const cap = Math.max(1, Math.floor(Number(capacity) || 1));
+  const cm  = Math.max(0, Math.floor(Number(childMat)   || 0));
+  const cn  = Math.max(0, Math.floor(Number(childNoMat) || 0));
+  return { extra_adults: Math.max(0, a - cap), num_guests: a + cm + cn };
+}
+
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = '', inQuote = false;
@@ -26242,7 +26255,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       return;
                     }
                     const pickRoomId = stats.room_ids[0];
-                    setEditingBooking({ ...editingBooking, room_id: pickRoomId });
+                    // Re-derive extra adults against the picked room's capacity.
+                    const cap = Math.max(1, Number(hotelRooms.find(r => r.id === pickRoomId)?.capacity || 1));
+                    const adults = Number(editingBooking.num_adults) > 0 ? Number(editingBooking.num_adults) : cap;
+                    const d = deriveOccupancy(adults, cap, editingBooking.extra_children_with_mattress, editingBooking.extra_children_no_mattress);
+                    setEditingBooking({ ...editingBooking, room_id: pickRoomId, num_adults: adults, extra_adults: d.extra_adults, num_guests: d.num_guests });
                   };
 
                   const fmtRupee = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
@@ -26309,7 +26326,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <label className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Change:</label>
                               <select
                                 value={editingBooking.room_id || ''}
-                                onChange={e => setEditingBooking({ ...editingBooking, room_id: e.target.value })}
+                                onChange={e => { const rid = e.target.value; const cap = Math.max(1, Number(hotelRooms.find(r => r.id === rid)?.capacity || 1)); const adults = Number(editingBooking.num_adults) > 0 ? Number(editingBooking.num_adults) : cap; const d = deriveOccupancy(adults, cap, editingBooking.extra_children_with_mattress, editingBooking.extra_children_no_mattress); setEditingBooking({ ...editingBooking, room_id: rid, num_adults: adults, extra_adults: d.extra_adults, num_guests: d.num_guests }); }}
                                 className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[10px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
                               >
                                 {drillRooms.map(r => (
@@ -26339,7 +26356,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               {tariffData.tariff_model === 'MATRIX' && tariffData.meal_plans.filter((m: any) => m.is_active !== 0).length > 0 && (
                 <div className="space-y-3 p-3 bg-[#cc5a16]/5 border border-[#cc5a16]/15 rounded-2xl">
                   <div className="flex items-center justify-between">
-                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Meal Plan + Extra Persons</label>
+                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Meal Plan + Occupancy</label>
                     <span className="text-[9px] font-bold uppercase tracking-widest text-[#cc5a16] bg-white px-2 py-0.5 rounded-full">Matrix Pricing</span>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -26362,32 +26379,55 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           })}
                       </select>
                     </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Extra Adult (with mattress)">+ Adult</label>
-                        <input type="number" min={0} max={6}
-                          value={editingBooking.extra_adults ?? 0}
-                          onChange={e => { const v = parseInt(e.target.value, 10); setEditingBooking({...editingBooking, extra_adults: isNaN(v) ? 0 : Math.max(0, Math.min(6, v))}); }}
-                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Extra Child 5-12 yrs with mattress">+ Child (mat)</label>
-                        <input type="number" min={0} max={4}
-                          value={editingBooking.extra_children_with_mattress ?? 0}
-                          onChange={e => { const v = parseInt(e.target.value, 10); setEditingBooking({...editingBooking, extra_children_with_mattress: isNaN(v) ? 0 : Math.max(0, Math.min(4, v))}); }}
-                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Extra Child 5-12 yrs without mattress">+ Child (no-mat)</label>
-                        <input type="number" min={0} max={4}
-                          value={editingBooking.extra_children_no_mattress ?? 0}
-                          onChange={e => { const v = parseInt(e.target.value, 10); setEditingBooking({...editingBooking, extra_children_no_mattress: isNaN(v) ? 0 : Math.max(0, Math.min(4, v))}); }}
-                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
-                        />
-                      </div>
-                    </div>
+                    {(() => {
+                      // Capacity-driven occupancy capture. "Adults" is the TOTAL
+                      // adult headcount; the room's capacity is the number
+                      // included in the base rate, so extra_adults is derived =
+                      // max(0, adults − capacity). num_guests is kept in sync.
+                      const selCap = Math.max(1, Number(hotelRooms.find(r => r.id === editingBooking.room_id)?.capacity || 1));
+                      const childMat   = Number(editingBooking.extra_children_with_mattress || 0);
+                      const childNoMat = Number(editingBooking.extra_children_no_mattress || 0);
+                      const adultsVal  = editingBooking.num_adults != null
+                        ? Number(editingBooking.num_adults)
+                        : (selCap + Number(editingBooking.extra_adults || 0));
+                      const extraA = Math.max(0, adultsVal - selCap);
+                      return (
+                        <div className="space-y-2">
+                          <div className="grid grid-cols-3 gap-2">
+                            <div>
+                              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Total adults staying in the room">Adults</label>
+                              <input type="number" min={1} max={20}
+                                value={adultsVal}
+                                onChange={e => { const v = parseInt(e.target.value, 10); const a = isNaN(v) ? 1 : Math.max(1, Math.min(20, v)); const d = deriveOccupancy(a, selCap, childMat, childNoMat); setEditingBooking({ ...editingBooking, num_adults: a, extra_adults: d.extra_adults, num_guests: d.num_guests }); }}
+                                className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Children 5-12 yrs with mattress">Child (mat)</label>
+                              <input type="number" min={0} max={4}
+                                value={editingBooking.extra_children_with_mattress ?? 0}
+                                onChange={e => { const v = parseInt(e.target.value, 10); const cm = isNaN(v) ? 0 : Math.max(0, Math.min(4, v)); const d = deriveOccupancy(adultsVal, selCap, cm, childNoMat); setEditingBooking({ ...editingBooking, extra_children_with_mattress: cm, num_guests: d.num_guests }); }}
+                                className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Children 5-12 yrs without mattress">Child (no-mat)</label>
+                              <input type="number" min={0} max={4}
+                                value={editingBooking.extra_children_no_mattress ?? 0}
+                                onChange={e => { const v = parseInt(e.target.value, 10); const cn = isNaN(v) ? 0 : Math.max(0, Math.min(4, v)); const d = deriveOccupancy(adultsVal, selCap, childMat, cn); setEditingBooking({ ...editingBooking, extra_children_no_mattress: cn, num_guests: d.num_guests }); }}
+                                className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                              />
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-[#6b5d52] leading-snug">
+                            This room includes <strong>{selCap}</strong> adult{selCap === 1 ? '' : 's'} in the base rate.{' '}
+                            {extraA > 0
+                              ? <span className="text-amber-700 font-semibold">{extraA} extra adult{extraA === 1 ? '' : 's'} charged per tariff.</span>
+                              : <span className="text-green-700">Within capacity — no extra-adult charge.</span>}
+                          </p>
+                        </div>
+                      );
+                    })()}
                   </div>
                   <p className="text-[10px] text-[#9c8e85] leading-snug">
                     Server resolves the per-night rate from the room-category × season × meal-plan matrix. Extra-person charges are added per night. Leave Rate-per-night = 0 below to auto-compute; enter a value to override.
@@ -26486,12 +26526,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <p className="text-[9px] text-[#9c8e85] mt-1">Blank → matrix tariff is used. Type a value only to override.</p>
                 </div>
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Guests</label>
-                  <input type="number" min={1}
-                    value={editingBooking.num_guests || ''}
-                    onChange={e => { const v = parseInt(e.target.value, 10); setEditingBooking({...editingBooking, num_guests: isNaN(v) ? 0 : Math.max(0, v)}); }}
-                    onBlur={() => { if (!editingBooking.num_guests || editingBooking.num_guests < 1) setEditingBooking({...editingBooking, num_guests: 1}); }}
-                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    Guests {editingBooking.num_adults != null && <span className="text-[9px] font-normal normal-case text-[#9c8e85]">— auto (adults + children)</span>}
+                  </label>
+                  {editingBooking.num_adults != null ? (
+                    // Auto-computed, read-only: one source of truth = adults + children.
+                    <div className="w-full bg-[#f0e8de] rounded-2xl px-4 py-3 text-[#3d3128] font-semibold flex items-baseline gap-2">
+                      {Number(editingBooking.num_adults) + Number(editingBooking.extra_children_with_mattress || 0) + Number(editingBooking.extra_children_no_mattress || 0)}
+                      <span className="text-[10px] font-normal text-[#9c8e85]">
+                        {editingBooking.num_adults} adult{Number(editingBooking.num_adults) === 1 ? '' : 's'}
+                        {(Number(editingBooking.extra_children_with_mattress || 0) + Number(editingBooking.extra_children_no_mattress || 0)) > 0
+                          ? ` + ${Number(editingBooking.extra_children_with_mattress || 0) + Number(editingBooking.extra_children_no_mattress || 0)} child` : ''}
+                      </span>
+                    </div>
+                  ) : (
+                    <input type="number" min={1}
+                      value={editingBooking.num_guests || ''}
+                      onChange={e => { const v = parseInt(e.target.value, 10); setEditingBooking({...editingBooking, num_guests: isNaN(v) ? 0 : Math.max(0, v)}); }}
+                      onBlur={() => { if (!editingBooking.num_guests || editingBooking.num_guests < 1) setEditingBooking({...editingBooking, num_guests: 1}); }}
+                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"/>
+                  )}
                 </div>
               </div>
               <div>

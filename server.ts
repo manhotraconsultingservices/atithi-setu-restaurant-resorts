@@ -1060,6 +1060,13 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS extra_adults INT DEFAULT 0;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS extra_children_with_mattress INT DEFAULT 0;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS extra_children_no_mattress INT DEFAULT 0;
+    -- Total adults staying (12 Jun 2026). The booking form now captures the
+    -- TOTAL adult headcount; the server derives extra_adults from the room's
+    -- own capacity (capacity = adults included in the base rate):
+    --   extra_adults = max(0, num_adults − room.capacity)
+    -- NULL on legacy rows / public-page bookings that still send extra_adults
+    -- directly — those keep their explicit extra_adults untouched.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS num_adults INT;
 
     -- Phase H3 / Sprint B1 — Room holds.
     -- Non-booking unavailability records: maintenance windows, owner stays,
@@ -3055,6 +3062,32 @@ async function computeBookingTotalWithExtras(
     total: Math.round((baseTotal + extrasTotal) * 100) / 100,
     per_night: perNight,
   };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  deriveAdultExtras — total adults → chargeable extra adults (12 Jun 2026)
+//
+//  A room's `capacity` is the number of adults included in the base rate.
+//  The booking form captures the TOTAL adults staying; the chargeable
+//  extra-adult count is everything beyond the room's own capacity:
+//
+//      extra_adults = max(0, num_adults − room.capacity)
+//
+//  Resolved server-side from the room row so the charge can't be gamed by a
+//  tampered client payload, and so a room reassignment (different capacity)
+//  at check-in re-derives the extras against the NEW room automatically.
+// ════════════════════════════════════════════════════════════════════════
+async function deriveAdultExtras(
+  restaurantId: string, roomId: string, numAdults: number
+): Promise<{ capacity: number; extraAdults: number }> {
+  let capacity = 1;
+  try {
+    const db = await getTenantDb(restaurantId);
+    const room: any = await db.get('SELECT capacity FROM rooms WHERE id = ?', [roomId]);
+    capacity = Math.max(1, Math.floor(Number(room?.capacity || 1)));
+  } catch { /* default capacity 1 */ }
+  const adults = Math.max(1, Math.floor(Number(numAdults) || 1));
+  return { capacity, extraAdults: Math.max(0, adults - capacity) };
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -21254,6 +21287,9 @@ ${data.tenant.name}`;
         // when meal_plan_id is null/undefined the booking renders identically
         // to the LEGACY path (no matrix lookup, no extra-person line).
         meal_plan_id, extra_adults, extra_children_with_mattress, extra_children_no_mattress,
+        // Adults-capacity workflow (12 Jun 2026) — TOTAL adults staying. When
+        // present, the server derives extra_adults from the room's capacity.
+        num_adults,
         // Receivables Phase 2 — optional travel-agent attribution. When set,
         // this booking rolls into that agent's statement + receivables aging.
         agent_id,
@@ -21261,11 +21297,29 @@ ${data.tenant.name}`;
       if (!guest_name || String(guest_name).trim().length === 0) {
         return res.status(400).json({ error: "Guest name is required." });
       }
+      // Adults-capacity workflow — when the form sends the TOTAL adult count,
+      // derive the chargeable extra adults from the room's own capacity
+      // (capacity = adults included in the base rate). Children are charged
+      // separately per tariff. When num_adults is absent (public page /
+      // legacy clients) we keep the explicit extra_adults the caller sent.
+      const xpChildMat   = Math.max(0, Number(extra_children_with_mattress || 0));
+      const xpChildNoMat = Math.max(0, Number(extra_children_no_mattress || 0));
+      let xpAdults = Math.max(0, Number(extra_adults || 0));
+      let numAdultsToStore: number | null = null;
+      let effectiveNumGuests = Math.max(1, Number(num_guests || 1));
+      if (num_adults != null && String(num_adults) !== '') {
+        const totalAdults = Math.max(1, Math.floor(Number(num_adults) || 1));
+        const derived = await deriveAdultExtras(req.params.id, room_id, totalAdults);
+        xpAdults = derived.extraAdults;
+        numAdultsToStore = totalAdults;
+        effectiveNumGuests = totalAdults + xpChildMat + xpChildNoMat;
+      }
+
       // Run all business-rule validations (dates per booking_type, capacity,
       // room status, double-booking) before INSERT. Returns a friendly
       // error string that surfaces directly in the booking modal.
       const v = await validateBookingRequest(req.params.id, {
-        room_id, check_in_date, check_out_date, booking_type, num_guests,
+        room_id, check_in_date, check_out_date, booking_type, num_guests: effectiveNumGuests,
       });
       if (!v.ok) return res.status(v.status).json({ error: v.error });
 
@@ -21285,9 +21339,8 @@ ${data.tenant.name}`;
       let total: number;
       let nights = 1;
       let mealPlanSnapshot: string | null = null;
-      const xpAdults = Math.max(0, Number(extra_adults || 0));
-      const xpChildMat = Math.max(0, Number(extra_children_with_mattress || 0));
-      const xpChildNoMat = Math.max(0, Number(extra_children_no_mattress || 0));
+      // xpAdults / xpChildMat / xpChildNoMat + effectiveNumGuests were resolved
+      // above (extra_adults derived from room capacity when num_adults sent).
       // Snapshot the human-readable meal-plan label so historical reprint
       // is stable even if the owner later renames or deactivates the plan
       // (mirrors currency_snapshot / tax_label_snapshot pattern).
@@ -21351,14 +21404,14 @@ ${data.tenant.name}`;
         `INSERT INTO room_bookings
          (id, room_id, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
           num_guests, check_in_date, check_out_date, status, booking_source, room_rate, total_amount, special_requests, booking_type,
-          meal_plan_id, meal_plan_snapshot, extra_adults, extra_children_with_mattress, extra_children_no_mattress,
+          meal_plan_id, meal_plan_snapshot, extra_adults, extra_children_with_mattress, extra_children_no_mattress, num_adults,
           agent_id, commission_pct, commission_amount, net_amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [bid, room_id, guest_name, guest_phone || null, guest_email || null,
          guest_id_proof || null, guest_nationality || null, guest_state || null,
-         num_guests || 1, check_in_date, check_out_date, booking_source || 'DIRECT', rate, total,
+         effectiveNumGuests, check_in_date, check_out_date, booking_source || 'DIRECT', rate, total,
          special_requests || null, bookingType,
-         meal_plan_id || null, mealPlanSnapshot, xpAdults, xpChildMat, xpChildNoMat,
+         meal_plan_id || null, mealPlanSnapshot, xpAdults, xpChildMat, xpChildNoMat, numAdultsToStore,
          agent_id || null, commission_pct, commission_amount, net_amount]
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
@@ -25547,7 +25600,7 @@ ${data.tenant.name}`;
       const LOCKED_AFTER_CHECKIN = [
         'room_rate','check_in_date','check_out_date','room_id','booking_type','num_guests','status',
         'guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin',
-        'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress',
+        'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress','num_adults',
       ];
       // RES-FIX: room_id is editable PRE-check-in (room reassignment / upgrade
       // in the check-in wizard + Edit Booking). It's in LOCKED_AFTER_CHECKIN
@@ -25555,7 +25608,7 @@ ${data.tenant.name}`;
       // from this allow list, so reassignment PATCHes silently dropped room_id
       // — the booking row, folio + invoice all kept the OLD room.
       const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','room_id','check_in_date','check_out_date','room_rate','special_requests','status','booking_type',
-        'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress',
+        'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress','num_adults',
         // Receivables Phase 2 — agent + booking_source editable post-create
         // so owner can re-tag a misattributed booking. Not locked after
         // check-in: tagging the right partner is a back-office concern.
@@ -25577,6 +25630,28 @@ ${data.tenant.name}`;
             locked_fields: blocked,
             booking_status: b.status,
           });
+        }
+      }
+
+      // Adults-capacity workflow — when the TOTAL adult count is edited, or the
+      // room is reassigned while the booking carries a total-adult count,
+      // re-derive the chargeable extra adults from the (possibly NEW) room's
+      // capacity and keep num_guests = adults + children in sync. This is what
+      // makes a check-in room upgrade correctly drop/raise the extra-adult
+      // charge (e.g. 3 adults: capacity-2 room → 1 extra; upgrade to capacity-4
+      // → 0 extra). Mirrors the POST path; never runs once finalized (those
+      // fields are locked above and would have 409'd before reaching here).
+      if (!isFinalized) {
+        const post0 = { ...b, ...patch };
+        const hasNumAdults = post0.num_adults != null && String(post0.num_adults) !== '';
+        if (hasNumAdults && (('num_adults' in patch) || ('room_id' in patch))) {
+          const totalAdults = Math.max(1, Math.floor(Number(post0.num_adults) || 1));
+          const derived = await deriveAdultExtras(req.params.id, post0.room_id, totalAdults);
+          patch.num_adults  = totalAdults;
+          patch.extra_adults = derived.extraAdults;
+          const childMat   = Math.max(0, Number(post0.extra_children_with_mattress || 0));
+          const childNoMat = Math.max(0, Number(post0.extra_children_no_mattress || 0));
+          patch.num_guests = totalAdults + childMat + childNoMat;
         }
       }
 
