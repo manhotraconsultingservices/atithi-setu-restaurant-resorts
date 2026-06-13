@@ -27980,6 +27980,88 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── DELIVER a room-service order + settle the billing choice in ONE tap ──
+  // The Marriott / Opera "close the check at handover" model. When the runner
+  // hands the food over they make a single choice:
+  //   • charge to room → order is marked DELIVERED and the F&B posts to the
+  //     guest folio immediately.
+  //   • guest paid     → order is marked DELIVERED and PAID_IN_ROOM; it never
+  //     touches the folio (and if it had somehow already posted, that folio
+  //     line is reversed so the guest is never billed twice).
+  // This closes the double-charge gap: the charge-vs-paid decision IS the act
+  // of delivering, done by the person handing over the tray — not a separate
+  // reconcile step someone has to remember later.
+  // body: { paid_in_room?: boolean, payment_method?: string }
+  app.post("/api/restaurant/:id/hotel/orders/:orderId/deliver", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_paid_at TIMESTAMP").catch(() => {});
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_payment_method TEXT").catch(() => {});
+      const order: any = await tenantDb.get("SELECT * FROM orders WHERE id = ? AND deleted_at IS NULL", [req.params.orderId]);
+      if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+      const paidInRoom = req.body?.paid_in_room === true || req.body?.paid_in_room === 1 || req.body?.paid_in_room === '1';
+      const method = String(req.body?.payment_method || 'CASH').toUpperCase().trim() || 'CASH';
+
+      // Mark delivered in BOTH status vocabularies so every downstream check
+      // (and the guest order tracker) agrees.
+      await tenantDb.run("UPDATE orders SET status = 'DELIVERED', kitchen_status = 'served' WHERE id = ?", [order.id]);
+
+      let folioPostStatus: string = order.folio_post_status || '';
+      let postedLines = 0, reversedLines = 0;
+
+      if (paidInRoom) {
+        // Guest paid the runner — keep it OFF the folio. Reverse if it had
+        // already posted (e.g. delivered-to-room earlier, paying only now).
+        if (order.folio_id) {
+          const rev = await reverseOrderFolioPosting(req.params.id, order.id, 'Paid in room at delivery', req.user?.id || 'RUNNER');
+          reversedLines = rev.reversed_count;
+        }
+        await tenantDb.run(
+          "UPDATE orders SET folio_post_status = 'PAID_IN_ROOM', room_paid_at = CURRENT_TIMESTAMP, room_payment_method = ? WHERE id = ?",
+          [method, order.id]
+        );
+        folioPostStatus = 'PAID_IN_ROOM';
+      } else if (String(order.payment_method || '').toUpperCase() === 'CHARGE_TO_ROOM'
+                 && String(order.folio_post_status || '').toUpperCase() !== 'PAID_IN_ROOM'
+                 && !order.folio_id
+                 && (order.room_id || order.booking_id)) {
+        // Charge to room — post the F&B to the guest folio now.
+        let parsedItems: any[] = [];
+        try { parsedItems = typeof order.items === 'string' ? JSON.parse(order.items) : (order.items || []); } catch { parsedItems = []; }
+        const folioItems: FolioOrderItem[] = (Array.isArray(parsedItems) ? parsedItems : []).map((it: any) => ({
+          name: it.name || it.menuName || 'Item',
+          quantity: Number(it.quantity || it.qty || 1),
+          unitPrice: Number(it.price || it.unitPrice || it.unit_price || 0),
+          gstRate: it.gstRate != null ? Number(it.gstRate) : (it.gst_rate != null ? Number(it.gst_rate) : undefined),
+        }));
+        const posted = await postOrderToFolio(req.params.id, {
+          id: order.id, room_id: order.room_id, booking_id: order.booking_id,
+          items: folioItems, subtype: 'IRD', posted_by: req.user?.id || 'RUNNER_DELIVERY',
+        });
+        folioPostStatus = posted?.ok ? 'POSTED' : 'PENDING_MANUAL';
+        postedLines = posted?.ok ? folioItems.length : 0;
+        await tenantDb.run("UPDATE orders SET folio_post_status = ? WHERE id = ?", [folioPostStatus, order.id]).catch(() => {});
+      }
+
+      const updated: any = await tenantDb.get("SELECT * FROM orders WHERE id = ?", [order.id]);
+      // Keep the guest's in-room order tracker live (best-effort).
+      try {
+        if (updated && typeof updated.items === 'string') { try { updated.items = JSON.parse(updated.items); } catch { /* leave as-is */ } }
+        const wss = (global as any).__wss;
+        if (wss) wss.clients.forEach((c: any) => { if (c.readyState === 1) c.send(JSON.stringify({ type: 'ORDER_UPDATE', data: updated, restaurantId: req.params.id })); });
+      } catch { /* WS broadcast is best-effort */ }
+
+      console.log(`[room-fnb] order ${order.id} DELIVERED by ${req.user?.id || 'staff'} — ${paidInRoom ? `PAID_IN_ROOM (${method}), reversed ${reversedLines} line(s)` : `charged to folio (${folioPostStatus})`}`);
+      res.json({ success: true, order_id: order.id, paid_in_room: paidInRoom, folio_post_status: folioPostStatus, posted_lines: postedLines, reversed_folio_lines: reversedLines });
+    } catch (err: any) {
+      console.error('deliver-order error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to deliver order' });
+    }
+  });
+
   // ════════════════════════════════════════════════════════════════════
   // Folio payments ledger (10 Jun 2026 critical fix)
   // ════════════════════════════════════════════════════════════════════
@@ -31872,8 +31954,14 @@ ${data.tenant.name}`;
       // undelivered orders never hit the bill. Idempotent (skips if already on
       // a folio); on failure we flag PENDING_MANUAL for front-desk reconcile.
       try {
+        // Bulletproof the trigger: the chef KDS marks delivery as
+        // kitchen_status='served' while the Command Center uses 'delivered' —
+        // accept either (or status=DELIVERED) so an in-room order always
+        // posts to the folio the moment it's handed over, regardless of which
+        // surface marked it. (Previously only 'delivered' was matched here,
+        // so a 'served'-only transition would silently skip folio posting.)
         const deliveredNow = (String(status || '').toUpperCase() === 'DELIVERED')
-          || (String(kitchen_status || '').toLowerCase() === 'delivered');
+          || ['delivered', 'served'].includes(String(kitchen_status || '').toLowerCase());
         if (deliveredNow && updatedOrder
             && String(updatedOrder.payment_method || '').toUpperCase() === 'CHARGE_TO_ROOM'
             && String(updatedOrder.folio_post_status || '').toUpperCase() !== 'PAID_IN_ROOM'

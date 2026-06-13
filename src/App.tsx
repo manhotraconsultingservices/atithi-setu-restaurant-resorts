@@ -32669,24 +32669,30 @@ const PendingRoomOrdersAlert: React.FC<{
     }
   };
 
-  // Guest paid this F&B bill in the room (cash/UPI handed to staff on
-  // delivery). Mark it paid → it stays OFF the folio (reversed if already
-  // posted), so it isn't billed again at checkout.
-  const markPaid = async (order: any) => {
-    const method = window.prompt('Guest paid in the room — payment method? (CASH / UPI / CARD)', 'CASH');
-    if (method == null) return;
+  // Marriott "close the check at handover": deliver the order AND settle the
+  // billing choice in ONE action. charge-to-room → marks DELIVERED + posts the
+  // F&B to the guest folio now. guest-paid → marks DELIVERED + PAID_IN_ROOM, so
+  // it never hits the folio (and any prior posting is reversed). Either way the
+  // order leaves the unbilled list immediately — no separate step to forget.
+  const deliverOrder = async (order: any, paidInRoom: boolean) => {
+    let method = 'CASH';
+    if (paidInRoom) {
+      const m = window.prompt('Guest paid in the room — payment method? (CASH / UPI / CARD)', 'CASH');
+      if (m == null) return;   // cancelled
+      method = (m || 'CASH').toUpperCase();
+    }
     setError(''); setBusyId(order.id);
     try {
-      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/orders/${order.id}/mark-paid-in-room`, {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/orders/${order.id}/deliver`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ payment_method: (method || 'CASH').toUpperCase() }),
+        body: JSON.stringify({ paid_in_room: paidInRoom, payment_method: method }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
       await onReconciled();
     } catch (e: any) {
-      setError(e?.message || 'Failed to mark paid in room');
+      setError(e?.message || 'Failed to deliver order');
     } finally {
       setBusyId(null);
     }
@@ -32699,8 +32705,9 @@ const PendingRoomOrdersAlert: React.FC<{
         <h3 className="text-base font-bold text-amber-900">Unbilled room orders ({orders.length})</h3>
       </div>
       <p className="text-xs text-amber-800/90 mb-4 leading-relaxed">
-        These in-room F&amp;B orders aren&rsquo;t on a folio yet. <strong>Charge to folio</strong> adds it to the guest&rsquo;s room
-        bill (they pay at checkout). <strong>💵 Paid in room</strong> if the guest already paid cash/UPI on delivery — that keeps
+        In-room F&amp;B not yet billed. When the runner hands the food over, pick one — it marks the order
+        delivered and settles the bill in one tap. <strong>Charge to room</strong> adds it to the guest&rsquo;s
+        folio (they pay at checkout). <strong>💵 Guest paid</strong> if they paid cash/UPI on delivery — that keeps
         it off the folio. Either way it won&rsquo;t be missed at checkout.
       </p>
       {error && <p className="text-xs text-[#c13b3b] bg-white/70 rounded-xl px-3 py-2 mb-3">{error}</p>}
@@ -32738,20 +32745,21 @@ const PendingRoomOrdersAlert: React.FC<{
               </select>
               <button
                 type="button"
-                onClick={() => charge(o)}
+                onClick={() => (picks[o.id] ? charge(o) : deliverOrder(o, false))}
                 disabled={busyId === o.id}
+                title="Mark delivered and add this F&B to the guest's room folio"
                 className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 disabled:opacity-50 whitespace-nowrap"
               >
-                {busyId === o.id ? 'Charging…' : 'Charge to folio'}
+                {busyId === o.id ? 'Working…' : 'Charge to room'}
               </button>
               <button
                 type="button"
-                onClick={() => markPaid(o)}
+                onClick={() => deliverOrder(o, true)}
                 disabled={busyId === o.id}
-                title="Guest paid this F&B bill in the room — keep it off the folio"
+                title="Guest paid this F&B in the room on delivery — mark delivered and keep it off the folio"
                 className="px-3 py-2 rounded-xl border border-emerald-600 text-emerald-700 bg-white text-xs font-bold hover:bg-emerald-50 disabled:opacity-50 whitespace-nowrap"
               >
-                💵 Paid in room
+                💵 Guest paid
               </button>
             </div>
           );
