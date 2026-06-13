@@ -33077,6 +33077,11 @@ const CheckoutModal: React.FC<{
   const [submitting, setSubmitting] = useState(false);
   // Folio breakdown toggle — expanded by default so staff sees charges
   const [entriesExpanded, setEntriesExpanded] = useState(true);
+  // GST-AT-CHECKOUT (client request 15 Jun 2026) — staff can waive / re-apply
+  // GST on the folio before settling (GST-exempt guest, SEZ / diplomatic,
+  // dispute, etc). Persisted server-side so the invoice + outstanding follow.
+  const [gstBusy, setGstBusy] = useState(false);
+  const [gstReason, setGstReason] = useState('');
   const sym = restaurant?.currency_symbol || '₹';
 
   const refresh = async () => {
@@ -33096,6 +33101,28 @@ const CheckoutModal: React.FC<{
   const previewPay = Number(payNow.amount || 0);
   const effectiveOutstanding = Math.max(0, baseOutstanding - previewPay - discount);
   const canSettle = effectiveOutstanding <= 0.01 || waive;
+
+  // GST-AT-CHECKOUT — current state + the GST that would apply if not waived
+  // (summed from the folio entries, which keep their stored gst_amount even
+  // while waived, so we can always show "GST that would apply").
+  const folioId: string | null = data?.folio?.id || null;
+  const gstExempt = Number(data?.folio?.gst_exempt) === 1;
+  const gstOnEntries = Array.isArray(data?.entries)
+    ? data.entries.reduce((s: number, e: any) => s + Number(e.gst_amount || 0), 0)
+    : 0;
+  const toggleGst = async (exempt: boolean) => {
+    if (!folioId) return;
+    setGstBusy(true);
+    try {
+      await hotelApi(`/folios/${folioId}/gst-toggle`, {
+        method: 'POST',
+        body: JSON.stringify({ exempt, reason: exempt ? (gstReason.trim() || null) : null }),
+      });
+      await refresh();   // re-pull folio so totals + outstanding reflect the change
+    } catch (err: any) {
+      alert(err?.message || 'Failed to update GST on the folio');
+    } finally { setGstBusy(false); }
+  };
 
   const settle = async () => {
     setSubmitting(true);
@@ -33389,6 +33416,44 @@ const CheckoutModal: React.FC<{
                   )}
                 </div>
               )}
+
+              {/* ── GST — add / remove on this invoice (client request) ── */}
+              <div className="rounded-2xl border border-[#cc5a16]/15 bg-[#faf7f2]/60 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">GST on this invoice</p>
+                    <p className="text-[12px] text-[#3d3128] mt-0.5">
+                      {gstExempt
+                        ? <span className="text-amber-700 font-semibold">Waived — invoice shows no GST{gstOnEntries > 0 ? <> (was {fmt(gstOnEntries)})</> : ''}</span>
+                        : <>Applied — <span className="font-mono font-semibold">{fmt(gstOnEntries)}</span></>}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={gstBusy || !folioId}
+                    onClick={() => toggleGst(!gstExempt)}
+                    className={cn(
+                      'px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap border transition-all disabled:opacity-50',
+                      gstExempt
+                        ? 'bg-[#cc5a16] text-white border-[#cc5a16] hover:bg-[#a84612]'
+                        : 'bg-white text-[#cc5a16] border-[#cc5a16]/25 hover:bg-[#cc5a16]/5'
+                    )}
+                  >{gstBusy ? '…' : gstExempt ? 'Re-apply GST' : 'Remove GST'}</button>
+                </div>
+                {!gstExempt ? (
+                  <input
+                    type="text"
+                    value={gstReason}
+                    onChange={e => setGstReason(e.target.value)}
+                    placeholder="Reason for waiving GST (optional — SEZ / diplomatic / exempt guest)"
+                    className="mt-2 w-full bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-[11px] outline-none"
+                  />
+                ) : (
+                  (data?.folio?.gst_exempt_reason
+                    ? <p className="text-[10px] text-[#9c8e85] mt-1 italic">Reason: {data.folio.gst_exempt_reason}</p>
+                    : null)
+                )}
+              </div>
 
               {/* ── Discount + comp/waive ──────────────────────── */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

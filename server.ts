@@ -1181,6 +1181,13 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- even if the tenant later switches country / preset.
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS currency_snapshot TEXT;
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS tax_label_snapshot TEXT;
+    -- GST-AT-CHECKOUT (15 Jun 2026) — staff can waive / re-apply GST on the
+    -- folio at checkout (e.g. GST-exempt guest, SEZ/diplomatic, dispute, or
+    -- a non-registered side bill). When gst_exempt=1, recomputeFolioTotals
+    -- zeroes the folio's GST (grand = subtotal − discount) and the invoice
+    -- renders without tax. Default 0 = normal taxable invoice (unchanged).
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS gst_exempt INTEGER DEFAULT 0;
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS gst_exempt_reason TEXT;
 
     CREATE TABLE IF NOT EXISTS folio_entries (
       id         TEXT PRIMARY KEY,
@@ -2230,9 +2237,12 @@ async function recomputeFolioTotals(tenantDb: DbInterface, folioId: string): Pro
      FROM folio_entries WHERE folio_id = ?`, [folioId]
   );
   const subtotal = Number(sums?.subtotal || 0);
-  const gst = Number(sums?.gst || 0);
-  const f: any = await tenantDb.get("SELECT discount FROM folios WHERE id = ?", [folioId]);
+  const f: any = await tenantDb.get("SELECT discount, gst_exempt FROM folios WHERE id = ?", [folioId]);
   const discount = Number(f?.discount || 0);
+  // GST-AT-CHECKOUT — when staff have waived GST on this folio, the folio's
+  // GST is zeroed (the per-entry gst_amount stays stored so re-applying is a
+  // simple recompute). Otherwise GST = sum of the entries' GST.
+  const gst = Number(f?.gst_exempt) === 1 ? 0 : Number(sums?.gst || 0);
   const grand = Math.max(0, subtotal + gst - discount);
   await tenantDb.run("UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?", [subtotal, gst, grand, folioId]);
 }
@@ -25306,6 +25316,48 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── GST-AT-CHECKOUT — waive / re-apply GST on an open folio ──────────
+  // Lets front-desk staff toggle GST on the folio at checkout (GST-exempt
+  // guest, SEZ / diplomatic, dispute, or a non-registered side bill).
+  // Sets folios.gst_exempt and recomputes — so the outstanding, the checkout
+  // settlement amount, and the invoice PDF all follow. The per-entry
+  // gst_amount rows are left intact, so re-applying GST is just a recompute.
+  // body: { exempt: boolean, reason?: string }
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/gst-toggle", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [req.params.folioId]);
+      if (!folio) return res.status(404).json({ error: 'Folio not found.' });
+      if (folio.status !== 'open') {
+        return res.status(400).json({ error: 'Folio is already settled — GST can only be changed before checkout.' });
+      }
+      const exempt = req.body?.exempt === true || req.body?.exempt === 1 || req.body?.exempt === '1';
+      const reason = String(req.body?.reason || '').trim() || null;
+      await tenantDb.run(
+        "UPDATE folios SET gst_exempt = ?, gst_exempt_reason = ? WHERE id = ?",
+        [exempt ? 1 : 0, exempt ? reason : null, folio.id]
+      );
+      await recomputeFolioTotals(tenantDb, folio.id);
+      const out = await getFolioOutstanding(tenantDb, folio.id).catch(() => null);
+      const updated: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+      // Audit trail: who/why is captured on the folio (gst_exempt_reason) +
+      // a server log line. (The reason column is the durable record.)
+      console.log(`[gst-toggle] folio ${folio.id} GST ${exempt ? 'WAIVED' : 'APPLIED'} by ${req.user?.id || req.user?.email || 'staff'}${reason ? ` — ${reason}` : ''}`);
+      res.json({
+        success: true,
+        gst_exempt: exempt,
+        folio: updated,
+        outstanding: out ? out.outstanding : Math.max(0, Number(updated.grand_total || 0)),
+        amount_paid: out ? out.total_paid : 0,
+      });
+    } catch (err) {
+      console.error("gst-toggle error:", err);
+      res.status(500).json({ error: "Failed to update GST on folio" });
+    }
+  });
+
   // Sprint P2-C — iCal export. Property-wide or per-room .ics feeds
   // so direct bookings sync to OTAs (Booking.com / Airbnb / Expedia
   // accept iCal feeds) and to personal calendars (Google / Apple).
@@ -26636,6 +26688,9 @@ ${data.tenant.name}`;
             "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
             [folio.id]
           );
+          // GST-AT-CHECKOUT — GST waived on this folio → render every line
+          // with zero tax so line items match the (already zeroed) summary.
+          if (Number(folio.gst_exempt) === 1) entries.forEach((e: any) => { e.gst_amount = 0; e.gst_rate = 0; });
           const invoiceDate = folio.settled_at || folio.created_at || new Date().toISOString();
           const settledDate = new Date(invoiceDate);
           // BA-FIX-4 (H4, 11 Jun 2026) — persist invoice_number on the
@@ -28351,6 +28406,9 @@ ${data.tenant.name}`;
         "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
         [req.params.folioId]
       );
+      // GST-AT-CHECKOUT — GST waived on this folio → render every line with
+      // zero tax so line items match the (already zeroed) summary total.
+      if (Number(folio.gst_exempt) === 1) entries.forEach((e: any) => { e.gst_amount = 0; e.gst_rate = 0; });
 
       // Invoice number
       const invoiceDate = folio.settled_at || folio.created_at || new Date().toISOString();
@@ -28506,6 +28564,9 @@ ${data.tenant.name}`;
         "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
         [req.params.folioId]
       );
+      // GST-AT-CHECKOUT — GST waived on this folio → render every line with
+      // zero tax so line items match the (already zeroed) summary total.
+      if (Number(folio.gst_exempt) === 1) entries.forEach((e: any) => { e.gst_amount = 0; e.gst_rate = 0; });
 
       const invoiceDate = folio.settled_at || folio.created_at || new Date().toISOString();
       const settledDate = new Date(invoiceDate);
