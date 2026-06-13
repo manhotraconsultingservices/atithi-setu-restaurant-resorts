@@ -254,8 +254,11 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       // ────────────── Stay details strip ──────────────
       const stayCols: Array<{ labelKey: keyof typeof L; value: string }> = [
         { labelKey: 'ROOM',      value: data.stay.roomName },
-        { labelKey: 'CHECK_IN',  value: fmtDate(data.stay.actualCheckInAt || data.stay.checkInDate) },
-        { labelKey: 'CHECK_OUT', value: fmtDate(data.stay.actualCheckOutAt || data.stay.checkOutDate) },
+        // Show the ACTUAL check-in / check-out timestamp (date + hh:mm) when the
+        // guest has been checked in / out; fall back to the scheduled date
+        // (date-only) before that happens.
+        { labelKey: 'CHECK_IN',  value: data.stay.actualCheckInAt  ? fmtDateTime(data.stay.actualCheckInAt)  : fmtDate(data.stay.checkInDate) },
+        { labelKey: 'CHECK_OUT', value: data.stay.actualCheckOutAt ? fmtDateTime(data.stay.actualCheckOutAt) : fmtDate(data.stay.checkOutDate) },
         { labelKey: 'NIGHTS',    value: String(computeNights(data.stay.checkInDate, data.stay.checkOutDate)) },
         { labelKey: 'GUESTS',    value: String(data.stay.numGuests || 1) },
       ];

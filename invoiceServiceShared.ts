@@ -336,7 +336,11 @@ export function fmtDateTime(val: string | undefined): string {
   if (!val) return '—';
   const d = new Date(val);
   if (isNaN(d.getTime())) return val;
-  return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  // Timestamps are stored as UTC ISO strings (new Date().toISOString()). Render
+  // in IST so the hh:mm shown on the invoice matches the front-desk clock —
+  // without an explicit timeZone this prints in the server's TZ (UTC on the
+  // VPS), making every check-in / check-out / settled time read 5h30m early.
+  return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
 }
 
 export function computeNights(checkIn: string, checkOut: string): number {

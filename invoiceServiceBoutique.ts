@@ -263,8 +263,10 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
         ['Folio',     data.folio.id || '—'],
         ['Booking',   data.stay.bookingId || '—'],
         ['Room',      data.stay.roomName || '—'],
-        ['Check-in',  fmtDate(data.stay.actualCheckInAt || data.stay.checkInDate)],
-        ['Check-out', fmtDate(data.stay.actualCheckOutAt || data.stay.checkOutDate)],
+        // Actual check-in / check-out timestamp (date + hh:mm) once it happens;
+        // scheduled date (date-only) until then.
+        ['Check-in',  data.stay.actualCheckInAt  ? fmtDateTime(data.stay.actualCheckInAt)  : fmtDate(data.stay.checkInDate)],
+        ['Check-out', data.stay.actualCheckOutAt ? fmtDateTime(data.stay.actualCheckOutAt) : fmtDate(data.stay.checkOutDate)],
         ['Nights',    `${nights}  ·  Guests ${data.stay.numGuests || 1}`],
         ['Place',     data.placeOfSupply || data.hotel.state || '—'],
       ];

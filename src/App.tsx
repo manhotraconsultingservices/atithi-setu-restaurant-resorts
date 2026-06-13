@@ -228,6 +228,8 @@ const BOOKING_COL_DEFS: { key: string; label: string; def: boolean }[] = [
   { key: 'booking_id', label: 'Booking ID', def: true  },
   { key: 'room',      label: 'Room',      def: true  },
   { key: 'dates',     label: 'Dates',     def: true  },
+  { key: 'checked_in',  label: 'Checked in',  def: false },
+  { key: 'checked_out', label: 'Checked out', def: false },
   { key: 'nights',    label: 'Nights',    def: false },
   { key: 'guests',    label: 'Guests',    def: false },
   { key: 'adults',    label: 'Adults',    def: false },
@@ -17809,6 +17811,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     {colOn('booking_id') && <th className="px-4 py-3 text-left">Booking ID</th>}
                     {colOn('room')      && <th onClick={() => toggleBookingSort('room')}     title="Click to sort" className={cn(sortableCls, 'text-left')}>Room{arrow('room')}</th>}
                     {colOn('dates')     && <th onClick={() => toggleBookingSort('check_in')} title="Click to sort" className={cn(sortableCls, 'text-left')}>Dates{arrow('check_in')}</th>}
+                    {colOn('checked_in')  && <th className="px-4 py-3 text-left whitespace-nowrap">Checked in</th>}
+                    {colOn('checked_out') && <th className="px-4 py-3 text-left whitespace-nowrap">Checked out</th>}
                     {colOn('nights')    && <th className="px-4 py-3 text-right">Nights</th>}
                     {colOn('guests')    && <th className="px-4 py-3 text-right">Guests</th>}
                     {colOn('adults')    && <th className="px-4 py-3 text-right" title="Total adults (extra beyond capacity in brackets)">Adults</th>}
@@ -17880,6 +17884,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <div className="text-[#9c8e85] whitespace-nowrap">→ {formatDateForTenant(b.check_out_date, restaurant?.date_format)}</div>
                           </td>
                         )}
+                        {/* Actual check-in / check-out timestamps (date + hh:mm, IST). */}
+                        {colOn('checked_in') && <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap">{b.actual_checkin_at ? new Date(b.actual_checkin_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}</td>}
+                        {colOn('checked_out') && <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap">{b.actual_checkout_at ? new Date(b.actual_checkout_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}</td>}
                         {colOn('nights') && <td className="px-4 py-3 text-right text-xs text-[#3d3128]">{rowNights ?? '—'}</td>}
                         {colOn('guests') && <td className="px-4 py-3 text-right text-xs text-[#3d3128]">{b.num_guests ?? '—'}</td>}
                         {colOn('adults') && <td className="px-4 py-3 text-right text-xs text-[#3d3128]">{b.num_adults ?? '—'}{b.extra_adults ? <span className="text-amber-700"> (+{b.extra_adults})</span> : null}</td>}
@@ -33223,6 +33230,13 @@ const CheckoutModal: React.FC<{
           <div className="bg-[#faf7f2] rounded-2xl p-3 text-[12px] space-y-1">
             <div className="flex justify-between"><span className="text-[#6b5d52]">Room</span><strong>{booking.room_name || booking.room_id}</strong></div>
             <div className="flex justify-between"><span className="text-[#6b5d52]">Dates</span><span>{formatDateForTenant(booking.check_in_date, restaurant?.date_format)} → {formatDateForTenant(booking.check_out_date, restaurant?.date_format)}</span></div>
+            {/* Actual check-in / check-out timestamps (date + hh:mm, IST). */}
+            {booking.actual_checkin_at && (
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Checked in</span><span>{new Date(booking.actual_checkin_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span></div>
+            )}
+            {booking.actual_checkout_at && (
+              <div className="flex justify-between"><span className="text-[#6b5d52]">Checked out</span><span>{new Date(booking.actual_checkout_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span></div>
+            )}
           </div>
 
           {lateFeeBanner}
