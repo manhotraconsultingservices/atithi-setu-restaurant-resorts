@@ -29,6 +29,7 @@ import {
   money, moneyNumeric,
   fmtDate, fmtDateTime, computeNights,
   entryTypeLabel, hsnForEntry, normaliseState,
+  categoryForEntry,
   amountInWords,
 } from './invoiceServiceShared.js';
 // Re-export the interface so existing `import { InvoiceData } from './invoiceService'`
@@ -349,8 +350,49 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
 
       const sign = data.isCreditNote ? -1 : 1;
       const billableEntries = data.entries.filter(e => !['TAX', 'DISCOUNT', 'PAYMENT'].includes(e.entryType));
+
+      // BILL-SPLIT (16 Jun 2026): present the bill as a consolidated document
+      // with distinct sections — Room Charges, Restaurant / Food & Beverage,
+      // Services — each with its own subtotal, so the room bill and the
+      // restaurant bill are clearly separated on one invoice. Entries are
+      // grouped by category (stable within each). When only one category is
+      // present the section header/subtotal are suppressed → single-category
+      // invoices render exactly as before.
+      const CAT_RANK: Record<string, number> = { ACCOMMODATION: 0, FNB: 1, SERVICE: 2, OTHER: 3 };
+      const SECTION_TITLE: Record<string, string> = {
+        ACCOMMODATION: 'Room Charges', FNB: 'Restaurant / Food & Beverage', SERVICE: 'Services', OTHER: 'Other Charges',
+      };
+      const orderedEntries = billableEntries
+        .map((e, idx) => ({ e, idx, cat: categoryForEntry(e.entryType) as string }))
+        .sort((a, b) => (CAT_RANK[a.cat] - CAT_RANK[b.cat]) || (a.idx - b.idx));
+      const showSections = new Set(orderedEntries.map(o => o.cat)).size > 1;
+      const drawSectionHeader = (cat: string) => {
+        ensureSpace(20);
+        doc.rect(M, y - 2, INNER_W, 16).fill(HIGHLIGHT);
+        doc.fillColor(INK).font('Helvetica-Bold').fontSize(8.5)
+           .text((SECTION_TITLE[cat] || cat).toUpperCase(), colPositions.desc + 4, y + 3);
+        y += 18;
+      };
+      const drawSectionSubtotal = (cat: string, amt: number) => {
+        ensureSpace(16);
+        doc.fillColor(INK_SOFT).font('Helvetica-Bold').fontSize(8.5)
+           .text(`${SECTION_TITLE[cat] || cat} subtotal`, colPositions.desc + 4, y + 2, { width: 220 });
+        doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
+           .text(moneyNumeric(data.tenant, amt * sign), colPositions.amt - 20, y + 2, { width: 80, align: 'right' });
+        y += 16;
+      };
+      let rowNum = 0;
+      let curCat: string | null = null;
+      let catSubtotal = 0;
       doc.font('Helvetica').fontSize(9).fillColor(INK_SOFT);
-      billableEntries.forEach((e, i) => {
+      orderedEntries.forEach(({ e, cat }) => {
+        if (showSections && cat !== curCat) {
+          if (curCat !== null) drawSectionSubtotal(curCat, catSubtotal);
+          drawSectionHeader(cat);
+          curCat = cat; catSubtotal = 0;
+        }
+        catSubtotal += Number(e.amount || 0);
+        const i = rowNum++;
         // PDF-FIX: paginate if this row + a sensible-sized totals/IRN/payment
         // tail wouldn't fit. We reserve ~280px for the post-items section
         // (totals + amount-in-words + IRN + payment + terms/signature). If
@@ -388,6 +430,8 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
            .text(moneyNumeric(data.tenant, e.amount * sign),    colPositions.amt - 20, rowY + 7, { width: 80, align: 'right' });
         y += rowH;
       });
+      // Subtotal for the final section (Room / Restaurant / Services).
+      if (showSections && curCat !== null) drawSectionSubtotal(curCat, catSubtotal);
 
       doc.moveTo(M, y).lineTo(PAGE_W - M, y).lineWidth(0.5).strokeColor(HAIR).stroke();
       y += 14;

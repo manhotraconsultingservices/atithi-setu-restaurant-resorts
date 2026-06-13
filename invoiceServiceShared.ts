@@ -358,7 +358,8 @@ export function entryTypeLabel(t: string): string {
     case 'ROOM_CHARGE':    return 'Accommodation';
     case 'SERVICE':        return 'Service charge';
     case 'SERVICE_CHARGE': return 'Service charge';   // Phase H2 — per-night charge on rooms
-    case 'F&B':            return 'Food & Beverage';
+    case 'F&B':
+    case 'F_AND_B':        return 'Food & Beverage';   // DB stores F_AND_B; 'F&B' kept as alias
     default:               return t.replace(/_/g, ' ');
   }
 }
@@ -366,7 +367,8 @@ export function entryTypeLabel(t: string): string {
 export function hsnForEntry(t: string): string {
   switch (t) {
     case 'ROOM_CHARGE':    return '996311';
-    case 'F&B':            return '996331';
+    case 'F&B':
+    case 'F_AND_B':        return '996331';
     case 'SERVICE':        return '999799';
     case 'SERVICE_CHARGE': return '996311';  // Bundled with the room — same accommodation HSN
     default:               return '996311';
@@ -381,8 +383,10 @@ export function categoryForEntry(t: string): EntryCategory {
   switch (t) {
     case 'ROOM_CHARGE':
     case 'SERVICE_CHARGE': // bundled with room
+    case 'EXTRA_PERSON':   // extra adults / children are part of the room stay
       return 'ACCOMMODATION';
-    case 'F&B':            return 'FNB';
+    case 'F&B':
+    case 'F_AND_B':        return 'FNB';
     case 'SERVICE':        return 'SERVICE';
     default:               return 'OTHER';
   }

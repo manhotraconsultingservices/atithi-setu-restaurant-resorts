@@ -21010,12 +21010,17 @@ ${data.tenant.name}`;
       // Total revenue earned today: folios settled on asOf + room nights tonight.
       // (Approximate — a full hotel revenue model would split room / F&B /
       // services per folio_entry. Here we surface the easy aggregates.)
+      // REVENUE-DEDUP: room revenue only — subtract charge-to-room F&B (it's
+      // counted as Restaurant/F&B revenue, not hotel revenue).
       const foliosSettledToday: any = await tenantDb.get(
-        `SELECT COALESCE(SUM(grand_total), 0)::float AS rev
-           FROM folios
-          WHERE (doc_type IS NULL OR doc_type = 'INVOICE')
-            AND status = 'settled'
-            AND TO_CHAR(settled_at, 'YYYY-MM-DD') = ?`,
+        `SELECT COALESCE(SUM(f.grand_total - COALESCE(fnb.fnb_total, 0)), 0)::float AS rev
+           FROM folios f
+           LEFT JOIN (SELECT folio_id, SUM(amount + COALESCE(gst_amount,0)) AS fnb_total
+                        FROM folio_entries WHERE entry_type = 'F_AND_B' GROUP BY folio_id) fnb
+                  ON fnb.folio_id = f.id
+          WHERE (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
+            AND f.status = 'settled'
+            AND TO_CHAR(f.settled_at, 'YYYY-MM-DD') = ?`,
         [asOf]
       );
       const settledRevenueToday = Number(foliosSettledToday?.rev || 0);
@@ -21120,15 +21125,24 @@ ${data.tenant.name}`;
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
       const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
       const tenantDb = await getTenantDb(req.params.id);
+      // REVENUE-DEDUP (16 Jun 2026): charge-to-room F&B is recognised as
+      // Restaurant/F&B revenue (it stays in the `orders` reports). It must NOT
+      // also count as hotel/room revenue here, or the same sale is booked
+      // twice. So room revenue = folio grand_total MINUS the F_AND_B lines
+      // (net of reversals, incl. their GST). Same dedup is applied to hotel
+      // analytics + night-audit settled revenue.
       const rows: any[] = await tenantDb.query(
         `SELECT COALESCE(rt.name, r.type, 'Uncategorised') AS room_type,
                 COUNT(DISTINCT f.id)::int AS stays,
-                COALESCE(SUM(f.grand_total),0)::float AS revenue,
+                COALESCE(SUM(f.grand_total - COALESCE(fnb.fnb_total, 0)),0)::float AS revenue,
                 COALESCE(SUM(GREATEST((b.check_out_date::date - b.check_in_date::date),1)),0)::int AS room_nights
            FROM folios f
            LEFT JOIN room_bookings b ON b.id = f.booking_id
            LEFT JOIN rooms r ON r.id = f.room_id
            LEFT JOIN room_types rt ON rt.id = r.type_id
+           LEFT JOIN (SELECT folio_id, SUM(amount + COALESCE(gst_amount,0)) AS fnb_total
+                        FROM folio_entries WHERE entry_type = 'F_AND_B' GROUP BY folio_id) fnb
+                  ON fnb.folio_id = f.id
           WHERE f.status='settled' AND (f.doc_type IS NULL OR f.doc_type='INVOICE')
             AND TO_CHAR(f.settled_at,'YYYY-MM-DD') BETWEEN ? AND ?
           GROUP BY room_type
@@ -28850,12 +28864,18 @@ ${data.tenant.name}`;
       // a ₹5,000 booking later refunded would show as ₹10,000 revenue
       // instead of ₹0. Filtering doc_type='INVOICE' (or NULL for legacy
       // rows) gives the correct net-after-refund picture.
+      // REVENUE-DEDUP: room/hotel revenue only — subtract charge-to-room F&B
+      // (recognised as Restaurant/F&B revenue, not hotel revenue). ADR/RevPAR
+      // below are derived from this, so they now reflect pure room revenue.
       const revenueRow: any = await tenantDb.get(
-        `SELECT COALESCE(SUM(grand_total), 0) AS rev, COUNT(*) AS n
-         FROM folios
-         WHERE status = 'settled'
-           AND settled_at >= NOW() - INTERVAL '30 days'
-           AND (doc_type IS NULL OR doc_type = 'INVOICE')`
+        `SELECT COALESCE(SUM(f.grand_total - COALESCE(fnb.fnb_total, 0)), 0) AS rev, COUNT(*) AS n
+         FROM folios f
+         LEFT JOIN (SELECT folio_id, SUM(amount + COALESCE(gst_amount,0)) AS fnb_total
+                      FROM folio_entries WHERE entry_type = 'F_AND_B' GROUP BY folio_id) fnb
+                ON fnb.folio_id = f.id
+         WHERE f.status = 'settled'
+           AND f.settled_at >= NOW() - INTERVAL '30 days'
+           AND (f.doc_type IS NULL OR f.doc_type = 'INVOICE')`
       );
       // For accurate NET revenue, also subtract credit notes issued in the
       // same window (they represent refunds against earlier-period
