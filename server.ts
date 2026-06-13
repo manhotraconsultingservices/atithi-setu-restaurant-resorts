@@ -21592,6 +21592,11 @@ ${data.tenant.name}`;
         name, contact_name, contact_phone, contact_email,
         check_in_date, check_out_date, booking_type,
         booking_source, special_requests,
+        // EXTRAS-GROUP (13 Jun 2026) — group-level meal plan applied to every
+        // room. When set (MATRIX mode), per-room rates resolve from the matrix
+        // and extra-person charges are added; null keeps the legacy base-rate
+        // path. Per-room occupancy (num_adults + children) rides on each room.
+        meal_plan_id,
       } = b;
       // ADV-PAY: optional advance collected at group booking time (corporate /
       // wedding groups frequently pay a deposit upfront before any room is
@@ -21600,7 +21605,7 @@ ${data.tenant.name}`;
       const advanceAmount    = Number(b.advance_amount || 0);
       const advanceMethod    = String(b.advance_method || '').toUpperCase().trim() || null;
       const advanceReference = String(b.advance_reference || '').trim() || null;
-      const rooms: Array<{ room_id: string; room_rate?: number; num_guests?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
+      const rooms: Array<{ room_id: string; room_rate?: number; num_guests?: number; num_adults?: number; extra_adults?: number; extra_children_with_mattress?: number; extra_children_no_mattress?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
       if (!name || String(name).trim().length === 0) {
         return res.status(400).json({ error: "Group name is required." });
       }
@@ -21617,13 +21622,44 @@ ${data.tenant.name}`;
       }
 
       const tenantDb = await getTenantDb(req.params.id);
+
+      // EXTRAS-GROUP — resolve per-room occupancy once. When the caller sends
+      // num_adults we derive the chargeable extra adults from the room's own
+      // capacity (mirrors the single-booking POST); children with / without
+      // mattress are charged separately per the extra_person_charges matrix.
+      // Older clients that only send num_guests keep their explicit value.
+      const occByRoom = new Map<string, { extraAdults: number; numAdultsToStore: number | null; childMat: number; childNoMat: number; numGuests: number }>();
+      for (const r of rooms) {
+        const childMat   = Math.max(0, Number(r.extra_children_with_mattress || 0));
+        const childNoMat = Math.max(0, Number(r.extra_children_no_mattress || 0));
+        let extraAdults  = Math.max(0, Number(r.extra_adults || 0));
+        let numAdultsToStore: number | null = null;
+        let numGuests = Math.max(1, Number(r.num_guests || 1));
+        if (r.num_adults != null && String(r.num_adults) !== '') {
+          const totalAdults = Math.max(1, Math.floor(Number(r.num_adults) || 1));
+          const derived = await deriveAdultExtras(req.params.id, r.room_id, totalAdults);
+          extraAdults = derived.extraAdults;
+          numAdultsToStore = totalAdults;
+          numGuests = totalAdults + childMat + childNoMat;
+        }
+        occByRoom.set(r.room_id, { extraAdults, numAdultsToStore, childMat, childNoMat, numGuests });
+      }
+
+      // EXTRAS-GROUP — snapshot the group meal-plan label once so historical
+      // reprints stay stable if the plan is later renamed / deactivated.
+      let mealPlanSnapshot: string | null = null;
+      if (meal_plan_id) {
+        const mp: any = await tenantDb.get("SELECT code, name FROM meal_plans WHERE id = ?", [meal_plan_id]).catch(() => null);
+        if (mp) mealPlanSnapshot = `${mp.code} · ${mp.name}`;
+      }
+
       // Validate EVERY room before inserting anything — atomic semantics.
       for (const r of rooms) {
         const v = await validateBookingRequest(req.params.id, {
           room_id: r.room_id,
           check_in_date, check_out_date,
           booking_type,
-          num_guests: r.num_guests || 1,
+          num_guests: occByRoom.get(r.room_id)?.numGuests || r.num_guests || 1,
         });
         if (!v.ok) return res.status(v.status).json({ error: `Room ${r.room_id}: ${v.error}` });
       }
@@ -21638,22 +21674,37 @@ ${data.tenant.name}`;
       const created: any[] = [];
       let groupTotal = 0;
       for (const r of rooms) {
-        // Sprint C-RP — per-room rate-plan resolution. If caller passed
-        // an explicit room_rate we honour it; else compute per-night
-        // total from rate_overrides + base_rate.
+        const occ = occByRoom.get(r.room_id) || { extraAdults: 0, numAdultsToStore: null, childMat: 0, childNoMat: 0, numGuests: r.num_guests || 1 };
+        // Per-room rate resolution. An explicit room_rate is an all-inclusive
+        // manual override (rate × nights, no extras) — same semantics as the
+        // single New Booking modal. When the rate is 0/unset we route through
+        // computeBookingTotalWithExtras so the MATRIX path resolves the
+        // meal-plan rate AND adds extra-person charges (extra adults beyond
+        // capacity + children with/without mattress). In LEGACY mode (or no
+        // meal plan) it falls back to the existing base-rate path.
         let rate = Number(r.room_rate) || 0;
         let total: number;
         if (bookingType === 'DAY_USE') {
           if (rate <= 0) {
-            const single = await getRateForRoomDate(req.params.id, r.room_id, check_in_date);
-            rate = single.rate;
+            const breakdown = await computeBookingTotalWithExtras(req.params.id, r.room_id, check_in_date, check_in_date, {
+              mealPlanId: meal_plan_id || null, extraAdults: occ.extraAdults,
+              extraChildrenWithMattress: occ.childMat, extraChildrenNoMattress: occ.childNoMat,
+              bookingType: 'DAY_USE',
+            });
+            rate = breakdown.per_night[0]?.base_rate || 0;
+            total = breakdown.total;
+          } else {
+            total = rate;
           }
-          total = rate;
         } else {
           if (rate <= 0) {
-            const plan = await computeRoomTotal(req.params.id, r.room_id, check_in_date, check_out_date);
-            rate = plan.nights[0]?.rate || 0;
-            total = plan.total;
+            const breakdown = await computeBookingTotalWithExtras(req.params.id, r.room_id, check_in_date, check_out_date, {
+              mealPlanId: meal_plan_id || null, extraAdults: occ.extraAdults,
+              extraChildrenWithMattress: occ.childMat, extraChildrenNoMattress: occ.childNoMat,
+              bookingType: 'OVERNIGHT',
+            });
+            rate = breakdown.per_night[0]?.base_rate || 0;
+            total = breakdown.total;
           } else {
             total = rate * nights;
           }
@@ -21665,11 +21716,15 @@ ${data.tenant.name}`;
            (id, room_id, guest_name, guest_phone, guest_email,
             num_guests, check_in_date, check_out_date, status, booking_source,
             room_rate, total_amount, special_requests, booking_type,
+            meal_plan_id, meal_plan_snapshot, extra_adults,
+            extra_children_with_mattress, extra_children_no_mattress, num_adults,
             group_id, group_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [bid, r.room_id, contact_name, contact_phone || null, contact_email || null,
-           r.num_guests || 1, check_in_date, check_out_date, booking_source || 'DIRECT',
+           occ.numGuests, check_in_date, check_out_date, booking_source || 'DIRECT',
            rate, total, special_requests || null, bookingType,
+           meal_plan_id || null, mealPlanSnapshot, occ.extraAdults,
+           occ.childMat, occ.childNoMat, occ.numAdultsToStore,
            groupId, String(name).trim()]
         );
         created.push(await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]));

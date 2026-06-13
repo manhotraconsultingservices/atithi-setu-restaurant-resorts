@@ -6823,6 +6823,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // Total adults staying — extra_adults is derived from the room's capacity.
     num_adults: number;
     extra_adults: number;
+    // EXTRAS-WALKIN (client report 13 Jun 2026 "walk-in has no option to add
+    // adult / child with-mattress / without-mattress"): capture children too,
+    // mirroring the standard New Booking modal. The /bookings POST already
+    // accepts + charges these per the extra_person_charges matrix; walk-in
+    // simply was not forwarding them.
+    extra_children_with_mattress: number;
+    extra_children_no_mattress: number;
     // WALK-IN-FIX (client report 7 Jun 2026 "walk-in workflow not working"):
     // Task #56 (Req 1b) added a server-side block: check-in is rejected with
     // HTTP 400 if no guest_documents row exists for the booking AND the
@@ -6885,6 +6892,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       // staff bump it up for extra adults, which the server then charges.
       num_adults: Math.max(1, Number(pick?.capacity || 1)),
       extra_adults: 0,
+      // EXTRAS-WALKIN — children default to 0; staff bump them per party.
+      extra_children_with_mattress: 0,
+      extra_children_no_mattress: 0,
       // ADV-PAY: advance collected at walk-in (defaults to 0 = no advance)
       advance_amount: 0,
       advance_method: 'CASH',
@@ -6932,6 +6942,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // Send TOTAL adults; the server derives extra_adults from the
           // room's capacity and sets num_guests = adults + children.
           num_adults: Math.max(1, Number(walkInDraft.num_adults || 1)),
+          // EXTRAS-WALKIN — forward children so the server adds the
+          // extra-person charges (with / without mattress) per the tariff.
+          extra_children_with_mattress: Math.max(0, Number(walkInDraft.extra_children_with_mattress || 0)),
+          extra_children_no_mattress:   Math.max(0, Number(walkInDraft.extra_children_no_mattress || 0)),
           room_rate: walkInDraft.room_rate || 0,
           meal_plan_id: walkInDraft.meal_plan_id || null,
         }),
@@ -7000,7 +7014,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     booking_type: 'OVERNIGHT' | 'DAY_USE';
     booking_source: string;
     special_requests: string;
-    rooms: Array<{ room_id: string; room_rate: number; num_guests: number }>;
+    // EXTRAS-GROUP (client report 13 Jun 2026 "group booking has no option to
+    // add adult / child with-mattress / without-mattress"): each room now
+    // carries its own occupancy so the server can derive extra adults from the
+    // room capacity and charge children per the extra_person_charges matrix.
+    // room_rate=0 routes through the matrix resolver (extras included); a
+    // positive room_rate is an all-inclusive manual override (no extras added),
+    // matching the single New Booking modal semantics.
+    rooms: Array<{ room_id: string; room_rate: number; num_guests: number; num_adults: number; extra_children_with_mattress: number; extra_children_no_mattress: number }>;
+    // Group-level meal plan (MATRIX mode only) — applied to every room in the
+    // group, which is the common case for corporate / wedding blocks.
+    meal_plan_id: string | null;
     saving: boolean;
     // ADV-PAY: advance collected at group booking time (corporate / wedding
     // groups frequently pay a deposit upfront). Stored on room_booking_groups
@@ -7017,6 +7041,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       check_in_date: today, check_out_date: tomorrow,
       booking_type: 'OVERNIGHT', booking_source: 'DIRECT',
       special_requests: '', rooms: [], saving: false,
+      // EXTRAS-GROUP — default the group meal plan to the first active plan
+      // when MATRIX mode is on (so per-room rates resolve from the matrix);
+      // null for LEGACY tenants keeps the existing base-rate behaviour.
+      meal_plan_id: tariffData.tariff_model === 'MATRIX'
+        ? (tariffData.meal_plans.filter((m: any) => m.is_active !== 0)
+            .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))[0]?.id || null)
+        : null,
       advance_amount: 0, advance_method: 'CASH', advance_reference: '',
     });
   };
@@ -7038,6 +7069,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         booking_type: groupBookingDraft.booking_type,
         booking_source: groupBookingDraft.booking_source,
         special_requests: groupBookingDraft.special_requests.trim() || null,
+        // EXTRAS-GROUP — group-level meal plan + per-room occupancy. The
+        // server derives extra adults from each room's capacity and charges
+        // children per the extra_person_charges matrix.
+        meal_plan_id: groupBookingDraft.meal_plan_id || null,
         rooms: groupBookingDraft.rooms,
         // ADV-PAY: pass advance to server; stored on room_booking_groups row.
         advance_amount: groupBookingDraft.advance_amount || 0,
@@ -23921,6 +23956,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           booking_type: 'OVERNIGHT',
                           meal_plan_id: draft.meal_plan_id,
                           extra_adults: draft.extra_adults,
+                          extra_children_with_mattress: draft.extra_children_with_mattress,
+                          extra_children_no_mattress: draft.extra_children_no_mattress,
                         }) : null;
                         return {
                           type_id: rt.id,
@@ -24029,26 +24066,46 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Meal Plan + Extras</label>
                       <span className="text-[9px] font-bold uppercase tracking-widest text-[#cc5a16] bg-white px-2 py-0.5 rounded-full">Matrix</span>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <select
-                        value={draft.meal_plan_id || ''}
-                        onChange={e => setDraft({ meal_plan_id: e.target.value || null })}
-                        className="bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
-                      >
-                        <option value="">— None (base rate) —</option>
-                        {tariffData.meal_plans
-                          .filter((m: any) => m.is_active !== 0)
-                          .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))
-                          .map((m: any) => (
-                            <option key={m.id} value={m.id}>{m.code} · {m.name}</option>
-                          ))}
-                      </select>
-                      <div className="flex items-center gap-2">
-                        <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap" title="Total adults staying">Adults</label>
+                    <select
+                      value={draft.meal_plan_id || ''}
+                      onChange={e => setDraft({ meal_plan_id: e.target.value || null })}
+                      className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    >
+                      <option value="">— None (base rate) —</option>
+                      {tariffData.meal_plans
+                        .filter((m: any) => m.is_active !== 0)
+                        .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))
+                        .map((m: any) => (
+                          <option key={m.id} value={m.id}>{m.code} · {m.name}</option>
+                        ))}
+                    </select>
+                    {/* EXTRAS-WALKIN — Adults / Child (mattress) / Child (no
+                        mattress), identical to the New Booking modal. Extra
+                        adults are derived from room capacity; children are
+                        charged per the extra_person_charges matrix. */}
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Total adults staying in the room">Adults</label>
                         <input type="number" min={1} max={20}
                           value={(() => { const cap = Math.max(1, Number(hotelRooms.find(r => r.id === draft.room_id)?.capacity || 1)); return draft.num_adults != null ? draft.num_adults : (cap + (draft.extra_adults || 0)); })()}
                           onChange={e => { const v = parseInt(e.target.value, 10); const a = isNaN(v) ? 1 : Math.max(1, Math.min(20, v)); const cap = Math.max(1, Number(hotelRooms.find(r => r.id === draft.room_id)?.capacity || 1)); setDraft({ num_adults: a, extra_adults: Math.max(0, a - cap) }); }}
-                          className="flex-1 bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Children 5-12 yrs with mattress">Child (mat)</label>
+                        <input type="number" min={0} max={4}
+                          value={draft.extra_children_with_mattress ?? 0}
+                          onChange={e => { const v = parseInt(e.target.value, 10); setDraft({ extra_children_with_mattress: isNaN(v) ? 0 : Math.max(0, Math.min(4, v)) }); }}
+                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1" title="Children 5-12 yrs without mattress">Child (no-mat)</label>
+                        <input type="number" min={0} max={4}
+                          value={draft.extra_children_no_mattress ?? 0}
+                          onChange={e => { const v = parseInt(e.target.value, 10); setDraft({ extra_children_no_mattress: isNaN(v) ? 0 : Math.max(0, Math.min(4, v)) }); }}
+                          className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-2 py-2 text-sm text-center focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
                         />
                       </div>
                     </div>
@@ -24056,12 +24113,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const cap = Math.max(1, Number(hotelRooms.find(r => r.id === draft.room_id)?.capacity || 1));
                       const adults = draft.num_adults != null ? Number(draft.num_adults) : (cap + (draft.extra_adults || 0));
                       const extraA = Math.max(0, adults - cap);
+                      const kids = Number(draft.extra_children_with_mattress || 0) + Number(draft.extra_children_no_mattress || 0);
                       return (
                         <p className="text-[10px] text-[#6b5d52] leading-snug">
                           Room includes <strong>{cap}</strong> adult{cap === 1 ? '' : 's'}.{' '}
                           {extraA > 0
                             ? <span className="text-amber-700 font-semibold">{extraA} extra adult{extraA === 1 ? '' : 's'} charged per tariff.</span>
-                            : <span className="text-green-700">Within capacity — no extra charge.</span>}
+                            : <span className="text-green-700">Within capacity — no extra-adult charge.</span>}
+                          {kids > 0 && <span className="text-amber-700 font-semibold"> {kids} child{kids === 1 ? '' : 'ren'} charged per tariff.</span>}
                         </p>
                       );
                     })()}
@@ -24182,6 +24241,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     booking_type: 'OVERNIGHT',
                     meal_plan_id: draft.meal_plan_id,
                     extra_adults: draft.extra_adults,
+                    extra_children_with_mattress: draft.extra_children_with_mattress,
+                    extra_children_no_mattress: draft.extra_children_no_mattress,
                   });
                   const manualTotal = draft.room_rate > 0 ? draft.room_rate * draft.nights : 0;
                   const showMatrix = preview && preview.matrix_used && draft.room_rate === 0;
@@ -24450,7 +24511,33 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const nights = draft.booking_type === 'DAY_USE'
           ? 1
           : Math.max(1, Math.ceil((new Date(draft.check_out_date).getTime() - new Date(draft.check_in_date).getTime()) / 86400000));
-        const subtotal = draft.rooms.reduce((s, r) => s + r.room_rate * nights, 0);
+        // EXTRAS-GROUP — per-room total. A manual room_rate (>0) is an
+        // all-inclusive override (rate × nights, no extras). room_rate=0
+        // routes through the matrix resolver so the meal-plan rate +
+        // extra-person charges (extra adults beyond capacity + children
+        // with/without mattress) are included — exactly what the server
+        // computes via computeBookingTotalWithExtras. Falls back to the
+        // room's base_rate when the matrix can't resolve (uncategorised /
+        // missing cell), mirroring the server-side fallback.
+        const groupRoomCap = (rid: string) => Math.max(1, Number(hotelRooms.find((x: any) => x.id === rid)?.capacity || 1));
+        const groupRowTotal = (sel: { room_id: string; room_rate: number; num_adults: number; extra_children_with_mattress: number; extra_children_no_mattress: number }): number => {
+          if (Number(sel.room_rate) > 0) return Number(sel.room_rate) * nights;
+          const cap = groupRoomCap(sel.room_id);
+          const preview = previewMatrixPrice({
+            room_id: sel.room_id,
+            check_in_date: draft.check_in_date,
+            check_out_date: draft.booking_type === 'DAY_USE' ? draft.check_in_date : draft.check_out_date,
+            booking_type: draft.booking_type,
+            meal_plan_id: draft.meal_plan_id,
+            extra_adults: Math.max(0, Number(sel.num_adults || cap) - cap),
+            extra_children_with_mattress: Number(sel.extra_children_with_mattress || 0),
+            extra_children_no_mattress: Number(sel.extra_children_no_mattress || 0),
+          });
+          if (preview) return preview.total;
+          return (Number(hotelRooms.find((x: any) => x.id === sel.room_id)?.base_rate || 0)) * nights;
+        };
+        const subtotal = draft.rooms.reduce((s, r) => s + groupRowTotal(r), 0);
+        const matrixMode = tariffData.tariff_model === 'MATRIX' && tariffData.meal_plans.filter((m: any) => m.is_active !== 0).length > 0;
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
             {/* MODAL-WIDTH-FIX: group bookings list multiple per-room rows
@@ -24572,6 +24659,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 </div>
 
+                {/* EXTRAS-GROUP — group-level meal plan (MATRIX mode only).
+                    One plan applies to every room in the block, which is the
+                    common case for corporate / wedding groups, and lets the
+                    server resolve each room's matrix rate. */}
+                {matrixMode && (
+                  <div className="p-3 bg-[#cc5a16]/5 border border-[#cc5a16]/15 rounded-2xl">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Meal Plan (whole group)</label>
+                      <span className="text-[9px] font-bold uppercase tracking-widest text-[#cc5a16] bg-white px-2 py-0.5 rounded-full">Matrix</span>
+                    </div>
+                    <select
+                      value={draft.meal_plan_id || ''}
+                      onChange={e => setGroupBookingDraft({ ...draft, meal_plan_id: e.target.value || null })}
+                      className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    >
+                      <option value="">— None (base rate) —</option>
+                      {tariffData.meal_plans
+                        .filter((m: any) => m.is_active !== 0)
+                        .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))
+                        .map((m: any) => (
+                          <option key={m.id} value={m.id}>{m.code} · {m.name}</option>
+                        ))}
+                    </select>
+                  </div>
+                )}
+
                 {/* Rooms picker */}
                 <div className="pt-2 border-t border-[#cc5a16]/10">
                   <div className="flex items-center justify-between mb-2">
@@ -24583,58 +24696,90 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </p>
                   </div>
 
-                  {/* Currently picked rooms */}
+                  {/* Currently picked rooms — each row captures occupancy
+                      (adults + children with/without mattress) so the server
+                      charges extras exactly like the single New Booking modal. */}
                   {draft.rooms.length > 0 && (
                     <div className="space-y-2 mb-3">
                       {draft.rooms.map((sel, idx) => {
                         const r = hotelRooms.find((x: any) => x.id === sel.room_id);
+                        const cap = groupRoomCap(sel.room_id);
+                        const adultsVal = Number(sel.num_adults || cap);
+                        const extraA = Math.max(0, adultsVal - cap);
+                        const kids = Number(sel.extra_children_with_mattress || 0) + Number(sel.extra_children_no_mattress || 0);
+                        // Patch this room + keep num_guests = adults + children.
+                        const setRoom = (patch: any) => {
+                          const next = [...draft.rooms];
+                          const merged = { ...next[idx], ...patch };
+                          merged.num_guests = Math.max(1, Number(merged.num_adults || 1) + Number(merged.extra_children_with_mattress || 0) + Number(merged.extra_children_no_mattress || 0));
+                          next[idx] = merged;
+                          setGroupBookingDraft({ ...draft, rooms: next });
+                        };
                         return (
-                          <div key={idx} className="flex items-center gap-2 bg-[#faf7f2] rounded-xl px-3 py-2">
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-semibold text-[#1a1208] truncate">{r?.name || sel.room_id}</p>
-                              <p className="text-[10px] text-[#9c8e85]">
-                                {r?.room_number ? `#${r.room_number} · ` : ''}{nights} × ₹{sel.room_rate} = ₹{(sel.room_rate * nights).toLocaleString('en-IN')}
-                              </p>
+                          <div key={idx} className="bg-[#faf7f2] rounded-xl px-3 py-2.5 space-y-2">
+                            <div className="flex items-start gap-2">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-semibold text-[#1a1208] truncate">{r?.name || sel.room_id}</p>
+                                <p className="text-[10px] text-[#9c8e85]">
+                                  {r?.room_number ? `#${r.room_number} · ` : ''}cap {cap} · {nights}n = <span className="font-mono text-[#cc5a16] font-semibold">₹{groupRowTotal(sel).toLocaleString('en-IN')}</span>
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setGroupBookingDraft({ ...draft, rooms: draft.rooms.filter((_, i) => i !== idx) })}
+                                className="p-1 text-[#c13b3b] hover:bg-[#c13b3b]/10 rounded shrink-0"
+                                title="Remove room"
+                              >
+                                <X size={14} />
+                              </button>
                             </div>
-                            <input
-                              type="number" min={1}
-                              value={sel.num_guests || ''}
-                              onChange={e => {
-                                const v = parseInt(e.target.value, 10);
-                                const next = [...draft.rooms];
-                                next[idx] = { ...next[idx], num_guests: isNaN(v) ? 0 : Math.max(0, v) };
-                                setGroupBookingDraft({ ...draft, rooms: next });
-                              }}
-                              onBlur={() => {
-                                if (!sel.num_guests || sel.num_guests < 1) {
-                                  const next = [...draft.rooms];
-                                  next[idx] = { ...next[idx], num_guests: 1 };
-                                  setGroupBookingDraft({ ...draft, rooms: next });
-                                }
-                              }}
-                              title="Guests"
-                              className="w-16 bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1 text-xs text-center"
-                            />
-                            <input
-                              type="number" min={0}
-                              value={sel.room_rate}
-                              onChange={e => {
-                                const v = parseInt(e.target.value, 10);
-                                const next = [...draft.rooms];
-                                next[idx] = { ...next[idx], room_rate: isNaN(v) ? 0 : Math.max(0, v) };
-                                setGroupBookingDraft({ ...draft, rooms: next });
-                              }}
-                              title="Rate/night"
-                              className="w-20 bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1 text-xs text-right"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setGroupBookingDraft({ ...draft, rooms: draft.rooms.filter((_, i) => i !== idx) })}
-                              className="p-1 text-[#c13b3b] hover:bg-[#c13b3b]/10 rounded"
-                              title="Remove"
-                            >
-                              <X size={14} />
-                            </button>
+                            <div className="grid grid-cols-4 gap-2">
+                              <div>
+                                <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5" title="Rate per night — 0 uses the matrix tariff (recommended)">Rate/nt</label>
+                                <input
+                                  type="number" min={0}
+                                  value={sel.room_rate || ''}
+                                  placeholder={matrixMode ? '0=matrix' : ''}
+                                  onChange={e => { const v = parseInt(e.target.value, 10); setRoom({ room_rate: isNaN(v) ? 0 : Math.max(0, v) }); }}
+                                  title="Rate/night — leave 0 to use the matrix tariff"
+                                  className="w-full bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 text-xs text-right"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5" title="Total adults staying in the room">Adults</label>
+                                <input
+                                  type="number" min={1} max={20}
+                                  value={adultsVal}
+                                  onChange={e => { const v = parseInt(e.target.value, 10); setRoom({ num_adults: isNaN(v) ? 1 : Math.max(1, Math.min(20, v)) }); }}
+                                  className="w-full bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 text-xs text-center"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5" title="Children 5-12 yrs with mattress">Child (mat)</label>
+                                <input
+                                  type="number" min={0} max={4}
+                                  value={sel.extra_children_with_mattress ?? 0}
+                                  onChange={e => { const v = parseInt(e.target.value, 10); setRoom({ extra_children_with_mattress: isNaN(v) ? 0 : Math.max(0, Math.min(4, v)) }); }}
+                                  className="w-full bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 text-xs text-center"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5" title="Children 5-12 yrs without mattress">Child (no-mat)</label>
+                                <input
+                                  type="number" min={0} max={4}
+                                  value={sel.extra_children_no_mattress ?? 0}
+                                  onChange={e => { const v = parseInt(e.target.value, 10); setRoom({ extra_children_no_mattress: isNaN(v) ? 0 : Math.max(0, Math.min(4, v)) }); }}
+                                  className="w-full bg-white border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 text-xs text-center"
+                                />
+                              </div>
+                            </div>
+                            {(extraA > 0 || kids > 0) && (
+                              <p className="text-[9px] text-amber-700 leading-snug">
+                                {extraA > 0 && <span>+{extraA} extra adult{extraA === 1 ? '' : 's'} </span>}
+                                {kids > 0 && <span>+{kids} child{kids === 1 ? '' : 'ren'} </span>}
+                                charged per tariff{Number(sel.room_rate) > 0 ? ' — manual rate overrides matrix, extras not auto-added' : ''}.
+                              </p>
+                            )}
                           </div>
                         );
                       })}
@@ -24650,9 +24795,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         if (!id) return;
                         const r = hotelRooms.find((x: any) => x.id === id);
                         if (!r) return;
+                        const cap = Math.max(1, Number(r.capacity || 1));
                         setGroupBookingDraft({
                           ...draft,
-                          rooms: [...draft.rooms, { room_id: id, room_rate: Number(r.base_rate) || 0, num_guests: 1 }],
+                          // MATRIX mode → rate 0 so the server resolves the
+                          // meal-plan rate + extras; LEGACY → seed base_rate.
+                          rooms: [...draft.rooms, {
+                            room_id: id,
+                            room_rate: matrixMode ? 0 : (Number(r.base_rate) || 0),
+                            num_adults: cap,
+                            extra_children_with_mattress: 0,
+                            extra_children_no_mattress: 0,
+                            num_guests: cap,
+                          }],
                         });
                       }}
                       className="w-full bg-[#faf7f2] border-2 border-dashed border-[#cc5a16]/30 rounded-2xl px-4 py-3 text-sm text-[#cc5a16] font-bold focus:ring-2 ring-[#cc5a16]/20 outline-none"
