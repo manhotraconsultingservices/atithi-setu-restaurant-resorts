@@ -7613,8 +7613,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       }
     }
 
-    // Mirror getSeasonForDate(): match the period that includes the date,
-    // sort by season.display_order (PEAK before OFF on ties).
+    // SEASON-FIX (15 Jun 2026) — mirror the server's getSeasonForDate EXACTLY:
+    // when several active periods cover the date, the MOST SPECIFIC (narrowest
+    // date span) wins, so a specific PEAK window overrides a broad OFF /
+    // year-long catch-all. display_order is only a tiebreak between equal
+    // spans. Previously this preview ranked purely by display_order, so it
+    // could disagree with what the folio actually bills (e.g. show OFF at
+    // booking time but charge PEAK at check-in) — exactly the "check-in is
+    // picking peak-season rate" mismatch reported. Now preview == billing.
     const seasonForDate = (d: string): string | null => {
       const matches = (tariffData.season_periods || []).filter((p: any) => {
         const s = String(p.start_date || '').slice(0, 10);
@@ -7622,9 +7628,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         return d >= s && d <= e;
       });
       if (!matches.length) return null;
+      if (matches.length === 1) return matches[0].season_id || null;
+      const spanDays = (p: any): number => {
+        const s = Date.parse(`${String(p.start_date).slice(0, 10)}T00:00:00Z`);
+        const e = Date.parse(`${String(p.end_date).slice(0, 10)}T00:00:00Z`);
+        return (Number.isFinite(s) && Number.isFinite(e) && e >= s) ? (e - s) : Number.MAX_SAFE_INTEGER;
+      };
       const ordered = matches
-        .map((p: any) => ({ id: p.season_id, order: (tariffData.seasons.find((s: any) => s.id === p.season_id)?.display_order) ?? 99 }))
-        .sort((a: any, b: any) => a.order - b.order);
+        .map((p: any) => ({
+          id: p.season_id,
+          span: spanDays(p),
+          order: (tariffData.seasons.find((s: any) => s.id === p.season_id)?.display_order) ?? 99,
+        }))
+        .sort((a: any, b: any) => (a.span !== b.span ? a.span - b.span : a.order - b.order));
       return ordered[0]?.id || null;
     };
 
@@ -32148,6 +32164,24 @@ const CheckInWizardModal: React.FC<{
                   onClick={openRoomPicker}
                   className="px-3 py-1.5 rounded-xl bg-white border border-[#cc5a16]/25 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5 whitespace-nowrap"
                 >Change / Upgrade</button>
+              </div>
+              {/* CHK-INFO (15 Jun 2026) — surface the Meal Plan + the
+                  season-resolved stay total on the check-in page so all the
+                  billing information is visible before check-in. The total is
+                  the backend-computed figure (room category × season × meal
+                  plan × extras) — for a reassigned room it's the new-room
+                  quote, otherwise the booking's stored total. */}
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <div className="bg-white rounded-lg border border-[#cc5a16]/10 px-2.5 py-1.5 min-w-0">
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Meal Plan</p>
+                  <p className="text-[12px] text-[#1a1208] font-semibold truncate" title={booking.meal_plan_snapshot || booking.meal_plan_id || 'Room only'}>
+                    {booking.meal_plan_snapshot || booking.meal_plan_id || 'Room only (EP)'}
+                  </p>
+                </div>
+                <div className="bg-white rounded-lg border border-[#cc5a16]/10 px-2.5 py-1.5 min-w-0">
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Stay total {draft.room_id !== booking.room_id ? '(new room)' : ''}</p>
+                  <p className="text-[12px] text-[#cc5a16] font-bold font-mono">₹{Number(stayTotal || 0).toLocaleString('en-IN')}</p>
+                </div>
               </div>
               {draft.room_id !== booking.room_id && (
                 <p className="text-[10px] text-[#9c8e85] mt-1">
