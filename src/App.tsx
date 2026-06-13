@@ -225,6 +225,7 @@ function deriveOccupancy(adults: number, capacity: number, childMat: number, chi
 // toggleable via the Columns chooser and persisted per-browser. `def` is the
 // out-of-box visibility. Adding a key here makes it appear in the chooser.
 const BOOKING_COL_DEFS: { key: string; label: string; def: boolean }[] = [
+  { key: 'booking_id', label: 'Booking ID', def: true  },
   { key: 'room',      label: 'Room',      def: true  },
   { key: 'dates',     label: 'Dates',     def: true  },
   { key: 'nights',    label: 'Nights',    def: false },
@@ -17714,6 +17715,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         className={cn(sortableCls, 'text-left sticky left-0 z-[2] bg-[#faf7f2] shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)]')}>
                       Guest{arrow('guest')}
                     </th>
+                    {colOn('booking_id') && <th className="px-4 py-3 text-left">Booking ID</th>}
                     {colOn('room')      && <th onClick={() => toggleBookingSort('room')}     title="Click to sort" className={cn(sortableCls, 'text-left')}>Room{arrow('room')}</th>}
                     {colOn('dates')     && <th onClick={() => toggleBookingSort('check_in')} title="Click to sort" className={cn(sortableCls, 'text-left')}>Dates{arrow('check_in')}</th>}
                     {colOn('nights')    && <th className="px-4 py-3 text-right">Nights</th>}
@@ -17769,6 +17771,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </div>
                           <div className="text-[11px] text-[#9c8e85]">{b.guest_phone || '—'} {b.guest_nationality ? `· ${b.guest_nationality}` : ''}</div>
                         </td>
+                        {colOn('booking_id') && (
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <button
+                              type="button"
+                              title="Booking reference — click to copy (use for cancellations & support)"
+                              onClick={() => { try { navigator.clipboard?.writeText(String(b.id)); } catch { /* ignore */ } }}
+                              className="font-mono text-[10px] text-[#6b5d52] hover:text-[#cc5a16] hover:underline"
+                            >{b.id}</button>
+                          </td>
+                        )}
                         {colOn('room') && <td className="px-4 py-3 text-[#3d3128] whitespace-nowrap">{b.room_name || b.room_id}</td>}
                         {/* Dates — whitespace-nowrap + min-width so each date shows in full. */}
                         {colOn('dates') && (

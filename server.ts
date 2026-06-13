@@ -2972,16 +2972,32 @@ async function computeRoomTotal(restaurantId: string, roomId: string, checkIn: s
 async function getSeasonForDate(restaurantId: string, isoDate: string): Promise<string | null> {
   try {
     const tenantDb = await getTenantDb(restaurantId);
-    const row: any = await tenantDb.get(
-      `SELECT sp.season_id
+    const rows: any[] = await tenantDb.query(
+      `SELECT sp.season_id, sp.start_date, sp.end_date, s.display_order
          FROM season_periods sp
          JOIN seasons s ON s.id = sp.season_id AND s.is_active = 1
-        WHERE ? BETWEEN sp.start_date AND sp.end_date
-        ORDER BY s.display_order ASC
-        LIMIT 1`,
+        WHERE ? BETWEEN sp.start_date AND sp.end_date`,
       [isoDate]
     );
-    return row?.season_id || null;
+    if (!rows || rows.length === 0) return null;
+    if (rows.length === 1) return rows[0].season_id;
+    // SEASON-FIX (overlapping periods): when more than one active season
+    // covers this stay date, prefer the MOST SPECIFIC one — the narrowest
+    // date span wins. A 2-week PEAK window must override a year-long OFF /
+    // default catch-all, regardless of display_order (the old tie-break,
+    // which wrongly applied off-season rates on peak dates). Narrowest span
+    // first, then display_order as a stable final tiebreak.
+    const spanDays = (r: any): number => {
+      const s = Date.parse(`${String(r.start_date).slice(0, 10)}T00:00:00Z`);
+      const e = Date.parse(`${String(r.end_date).slice(0, 10)}T00:00:00Z`);
+      return (Number.isFinite(s) && Number.isFinite(e) && e >= s) ? (e - s) : Number.MAX_SAFE_INTEGER;
+    };
+    rows.sort((a, b) => {
+      const da = spanDays(a), db = spanDays(b);
+      if (da !== db) return da - db;
+      return Number(a.display_order || 0) - Number(b.display_order || 0);
+    });
+    return rows[0].season_id || null;
   } catch {
     // Table may not exist for non-hotel tenants — that's OK.
     return null;
