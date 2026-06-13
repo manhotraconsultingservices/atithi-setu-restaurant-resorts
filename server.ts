@@ -1837,11 +1837,20 @@ async function postOrderToFolio(
 
   // Idempotency — bail if this order id is already posted.
   const existing: any = await tenantDb.get(
-    "SELECT folio_id, posted_to_folio_at FROM orders WHERE id = ?",
+    "SELECT folio_id, posted_to_folio_at, status FROM orders WHERE id = ?",
     [order.id]
   );
   if (existing?.folio_id && existing?.posted_to_folio_at) {
     return { ok: true, folio_id: existing.folio_id, reason: 'already-posted' };
+  }
+  // CANCEL-GUARD (16 Jun 2026): a cancelled order must NEVER reach a folio —
+  // not on delivery, not via the sweep, not via any manual post. Cancel flips
+  // status='CANCELLED' (it does not soft-delete), so without this guard the
+  // folio sweep (which only excludes deleted_at / already-posted) would bill a
+  // cancelled order to the guest. This is the single choke point every posting
+  // path flows through.
+  if (String(existing?.status || '').toUpperCase() === 'CANCELLED') {
+    return { ok: false, reason: 'order-cancelled' };
   }
 
   let { folioId, bookingId: resolvedBookingId } = await resolveActiveFolioForRoom(tenantDb, {
@@ -2010,6 +2019,7 @@ async function postPendingRoomOrdersToFolio(
     pending = await tenantDb.query(
       `SELECT * FROM orders
         WHERE deleted_at IS NULL
+          AND UPPER(COALESCE(status, '')) <> 'CANCELLED'
           AND folio_id IS NULL
           AND UPPER(COALESCE(payment_method, '')) = 'CHARGE_TO_ROOM'
           AND COALESCE(folio_post_status, '') NOT IN ('POSTED', 'PAID_IN_ROOM')
@@ -20716,10 +20726,12 @@ ${data.tenant.name}`;
                         -- rule the folio sweep / checkout panel use).
                         COALESCE((SELECT SUM(o.total_amount) FROM orders o
                                    WHERE o.deleted_at IS NULL
+                                     AND UPPER(COALESCE(o.status,'')) <> 'CANCELLED'
                                      AND UPPER(o.payment_method) = 'CHARGE_TO_ROOM'
                                      AND (o.booking_id = b.id OR o.room_id = b.room_id)), 0) AS fnb_total,
                         COALESCE((SELECT SUM(o.total_amount) FROM orders o
                                    WHERE o.deleted_at IS NULL
+                                     AND UPPER(COALESCE(o.status,'')) <> 'CANCELLED'
                                      AND UPPER(o.payment_method) = 'CHARGE_TO_ROOM'
                                      AND (o.booking_id = b.id OR o.room_id = b.room_id)
                                      AND COALESCE(o.folio_post_status,'') <> 'PAID_IN_ROOM'), 0) AS fnb_unpaid
@@ -27868,6 +27880,7 @@ ${data.tenant.name}`;
           WHERE o.folio_post_status IN ('PENDING_MANUAL', 'AWAITING_DELIVERY')
             AND o.folio_id IS NULL
             AND o.deleted_at IS NULL
+            AND UPPER(COALESCE(o.status,'')) <> 'CANCELLED'
           ORDER BY o.created_at DESC`
       );
       res.json(rows);
@@ -28108,6 +28121,7 @@ ${data.tenant.name}`;
                 room_payment_method, room_paid_at, created_at
            FROM orders
           WHERE deleted_at IS NULL
+            AND UPPER(COALESCE(status,'')) <> 'CANCELLED'
             AND UPPER(payment_method) = 'CHARGE_TO_ROOM'
             AND (booking_id = ? OR room_id = ?)
           ORDER BY created_at ASC`,
@@ -28152,6 +28166,7 @@ ${data.tenant.name}`;
       const orders: any[] = await tenantDb.query(
         `SELECT id, folio_id FROM orders
           WHERE deleted_at IS NULL
+            AND UPPER(COALESCE(status,'')) <> 'CANCELLED'
             AND UPPER(payment_method) = 'CHARGE_TO_ROOM'
             AND (booking_id = ? OR room_id = ?)
             AND COALESCE(folio_post_status,'') <> 'PAID_IN_ROOM'`,

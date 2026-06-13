@@ -16,10 +16,14 @@ let pass = 0, fail = 0;
 const ok = (cond, label) => { if (cond) pass++; else { fail++; console.log(`  ${C.r}✗${C.x} ${label}`); } };
 const r2 = (n) => Math.round(n * 100) / 100;
 
-// Mirror of the bill-summary aggregation.
+const isCancelled = (o) => String(o.status || '').toUpperCase() === 'CANCELLED';
+
+// Mirror of the bill-summary aggregation. Cancelled orders are excluded by the
+// SQL (UPPER(status) <> 'CANCELLED'), so they never appear on the bill.
 function summarise(orders) {
   let total = 0, paid = 0, onFolio = 0, pending = 0;
   for (const o of orders) {
+    if (isCancelled(o)) continue;
     const amt = Number(o.total_amount || 0);
     total += amt;
     const st = String(o.folio_post_status || '').toUpperCase();
@@ -35,6 +39,7 @@ function markPaid(orders) {
   let marked = 0, reversed = 0;
   const next = orders.map(o => ({ ...o }));
   for (const o of next) {
+    if (isCancelled(o)) continue;          // cancelled orders are never in the mark-paid set
     if (String(o.folio_post_status || '').toUpperCase() === 'PAID_IN_ROOM') continue;
     if (o.folio_id) reversed++;            // had posted → reverse the folio line
     o.folio_post_status = 'PAID_IN_ROOM';
@@ -78,6 +83,23 @@ ok(res2.marked === 0 && res2.reversed === 0, 're-running mark-paid on a settled 
 
 // No F&B → fnb_total 0 → the row shows "—" (no button).
 ok(summarise([]).total === 0, 'no room-service orders → restaurant bill total 0 (row shows —)');
+
+// ── Cancel an order BEFORE delivery → it must NEVER hit the folio/bill ──
+// A cancelled order keeps status='CANCELLED', folio_id NULL (never posted).
+// Every restaurant-bill query and the folio sweep exclude it.
+const withCancel = [
+  { id: 'A', total_amount: 600, folio_post_status: 'AWAITING_DELIVERY', folio_id: null, status: 'DELIVERED' },
+  { id: 'B', total_amount: 400, folio_post_status: 'AWAITING_DELIVERY', folio_id: null, status: 'CANCELLED' }, // cancelled before delivery
+];
+const sc = summarise(withCancel);
+ok(sc.total === 600, 'cancelled order is EXCLUDED from the restaurant bill total (600, not 1000)');
+ok(sc.unpaid === 600, 'cancelled order is excluded from unpaid too');
+const scPaid = markPaid(withCancel);
+ok(scPaid.marked === 1, 'mark-paid touches only the live order (1), never the cancelled one');
+ok(scPaid.orders.find(o => o.id === 'B').folio_post_status === 'AWAITING_DELIVERY', 'cancelled order is left untouched (never marked paid / posted)');
+// Even if the SWEEP tried it, postOrderToFolio bails on a cancelled order:
+const postGuard = (o) => (isCancelled(o) ? { ok: false, reason: 'order-cancelled' } : { ok: true });
+ok(postGuard(withCancel[1]).ok === false, 'postOrderToFolio refuses a cancelled order (never reaches the folio)');
 
 console.log(`${C.b}\n═══════════════════════════════════════════════════════════════${C.x}`);
 console.log(`  ${C.g}✓ Passed:${C.x} ${pass}`);
