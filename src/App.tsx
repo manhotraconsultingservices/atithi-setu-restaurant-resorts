@@ -16758,9 +16758,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               );
             })()}
 
-            {/* Sprint C-RP — Rate Plans (weekend / season rates).
-                Per-room or per-type date-range price overrides. Booking
-                creation + folio generation both consult these. */}
+            {/* Sprint C-RP — Rate Plans (weekend / season rates). SETUP-only —
+                date-range price overrides are an owner pricing concern, not
+                part of the staff-facing Room Availability status board. */}
+            {isSetup && (
             <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5">
               <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
                 <div>
@@ -16835,6 +16836,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               )}
             </div>
+            )}
 
             {hotelRooms.length === 0 ? (
               <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 p-12 text-center">
