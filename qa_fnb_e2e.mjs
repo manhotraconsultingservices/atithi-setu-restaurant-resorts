@@ -121,6 +121,57 @@ bookings.find(b => b.id === 'BK2').status = 'CHECKED_IN';
 const swept = postOrderToFolio(o3);   // sweep retries
 ok(swept.ok && checkoutView('F2').restaurant === 84, 'after check-in the pending F&B posts (80 + 4 GST = 84)');
 
+// ── 6. CHECKOUT DISPLAY (17 Jun 2026) — the F&B must be VISIBLE at checkout
+//      even when posting never set a folio_post_status (the long-standing
+//      "no restaurant order shows at checkout" bug). Models GET
+//      /bookings/:id/restaurant-bill (matches CHARGE_TO_ROOM by booking_id OR
+//      room_id, ignores folio_post_status) and the CheckoutModal deriving the
+//      unbilled-orders reconcile panel + restaurant-bill summary from it.
+const orderAmt = (o) => r2(o.items.reduce((s, it) => s + it.qty * it.price, 0));
+function restaurantBill(bookingId, roomId) {
+  const os = orders.filter(o =>
+    o.payment_method === 'CHARGE_TO_ROOM' &&
+    String(o.status).toUpperCase() !== 'CANCELLED' &&
+    (o.booking_id === bookingId || o.room_id === roomId));
+  let total = 0, paid = 0, onFolio = 0, pending = 0;
+  for (const o of os) {
+    const amt = orderAmt(o); total += amt;
+    const st = String(o.folio_post_status || '').toUpperCase();
+    if (st === 'PAID_IN_ROOM') paid += amt; else if (st === 'POSTED') onFolio += amt; else pending += amt;
+  }
+  return { orders: os, total: r2(total), paid_in_room: r2(paid), on_folio: r2(onFolio), pending: r2(pending) };
+}
+const unbilledAtCheckout = (rb) => rb.orders.filter(o => {
+  const st = String(o.folio_post_status || '').toUpperCase();
+  return st !== 'POSTED' && st !== 'PAID_IN_ROOM';
+});
+
+// Fresh checked-in guest in R3 with an open folio carrying a room charge.
+bookings.push({ id: 'BK3', room_id: 'R3', status: 'CHECKED_IN' });
+folios.push({ id: 'F3', booking_id: 'BK3', room_id: 'R3', status: 'open' });
+folioEntries.push({ id: uid('FE'), folio_id: 'F3', entry_type: 'ROOM_CHARGE', amount: 4000, gst: 480, source_id: null, reversal_of: null });
+// An order delivered while the schema column was missing → its post threw and
+// folio_post_status was never set (NULL). The OLD checkout paths dropped this:
+// /orders/pending-folio required PENDING_MANUAL/AWAITING_DELIVERY, and the
+// folio had no F_AND_B entry — so it was invisible. The robust restaurant-bill
+// query still finds it.
+const oStuck = { id: uid('O'), room_id: 'R3', booking_id: 'BK3', payment_method: 'CHARGE_TO_ROOM', status: 'DELIVERED', folio_id: null, posted_at: false, folio_post_status: null, items: [{ name: 'Pizza', qty: 1, price: 400, gst: 5 }] };
+orders.push(oStuck);
+
+const rb3 = restaurantBill('BK3', 'R3');
+ok(rb3.total === 400, 'restaurant-bill surfaces the F&B even with NULL folio_post_status (total 400)');
+ok(rb3.pending === 400, 'the stuck order is counted as pending (unbilled)');
+ok(unbilledAtCheckout(rb3).length === 1, 'checkout reconcile panel now shows the order that was previously invisible');
+ok(checkoutView('F3').restaurant === 0, 'folio carries no F&B yet (nothing was posted) — so without the bill view it would be hidden');
+
+// Staff clicks "Charge to room" at checkout → posts it to the folio.
+const postedStuck = postOrderToFolio(oStuck);
+oStuck.folio_post_status = postedStuck.ok ? 'POSTED' : 'PENDING_MANUAL';
+const rb3b = restaurantBill('BK3', 'R3');
+ok(postedStuck.ok && rb3b.on_folio === 400 && rb3b.pending === 0, 'after Charge to room: F&B moves on-folio, nothing pending');
+ok(unbilledAtCheckout(rb3b).length === 0, 'reconcile panel clears once charged');
+ok(checkoutView('F3').restaurant === 420, 'folio split now shows Restaurant 420 (400 + 20 GST) at checkout');
+
 console.log(`${C.b}\n═══════════════════════════════════════════════════════════════${C.x}`);
 console.log(`  ${C.g}✓ Passed:${C.x} ${pass}`);
 console.log(`  ${fail ? C.r : C.g}✗ Failed:${C.x} ${fail}`);

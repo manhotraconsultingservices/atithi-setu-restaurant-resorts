@@ -33298,6 +33298,13 @@ const CheckoutModal: React.FC<{
   onPendingReconciled?: () => void | Promise<void>;
 }> = ({ booking, restaurant, restaurantId, token, fetchFolioOutstanding, hotelApi, onClose, onSettled, loyaltyBanner, lateFeeBanner, pendingRoomOrders = [], onPendingReconciled }) => {
   const [data, setData] = useState<any | null>(null);
+  // ROBUST F&B-AT-CHECKOUT (17 Jun 2026) — the guest's restaurant bill, fetched
+  // from /bookings/:id/restaurant-bill. That query matches CHARGE_TO_ROOM orders
+  // by booking_id OR room_id and IGNORES folio_post_status, so it surfaces F&B
+  // that the folio-entries path and the pendingFolioOrders prop both missed
+  // (orders whose post never set a status, or whose sweep room-match diverged) —
+  // the long-standing "no restaurant order shows at checkout" bug.
+  const [restBill, setRestBill] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [discount, setDiscount] = useState(0);
   const [paymentMethod, setPaymentMethod] = useState<'CASH'|'CARD'|'UPI'|'BANK'>('CASH');
@@ -33321,7 +33328,17 @@ const CheckoutModal: React.FC<{
 
   const refresh = async () => {
     setLoading(true);
-    try { setData(await fetchFolioOutstanding(booking.id)); }
+    try {
+      // Pull the folio outstanding AND the robust restaurant bill together. The
+      // restaurant-bill fetch is best-effort — a failure must not blank the
+      // whole checkout, so it falls back to null and the rest still renders.
+      const [folio, rb] = await Promise.all([
+        fetchFolioOutstanding(booking.id).catch(() => null),
+        hotelApi(`/bookings/${booking.id}/restaurant-bill`).catch(() => null),
+      ]);
+      setData(folio);
+      setRestBill(rb);
+    }
     catch { setData(null); }
     finally { setLoading(false); }
   };
@@ -33358,7 +33375,29 @@ const CheckoutModal: React.FC<{
       alert(e?.message || 'Failed to post the room order to the folio');
     } finally { setPendingBusyId(null); }
   };
-  const visiblePending = pendingRoomOrders.filter((o: any) => !resolvedPending.has(o.id));
+  // Unbilled room F&B to reconcile at checkout. Source it from the robust
+  // restaurant-bill query (every CHARGE_TO_ROOM order for this room/booking not
+  // already POSTED or PAID_IN_ROOM) MERGED with the pendingRoomOrders prop,
+  // deduped by id. The prop alone relied on /orders/pending-folio (which needs a
+  // specific folio_post_status) + a frontend room-id match — both of which could
+  // silently drop the order, leaving nothing to charge at checkout.
+  const restOrders: any[] = Array.isArray(restBill?.orders) ? restBill.orders : [];
+  const unsettledRest = restOrders.filter((o: any) => {
+    const st = String(o.folio_post_status || '').toUpperCase();
+    return st !== 'POSTED' && st !== 'PAID_IN_ROOM';
+  });
+  const _pendingById = new Map<string, any>();
+  for (const o of [...(Array.isArray(pendingRoomOrders) ? pendingRoomOrders : []), ...unsettledRest]) {
+    if (o && o.id && !_pendingById.has(o.id)) _pendingById.set(o.id, o);
+  }
+  const visiblePending = Array.from(_pendingById.values()).filter((o: any) => !resolvedPending.has(o.id));
+  // Full restaurant-bill figures (incl. already-posted / paid F&B) so staff can
+  // always SEE the F&B total at checkout, even when nothing needs action.
+  const restBillTotal = Number(restBill?.total || 0);
+  const restBillOnFolio = Number(restBill?.on_folio || 0);
+  const restBillPaidInRoom = Number(restBill?.paid_in_room || 0);
+  // Sum of the unbilled orders still showing in the reconcile panel.
+  const restBillPending = visiblePending.reduce((s: number, o: any) => s + Number(o.total_amount || 0), 0);
 
   const grand = Number(data?.folio?.grand_total || booking.total_amount || 0);
   const paid = Number(data?.total_paid || 0);
@@ -33503,6 +33542,32 @@ const CheckoutModal: React.FC<{
                   >💵 Guest paid</button>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* ── Restaurant / F&B bill (always visible when the guest ordered
+              room-service) ─────────────────────────────────────────────────
+              Driven by /restaurant-bill so the F&B is shown at checkout no
+              matter what state the folio post is in. Unbilled amounts are
+              reconciled via the amber panel above; this card is the at-a-glance
+              total so "no F&B at checkout" can never happen silently again. */}
+          {restBillTotal > 0 && (
+            <div className="rounded-2xl border border-[#f0e8dd] bg-white p-3 text-[12px]">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">🍽 Restaurant / F&amp;B bill</p>
+                <span className="font-mono font-bold text-[#1a1208]">{fmt(restBillTotal)}</span>
+              </div>
+              <div className="text-[11px] text-[#6b5d52] space-y-0.5">
+                {restBillOnFolio > 0 && (
+                  <div className="flex justify-between"><span>On the room folio (settled at checkout)</span><span className="font-mono">{fmt(restBillOnFolio)}</span></div>
+                )}
+                {restBillPending > 0 && (
+                  <div className="flex justify-between"><span className="text-amber-700 font-semibold">Unbilled — charge / mark paid above</span><span className="font-mono text-amber-700 font-semibold">{fmt(restBillPending)}</span></div>
+                )}
+                {restBillPaidInRoom > 0 && (
+                  <div className="flex justify-between"><span>Already paid in room</span><span className="font-mono text-emerald-700">−{fmt(restBillPaidInRoom)}</span></div>
+                )}
+              </div>
             </div>
           )}
 

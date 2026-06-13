@@ -27911,7 +27911,8 @@ ${data.tenant.name}`;
                   ORDER BY f.created_at DESC LIMIT 1) AS open_folio_id
            FROM orders o
            LEFT JOIN rooms r ON r.id = o.room_id
-          WHERE o.folio_post_status IN ('PENDING_MANUAL', 'AWAITING_DELIVERY')
+          WHERE UPPER(COALESCE(o.payment_method,'')) = 'CHARGE_TO_ROOM'
+            AND COALESCE(o.folio_post_status, '') NOT IN ('POSTED', 'PAID_IN_ROOM')
             AND o.folio_id IS NULL
             AND o.deleted_at IS NULL
             AND UPPER(COALESCE(o.status,'')) <> 'CANCELLED'
