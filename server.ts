@@ -501,6 +501,11 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
+    -- Who/what initiated the cancellation, for the Cancelled Reservations
+    -- report attribution: STAFF (front desk — cancelled_by holds the staff id,
+    -- resolved to a name), OTA (cancelled_by holds the channel), GUEST_ONLINE,
+    -- AGENT, NO_SHOW, SYSTEM. NULL on legacy rows → treated as STAFF.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_source TEXT;
 
     -- Sprint CH-2 — iCal feeds. Owner pastes Booking.com / Airbnb /
     -- Vrbo / Agoda iCal URLs here. Cron pulls every 30 min, upserts
@@ -21182,19 +21187,49 @@ ${data.tenant.name}`;
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
       const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
       const tenantDb = await getTenantDb(req.params.id);
+      // Resolve the canceller name (attendance_staff) + the agent name so the
+      // report can show WHO cancelled — staff member, OTA channel, agent, the
+      // guest online, or an auto no-show.
       const rows: any[] = await tenantDb.query(
         `SELECT b.id, b.guest_name, b.guest_phone, b.check_in_date, b.check_out_date,
-                b.total_amount, b.booking_source,
-                b.cancelled_at, b.cancelled_by, b.cancellation_reason,
+                b.total_amount, b.booking_source, b.agent_id,
+                b.cancelled_at, b.cancelled_by, b.cancelled_source, b.cancellation_reason,
                 b.cancellation_refund_pct, b.cancellation_refund_amount,
-                r.name AS room_name
+                r.name AS room_name,
+                s.name AS cancelled_by_staff_name,
+                ta.name AS agent_name
            FROM room_bookings b
            LEFT JOIN rooms r ON r.id = b.room_id
+           LEFT JOIN attendance_staff s ON s.id = b.cancelled_by
+           LEFT JOIN travel_agents   ta ON ta.id = b.agent_id
           WHERE b.status = 'CANCELLED'
             AND TO_CHAR(COALESCE(b.cancelled_at, b.check_in_date),'YYYY-MM-DD') BETWEEN ? AND ?
           ORDER BY b.cancelled_at DESC NULLS LAST`,
         [from, to]
       ).catch(() => []);
+      // Compute a human-readable "Cancelled by" label per row so the UI + CSV
+      // render identically. Source-driven, with sensible fallbacks for legacy
+      // rows (NULL source = a staff/owner cancel).
+      for (const r of rows) {
+        const src = String(r.cancelled_source || '').toUpperCase();
+        if (src === 'OTA') {
+          r.cancelled_by_label = `OTA · ${r.cancelled_by || r.booking_source || 'Channel'}`;
+        } else if (src === 'GUEST_ONLINE') {
+          r.cancelled_by_label = 'Guest (online)';
+        } else if (src === 'AGENT') {
+          r.cancelled_by_label = `Agent · ${r.agent_name || r.cancelled_by || 'Travel agent'}`;
+        } else if (src === 'NO_SHOW') {
+          r.cancelled_by_label = 'No-show (auto)';
+        } else if (r.cancelled_by_staff_name) {
+          r.cancelled_by_label = r.cancelled_by_staff_name;       // STAFF — resolved name
+        } else if (r.cancelled_by) {
+          r.cancelled_by_label = 'Owner / Manager';               // central user (not in staff table)
+        } else if (src === 'STAFF') {
+          r.cancelled_by_label = 'Front desk';
+        } else {
+          r.cancelled_by_label = '—';
+        }
+      }
       const refundTotal = rows.reduce((s: number, r: any) => s + Number(r.cancellation_refund_amount || 0), 0);
       const lostRevenue = rows.reduce((s: number, r: any) => s + Number(r.total_amount || 0), 0);
       res.json({
@@ -23798,9 +23833,10 @@ ${data.tenant.name}`;
           await tenantDb.run(
             `UPDATE room_bookings
                 SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP,
+                    cancelled_source = 'OTA', cancelled_by = ?,
                     cancellation_reason = ?
               WHERE id = ?`,
-            [`Cancelled via ${channelKey} webhook`, prior.booking_id]
+            [channelKey, `Cancelled via ${channelKey} webhook`, prior.booking_id]
           );
         } else {
           // MODIFIED — only adjust dates / amount if provided
@@ -25413,6 +25449,7 @@ ${data.tenant.name}`;
              SET status                     = 'CANCELLED',
                  cancelled_at               = ?,
                  cancelled_by               = ?,
+                 cancelled_source           = 'STAFF',
                  cancellation_reason        = ?,
                  cancellation_refund_pct    = ?,
                  cancellation_refund_amount = ?
@@ -26763,6 +26800,7 @@ ${data.tenant.name}`;
             SET status                     = 'CANCELLED',
                 cancelled_at               = ?,
                 cancelled_by               = ?,
+                cancelled_source           = 'STAFF',
                 cancellation_reason        = ?,
                 cancellation_refund_pct    = ?,
                 cancellation_refund_amount = ?
@@ -33627,6 +33665,28 @@ ${data.tenant.name}`;
                        : Math.floor(Math.random() * 30) + 1;
         const createdAt = toIso(addDays(checkIn, -leadDays));
 
+        // Cancellation attribution for seeded data so the Cancelled
+        // Reservations report shows varied "Cancelled by" sources: an OTA
+        // channel cancels OTA bookings; direct bookings split between the
+        // guest (online) and the front desk.
+        let cancelledAt: string | null = null;
+        let cancelledSource: string | null = null;
+        let cancelledBy: string | null = null;
+        let cancelReason: string | null = null;
+        if (status === 'CANCELLED') {
+          cancelledAt = `${toIso(addDays(checkIn, -Math.max(1, Math.floor(leadDays / 2))))} 10:30:00`;
+          const codeU = String(ch.code).toUpperCase();
+          if (!['DIRECT', 'DIRECT_WEB', 'WALK_IN'].includes(codeU)) {
+            cancelledSource = 'OTA'; cancelledBy = ch.code; cancelReason = `Cancelled via ${ch.code}`;
+          } else if (codeU === 'WALK_IN') {
+            cancelledSource = 'STAFF'; cancelReason = 'Front desk cancellation';
+          } else if (Math.random() < 0.5) {
+            cancelledSource = 'GUEST_ONLINE'; cancelReason = 'Guest self-cancelled online';
+          } else {
+            cancelledSource = 'STAFF'; cancelReason = 'Front desk cancellation';
+          }
+        }
+
         const id = `OTA-SEED-${tenantId.replace(/-/g, '').slice(0, 6)}-${String(i).padStart(4, '0')}`;
         const guestName = pickName();
         const numGuests = Math.random() < 0.6 ? 2 : Math.random() < 0.85 ? 1 : 3;
@@ -33638,13 +33698,15 @@ ${data.tenant.name}`;
                 check_in_date, check_out_date, actual_checkin_at, actual_checkout_at,
                 status, booking_source, room_rate, total_amount,
                 commission_pct, commission_amount, net_amount,
-                booking_type, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OVERNIGHT', ?)
+                booking_type, created_at,
+                cancelled_at, cancelled_source, cancelled_by, cancellation_reason
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OVERNIGHT', ?, ?, ?, ?, ?)
               ON CONFLICT (id) DO NOTHING`,
             [id, room.id, guestName, pickPhone(), numGuests,
              toIso(checkIn), toIso(checkOut), actualCheckIn, actualCheckOut,
              status, ch.code, roomRate, total,
-             commPct, commAmt, netAmt, createdAt]
+             commPct, commAmt, netAmt, createdAt,
+             cancelledAt, cancelledSource, cancelledBy, cancelReason]
           );
           inserted++;
           channelCounts[ch.code] = (channelCounts[ch.code] || 0) + 1;

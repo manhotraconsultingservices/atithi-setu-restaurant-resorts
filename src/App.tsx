@@ -33441,8 +33441,8 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
       downloadCsv('guest-directory.csv', ['Guest', 'Phone', 'Email', 'Stays', 'Total Spend', 'Last Visit'],
         (data.rows || []).map((r: any) => [r.guest_name, r.guest_phone, r.guest_email, r.stays, r.total_spend, String(r.last_visit || '').slice(0, 10)]));
     } else if (active === 'cancellations') {
-      downloadCsv(`cancelled-reservations-${stamp}.csv`, ['Booking', 'Guest', 'Phone', 'Room', 'Check-in', 'Cancelled At', 'Reason', 'Refund %', 'Refund Amount'],
-        (data.rows || []).map((r: any) => [r.id, r.guest_name, r.guest_phone, r.room_name, String(r.check_in_date || '').slice(0, 10), String(r.cancelled_at || '').slice(0, 10), r.cancellation_reason, r.cancellation_refund_pct, r.cancellation_refund_amount]));
+      downloadCsv(`cancelled-reservations-${stamp}.csv`, ['Booking', 'Guest', 'Phone', 'Room', 'Check-in', 'Cancelled At', 'Cancelled By', 'Reason', 'Refund %', 'Refund Amount'],
+        (data.rows || []).map((r: any) => [r.id, r.guest_name, r.guest_phone, r.room_name, String(r.check_in_date || '').slice(0, 10), String(r.cancelled_at || '').slice(0, 10), r.cancelled_by_label || '', r.cancellation_reason, r.cancellation_refund_pct, r.cancellation_refund_amount]));
     } else if (active === 'purchase') {
       downloadCsv(`purchase-spend-${stamp}.csv`, ['Date', 'PO', 'Supplier', 'Status', 'Amount'],
         (data.rows || []).map((r: any) => [String(r.raised_at || '').slice(0, 10), r.id, r.supplier_name, r.status, r.amount]));
@@ -33508,8 +33508,8 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
       return (<>
         <div className="grid grid-cols-3 gap-2 mb-3">{kpi('Cancelled', data.count ?? 0)}{kpi('Lost revenue', cur(data.lost_revenue))}{kpi('Refunded', cur(data.refund_total))}</div>
         {rows.length === 0 ? empty() : (
-          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Guest', 'Room', 'Check-in', 'Cancelled', 'Reason', 'Refund'].map(th)}</tr></thead>
-            <tbody>{rows.map((r: any) => (<tr key={r.id} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3 font-semibold">{r.guest_name}</td><td className="py-1.5 px-3">{r.room_name || '—'}</td><td className="py-1.5 px-3">{String(r.check_in_date || '').slice(0, 10)}</td><td className="py-1.5 px-3">{String(r.cancelled_at || '').slice(0, 10) || '—'}</td><td className="py-1.5 px-3 text-[#6b5d52]">{r.cancellation_reason || '—'}</td><td className="py-1.5 px-3 font-bold">{cur(r.cancellation_refund_amount)}</td></tr>))}</tbody></table>
+          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Guest', 'Room', 'Check-in', 'Cancelled', 'Cancelled by', 'Reason', 'Refund'].map(th)}</tr></thead>
+            <tbody>{rows.map((r: any) => (<tr key={r.id} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3 font-semibold">{r.guest_name}</td><td className="py-1.5 px-3">{r.room_name || '—'}</td><td className="py-1.5 px-3">{String(r.check_in_date || '').slice(0, 10)}</td><td className="py-1.5 px-3">{String(r.cancelled_at || '').slice(0, 10) || '—'}</td><td className="py-1.5 px-3 whitespace-nowrap">{r.cancelled_by_label || '—'}</td><td className="py-1.5 px-3 text-[#6b5d52]">{r.cancellation_reason || '—'}</td><td className="py-1.5 px-3 font-bold">{cur(r.cancellation_refund_amount)}</td></tr>))}</tbody></table>
         )}
       </>);
     }
