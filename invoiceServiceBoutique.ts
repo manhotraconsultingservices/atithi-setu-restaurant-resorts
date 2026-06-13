@@ -600,56 +600,44 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
       }
 
       // ═══ IRN BOX (R-3) ═════════════════════════════════════════════
-      // Same logic as Classic — pure compliance, no template variation.
+      // Render ONLY when a real IRN was GENERATED. The "IRN PENDING" notice
+      // was removed per owner request (cluttered non-e-invoicing tenants).
       const irn = data.irn;
-      if (irn && (irn.eInvoiceMandatory || irn.irn || irn.status)) {
-        const isGenerated = String(irn.status || '').toUpperCase() === 'GENERATED' && irn.irn;
-        const irnBoxH = isGenerated ? 86 : 44;
+      const irnGenerated = !!(irn && String(irn.status || '').toUpperCase() === 'GENERATED' && irn.irn);
+      if (irnGenerated) {
+        const irnBoxH = 86;
         ensureSpace(irnBoxH + 12);
-        const irnBg = isGenerated ? '#f0f7f3' : '#fff5e6';
-        const irnBorder = isGenerated ? '#2d7d5a' : '#cc5a16';
-        doc.roundedRect(M, y, INNER_W, irnBoxH, 4).fillAndStroke(irnBg, irnBorder);
-        doc.fillColor(irnBorder).font('Helvetica-Bold').fontSize(8.5)
-           .text(isGenerated ? 'GST E-INVOICE (IRN)' : 'GST E-INVOICE — IRN PENDING',
-                 M + 12, y + 7, { characterSpacing: 0.8 });
-        if (isGenerated) {
+        doc.roundedRect(M, y, INNER_W, irnBoxH, 4).fillAndStroke('#f0f7f3', '#2d7d5a');
+        doc.fillColor('#2d7d5a').font('Helvetica-Bold').fontSize(8.5)
+           .text('GST E-INVOICE (IRN)', M + 12, y + 7, { characterSpacing: 0.8 });
+        doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5)
+           .text('IRN', M + 12, y + 22);
+        doc.fillColor(INK).font('Helvetica-Bold').fontSize(7.5)
+           .text(String(irn!.irn || '').slice(0, 64), M + 12, y + 32, { width: INNER_W - 110 });
+        if (irn!.ackNo) {
           doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5)
-             .text('IRN', M + 12, y + 22);
-          doc.fillColor(INK).font('Helvetica-Bold').fontSize(7.5)
-             .text(String(irn.irn || '').slice(0, 64), M + 12, y + 32, { width: INNER_W - 110 });
-          if (irn.ackNo) {
-            doc.fillColor(INK_SOFT).font('Helvetica').fontSize(7.5)
-               .text(`ACK ${irn.ackNo}${irn.ackDate ? ' · ' + irn.ackDate : ''}`,
-                     M + 12, y + 56);
-          }
-          if (irn.signedQrCode) {
-            try {
-              let qrBytes: Buffer | null = null;
-              const raw = String(irn.signedQrCode);
-              if (raw.startsWith('data:image/')) {
-                const comma = raw.indexOf(',');
-                if (comma > 0) qrBytes = Buffer.from(raw.slice(comma + 1), 'base64');
-              } else if (/^[A-Za-z0-9+/=\s]+$/.test(raw) && raw.length > 200) {
-                qrBytes = Buffer.from(raw.replace(/\s+/g, ''), 'base64');
-              }
-              if (qrBytes) {
-                doc.image(qrBytes, PAGE_W - M - 78, y + 6, { fit: [70, 70] } as any);
-              } else {
-                doc.fillColor(MUTED).font('Helvetica').fontSize(6.5)
-                   .text('QR not previewable here — scan the source.', PAGE_W - M - 130, y + 60, { width: 120 });
-              }
-            } catch {
-              // ignore image failure — text IRN is still legally sufficient
+             .text(`ACK ${irn!.ackNo}${irn!.ackDate ? ' · ' + irn!.ackDate : ''}`,
+                   M + 12, y + 56);
+        }
+        if (irn!.signedQrCode) {
+          try {
+            let qrBytes: Buffer | null = null;
+            const raw = String(irn!.signedQrCode);
+            if (raw.startsWith('data:image/')) {
+              const comma = raw.indexOf(',');
+              if (comma > 0) qrBytes = Buffer.from(raw.slice(comma + 1), 'base64');
+            } else if (/^[A-Za-z0-9+/=\s]+$/.test(raw) && raw.length > 200) {
+              qrBytes = Buffer.from(raw.replace(/\s+/g, ''), 'base64');
             }
+            if (qrBytes) {
+              doc.image(qrBytes, PAGE_W - M - 78, y + 6, { fit: [70, 70] } as any);
+            } else {
+              doc.fillColor(MUTED).font('Helvetica').fontSize(6.5)
+                 .text('QR not previewable here — scan the source.', PAGE_W - M - 130, y + 60, { width: 120 });
+            }
+          } catch {
+            // ignore image failure — text IRN is still legally sufficient
           }
-        } else {
-          doc.fillColor(INK_SOFT).font('Helvetica').fontSize(8.5)
-             .text(
-               irn.eInvoiceMandatory
-                 ? 'This invoice will be replaced by an IRN-stamped version after the GSP returns IRP confirmation. Per Sec 31(1) CGST Rules, an e-invoice without IRN is not a valid tax invoice for B2B sales.'
-                 : 'IRN registration pending.',
-               M + 12, y + 22, { width: INNER_W - 24 }
-             );
         }
         y += irnBoxH + 12;
       }
