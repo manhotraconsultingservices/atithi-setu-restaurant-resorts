@@ -27347,6 +27347,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             (o.room_id && o.room_id === checkoutBooking.room_id) ||
             (o.booking_id && o.booking_id === checkoutBooking.id)
           )}
+          onPendingReconciled={fetchPendingFolioOrders}
         />
       )}
 
@@ -33121,7 +33122,8 @@ const CheckoutModal: React.FC<{
   loyaltyBanner: React.ReactNode;
   lateFeeBanner: React.ReactNode;
   pendingRoomOrders?: any[];
-}> = ({ booking, restaurant, restaurantId, token, fetchFolioOutstanding, hotelApi, onClose, onSettled, loyaltyBanner, lateFeeBanner, pendingRoomOrders = [] }) => {
+  onPendingReconciled?: () => void | Promise<void>;
+}> = ({ booking, restaurant, restaurantId, token, fetchFolioOutstanding, hotelApi, onClose, onSettled, loyaltyBanner, lateFeeBanner, pendingRoomOrders = [], onPendingReconciled }) => {
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [discount, setDiscount] = useState(0);
@@ -33137,6 +33139,11 @@ const CheckoutModal: React.FC<{
   // dispute, etc). Persisted server-side so the invoice + outstanding follow.
   const [gstBusy, setGstBusy] = useState(false);
   const [gstReason, setGstReason] = useState('');
+  // Inline reconcile of unbilled room F&B from RIGHT HERE at checkout, so staff
+  // don't have to leave for Folios → Unbilled room orders. resolvedPending hides
+  // an order optimistically the moment it's charged / marked paid.
+  const [pendingBusyId, setPendingBusyId] = useState<string | null>(null);
+  const [resolvedPending, setResolvedPending] = useState<Set<string>>(new Set());
   const sym = restaurant?.currency_symbol || '₹';
 
   const refresh = async () => {
@@ -33146,6 +33153,39 @@ const CheckoutModal: React.FC<{
     finally { setLoading(false); }
   };
   useEffect(() => { refresh(); /* eslint-disable-line */ }, [booking.id]);
+
+  // Charge an unbilled room order onto the folio (or mark it paid-in-room) in
+  // one tap, then re-pull the folio so the outstanding + breakdown update live.
+  const summarizeOrderItems = (items: any): string => {
+    let arr: any = items;
+    try { if (typeof items === 'string') arr = JSON.parse(items); } catch { arr = []; }
+    if (!Array.isArray(arr)) return '';
+    return arr.map((it: any) => `${it.name || it.menuName || 'Item'}${Number(it.quantity || it.qty || 1) > 1 ? ` ×${it.quantity || it.qty}` : ''}`).join(', ');
+  };
+  const reconcilePending = async (order: any, paidInRoom: boolean) => {
+    let method = 'CASH';
+    if (paidInRoom) {
+      const m = window.prompt('Guest paid in the room — payment method? (CASH / UPI / CARD)', 'CASH');
+      if (m == null) return;   // cancelled
+      method = (m || 'CASH').toUpperCase();
+    }
+    setPendingBusyId(order.id);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/orders/${order.id}/deliver`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ paid_in_room: paidInRoom, payment_method: method }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d?.error || `Failed (${res.status})`);
+      setResolvedPending(prev => { const n = new Set(prev); n.add(order.id); return n; });
+      await refresh();                          // folio total / outstanding now reflect the charge
+      if (onPendingReconciled) await onPendingReconciled();
+    } catch (e: any) {
+      alert(e?.message || 'Failed to post the room order to the folio');
+    } finally { setPendingBusyId(null); }
+  };
+  const visiblePending = pendingRoomOrders.filter((o: any) => !resolvedPending.has(o.id));
 
   const grand = Number(data?.folio?.grand_total || booking.total_amount || 0);
   const paid = Number(data?.total_paid || 0);
@@ -33245,19 +33285,42 @@ const CheckoutModal: React.FC<{
           {/* RS-FIX — warn if room-service charges for this room aren't on the
               folio yet. Non-blocking; staff reconcile them via Folios →
               Unbilled room orders before settling. */}
-          {pendingRoomOrders.length > 0 && (
-            <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-3">
+          {visiblePending.length > 0 && (
+            <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-3 space-y-2">
               <div className="flex items-start gap-2">
                 <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
                 <div>
                   <p className="text-xs font-bold text-amber-900">
-                    {pendingRoomOrders.length} unbilled room order{pendingRoomOrders.length === 1 ? '' : 's'} for this room
+                    {visiblePending.length} unbilled room order{visiblePending.length === 1 ? '' : 's'} for this room
                   </p>
                   <p className="text-[11px] text-amber-800/90 mt-0.5 leading-relaxed">
-                    These room-service charges aren&rsquo;t on the folio yet. Post them via <strong>Folios &rarr; Unbilled room orders</strong> before settling, or the revenue will be missed.
+                    These room-service charges aren&rsquo;t on the folio yet. <strong>Charge to room</strong> adds it to this bill;
+                    <strong> Guest paid</strong> if they already settled it in the room. Do it here before checking out.
                   </p>
                 </div>
               </div>
+              {visiblePending.map((o: any) => (
+                <div key={o.id} className="flex flex-wrap items-center gap-2 bg-white rounded-xl border border-amber-200 px-3 py-2">
+                  <div className="flex-1 min-w-[150px]">
+                    <p className="text-[11px] font-semibold text-[#1a1208] leading-snug">{summarizeOrderItems(o.items) || 'Room order'}</p>
+                    {o.created_at && <p className="text-[10px] text-[#9c8e85]">{new Date(o.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' })}</p>}
+                  </div>
+                  <span className="font-mono text-sm font-bold text-[#1a1208] whitespace-nowrap">{fmt(Number(o.total_amount || 0))}</span>
+                  <button
+                    type="button"
+                    onClick={() => reconcilePending(o, false)}
+                    disabled={pendingBusyId === o.id}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-bold hover:bg-emerald-700 disabled:opacity-50 whitespace-nowrap"
+                  >{pendingBusyId === o.id ? 'Working…' : 'Charge to room'}</button>
+                  <button
+                    type="button"
+                    onClick={() => reconcilePending(o, true)}
+                    disabled={pendingBusyId === o.id}
+                    title="Guest already paid this in the room — keep it off the folio"
+                    className="px-3 py-1.5 rounded-lg border border-emerald-600 text-emerald-700 bg-white text-[11px] font-bold hover:bg-emerald-50 disabled:opacity-50 whitespace-nowrap"
+                  >💵 Guest paid</button>
+                </div>
+              ))}
             </div>
           )}
 
