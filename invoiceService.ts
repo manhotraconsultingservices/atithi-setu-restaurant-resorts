@@ -366,20 +366,30 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
         .map((e, idx) => ({ e, idx, cat: categoryForEntry(e.entryType) as string }))
         .sort((a, b) => (CAT_RANK[a.cat] - CAT_RANK[b.cat]) || (a.idx - b.idx));
       const showSections = new Set(orderedEntries.map(o => o.cat)).size > 1;
+      // SECTION-VISIBILITY (17 Jun 2026) — the section header was a near-white
+      // HIGHLIGHT tint with ink text, so Room Charges / Restaurant bands barely
+      // read as dividers. Now a solid ACCENT (brand) band with white bold,
+      // letter-spaced text — an unmistakable divider — and each section is
+      // bookended by a subtle tinted subtotal band so the grouping is obvious.
       const drawSectionHeader = (cat: string) => {
-        ensureSpace(20);
-        doc.rect(M, y - 2, INNER_W, 16).fill(HIGHLIGHT);
-        doc.fillColor(INK).font('Helvetica-Bold').fontSize(8.5)
-           .text((SECTION_TITLE[cat] || cat).toUpperCase(), colPositions.desc + 4, y + 3);
-        y += 18;
+        ensureSpace(24);
+        const bandH = 18;
+        doc.rect(M, y - 2, INNER_W, bandH).fill(ACCENT);
+        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(9)
+           .text((SECTION_TITLE[cat] || cat).toUpperCase(), colPositions.desc + 4, y + 3, { characterSpacing: 0.6 });
+        doc.fillColor(INK);   // reset so subsequent rows aren't white
+        y += bandH + 4;
       };
       const drawSectionSubtotal = (cat: string, amt: number) => {
-        ensureSpace(16);
-        doc.fillColor(INK_SOFT).font('Helvetica-Bold').fontSize(8.5)
+        ensureSpace(18);
+        // Subtle tinted band + top hairline closes the section visually.
+        doc.rect(M, y - 1, INNER_W, 15).fill(HIGHLIGHT);
+        doc.moveTo(M, y - 1).lineTo(PAGE_W - M, y - 1).lineWidth(0.5).strokeColor(ACCENT).stroke();
+        doc.fillColor(INK).font('Helvetica-Bold').fontSize(8.5)
            .text(`${SECTION_TITLE[cat] || cat} subtotal`, colPositions.desc + 4, y + 2, { width: 220 });
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
            .text(moneyNumeric(data.tenant, amt * sign), colPositions.amt - 20, y + 2, { width: 80, align: 'right' });
-        y += 16;
+        y += 18 + 2;
       };
       let rowNum = 0;
       let curCat: string | null = null;
