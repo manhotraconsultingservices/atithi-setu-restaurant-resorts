@@ -243,6 +243,15 @@ const BOOKING_COL_DEFS: { key: string; label: string; def: boolean }[] = [
   { key: 'paylink',   label: 'Pay link',  def: true  },
 ];
 
+// Location label for an order. Room-service orders store their location as
+// "Room 101" in the table field, so prefixing "Table " gives "Table Room 101".
+// Show "Room 101" as-is; only prefix "Table " for an actual table number.
+function orderLocationLabel(tableNumber: any): string {
+  const t = String(tableNumber ?? '').trim();
+  if (!t) return '—';
+  return /^room\b/i.test(t) ? t : `Table ${t}`;
+}
+
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = '', inQuote = false;
@@ -23413,7 +23422,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 {String(o.id || '').startsWith('MAN-') ? (
                                   <span className="text-purple-700">Manual</span>
                                 ) : (
-                                  <>Table {o.tableNumber}</>
+                                  <>{orderLocationLabel(o.tableNumber)}</>
                                 )}
                                 {(o as any).round_number > 1 && (
                                   <span className="ml-1 text-[11px] text-[#9c8e85]">R{(o as any).round_number}</span>
@@ -23521,7 +23530,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   {/* Cancel order */}
                                   <button
                                     onClick={() => {
-                                      if (window.confirm(`Cancel order #${String(o.id).slice(-6).toUpperCase()} for Table ${o.tableNumber}?`)) {
+                                      if (window.confirm(`Cancel order #${String(o.id).slice(-6).toUpperCase()} for ${orderLocationLabel(o.tableNumber)}?`)) {
                                         patchLiveOrder(o.id, { status: 'CANCELLED' });
                                       }
                                     }}
@@ -35779,7 +35788,7 @@ function ChefDashboard({ restaurantId, token }: { restaurantId: string, token: s
                   <div className="p-5 border-b border-[#faf7f2] flex justify-between items-start bg-[#faf7f2]/40">
                     <div>
                       <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] block">
-                        {String(order.id || '').startsWith('MAN-') ? '📋 Manual Invoice' : `Table ${order.tableNumber}`}
+                        {String(order.id || '').startsWith('MAN-') ? '📋 Manual Invoice' : orderLocationLabel(order.tableNumber)}
                       </span>
                       <h4 className="text-base font-bold font-mono text-[#1a1208]">{order.id}</h4>
                       <div className="flex flex-wrap gap-1.5 mt-1.5">
@@ -36242,7 +36251,7 @@ function buildKitchenSlipHTML(d: {
 <html>
 <head>
   <meta charset="UTF-8"/>
-  <title>KOT - Table ${d.tableNumber}</title>
+  <title>KOT - ${orderLocationLabel(d.tableNumber)}</title>
   <style>
     @page { size: 80mm auto; margin: 0; }
     html, body { margin: 0; padding: 0; height: auto; }
