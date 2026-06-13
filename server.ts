@@ -26270,11 +26270,11 @@ ${data.tenant.name}`;
                 `UPDATE loyalty_customers SET last_perk_at = ? WHERE phone = ?`,
                 [new Date().toISOString(), norm]
               );
-              try {
-                await triggerNotification(req.params.id, 'GUEST_PERK_TRIGGERED', {
-                  bookingId: b.id, guestName: b.guest_name, perkType: perk.type, message: perk.message,
-                });
-              } catch {}
+              // Fire-and-forget — see GUEST_CHECKED_IN below. The perk
+              // email/SMS still sends; it just doesn't block check-in.
+              void triggerNotification(req.params.id, 'GUEST_PERK_TRIGGERED', {
+                bookingId: b.id, guestName: b.guest_name, perkType: perk.type, message: perk.message,
+              }).catch(() => {});
             } else {
               // Already fired earlier today — return preview but skip notification.
               perk = { ...perk, applies: false };
@@ -26285,7 +26285,12 @@ ${data.tenant.name}`;
         console.warn('[hotel-checkin] perk hook failed:', e);
       }
 
-      try { await triggerNotification(req.params.id, 'GUEST_CHECKED_IN', { bookingId: b.id, guestName: b.guest_name, roomId: b.room_id }); } catch {}
+      // PERF (17 Jun 2026) — fire-and-forget. triggerNotification sends
+      // email/SMS/WhatsApp/Telegram SEQUENTIALLY to every enabled recipient,
+      // each a 0.5-1.5s network round-trip; awaiting it added 2-7s to every
+      // check-in. The notification still goes out; it just no longer blocks
+      // the staff's check-in response (mirrors the payment-link send below).
+      void triggerNotification(req.params.id, 'GUEST_CHECKED_IN', { bookingId: b.id, guestName: b.guest_name, roomId: b.room_id }).catch(() => {});
 
       // ── Auto-send payment link on check-in ───────────────────────
       // Build the payload + send via email (if guest has an email on

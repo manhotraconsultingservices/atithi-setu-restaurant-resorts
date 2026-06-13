@@ -10371,8 +10371,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       body.advance_reference = advance.reference || null;
     }
     const result = await hotelApi(`/bookings/${bookingId}/checkin`, { method: 'POST', body: JSON.stringify(body) });
-    await fetchHotelBookings();
-    await fetchHotelRooms();
+    // PERF (17 Jun 2026) — refetch the bookings + rooms lists in PARALLEL, not
+    // one-then-the-other. /bookings is the heavy one (per-row subqueries); doing
+    // it sequentially after /rooms doubled the post-check-in wait the user saw.
+    await Promise.all([fetchHotelBookings(), fetchHotelRooms()]);
     markAvailabilityDirty();
     // Phase H1 — celebrate birthday / anniversary perks. Server returns
     // perk.applies=true when today matches the guest's stored date and
@@ -26918,9 +26920,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <p className="font-mono font-bold text-[#cc5a16]">₹{preview.total.toLocaleString('en-IN')}</p>
                           </div>
                         </div>
-                        {!preview.matrix_used && (
-                          <p className="text-[9px] italic text-amber-700">No matrix entry for this combination — falling back to room base rate. Configure the tariff matrix in Settings to use meal-plan pricing.</p>
-                        )}
+                        {!preview.matrix_used && (() => {
+                          // Name the EXACT empty cell so staff can see this is a
+                          // tariff-config gap (not a calculation bug) and fill it.
+                          // The per-night rate, the preview, and the folio all
+                          // read the matrix the same way — an empty cell falls
+                          // back to the room base rate by design.
+                          const rt = (tariffData.room_types || []).find((t: any) => t.id === (hotelRooms.find(r => r.id === editingBooking.room_id)?.type_id));
+                          const mp = (tariffData.meal_plans || []).find((m: any) => m.id === editingBooking.meal_plan_id);
+                          const seasonsLbl = seasonsInStay.filter(s => s !== 'no-season').join(' + ') || 'this season';
+                          const rtLbl = rt?.name || 'this room category';
+                          return (
+                            <p className="text-[9px] italic text-amber-700">
+                              {mp
+                                ? <>No tariff set for <strong>{rtLbl} × {seasonsLbl} × {mp.code}</strong> — showing the room base rate (₹{preview.base_total.toLocaleString('en-IN')}/stay). Set this exact cell in <strong>Settings → Room Setup → Tariff</strong> to price it.</>
+                                : <>No meal plan selected — showing the room base rate. Pick a meal plan above, then set its rate for <strong>{rtLbl} × {seasonsLbl}</strong> in <strong>Settings → Room Setup → Tariff</strong>.</>}
+                            </p>
+                          );
+                        })()}
                         {Number(editingBooking.room_rate) > 0 && (
                           <p className="text-[9px] italic text-amber-700">Manual room_rate is set ({editingBooking.room_rate}/night). The server will use THAT rate × nights and ignore this matrix preview. Clear the rate field to use the matrix.</p>
                         )}
