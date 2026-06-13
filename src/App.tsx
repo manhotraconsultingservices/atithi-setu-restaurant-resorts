@@ -16412,6 +16412,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                             className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-md bg-red-50 text-red-700 hover:bg-red-100"
                                           >× Discard</button>
                                         ) : (
+                                          <div className="inline-flex items-center gap-1.5">
                                           <button
                                             type="button"
                                             onClick={() => {
@@ -16432,8 +16433,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                               removeMealPlan(m.id);
                                               alert(`"${m.code}" moved to Archived. Click Save Meal Plans to persist, or Restore to undo.`);
                                             }}
+                                            title="Hide from booking forms (keeps history); can be restored"
                                             className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-md bg-[#faf7f2] text-[#c13b3b] hover:bg-red-50 border border-red-200"
                                           >Archive…</button>
+                                          <button
+                                            type="button"
+                                            onClick={() => deleteMealPlan(m)}
+                                            title="Permanently delete this meal plan from the system"
+                                            className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-md bg-red-50 text-red-700 hover:bg-red-100 border border-red-200"
+                                          >🗑 Delete</button>
+                                          </div>
                                         )}
                                       </td>
                                     </tr>
@@ -17703,7 +17712,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
                   {(() => {
                     const arrow = (c: string) => bookingSort.col === c ? (bookingSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
-                    const sortableCls = 'px-4 py-3 cursor-pointer select-none hover:text-[#cc5a16]';
+                    const sortableCls = 'px-4 py-3 whitespace-nowrap cursor-pointer select-none hover:text-[#cc5a16]';
                     return (
                   <tr>
                     {/* Guest — pinned left so the row's identity never scrolls away */}
@@ -17769,9 +17778,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         {colOn('room') && <td className="px-4 py-3 text-[#3d3128] whitespace-nowrap">{b.room_name || b.room_id}</td>}
                         {/* Dates — whitespace-nowrap + min-width so each date shows in full. */}
                         {colOn('dates') && (
-                          <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap min-w-[150px]">
-                            <div className="font-medium">{formatDateForTenant(b.check_in_date, restaurant?.date_format)}</div>
-                            <div className="text-[#9c8e85]">→ {formatDateForTenant(b.check_out_date, restaurant?.date_format)}</div>
+                          <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap min-w-[160px]">
+                            <div className="font-medium whitespace-nowrap">{formatDateForTenant(b.check_in_date, restaurant?.date_format)}</div>
+                            <div className="text-[#9c8e85] whitespace-nowrap">→ {formatDateForTenant(b.check_out_date, restaurant?.date_format)}</div>
                           </td>
                         )}
                         {colOn('nights') && <td className="px-4 py-3 text-right text-xs text-[#3d3128]">{rowNights ?? '—'}</td>}
@@ -17779,9 +17788,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         {colOn('adults') && <td className="px-4 py-3 text-right text-xs text-[#3d3128]">{b.num_adults ?? '—'}{b.extra_adults ? <span className="text-amber-700"> (+{b.extra_adults})</span> : null}</td>}
                         {colOn('meal_plan') && <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap">{b.meal_plan_snapshot || b.meal_plan_id || '—'}</td>}
                         {colOn('status') && (
-                          <td className="px-4 py-3">
+                          <td className="px-4 py-3 whitespace-nowrap">
                             <span
-                              className={cn("px-2 py-1 rounded-md text-[10px] font-bold uppercase border", lcStyle.bg, lcStyle.text, lcStyle.border)}
+                              className={cn("inline-block whitespace-nowrap px-2 py-1 rounded-md text-[10px] font-bold uppercase border", lcStyle.bg, lcStyle.text, lcStyle.border)}
                               title={`DB status: ${b.status}`}
                             >{lcStyle.label}</span>
                           </td>
