@@ -236,6 +236,7 @@ const BOOKING_COL_DEFS: { key: string; label: string; def: boolean }[] = [
   { key: 'meal_plan', label: 'Meal Plan', def: false },
   { key: 'status',    label: 'Status',    def: true  },
   { key: 'total',     label: 'Total',     def: true  },
+  { key: 'restaurant', label: 'Restaurant bill', def: true },
   { key: 'advance',   label: 'Advance',   def: true  },
   { key: 'source',    label: 'Source',    def: false },
   { key: 'created',   label: 'Created',   def: false },
@@ -7234,6 +7235,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingBooking, setEditingBooking] = useState<any>(null);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [checkoutBooking, setCheckoutBooking] = useState<any>(null);
+  // RESTAURANT-BILL — booking whose room-service F&B bill is open in the
+  // view/mark-paid modal (opened from the reservation table cell).
+  const [restaurantBillBooking, setRestaurantBillBooking] = useState<any>(null);
 
   // Phase H1 — cancellation confirm modal (refund preview + reason)
   // Phase H1 — early check-in confirm modal (state-based, not window.confirm).
@@ -17819,6 +17823,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     {colOn('meal_plan') && <th className="px-4 py-3 text-left">Meal Plan</th>}
                     {colOn('status')    && <th onClick={() => toggleBookingSort('status')} title="Click to sort" className={cn(sortableCls, 'text-left')}>Status{arrow('status')}</th>}
                     {colOn('total')     && <th onClick={() => toggleBookingSort('total')}  title="Click to sort" className={cn(sortableCls, 'text-right')}>Total{arrow('total')}</th>}
+                    {colOn('restaurant') && <th className="text-right px-4 py-3" title="Room-service F&B for this guest — click to view / mark paid">Restaurant bill</th>}
                     {colOn('advance')   && <th className="text-right px-4 py-3" title="Advance payments already collected">Advance</th>}
                     {colOn('source')    && <th className="px-4 py-3 text-left">Source</th>}
                     {colOn('created')   && <th className="px-4 py-3 text-left">Created</th>}
@@ -17900,6 +17905,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </td>
                         )}
                         {colOn('total') && <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>}
+                        {colOn('restaurant') && (
+                          <td className="px-4 py-3 text-right whitespace-nowrap">
+                            {Number(b.fnb_total || 0) > 0 ? (
+                              <button
+                                type="button"
+                                onClick={() => setRestaurantBillBooking(b)}
+                                title="View the room-service F&B bill / mark it paid"
+                                className="font-mono text-[#1a1208] hover:text-[#cc5a16] hover:underline"
+                              >
+                                ₹{Number(b.fnb_total || 0).toLocaleString('en-IN')}
+                                {Number(b.fnb_unpaid || 0) <= 0.01
+                                  ? <span className="ml-1 text-[9px] font-bold text-emerald-700 uppercase">✓ paid</span>
+                                  : <span className="ml-1 text-[9px] font-bold text-amber-700 uppercase">unpaid</span>}
+                              </button>
+                            ) : <span className="text-[#9c8e85]">—</span>}
+                          </td>
+                        )}
                         {/* ADV-PAY: show advance collected so far. Green when >0. */}
                         {colOn('advance') && (
                           <td className="px-4 py-3 text-right">
@@ -27351,6 +27373,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         />
       )}
 
+      {/* ═════════ Restaurant-bill view / mark-paid modal ═════════ */}
+      {restaurantBillBooking && (
+        <RestaurantBillModal
+          booking={restaurantBillBooking}
+          restaurant={restaurant}
+          restaurantId={restaurantId!}
+          token={token!}
+          onClose={() => setRestaurantBillBooking(null)}
+          onChanged={async () => { await fetchHotelBookings(); await fetchPendingFolioOrders(); markAvailabilityDirty(); }}
+        />
+      )}
+
       {/* ═════════ FAQ add/edit modal (Phase 4) ═════════ */}
       {showFaqModal && editingFaq && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
@@ -33108,6 +33142,136 @@ const PickupPaceChart: React.FC<{ restaurantId: string; token: string }> = ({ re
 //   • "Receive payment" form to record the final payment now.
 //   • "Settle & Check Out" button — disabled until outstanding ≤ 0
 //     OR the staff explicitly toggles "Comp / waive".
+// ════════════════════════════════════════════════════════════════════
+// RestaurantBillModal — view a guest's room-service F&B bill + mark it paid
+// ════════════════════════════════════════════════════════════════════
+// Opened from the reservation table's "Restaurant bill" column. Lists the
+// guest's CHARGE_TO_ROOM F&B orders with their state (paid-in-room / on the
+// room folio / pending) and lets staff settle the whole bill separately —
+// which marks the orders paid-in-room and reverses any that had posted to the
+// folio, so the F&B is never billed twice.
+const RestaurantBillModal: React.FC<{
+  booking: any;
+  restaurant: any;
+  restaurantId: string;
+  token: string;
+  onClose: () => void;
+  onChanged: () => void | Promise<void>;
+}> = ({ booking, restaurant, restaurantId, token, onClose, onChanged }) => {
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const sym = restaurant?.currency_symbol || '₹';
+  const fmt = (n: number) => `${sym}${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings/${booking.id}/restaurant-bill`, { headers: { Authorization: `Bearer ${token}` } });
+      const d = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(d?.error || `Failed (${res.status})`);
+      setData(d);
+    } catch (e: any) { setError(e?.message || 'Failed to load the restaurant bill'); setData(null); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { refresh(); /* eslint-disable-line */ }, [booking.id]);
+
+  const summarize = (items: any): string => {
+    let arr: any = items;
+    try { if (typeof items === 'string') arr = JSON.parse(items); } catch { arr = []; }
+    if (!Array.isArray(arr)) return '';
+    return arr.map((it: any) => `${it.name || it.menuName || 'Item'}${Number(it.quantity || it.qty || 1) > 1 ? ` ×${it.quantity || it.qty}` : ''}`).join(', ');
+  };
+  const STATE_BADGE: Record<string, { label: string; cls: string }> = {
+    PAID_IN_ROOM:      { label: 'Paid in room',     cls: 'bg-emerald-50 text-emerald-700' },
+    POSTED:            { label: 'On room folio',    cls: 'bg-sky-50 text-sky-700' },
+    PENDING_MANUAL:    { label: 'Unbilled',         cls: 'bg-amber-50 text-amber-700' },
+    AWAITING_DELIVERY: { label: 'Awaiting delivery', cls: 'bg-amber-50 text-amber-700' },
+  };
+
+  const markPaid = async () => {
+    const m = window.prompt('Guest paid the restaurant bill — payment method? (CASH / UPI / CARD)', 'CASH');
+    if (m == null) return;
+    setBusy(true); setError('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings/${booking.id}/restaurant-bill/mark-paid`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ payment_method: (m || 'CASH').toUpperCase() }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d?.error || `Failed (${res.status})`);
+      await refresh();
+      await onChanged();
+    } catch (e: any) { setError(e?.message || 'Failed to mark the bill paid'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col">
+        <div className="shrink-0 px-6 py-4 border-b border-[#cc5a16]/10 flex items-center justify-between">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">🍽 Restaurant bill</p>
+            <h3 className="text-lg font-bold font-serif text-[#1a1208]">{booking.guest_name || 'Guest'} · {booking.room_name || booking.room_id}</h3>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 rounded-full bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#3d3128]">×</button>
+        </div>
+        <div className="p-6 overflow-y-auto flex-1 min-h-0 space-y-3">
+          {error && <p className="text-xs text-[#c13b3b] bg-[#fdf0f0] rounded-xl px-3 py-2">{error}</p>}
+          {loading && <p className="text-center text-sm text-[#9c8e85] italic py-4">Loading…</p>}
+          {!loading && data && data.count === 0 && (
+            <p className="text-center text-sm text-[#9c8e85] italic py-6">No room-service F&amp;B orders for this guest.</p>
+          )}
+          {!loading && data && data.count > 0 && (
+            <>
+              <div className="space-y-1.5">
+                {data.orders.map((o: any) => {
+                  const st = String(o.folio_post_status || '').toUpperCase();
+                  const badge = STATE_BADGE[st] || { label: st || 'Pending', cls: 'bg-stone-50 text-stone-600' };
+                  return (
+                    <div key={o.id} className="flex items-start justify-between gap-3 bg-[#faf7f2] rounded-xl px-3 py-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[12px] text-[#1a1208] leading-snug">{summarize(o.items) || 'Room order'}</p>
+                        <span className={cn('inline-block mt-1 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded', badge.cls)}>{badge.label}</span>
+                      </div>
+                      <span className="font-mono text-sm font-bold text-[#1a1208] whitespace-nowrap">{fmt(o.total_amount)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="rounded-2xl border border-[#cc5a16]/15 bg-white p-3 text-[12px] space-y-1">
+                <div className="flex justify-between"><span className="text-[#6b5d52]">Total restaurant bill</span><span className="font-mono font-bold">{fmt(data.total)}</span></div>
+                {data.paid_in_room > 0 && <div className="flex justify-between"><span className="text-[#6b5d52]">Paid in room</span><span className="font-mono text-emerald-700">{fmt(data.paid_in_room)}</span></div>}
+                {data.on_folio > 0 && <div className="flex justify-between"><span className="text-[#6b5d52]">On room folio (pays at checkout)</span><span className="font-mono text-sky-700">{fmt(data.on_folio)}</span></div>}
+                {data.pending > 0 && <div className="flex justify-between"><span className="text-[#6b5d52]">Pending (not yet billed)</span><span className="font-mono text-amber-700">{fmt(data.pending)}</span></div>}
+                <div className="border-t border-[#cc5a16]/10 pt-1 flex justify-between font-bold">
+                  <span className="text-[#1a1208]">Unpaid</span><span className="font-mono text-[#cc5a16]">{fmt(data.unpaid)}</span>
+                </div>
+              </div>
+              <p className="text-[10px] text-[#9c8e85] leading-snug">
+                <strong>Mark paid</strong> settles the restaurant bill separately — the orders are marked paid-in-room and any that posted to the room folio are reversed, so the guest is never billed for the same F&amp;B twice.
+              </p>
+            </>
+          )}
+        </div>
+        <div className="shrink-0 px-6 py-4 border-t border-[#cc5a16]/10 flex items-center justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Close</button>
+          {!loading && data && data.unpaid > 0.01 && (
+            <button
+              onClick={markPaid}
+              disabled={busy}
+              title="Guest paid the restaurant bill separately"
+              className="px-4 py-2 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-50"
+            >{busy ? 'Working…' : `💵 Mark paid (${fmt(data.unpaid)})`}</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Server enforces the gate too (returns 409 with OUTSTANDING_BALANCE
 // when not waived) — UI block is for ergonomics, server is the law.
 const CheckoutModal: React.FC<{

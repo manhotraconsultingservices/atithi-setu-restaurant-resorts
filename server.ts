@@ -20707,7 +20707,22 @@ ${data.tenant.name}`;
                         ) AS advance_paid,
                         (SELECT f.id FROM folios f
                          WHERE f.booking_id = b.id AND f.status = 'open'
-                         ORDER BY f.created_at DESC LIMIT 1) AS open_folio_id
+                         ORDER BY f.created_at DESC LIMIT 1) AS open_folio_id,
+                        -- RESTAURANT-BILL (16 Jun 2026): the guest's room-service
+                        -- F&B total + how much is still unpaid (not yet settled
+                        -- in the room), so the booking row can show the
+                        -- restaurant bill and offer a Mark-paid action. Matches
+                        -- orders to the booking by booking_id OR room_id (same
+                        -- rule the folio sweep / checkout panel use).
+                        COALESCE((SELECT SUM(o.total_amount) FROM orders o
+                                   WHERE o.deleted_at IS NULL
+                                     AND UPPER(o.payment_method) = 'CHARGE_TO_ROOM'
+                                     AND (o.booking_id = b.id OR o.room_id = b.room_id)), 0) AS fnb_total,
+                        COALESCE((SELECT SUM(o.total_amount) FROM orders o
+                                   WHERE o.deleted_at IS NULL
+                                     AND UPPER(o.payment_method) = 'CHARGE_TO_ROOM'
+                                     AND (o.booking_id = b.id OR o.room_id = b.room_id)
+                                     AND COALESCE(o.folio_post_status,'') <> 'PAID_IN_ROOM'), 0) AS fnb_unpaid
                  FROM room_bookings b
               LEFT JOIN rooms r ON r.id = b.room_id
                  WHERE 1 = 1`;
@@ -28073,6 +28088,92 @@ ${data.tenant.name}`;
     } catch (err: any) {
       console.error('deliver-order error:', err);
       res.status(500).json({ error: err?.message || 'Failed to deliver order' });
+    }
+  });
+
+  // ─── RESTAURANT BILL for a booking — view + mark paid ────────────────────
+  // The guest's room-service F&B (CHARGE_TO_ROOM orders), surfaced on the
+  // booking row so staff can SEE the restaurant bill and settle it separately
+  // from the room bill. Matches orders to the booking by booking_id OR room_id
+  // (same rule the folio sweep / checkout panel use).
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/restaurant-bill", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get("SELECT id, room_id, guest_name FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      const orders: any[] = await tenantDb.query(
+        `SELECT id, items, total_amount, status, kitchen_status, folio_post_status, folio_id,
+                room_payment_method, room_paid_at, created_at
+           FROM orders
+          WHERE deleted_at IS NULL
+            AND UPPER(payment_method) = 'CHARGE_TO_ROOM'
+            AND (booking_id = ? OR room_id = ?)
+          ORDER BY created_at ASC`,
+        [b.id, b.room_id]
+      ).catch(() => []);
+      let total = 0, paid = 0, onFolio = 0, pending = 0;
+      for (const o of orders) {
+        const amt = Number(o.total_amount || 0);
+        total += amt;
+        const st = String(o.folio_post_status || '').toUpperCase();
+        if (st === 'PAID_IN_ROOM') paid += amt;
+        else if (st === 'POSTED') onFolio += amt;
+        else pending += amt;   // AWAITING_DELIVERY / PENDING_MANUAL / unposted
+      }
+      const round = (n: number) => Math.round(n * 100) / 100;
+      res.json({
+        booking_id: b.id, guest_name: b.guest_name,
+        orders, count: orders.length,
+        total: round(total), paid_in_room: round(paid), on_folio: round(onFolio),
+        pending: round(pending), unpaid: round(total - paid),
+      });
+    } catch (err: any) {
+      console.error('restaurant-bill error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to load restaurant bill' });
+    }
+  });
+
+  // Mark the WHOLE restaurant bill paid (guest settled their F&B separately /
+  // in the room). Every F&B order not already PAID_IN_ROOM is marked paid; any
+  // that had already posted to the folio is reversed so it isn't billed twice
+  // (and so the room outstanding drops by the F&B amount).
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/restaurant-bill/mark-paid", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_paid_at TIMESTAMP").catch(() => {});
+      await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_payment_method TEXT").catch(() => {});
+      const b: any = await tenantDb.get("SELECT id, room_id FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      if (!b) return res.status(404).json({ error: 'Booking not found.' });
+      const method = String(req.body?.payment_method || 'CASH').toUpperCase().trim() || 'CASH';
+      const orders: any[] = await tenantDb.query(
+        `SELECT id, folio_id FROM orders
+          WHERE deleted_at IS NULL
+            AND UPPER(payment_method) = 'CHARGE_TO_ROOM'
+            AND (booking_id = ? OR room_id = ?)
+            AND COALESCE(folio_post_status,'') <> 'PAID_IN_ROOM'`,
+        [b.id, b.room_id]
+      ).catch(() => []);
+      let marked = 0, reversed = 0;
+      for (const o of orders) {
+        if (o.folio_id) {
+          const rev = await reverseOrderFolioPosting(req.params.id, o.id, 'Restaurant bill paid separately', req.user?.id || 'FRONT_DESK');
+          reversed += rev.reversed_count;
+        }
+        await tenantDb.run(
+          "UPDATE orders SET folio_post_status = 'PAID_IN_ROOM', room_paid_at = CURRENT_TIMESTAMP, room_payment_method = ? WHERE id = ?",
+          [method, o.id]
+        );
+        marked++;
+      }
+      console.log(`[restaurant-bill] booking ${b.id}: marked ${marked} F&B order(s) PAID_IN_ROOM (${method}), reversed ${reversed} folio line(s)`);
+      res.json({ success: true, booking_id: b.id, marked, reversed_folio_lines: reversed, payment_method: method });
+    } catch (err: any) {
+      console.error('restaurant-bill mark-paid error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to mark restaurant bill paid' });
     }
   });
 
