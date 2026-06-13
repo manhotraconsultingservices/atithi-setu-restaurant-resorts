@@ -1822,6 +1822,32 @@ async function resolveActiveFolioForRoom(
   return { folioId, bookingId, roomId };
 }
 
+// Tenants for which the room-service (RS) bridge columns on `orders` have been
+// verified/created this process. The original ALTERs live in the create-user
+// handler, so they only ran for tenants created AFTER the RS feature shipped —
+// older tenants (e.g. viveks-cafe) never got `posted_to_folio_at` etc., and any
+// posting path then threw `column "posted_to_folio_at" does not exist`. This
+// guards a one-time-per-process defensive migration at the single choke point
+// every posting path flows through (postOrderToFolio).
+const __rsOrderColsEnsured = new Set<string>();
+async function ensureOrderRsColumns(tenantDb: any, restaurantId: string): Promise<void> {
+  if (__rsOrderColsEnsured.has(restaurantId)) return;
+  try {
+    await tenantDb.exec(`
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_id TEXT;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS booking_id TEXT;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_id TEXT;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS posted_to_folio_at TIMESTAMP;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS folio_post_status TEXT;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_paid_at TIMESTAMP;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_payment_method TEXT;
+    `);
+    __rsOrderColsEnsured.add(restaurantId);   // only cache on success → retry next call if it failed
+  } catch (err) {
+    console.warn(`[folio] ensureOrderRsColumns failed for ${restaurantId}:`, err);
+  }
+}
+
 async function postOrderToFolio(
   restaurantId: string,
   order: {
@@ -1834,6 +1860,7 @@ async function postOrderToFolio(
   }
 ): Promise<{ ok: boolean; folio_id?: string; reason?: string; entry_ids?: string[] }> {
   const tenantDb = await getTenantDb(restaurantId);
+  await ensureOrderRsColumns(tenantDb, restaurantId);
 
   // Idempotency — bail if this order id is already posted.
   const existing: any = await tenantDb.get(
@@ -4409,6 +4436,13 @@ async function startServer() {
       try {
         const tenantDb = await getTenantDb(t.id);
         await createHotelTables(tenantDb);
+        // The `orders` room-service bridge columns (posted_to_folio_at,
+        // folio_id, folio_post_status, …) were originally ALTERed only in the
+        // create-user handler, so hotel tenants created BEFORE the RS feature
+        // (e.g. viveks-cafe) never got them — `posted_to_folio_at` was missing
+        // and any folio post threw `column "posted_to_folio_at" does not exist`.
+        // Re-run the same defensive migration here so they land at boot too.
+        await ensureOrderRsColumns(tenantDb, t.id);
       } catch (err) {
         console.error(`[hotel-tenant-migration] tenant ${t.id}:`, err);
       }
