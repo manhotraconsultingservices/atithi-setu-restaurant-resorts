@@ -6700,7 +6700,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'DELIVERY'                                  // multi-platform delivery integration
     | 'LOYALTY'                                   // tier-based customer loyalty (Phase 1)
     | 'ROSTER' | 'TIMESHEET'                      // shift roster + planned-vs-actual (Phase 3)
-    | 'ROOMS' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1
+    | 'ROOMS' | 'ROOM_SETUP' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1 (ROOMS=availability board, ROOM_SETUP=owner-only setup)
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE'  // hospitality Phase 2 & 3
     | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
     | 'CHANNEL_MANAGER'                           // OTA credentials + iCal feeds + webhook log + room mappings
@@ -7327,7 +7327,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   useEffect(() => {
     if (!bothEnabled) return;
     const restaurantOnlyIds = new Set(['MENU', 'INVENTORY', 'DELIVERY', 'QR', 'BOOKINGS', 'ORDERS']);
-    const hotelOnlyIds      = new Set(['ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS', 'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ']);
+    const hotelOnlyIds      = new Set(['ROOMS', 'ROOM_SETUP', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS', 'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ']);
     const hidden =
       (dashboardMode === 'RESTAURANT' && hotelOnlyIds.has(activeTab)) ||
       (dashboardMode === 'HOTEL'      && restaurantOnlyIds.has(activeTab));
@@ -8049,6 +8049,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // the URL/cache edge cases.
   useEffect(() => {
     if (activeTab === 'STAFF_ACCESS' && !isOwnerOrAdmin) {
+      setActiveTab('MONITOR');
+    }
+    // Room Setup is owner-only too — bounce non-owners who reach it via a
+    // stale URL/cache (the nav already hides the entry for them).
+    if (activeTab === 'ROOM_SETUP' && !isOwnerOrAdmin) {
       setActiveTab('MONITOR');
     }
   }, [activeTab, isOwnerOrAdmin]);
@@ -10613,7 +10618,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   useEffect(() => {
     if (!isHotelEnabled) return;
-    if (activeTab === 'ROOMS') { fetchHotelRooms(); fetchHotelRoomTypes(); fetchRateOverrides(); }
+    // ROOMS = staff availability board (just the room list). ROOM_SETUP =
+    // owner setup (also needs room types + rate overrides for the tariff editor).
+    if (activeTab === 'ROOMS') { fetchHotelRooms(); }
+    if (activeTab === 'ROOM_SETUP') { fetchHotelRooms(); fetchHotelRoomTypes(); fetchRateOverrides(); }
     if (activeTab === 'SERVICES') fetchHotelServices();
     if (activeTab === 'SERVICE_REQUESTS') fetchHotelRequests();
     if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); fetchTariff(); fetchPendingFolioOrders(); }
@@ -11128,7 +11136,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
-            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Rooms & Availability', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
             SETTINGS: 'Brand & Settings', STAFF_ACCESS: 'Staff Access', NOTIFICATIONS: 'Notifications', SUBSCRIPTION: 'Subscription'
@@ -11206,7 +11214,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             tabs: [
               ...(bothEnabled ? opsTrio('HOTEL') : []),
               { id: 'HOTEL_BOOKINGS',       label: 'Reservations' },
-              { id: 'ROOMS',                label: 'Rooms & Availability' },
+              // Room & Availability split (15 Jun 2026): the ROOMS tab is now
+              // the staff-facing live status board (relabelled "Room
+              // Availability"); room setup (CRUD + types + tariff) moves to a
+              // new OWNER-ONLY "Room Setup" tab. The id stays 'ROOMS' so every
+              // tenant's existing staff permission for the status board carries
+              // over unchanged (and the status-toggle endpoint still matches).
+              { id: 'ROOMS',                label: 'Room Availability' },
+              ...(isOwnerOrAdmin ? [{ id: 'ROOM_SETUP', label: 'Room Setup' } as NavTab] : []),
               { id: 'FRONT_OFFICE_REPORTS', label: 'Hotel Reports' },
               { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
               { id: 'SERVICES',             label: 'Service Catalogue' },
@@ -11279,6 +11294,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // the array for non-owners, so this short-circuit is owner-only).
         const isVisible = (id: string) => {
           if (id === 'STAFF_ACCESS' && isOwnerOrAdmin) return true;
+          // Room Setup is owner-only (room CRUD + types + tariff). Mirror the
+          // STAFF_ACCESS gate: owners always see it; everyone else never does.
+          if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
           return isTabVisible(id, effectiveAllowedTabs);
         };
         // A page shows when RBAC allows it AND the tenant has the relevant
@@ -15937,9 +15955,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
         </div>
-      ) : activeTab === 'ROOMS' && isHotelEnabled ? (
-        /* ════════════════ ROOMS — Hospitality module ════════════════ */
+      ) : (activeTab === 'ROOMS' || activeTab === 'ROOM_SETUP') && isHotelEnabled ? (
+        /* ════════════════ ROOMS / ROOM_SETUP — Hospitality module ════════
+           ROOMS = staff-facing live status board (Room Availability).
+           ROOM_SETUP = owner-only setup (Add/Edit/Delete rooms, Room Types,
+           Tariff). Both render the same room list; the setup-only sections and
+           the per-room edit/delete/block actions are gated behind `isSetup`. */
         (() => {
+          const isSetup = activeTab === 'ROOM_SETUP';
           // Status counts for the filter pills (unfiltered — reflects the full property)
           const counts: Record<string, number> = {
             ALL: hotelRooms.length,
@@ -15979,23 +16002,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="space-y-5">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
-                <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Rooms</h2>
-                <p className="text-sm text-[#6b5d52] mt-1">Manage your property's rooms, statuses, and QR codes.</p>
+                <h2 className="text-3xl font-bold font-serif text-[#1a1208]">{isSetup ? 'Room Setup' : 'Room Availability'}</h2>
+                <p className="text-sm text-[#6b5d52] mt-1">
+                  {isSetup
+                    ? "Add and configure rooms, room types, and tariff. Owner-only."
+                    : "Live room status board. Tap a room's status to update housekeeping (vacant / occupied / cleaning / etc.)."}
+                </p>
               </div>
-              <button
-                onClick={() => { setEditingRoom({}); setShowRoomModal(true); }}
-                className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20"
-              >
-                <Plus size={16} /> Add Room
-              </button>
+              {isSetup && (
+                <button
+                  onClick={() => { setEditingRoom({}); setShowRoomModal(true); }}
+                  className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] transition-all flex items-center gap-2 shadow-md shadow-[#cc5a16]/20"
+                >
+                  <Plus size={16} /> Add Room
+                </button>
+              )}
             </div>
 
             {hotelError && <div className="px-4 py-3 rounded-xl bg-[#fdf0f0] border border-[#c13b3b]/20 text-[#c13b3b] text-sm">{hotelError}</div>}
 
-            {/* Sprint B2 — Room Types management.
+            {/* Sprint B2 — Room Types management (SETUP only).
                 Per-property categories (Standard / Deluxe / Suite / etc.)
                 that physical rooms can be tagged to. Manages the catalogue
                 here; tagging happens in the room edit modal. */}
+            {isSetup && (
             <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5">
               <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
                 <div>
@@ -16047,15 +16077,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               )}
             </div>
+            )}
 
             {/* ════════════════════════════════════════════════════════════
-                BCG Tariff Phase 2 — Tariff Configuration matrix editor.
+                BCG Tariff Phase 2 — Tariff Configuration matrix editor (SETUP).
                 Lets the owner switch from the LEGACY date-range override
                 model to the MATRIX model (Room × Season × Meal Plan) and
-                edit the matrix in place. Hidden when the hotel module
-                isn't enabled.
+                edit the matrix in place. Owner-only (Room Setup tab).
                 ════════════════════════════════════════════════════════════ */}
-            {isHotelEnabled && (() => {
+            {isSetup && (() => {
               const tariff = tariffData;
               const mealPlans = (tariff.meal_plans || []).filter((m: any) => m.is_active !== 0)
                 .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
@@ -16810,8 +16840,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 p-12 text-center">
                 <Bed className="mx-auto text-[#cc5a16] mb-3" size={40} />
                 <h3 className="text-lg font-bold font-serif text-[#1a1208]">No rooms yet</h3>
-                <p className="text-sm text-[#6b5d52] mt-1 mb-4">Add your first room to start accepting guest service requests.</p>
-                <button onClick={() => { setEditingRoom({}); setShowRoomModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Add Room</button>
+                <p className="text-sm text-[#6b5d52] mt-1 mb-4">{isSetup ? 'Add your first room to start accepting guest service requests.' : 'No rooms have been set up yet. Ask the owner to add rooms in Room Setup.'}</p>
+                {isSetup && <button onClick={() => { setEditingRoom({}); setShowRoomModal(true); }} className="px-5 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Add Room</button>}
               </div>
             ) : (
             <>
@@ -16990,6 +17020,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             </td>
                             <td className="px-4 py-2.5 text-right whitespace-nowrap">
                               <button onClick={() => setRoomQrPreview({ ...room, qrUrl: `${window.location.origin}/${room.qr_code_data || `?r=${restaurantId}&room=${room.id}`}` })} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 mr-1" title="QR code"><QrCode size={12} /></button>
+                              {/* Edit / Block / Delete are SETUP-only (owner). The status board
+                                  keeps just QR + the status toggle for staff. */}
+                              {isSetup && (<>
                               <button
                                 onClick={() => { if (!locked) { setEditingRoom(room); setShowRoomModal(true); } }}
                                 disabled={locked}
@@ -16998,6 +17031,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               >Edit</button>
                               <button onClick={() => setBlockingRoom(room)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#b8860b] text-[10px] font-bold hover:bg-[#b8860b]/10 mr-1" title="Block dates"><CalendarClock size={12} /></button>
                               <button onClick={() => deleteRoom(room.id)} className="px-2 py-1 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[10px] font-bold hover:bg-[#c13b3b]/10" title="Delete"><Trash2 size={12} /></button>
+                              </>)}
                             </td>
                           </tr>
                         );
@@ -17054,6 +17088,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </div>
                       <div className="flex gap-2 pt-3 border-t border-[#cc5a16]/10">
                         <button onClick={() => setRoomQrPreview({ ...room, qrUrl })} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/10 flex items-center justify-center gap-1" title="View QR code"><QrCode size={14} /> QR</button>
+                        {/* Edit / Block / Delete are SETUP-only (owner). The status board
+                            keeps QR + the status toggles above for staff. */}
+                        {isSetup && (<>
                         {/* ROOM-LOCK (revenue-leak prevention): Edit is disabled when the
                             room is OCCUPIED (guest in residence) or BLOCKED (held). Staff
                             could otherwise change base_rate mid-stay and silently affect
@@ -17082,6 +17119,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         })()}
                         <button onClick={() => setBlockingRoom(room)} className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] text-[#b8860b] text-xs font-bold hover:bg-[#b8860b]/10 flex items-center justify-center gap-1" title="Block dates"><CalendarClock size={14} /> Block</button>
                         <button onClick={() => deleteRoom(room.id)} className="px-3 py-2 rounded-xl bg-[#fdf0f0] text-[#c13b3b] text-xs font-bold hover:bg-[#c13b3b]/10" title="Delete"><Trash2 size={14} /></button>
+                        </>)}
                       </div>
                     </div>
                   );
@@ -20396,7 +20434,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'SUBSCRIPTION',      label: 'Subscription / Billing',  description: 'Plan tier, invoices for the AtithiSetu subscription itself, payment.' },
               { id: 'SETTINGS',          label: 'Settings',                description: 'GST setup, business profile, hotel settings, channel credentials.' },
               // Hotel tabs
-              { id: 'ROOMS',             label: 'Rooms',                   description: 'Room inventory, types, rate plans, yield rules, holds.', hotelOnly: true },
+              { id: 'ROOMS',             label: 'Room Availability',       description: 'Live room status board (vacant / occupied / cleaning / etc). Room setup is owner-only.', hotelOnly: true },
               { id: 'HOTEL_BOOKINGS',    label: 'Hotel Bookings',          description: 'Create/edit bookings, check-in, check-out, cancellations, calendar.', hotelOnly: true },
               { id: 'SERVICES',          label: 'Hotel Services',          description: 'Configure room-service offerings (Extra towels, AC repair, etc.) and pricing.', hotelOnly: true },
               { id: 'SERVICE_REQUESTS',  label: 'Service Requests',        description: 'Live queue of guest requests — housekeeping / maintenance acknowledge here.', hotelOnly: true },
