@@ -10348,21 +10348,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // modal before opening the wizard.
   const confirmAndCheckIn = async (b: any) => {
     if (!b?.id) return;
-    const today = new Date().toISOString().slice(0, 10);
-    const scheduled = normaliseBookingDate(b.check_in_date);
-    if (scheduled && scheduled > today) {
-      setEarlyCheckInTarget(b);
-      return;
-    }
-    // Open the wizard for every check-in, whether or not data is
-    // already complete. Staff often want to double-check phone /
-    // ID number even if the row looks clean.
+    // ALWAYS open the 2-page wizard — for every check-in, early or not. The
+    // wizard is the only place staff can reassign / upgrade the room, so an
+    // early (future-dated) check-in must NOT be diverted to the bare early
+    // confirm modal (which had no room options — the root cause of "one
+    // booking shows reassign/upgrade, another doesn't"). The wizard detects
+    // an early date, shows a warning banner, and forces the check-in through.
     //
-    // FIX (#1 — booked guest count not reflecting at check-in): always
-    // open the wizard against the freshest FULL booking row from the
-    // bookings list (num_guests, room_id, room_rate, room_name, dates),
-    // not whatever partial object triggered the action (an arrivals-
-    // worklist or calendar cell can be thin). This guarantees the guest
+    // Always open against the freshest FULL booking row from the bookings
+    // list (num_guests, room_id, room_rate, room_name, dates) so the guest
     // count pre-fills and the room reassignment picker has its inputs.
     const full = hotelBookings.find((x: any) => x.id === b.id) || b;
     setCheckInChecklistTarget(full);
@@ -26792,12 +26786,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       {checkInChecklistTarget && (() => {
         const b = checkInChecklistTarget;
         const requireDocs = hotelSettings.require_id_at_checkin !== false;
+        // Early check-in = the booking's check-in date is still in the future.
+        // The wizard shows a warning + we pass force=true so the server's
+        // date guard lets it through (reassignment/upgrade still available).
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const scheduled = normaliseBookingDate(b.check_in_date);
+        const isEarly = !!(scheduled && scheduled > todayIso);
         return (
           <CheckInWizardModal
             booking={b}
             requireDocs={requireDocs}
             restaurantId={restaurantId}
             token={token}
+            isEarly={isEarly}
             onPreview={(doc: any) => setDocPreview(doc)}
             onCancel={() => setCheckInChecklistTarget(null)}
             onSaved={(patched: any) => {
@@ -26806,16 +26807,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             }}
             onCheckIn={async (advance?: { amount: number; method: string; reference?: string }) => {
               try {
-                await checkInBooking(b.id, false, advance);
+                // force=true for an early check-in so the server bypasses the
+                // future-date guard (the wizard already warned the staff).
+                await checkInBooking(b.id, isEarly, advance);
                 setCheckInChecklistTarget(null);
               } catch (err: any) {
-                const msg = err?.message || '';
-                if (/scheduled for/i.test(msg) || /early/i.test(msg)) {
-                  setCheckInChecklistTarget(null);
-                  setEarlyCheckInTarget(b);
-                } else {
-                  alert(msg || 'Check-in failed');
-                }
+                alert(err?.message || 'Check-in failed');
               }
             }}
           />
@@ -31641,11 +31638,12 @@ const CheckInWizardModal: React.FC<{
   requireDocs: boolean;
   restaurantId: string;
   token: string;
+  isEarly?: boolean;
   onPreview?: (doc: any) => void;
   onCancel: () => void;
   onSaved?: (patched: any) => void;
   onCheckIn: (advance?: { amount: number; method: string; reference?: string }) => void | Promise<void>;
-}> = ({ booking, requireDocs, restaurantId, token, onPreview, onCancel, onSaved, onCheckIn }) => {
+}> = ({ booking, requireDocs, restaurantId, token, isEarly = false, onPreview, onCancel, onSaved, onCheckIn }) => {
   const [step, setStep] = useState<1 | 2>(1);
   const [draft, setDraft] = useState<any>({
     guest_name:        booking.guest_name || '',
@@ -31693,7 +31691,15 @@ const CheckInWizardModal: React.FC<{
     try {
       const ci = String(booking.check_in_date || '').slice(0, 10);
       const co = String(booking.check_out_date || '').slice(0, 10);
-      const qs = new URLSearchParams({ start: ci, end: co, guests: String(draft.num_guests || 1) });
+      // guests=1 here ON PURPOSE: the reassignment/upgrade picker should show
+      // EVERY room free for the dates, not hide rooms whose capacity is below
+      // the party size. Reassignment is a billing concern (over-capacity →
+      // extra-person charges; the server PATCH uses skipCapacityCheck), not an
+      // inventory rejection — so staff see all options with each room's
+      // capacity shown, and decide. Previously a party larger than a room's
+      // capacity made that room (and sometimes ALL rooms) vanish from the
+      // picker, leaving "no option to reassign / upgrade".
+      const qs = new URLSearchParams({ start: ci, end: co, guests: '1' });
       // Quote each candidate room with THIS booking's meal plan + extra
       // persons so the picker shows the meal-plan-adjusted rate + stay total
       // (not the bare base rate). The booking carries these fields.
@@ -31849,6 +31855,11 @@ const CheckInWizardModal: React.FC<{
         {/* ─── PAGE 1 ─── */}
         {step === 1 && (
           <div className="space-y-3">
+            {isEarly && (
+              <div className="rounded-2xl bg-amber-50 border border-amber-300 px-4 py-2.5 text-[12px] text-amber-900">
+                <strong>Early check-in.</strong> This booking is for {String(booking.check_in_date || '').slice(0, 10)} (a future date). You can still verify details, reassign / upgrade the room, and check the guest in now.
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
