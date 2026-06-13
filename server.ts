@@ -31293,19 +31293,53 @@ ${data.tenant.name}`;
       // divergence. Hard-delete (not soft-delete) because the order was
       // never observable to a downstream consumer — there's no audit
       // trail to preserve. We log the rollback for forensics.
-      // ── Room-service F&B posts to the folio ON DELIVERY, not at order time ──
-      // Hotel workflow (client request): an in-room QR / CHARGE_TO_ROOM order is
-      // sent to the kitchen now (status CONFIRMED, kitchen_status='queued') and
-      // the F&B charge is added to the guest's folio only when the food is
-      // marked DELIVERED (PATCH /api/orders/:id). This way a cancelled or
-      // never-delivered order never hits the bill. We flag it AWAITING_DELIVERY
-      // so the delivery transition knows to post; on delivery, success → POSTED,
-      // failure → PENDING_MANUAL (front desk reconciles via /orders/pending-folio,
-      // which also surfaces AWAITING_DELIVERY orders so none is missed at checkout).
+      // ── Room-service F&B → guest folio ──────────────────────────────────
+      // FOLIO-RELIABILITY (16 Jun 2026): post the F&B to the guest's OPEN folio
+      // IMMEDIATELY when the guest is in-house, so it's on the bill at checkout
+      // regardless of whether anyone marks the order delivered. The previous
+      // "post only on delivery" model left charges stranded as AWAITING_DELIVERY
+      // when runners didn't mark delivery, and the checkout sweep could miss an
+      // order whose booking_id was NULL (QR order placed without a session) —
+      // so the restaurant bill silently never reached the folio.
+      // Two robustness moves:
+      //   1. Self-heal booking_id from the room's checked-in booking, so the
+      //      charge is firmly linked to the stay (sweep + restaurant-bill column
+      //      + reports all key off it).
+      //   2. Post now via postOrderToFolio (idempotent — a later delivery /
+      //      sweep is a no-op; it self-creates the folio for a checked-in room).
+      // If no folio can be resolved yet (guest not checked in), flag
+      // AWAITING_DELIVERY; the delivery trigger + checkout sweep post it later.
+      // Cancelling reverses any posting (see PATCH /orders cancel guard).
       let folioResult: { ok: boolean; folio_id?: string; reason?: string } | null = null;
       if (isChargeToRoom && (finalRoomId || finalBookingId)) {
-        await db.run("UPDATE orders SET folio_post_status = 'AWAITING_DELIVERY' WHERE id = ?", [id]).catch(() => {});
-        folioResult = { ok: false, reason: 'awaiting-delivery' };
+        let chargeBookingId = finalBookingId;
+        if (!chargeBookingId && finalRoomId) {
+          const rb: any = await db.get(
+            "SELECT id FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' ORDER BY actual_checkin_at DESC LIMIT 1",
+            [finalRoomId]
+          ).catch(() => null);
+          if (rb?.id) {
+            chargeBookingId = rb.id;
+            await db.run("UPDATE orders SET booking_id = ? WHERE id = ?", [rb.id, id]).catch(() => {});
+          }
+        }
+        const folioItems: FolioOrderItem[] = (Array.isArray(items) ? items : []).map((it: any) => ({
+          name: it.name || it.menuName || 'Item',
+          quantity: Number(it.quantity || it.qty || 1),
+          unitPrice: Number(it.price ?? it.unitPrice ?? it.unit_price ?? 0),
+          gstRate: it.gstRate != null ? Number(it.gstRate) : (it.gst_rate != null ? Number(it.gst_rate) : undefined),
+        }));
+        const posted: any = await postOrderToFolio(req.params.id, {
+          id, room_id: finalRoomId, booking_id: chargeBookingId,
+          items: folioItems, subtype: 'IRD', posted_by: 'QR_ORDER',
+        }).catch((e: any) => ({ ok: false, reason: e?.message || 'post-error' }));
+        if (posted?.ok) {
+          await db.run("UPDATE orders SET folio_post_status = 'POSTED' WHERE id = ?", [id]).catch(() => {});
+          folioResult = { ok: true, folio_id: posted.folio_id };
+        } else {
+          await db.run("UPDATE orders SET folio_post_status = 'AWAITING_DELIVERY' WHERE id = ?", [id]).catch(() => {});
+          folioResult = { ok: false, reason: posted?.reason || 'awaiting-delivery' };
+        }
       }
 
       res.json({
@@ -32066,6 +32100,12 @@ ${data.tenant.name}`;
         revertIngredientsForOrder(db, req.params.id).catch(err => {
           console.warn(`[inventory] Reversal failed for order ${req.params.id}:`, err);
         });
+        // CANCEL-REVERSAL (16 Jun 2026): F&B now posts to the folio at order
+        // time, so a cancel must reverse any posted folio line — otherwise the
+        // cancelled food stays on the guest's bill. Audit-preserving (inserts
+        // negative mirror entries + recomputes); a no-op if nothing was posted.
+        reverseOrderFolioPosting(req.user!.restaurantId, req.params.id, 'Order cancelled', req.user?.id || 'STAFF')
+          .catch(err => console.warn(`[folio] cancel-reversal failed for order ${req.params.id}:`, err));
       }
 
       // Broadcast ORDER_UPDATE via WebSocket so customers/monitors get live status
