@@ -30099,6 +30099,63 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── S4 (17 Jun 2026): CUSTOMER-side cancel before preparation ───────────
+  // A diner can cancel their own round from the QR / E-Menu while it is still
+  // QUEUED (status CONFIRMED/PENDING) and unpaid. PUBLIC + token-owned: the
+  // caller must present the session_token (a secret in their device) AND the
+  // order must belong to that session — same trust model as placing the order.
+  // Once the kitchen starts (status PREPARING+) or the order is paid, self-
+  // cancel is refused (409) and the guest is told to ask staff. Runs the SAME
+  // side-effects as the staff cancel: returns ingredient stock + reverses any
+  // folio posting + broadcasts ORDER_UPDATE so the kitchen drops it live.
+  app.post("/api/restaurant/:id/sessions/:token/orders/:orderId/cancel", async (req: Request, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const session: any = await db.get(
+        "SELECT id FROM table_sessions WHERE session_token = ?", [req.params.token]
+      );
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+      const order: any = await db.get(
+        "SELECT id, session_id, status, payment_status FROM orders WHERE id = ? AND deleted_at IS NULL",
+        [req.params.orderId]
+      );
+      if (!order || order.session_id !== session.id) {
+        return res.status(404).json({ error: 'Order not found for this table.' });
+      }
+      const st = String(order.status || '').toUpperCase();
+      if (st === 'CANCELLED') return res.json({ success: true, already_cancelled: true });
+      if (st !== 'CONFIRMED' && st !== 'PENDING') {
+        return res.status(409).json({ error: 'This order can no longer be cancelled — the kitchen has already started preparing it. Please ask our staff.' });
+      }
+      if (String(order.payment_status || '').toUpperCase() === 'PAID') {
+        return res.status(409).json({ error: 'This order is already paid and cannot be cancelled here. Please ask our staff.' });
+      }
+      await db.run("UPDATE orders SET status = 'CANCELLED' WHERE id = ?", [req.params.orderId]);
+      // Same reversals as the staff cancel path (PATCH /api/orders/:id).
+      revertIngredientsForOrder(db, req.params.orderId).catch(err =>
+        console.warn(`[inventory] customer-cancel reversal failed for order ${req.params.orderId}:`, err));
+      reverseOrderFolioPosting(req.params.id, req.params.orderId, 'Cancelled by guest', 'CUSTOMER').catch(err =>
+        console.warn(`[folio] customer-cancel reversal failed for order ${req.params.orderId}:`, err));
+      // Broadcast so the kitchen / command centre drop it from the live view.
+      const updatedOrder: any = await db.get("SELECT * FROM orders WHERE id = ?", [req.params.orderId]);
+      if (updatedOrder) {
+        try { if (typeof updatedOrder.items === 'string') updatedOrder.items = JSON.parse(updatedOrder.items); } catch { /* leave as-is */ }
+        const wss = (global as any).__wss;
+        if (wss) {
+          wss.clients.forEach((client: any) => {
+            if (client.readyState === 1) {
+              client.send(JSON.stringify({ type: 'ORDER_UPDATE', data: updatedOrder, restaurantId: req.params.id }));
+            }
+          });
+        }
+      }
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error('customer order cancel error:', err);
+      res.status(500).json({ error: 'Failed to cancel order' });
+    }
+  });
+
   // Orders: Get Orders
   app.get("/api/restaurant/:id/orders", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -32106,10 +32163,52 @@ ${data.tenant.name}`;
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS eta TEXT").catch(() => {});
       await db.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS kitchen_status TEXT DEFAULT 'queued'").catch(() => {});
 
-      const { status, payment_status, payment_method, kitchen_status, chef_id, chef_name, eta } = req.body;
+      const { status, payment_status, payment_method, kitchen_status, chef_id, chef_name, eta, items } = req.body;
 
-      let query = "UPDATE orders SET ";
-      const params: any[] = [];
+      // S3 (17 Jun 2026): staff can MODIFY an order's items (change qty / remove
+      // a line) while it is still QUEUED — not yet being prepared and not paid.
+      // Totals are recomputed from the new items; GST is scaled by the order's
+      // existing gst/total fraction so both GST-inclusive and GST-exclusive
+      // tenants stay correct (only quantities/lines change, never the tax basis).
+      // Blocked once the kitchen starts (status leaves CONFIRMED/PENDING) or the
+      // order is paid. Inventory is NOT auto-adjusted on edit (the only reversal
+      // primitive reverts the whole order) — noted for follow-up.
+      let editItemsSql = '';
+      const editItemsParams: any[] = [];
+      if (Array.isArray(items)) {
+        const cur: any = await db.get(
+          "SELECT status, payment_status, total_amount, gst_amount FROM orders WHERE id = ?",
+          [req.params.id]
+        );
+        if (!cur) return res.status(404).json({ error: 'Order not found' });
+        const st = String(cur.status || '').toUpperCase();
+        if (st !== 'CONFIRMED' && st !== 'PENDING') {
+          return res.status(409).json({ error: 'This order can no longer be edited — the kitchen has already started it.' });
+        }
+        if (String(cur.payment_status || '').toUpperCase() === 'PAID') {
+          return res.status(409).json({ error: 'A paid order cannot be edited.' });
+        }
+        const r2 = (n: number) => Math.round(n * 100) / 100;
+        const clean = (items as any[])
+          .map((it: any) => ({
+            ...it,
+            name: it.name || it.menuName || 'Item',
+            quantity: Math.max(0, Math.floor(Number(it.quantity ?? it.qty ?? 0))),
+            price: Number(it.price ?? it.unit_price ?? it.unitPrice ?? 0),
+          }))
+          .filter((it: any) => it.quantity > 0 && it.price >= 0);
+        if (clean.length === 0) {
+          return res.status(400).json({ error: 'An order must keep at least one item. To remove everything, cancel the order instead.' });
+        }
+        const newTotal = r2(clean.reduce((s: number, it: any) => s + it.price * it.quantity, 0));
+        const ratio = Number(cur.total_amount) > 0 ? Number(cur.gst_amount || 0) / Number(cur.total_amount) : 0;
+        const newGst = r2(newTotal * ratio);
+        editItemsSql = "items = ?, total_amount = ?, gst_amount = ?, ";
+        editItemsParams.push(JSON.stringify(clean), newTotal, newGst);
+      }
+
+      let query = "UPDATE orders SET " + editItemsSql;
+      const params: any[] = [...editItemsParams];
       if (status) {
         query += "status = ?, ";
         params.push(status);

@@ -7366,6 +7366,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [liveNow, setLiveNow] = useState(Date.now());
   const [liveOrders, setLiveOrders] = useState<Order[]>([]);
   const [liveOrdersExpanded, setLiveOrdersExpanded] = useState(true);
+  // S3 (17 Jun 2026): staff "Modify order" — the live order being edited (items/qty).
+  const [editOrder, setEditOrder] = useState<any | null>(null);
   // Cloud-kitchen: dedicated panel state, fetched alongside /tables/live
   const [cloudKitchenOrders, setCloudKitchenOrders] = useState<any[]>([]);
   const [cloudKitchenSummary, setCloudKitchenSummary] = useState<{
@@ -23491,6 +23493,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                       ▶ Start
                                     </button>
                                   )}
+                                  {/* S3: modify items / quantities before the kitchen starts */}
+                                  {isQueued && (
+                                    <button
+                                      onClick={() => setEditOrder(o)}
+                                      className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-100 text-amber-800 hover:bg-amber-200 transition-colors whitespace-nowrap"
+                                      title="Edit items / quantities (before the kitchen starts)"
+                                    >
+                                      ✏ Edit
+                                    </button>
+                                  )}
                                   {isPreparing && (
                                     <button
                                       onClick={() => patchLiveOrder(o.id, { status: 'READY', kitchen_status: 'ready' })}
@@ -23553,6 +23565,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             )}
           </div>
+
+          {/* S3: staff "Modify order" modal (edit qty / remove items pre-prep) */}
+          {editOrder && (
+            <LiveOrderEditModal
+              order={editOrder}
+              restaurantId={restaurantId!}
+              token={token!}
+              onClose={() => setEditOrder(null)}
+              onSaved={() => { fetchLiveTables(); }}
+            />
+          )}
 
           {/* ── WAITER CALLS ── */}
           <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden shadow-sm">
@@ -37223,6 +37246,87 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
   );
 }
 
+// ── S3 (17 Jun 2026): staff "Modify order" modal ────────────────────────────
+// Lets front-desk / kitchen staff adjust quantities or remove a line on a
+// still-QUEUED order before the kitchen starts. Saves via PATCH /api/orders/:id
+// with the new items; the server re-validates (queued + unpaid), recomputes
+// total_amount, and scales GST by the order's existing gst/total fraction.
+function LiveOrderEditModal({ order, restaurantId, token, onClose, onSaved }: {
+  order: any; restaurantId: string; token: string; onClose: () => void; onSaved: () => void;
+}) {
+  const initial = (Array.isArray(order.items) ? order.items : []).map((it: any) => ({
+    _orig: it,
+    name: it.name || it.menuName || 'Item',
+    size: it.size,
+    price: Number(it.price ?? it.unit_price ?? it.unitPrice ?? 0),
+    quantity: Math.max(0, Math.floor(Number(it.quantity ?? it.qty ?? 1))),
+  }));
+  const [lines, setLines] = useState<any[]>(initial);
+  const [saving, setSaving] = useState(false);
+  const setQty = (i: number, q: number) => setLines(ls => ls.map((l, j) => j === i ? { ...l, quantity: Math.max(0, q) } : l));
+  const kept = lines.filter(l => l.quantity > 0);
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const newTotal = r2(kept.reduce((s, l) => s + l.price * l.quantity, 0));
+  const origTotal = Number(order.totalAmount ?? order.total_amount ?? 0);
+  const save = async () => {
+    if (kept.length === 0) { alert('Keep at least one item, or use ✕ Cancel to void the whole order.'); return; }
+    setSaving(true);
+    try {
+      const payload = kept.map(l => ({ ...(l._orig || {}), name: l.name, price: l.price, quantity: l.quantity, size: l.size }));
+      const res = await fetch(`/api/orders/${order.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ items: payload }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert(data?.error || 'Could not save the changes.'); return; }
+      onSaved();
+      onClose();
+    } catch { alert('Could not save the changes. Please try again.'); }
+    finally { setSaving(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md max-h-[90vh] flex flex-col">
+        <div className="px-6 py-4 border-b border-[#cc5a16]/10 flex items-center justify-between shrink-0">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">Modify order</p>
+            <h3 className="text-lg font-bold text-[#1a1208]">#{String(order.id).slice(-6).toUpperCase()}</h3>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 rounded-full bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[#3d3128]">×</button>
+        </div>
+        <div className="p-5 space-y-2 overflow-y-auto flex-1 min-h-0">
+          <p className="text-[11px] text-[#9c8e85] leading-snug">Adjust quantities or set a line to 0 to remove it. Allowed only before the kitchen starts preparing.</p>
+          {lines.map((l, i) => (
+            <div key={i} className={cn('flex items-center gap-2 rounded-xl border px-3 py-2', l.quantity === 0 ? 'border-red-200 bg-red-50 opacity-60' : 'border-[#f0e8dd]')}>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-[#1a1208] truncate">{l.name}{l.size ? ` (${l.size})` : ''}</p>
+                <p className="text-[11px] text-[#9c8e85] font-mono">₹{l.price.toFixed(2)} each</p>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button type="button" onClick={() => setQty(i, l.quantity - 1)} className="w-7 h-7 rounded-lg bg-[#faf7f2] font-bold text-[#3d3128] hover:bg-[#cc5a16]/10">−</button>
+                <span className="w-6 text-center font-mono text-sm">{l.quantity}</span>
+                <button type="button" onClick={() => setQty(i, l.quantity + 1)} className="w-7 h-7 rounded-lg bg-[#faf7f2] font-bold text-[#3d3128] hover:bg-[#cc5a16]/10">+</button>
+              </div>
+              <span className="w-16 text-right font-mono text-sm font-bold text-[#1a1208]">₹{(l.price * l.quantity).toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+        <div className="px-5 py-4 border-t border-[#cc5a16]/10 space-y-3 shrink-0">
+          <div className="flex justify-between items-baseline text-sm">
+            <span className="text-[#6b5d52]">New total {origTotal > 0 && <span className="text-[10px] text-[#9c8e85]">(was ₹{origTotal.toFixed(2)})</span>}</span>
+            <span className="font-mono font-bold text-[#1a1208]">₹{newTotal.toFixed(2)}</span>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={onClose} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Close</button>
+            <button onClick={save} disabled={saving || kept.length === 0} className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50">{saving ? 'Saving…' : 'Save changes'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [cart, setCart] = useState<OrderItem[]>([]);
@@ -37453,6 +37557,33 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       }
     } catch (err) {
       console.error('Failed to init session:', err);
+    }
+  };
+
+  // ── S4 (17 Jun 2026): customer cancels their own round before it's prepared ──
+  // Allowed only while the order is still queued (status CONFIRMED/PENDING) and
+  // unpaid — the server re-checks authoritatively and refuses once the kitchen
+  // has started. Token-owned: the session_token proves it's this diner's order.
+  const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
+  const cancelMyOrder = async (orderId: string) => {
+    if (!session?.session_token || !restaurantId || cancellingOrderId) return;
+    if (!window.confirm('Cancel this order? This is only possible before the kitchen starts preparing it.')) return;
+    setCancellingOrderId(orderId);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/orders/${orderId}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert(data?.error || 'Could not cancel this order.'); return; }
+      // Optimistically drop it from the running bill + list. The backend now
+      // also excludes cancelled orders from the session view on next refresh.
+      setSession(prev => prev ? { ...prev, orders: (prev.orders || []).filter((o: any) => o.id !== orderId) } : prev);
+    } catch {
+      alert('Could not cancel this order. Please try again or ask our staff.');
+    } finally {
+      setCancellingOrderId(null);
     }
   };
 
@@ -38749,6 +38880,17 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                               </div>
                             ))}
                           </div>
+                          {/* S4: self-cancel a round that the kitchen hasn't started yet */}
+                          {(o.status === 'CONFIRMED' || o.status === 'PENDING') && session.status === 'open' && (
+                            <button
+                              type="button"
+                              onClick={() => cancelMyOrder(o.id)}
+                              disabled={cancellingOrderId === o.id}
+                              className="mt-3 w-full px-3 py-2 rounded-xl border border-red-200 bg-red-50 text-red-600 text-xs font-bold hover:bg-red-100 disabled:opacity-50"
+                            >
+                              {cancellingOrderId === o.id ? 'Cancelling…' : '✕ Cancel this order'}
+                            </button>
+                          )}
                         </div>
                       </div>
                     );
