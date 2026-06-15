@@ -16029,18 +16029,25 @@ ${data.tenant.name}`;
     if (!order) return { reverted: false, lines: 0 };
     if (Number(order.inventory_reverted || 0) === 1) return { reverted: false, lines: 0 };
 
-    const consumed: any[] = await db.query(
-      `SELECT ingredient_id, qty_delta, unit
+    // NET-AWARE (17 Jun 2026): return only what is STILL outstanding for this
+    // order — the NET of all its movements (CONSUMPTION + any prior REVERSAL a
+    // staff edit already applied), per ingredient — not the gross CONSUMPTION.
+    // After an edit returned the original consumption and re-deducted the new
+    // items, a later cancel then returns exactly the new outstanding and never
+    // double-credits the original. For a never-edited order, net == the full
+    // consumption, so behaviour is identical to before this change.
+    const nets: any[] = await db.query(
+      `SELECT ingredient_id, SUM(qty_delta) AS net, MAX(unit) AS unit
          FROM stock_movements
         WHERE reference_type = 'order'
           AND reference_id = ?
-          AND movement_type = 'CONSUMPTION'`,
+        GROUP BY ingredient_id`,
       [orderId]
     ).catch(() => [] as any[]);
 
     let lines = 0;
-    for (const c of consumed) {
-      const qtyToReturn = -Number(c.qty_delta);  // qty_delta was negative; flip sign
+    for (const c of nets) {
+      const qtyToReturn = -Number(c.net);  // net is negative while stock is still out
       if (!Number.isFinite(qtyToReturn) || qtyToReturn <= 0) continue;
       const updated: any[] = await db.query(
         `UPDATE ingredients
@@ -32171,10 +32178,12 @@ ${data.tenant.name}`;
       // existing gst/total fraction so both GST-inclusive and GST-exclusive
       // tenants stay correct (only quantities/lines change, never the tax basis).
       // Blocked once the kitchen starts (status leaves CONFIRMED/PENDING) or the
-      // order is paid. Inventory is NOT auto-adjusted on edit (the only reversal
-      // primitive reverts the whole order) — noted for follow-up.
+      // order is paid. Ingredient stock is re-synced to the new items after the
+      // UPDATE below (return the original consumption → deduct the new items →
+      // re-arm the cancel reversal).
       let editItemsSql = '';
       const editItemsParams: any[] = [];
+      let editedItems: any[] | null = null;
       if (Array.isArray(items)) {
         const cur: any = await db.get(
           "SELECT status, payment_status, total_amount, gst_amount FROM orders WHERE id = ?",
@@ -32205,6 +32214,7 @@ ${data.tenant.name}`;
         const newGst = r2(newTotal * ratio);
         editItemsSql = "items = ?, total_amount = ?, gst_amount = ?, ";
         editItemsParams.push(JSON.stringify(clean), newTotal, newGst);
+        editedItems = clean;
       }
 
       let query = "UPDATE orders SET " + editItemsSql;
@@ -32242,6 +32252,24 @@ ${data.tenant.name}`;
       params.push(req.params.id);
 
       await db.run(query, params);
+
+      // ── Inventory: re-sync stock to the EDITED items (S3, 17 Jun 2026) ──
+      // Staff changed line items while the order was still queued. Return the
+      // originally-deducted stock, deduct for the new items, then clear the
+      // reverted flag so a later cancel reverses the NEW outstanding. Awaited
+      // so a near-simultaneous cancel sees the re-armed state. Net-aware revert
+      // (see revertIngredientsForOrder) keeps that later cancel correct.
+      // Skipped when this same PATCH also cancels (the cancel block below
+      // returns the original consumption, which is what we want then).
+      if (editedItems && !(status && String(status).toUpperCase() === 'CANCELLED')) {
+        try {
+          await revertIngredientsForOrder(db, req.params.id);
+          await deductIngredientsForOrder(db, req.params.id, editedItems, req.user!.restaurantId);
+          await db.run("UPDATE orders SET inventory_reverted = 0 WHERE id = ?", [req.params.id]);
+        } catch (e) {
+          console.warn(`[inventory] edit re-sync failed for order ${req.params.id}:`, e);
+        }
+      }
 
       // ── Inventory: cancellation reversal (idempotent, non-blocking) ─────
       // If this PATCH transitioned the order to CANCELLED, restore the stock
