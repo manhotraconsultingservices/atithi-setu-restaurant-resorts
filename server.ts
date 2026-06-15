@@ -24695,9 +24695,10 @@ ${data.tenant.name}`;
       if (!guest_name || !String(guest_name).trim()) {
         return res.status(400).json({ error: "Name is required." });
       }
-      if (!guest_phone || !String(guest_phone).trim()) {
-        return res.status(400).json({ error: "Phone is required." });
-      }
+      // Phone is OPTIONAL at booking time (front desk holds, OTA placeholders,
+      // guests who book before sharing a number). It becomes MANDATORY at
+      // check-in — enforced in POST /hotel/bookings/:id/checkin. Email stays
+      // required here so we can send the booking confirmation.
       if (!guest_email || !String(guest_email).trim()) {
         return res.status(400).json({ error: "Email is required so we can confirm your booking." });
       }

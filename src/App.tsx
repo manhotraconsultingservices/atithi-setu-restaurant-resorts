@@ -26363,13 +26363,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
-                    Phone <span className="text-[#c13b3b]">*</span>
+                    Phone <span className="text-[9px] font-medium normal-case text-[#9c8e85]">· optional now, required at check-in</span>
                   </label>
                   <input
-                    required
                     type="tel"
                     pattern="[+0-9\s\-]{7,}"
-                    title="Phone is required at check-in (Form-C / FRRO / WhatsApp)"
+                    title="Optional when booking. A mobile number is required before check-in (Form-C / FRRO / WhatsApp)."
                     value={editingBooking.guest_phone || ''}
                     onChange={e => setEditingBooking({...editingBooking, guest_phone: e.target.value})}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
@@ -51215,7 +51214,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
       const selectedPlanId = catId ? mealPlanByCat[catId] : '';
       const bookingPayload: any = {
         guest_name: guest.name.trim(),
-        guest_phone: guest.phone.trim(),
+        guest_phone: guest.phone.trim() || null,
         guest_email: guest.email.trim(),
         check_in_date: searchParams.start,
         check_out_date: searchParams.end,
@@ -52233,8 +52232,8 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
                 className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
             </div>
             <div>
-              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone *</label>
-              <input required type="tel" value={guest.phone} onChange={e => setGuest({ ...guest, phone: e.target.value })}
+              <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Phone</label>
+              <input type="tel" value={guest.phone} onChange={e => setGuest({ ...guest, phone: e.target.value })}
                 placeholder="+91 9876543210"
                 className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none" />
             </div>
