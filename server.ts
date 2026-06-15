@@ -29527,8 +29527,12 @@ ${data.tenant.name}`;
 
       // Helper to load and return a session with its orders
       const returnSession = async (sess: any) => {
+        // S1/S5 fix (15 Jun 2026): exclude CANCELLED orders so the customer's
+        // running bill + order list never include a cancelled round. The
+        // invoice / request-bill (line ~29825) already excludes them — this
+        // keeps the customer view consistent with the invoice.
         const orders = await db.query(
-          "SELECT * FROM orders WHERE session_id = ? ORDER BY round_number, created_at",
+          "SELECT * FROM orders WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED' ORDER BY round_number, created_at",
           [sess.id]
         );
         orders.forEach((o: any) => {
@@ -29654,8 +29658,12 @@ ${data.tenant.name}`;
       );
       if (!session) return res.status(404).json({ error: "Session not found" });
 
+      // S1/S5 fix (15 Jun 2026): exclude CANCELLED orders from the customer
+      // session view so the running total + order list match the invoice
+      // (request-bill already excludes them). Staff /active-session is left
+      // untouched so staff can still see cancelled rounds.
       const orders = await db.query(
-        "SELECT * FROM orders WHERE session_id = ? ORDER BY round_number, created_at",
+        "SELECT * FROM orders WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED' ORDER BY round_number, created_at",
         [session.id]
       );
       orders.forEach((o: any) => {
@@ -30072,9 +30080,12 @@ ${data.tenant.name}`;
 
       const session = await db.get("SELECT id, table_id FROM table_sessions WHERE session_token = ?", [req.params.token]);
       if (session) {
-        // Mark all orders paid AND delivered so they leave the live kitchen view
+        // Mark all orders paid AND delivered so they leave the live kitchen view.
+        // S2 fix (15 Jun 2026): NEVER touch cancelled orders. Without this guard
+        // the close marked cancelled rounds PAID *and* overwrote their CANCELLED
+        // status back to 'DELIVERED' — un-cancelling them and billing the guest.
         await db.run(
-          "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED' WHERE session_id = ?",
+          "UPDATE orders SET payment_status = 'PAID', status = 'DELIVERED' WHERE session_id = ? AND UPPER(COALESCE(status,'')) <> 'CANCELLED'",
           [session.id]
         );
         // CMD-CENTER-2: centralised free-table helper; logs on failure instead
