@@ -31658,6 +31658,11 @@ const AvailabilityCalendarV2: React.FC<{
   const [start, setStart] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  // V2 default is the room-ID-light "Type" view: bookings shown as guest chips
+  // grouped by room type, no physical-room rows. Toggle on to drill into the
+  // room×date grid (physical room IDs). Rooms are only firm at check-in, so the
+  // type view is the right default; the room grid stays one click away.
+  const [showRoomNumbers, setShowRoomNumbers] = useState(false);
 
   const fetchAvailability = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -31722,7 +31727,10 @@ const AvailabilityCalendarV2: React.FC<{
 
   // Floating bookings keyed by group id — collected from the grid (cells of a
   // type's rooms that carry a floating booking). Each becomes one Unassigned row.
-  const floatingByGroup = useMemo(() => {
+  // All bookings of each type, collected from the grid (dedup by booking_id),
+  // carrying enough to render a room-ID-light chip: floating vs locked, status,
+  // and the (tentative/assigned) room number. Drives the default Type view.
+  const allBookingsByGroup = useMemo(() => {
     const out: Record<string, any[]> = {};
     if (!data) return out;
     for (const g of grouped) {
@@ -31731,22 +31739,40 @@ const AvailabilityCalendarV2: React.FC<{
         const dayMap = data.grid?.[r.id] || {};
         for (const d of Object.keys(dayMap)) {
           const c = dayMap[d];
-          if (c?.booking_id && Number(c.room_locked ?? 1) === 0 && !m.has(c.booking_id)) {
+          if (!c?.booking_id) continue;
+          const st = String(c.status || '').toUpperCase();
+          if (st === 'HOLD') continue; // holds aren't guest bookings
+          if (!m.has(c.booking_id)) {
             m.set(c.booking_id, {
               id: c.booking_id,
               guest_name: c.guest_name || 'Guest',
               ci: String(c.check_in_date || '').slice(0, 10),
               co: String(c.check_out_date || '').slice(0, 10),
               booking_type: c.booking_type,
+              status: st,
+              room_locked: Number(c.room_locked ?? 1),
+              room_number: r.room_number,
+              room_name: r.name,
             });
           }
         }
       }
-      out[g.id] = Array.from(m.values()).sort((a, b) =>
-        a.ci.localeCompare(b.ci) || String(a.guest_name).localeCompare(String(b.guest_name)));
+      out[g.id] = Array.from(m.values()).sort((a, b) => {
+        // Unassigned (floating) first, then by check-in date, then guest.
+        if ((a.room_locked === 0) !== (b.room_locked === 0)) return a.room_locked === 0 ? -1 : 1;
+        return a.ci.localeCompare(b.ci) || String(a.guest_name).localeCompare(String(b.guest_name));
+      });
     }
     return out;
   }, [data, grouped]);
+  // Floating-only subset for the rooms-view Unassigned lane.
+  const floatingByGroup = useMemo(() => {
+    const out: Record<string, any[]> = {};
+    for (const gid of Object.keys(allBookingsByGroup)) {
+      out[gid] = allBookingsByGroup[gid].filter((b: any) => b.room_locked === 0);
+    }
+    return out;
+  }, [allBookingsByGroup]);
 
   const todayKpis = useMemo(() => {
     const todayIso = new Date().toISOString().slice(0, 10);
@@ -31809,6 +31835,15 @@ const AvailabilityCalendarV2: React.FC<{
                 days === n ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52] hover:bg-[#faf7f2]')}>{n}d</button>
           ))}
         </div>
+        {/* View mode — Type (room-ID-light, default) vs Rooms (physical grid). */}
+        <div className="flex gap-1 bg-white rounded-lg p-1 border border-[#cc5a16]/15 shrink-0">
+          <button onClick={() => setShowRoomNumbers(false)}
+            className={cn('px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-widest',
+              !showRoomNumbers ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52] hover:bg-[#faf7f2]')}>Types</button>
+          <button onClick={() => setShowRoomNumbers(true)}
+            className={cn('px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-widest',
+              showRoomNumbers ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52] hover:bg-[#faf7f2]')}>Rooms</button>
+        </div>
         <div className="flex items-center gap-2 ml-auto">
           <button type="button" onClick={() => fetchAvailability(false)} disabled={loading} title="Refresh now"
             className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-xs font-bold hover:bg-white disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1">
@@ -31865,12 +31900,18 @@ const AvailabilityCalendarV2: React.FC<{
                 const sellable = g.rooms.filter((r: any) => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED').length;
                 const toggle = () => setCollapsedGroups(prev => { const n = new Set(prev); n.has(g.id) ? n.delete(g.id) : n.add(g.id); return n; });
                 const floats: any[] = floatingByGroup[g.id] || [];
+                const allBk: any[] = allBookingsByGroup[g.id] || [];
+                // Representative sellable room of the type — used to seed a new
+                // floating booking from the Type-view inventory cells.
+                const repRoom = g.rooms.find((r: any) => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED') || g.rooms[0];
                 return (
                   <React.Fragment key={g.id}>
-                    {/* Inventory header lane */}
-                    <tr className="cursor-pointer" onClick={toggle}>
+                    {/* Inventory header lane. In Rooms view the row toggles the
+                        per-type drill-down; in Type view its date cells are
+                        click-to-book (floating) for that category. */}
+                    <tr className={showRoomNumbers ? 'cursor-pointer' : ''} onClick={showRoomNumbers ? toggle : undefined}>
                       <td className="sticky left-0 z-10 bg-[#faf7f2] border-r border-[#cc5a16]/10 px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
-                        <span className="inline-block w-3 text-[#cc5a16]">{collapsed ? '▸' : '▾'}</span>{' '}
+                        {showRoomNumbers && <span className="inline-block w-3 text-[#cc5a16]">{collapsed ? '▸' : '▾'}</span>}{' '}
                         {g.name} · {g.rooms.length} room{g.rooms.length > 1 ? 's' : ''}
                         {floats.length > 0 && <span className="ml-1 text-emerald-700 normal-case">· {floats.length} unassigned</span>}
                       </td>
@@ -31884,17 +31925,73 @@ const AvailabilityCalendarV2: React.FC<{
                         const low = sellable >= 4 && avail <= Math.ceil(sellable * 0.25);
                         const bg = avail === 0 ? '#fde2e7' : low ? '#fef3c7' : '#e9f7ef';
                         const fg = avail === 0 ? '#9f1239' : low ? '#92400e' : '#1f513f';
+                        const bookable = !showRoomNumbers && !!repRoom && avail > 0;
                         return (
-                          <td key={d} className="text-center border-l border-[#cc5a16]/5 bg-[#faf7f2]" style={{ minWidth: 44 }}
-                              title={`${avail} of ${sellable} ${g.name} sellable on ${d}`}>
+                          <td key={d}
+                              onClick={bookable ? (e) => { e.stopPropagation(); onCellClick(repRoom.id, d); } : undefined}
+                              className={cn('text-center border-l border-[#cc5a16]/5 bg-[#faf7f2]', bookable && 'cursor-pointer hover:ring-2 hover:ring-inset hover:ring-[#cc5a16]/30')}
+                              style={{ minWidth: 44 }}
+                              title={bookable ? `Click to book a ${g.name} from ${d} (auto-assigned / floating)` : `${avail} of ${sellable} ${g.name} sellable on ${d}`}>
                             <span className="inline-block min-w-[20px] rounded px-1 py-0.5 text-[10px] font-bold" style={{ background: bg, color: fg }}>{avail}</span>
                           </td>
                         );
                       })}
                     </tr>
 
+                    {/* ── TYPE VIEW (default) — one guest chip-row per booking,
+                        no physical-room rows. Room # is a faint badge only on
+                        assigned / in-house guests; floating guests read as
+                        "Unassigned". ─────────────────────────────────────── */}
+                    {!showRoomNumbers && allBk.map((bk: any) => {
+                      const floating = bk.room_locked === 0;
+                      const firstCovered = data.dates.find((d: string) =>
+                        bk.booking_type === 'DAY_USE' ? d === bk.ci : (d >= bk.ci && d < bk.co));
+                      const sub = floating ? 'Unassigned'
+                        : bk.status === 'CHECKED_IN' ? `In-house · #${bk.room_number || '—'}`
+                        : bk.status === 'CHECKED_OUT' ? `Checked out · #${bk.room_number || '—'}`
+                        : `Assigned · #${bk.room_number || '—'}`;
+                      return (
+                        <tr key={`bk-${bk.id}`} className={cn('border-b border-[#cc5a16]/5', floating && 'bg-emerald-50/30')}>
+                          <td className={cn('sticky left-0 z-10 border-r border-[#cc5a16]/10 px-3 py-1.5', floating ? 'bg-emerald-50/60' : 'bg-white')}>
+                            <div className={cn('font-semibold text-[12px] truncate', floating ? 'text-emerald-800' : 'text-[#1a1208]')} title={bk.guest_name}>
+                              {floating ? '↻ ' : ''}{bk.guest_name}
+                            </div>
+                            <div className={cn('text-[9px] uppercase tracking-widest', floating ? 'text-emerald-700' : 'text-[#9c8e85]')}>{sub}</div>
+                          </td>
+                          {data.dates.map((d: string) => {
+                            const covered = bk.booking_type === 'DAY_USE' ? d === bk.ci : (d >= bk.ci && d < bk.co);
+                            if (!covered) return <td key={d} className="border-l border-[#cc5a16]/5" style={{ minWidth: 44, height: 36 }} />;
+                            let st: string = floating ? 'FLOATING' : bk.status;
+                            if (st === 'CHECKED_IN' && bk.co && bk.co <= d) st = 'CHECKING_OUT';
+                            const p = cellPalette[st] || cellPalette.BOOKED;
+                            return (
+                              <td key={d}
+                                  onClick={() => onBookingClick && onBookingClick(bk.id)}
+                                  title={`${bk.guest_name} (${floating ? 'unassigned / floating' : st}) · click for actions`}
+                                  className="p-1 text-center align-middle border-l border-[#cc5a16]/5 cursor-pointer hover:ring-2 hover:ring-amber-500 hover:brightness-105"
+                                  style={{ background: p.bg, minWidth: 44, height: 36 }}>
+                                {d === firstCovered && (
+                                  <div className="text-[10px] font-bold truncate px-1 leading-tight" style={{ color: p.fg, maxWidth: 60 }}>
+                                    {String(bk.guest_name).split(' ')[0]}
+                                  </div>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                    {!showRoomNumbers && allBk.length === 0 && (
+                      <tr className="border-b border-[#cc5a16]/5">
+                        <td className="sticky left-0 z-10 bg-white border-r border-[#cc5a16]/10 px-3 py-1.5 text-[11px] text-[#9c8e85] italic">No reservations</td>
+                        {data.dates.map((d: string) => <td key={d} className="border-l border-[#cc5a16]/5" style={{ minWidth: 44, height: 28 }} />)}
+                      </tr>
+                    )}
+
+                    {/* ── ROOMS VIEW — physical room×date grid (floating in the
+                        Unassigned lane, locked/checked-in in their rooms). ──── */}
                     {/* Unassigned (floating) lane — one row per floating booking */}
-                    {!collapsed && floats.map((fb: any) => {
+                    {showRoomNumbers && !collapsed && floats.map((fb: any) => {
                       const firstCovered = data.dates.find((d: string) =>
                         fb.booking_type === 'DAY_USE' ? d === fb.ci : (d >= fb.ci && d < fb.co));
                       return (
@@ -31927,7 +32024,7 @@ const AvailabilityCalendarV2: React.FC<{
 
                     {/* Physical room rows — floating bookings hidden (their tentative
                         room reads as available; they live in the Unassigned lane). */}
-                    {!collapsed && g.rooms.map((r: any) => (
+                    {showRoomNumbers && !collapsed && g.rooms.map((r: any) => (
                       <tr key={r.id} className="border-b border-[#cc5a16]/5">
                         <td className="sticky left-0 z-10 bg-white border-r border-[#cc5a16]/10 px-3 py-1.5">
                           <div className="font-semibold text-[#1a1208] text-[12px]">{r.name}</div>
