@@ -7255,6 +7255,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       return 0;
     });
   }, [hotelBookings, bookingHistoryFilter.search, bookingSort]);
+  // Reservation-table pagination (10 rows/page) — the list can run to hundreds
+  // of rows; paginate the already-filtered/sorted set in-browser. Reset to page
+  // 1 on a new search/sort; clamp when the result set shrinks.
+  const BOOKINGS_PAGE_SIZE = 10;
+  const [bookingsPage, setBookingsPage] = useState(1);
+  const bookingsTotalPages = Math.max(1, Math.ceil(displayedBookings.length / BOOKINGS_PAGE_SIZE));
+  useEffect(() => { setBookingsPage(1); }, [bookingHistoryFilter.search, bookingSort.col, bookingSort.dir]);
+  useEffect(() => { setBookingsPage(p => Math.min(Math.max(1, p), bookingsTotalPages)); }, [bookingsTotalPages]);
+  const pagedBookings = useMemo(
+    () => displayedBookings.slice((bookingsPage - 1) * BOOKINGS_PAGE_SIZE, bookingsPage * BOOKINGS_PAGE_SIZE),
+    [displayedBookings, bookingsPage],
+  );
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
   const [complianceList, setComplianceList] = useState<any[]>([]);
   const [hotelAnalytics, setHotelAnalytics] = useState<any>(null);
@@ -17942,7 +17954,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   })()}
                 </thead>
                 <tbody>
-                  {displayedBookings.map((b: any) => {
+                  {pagedBookings.map((b: any) => {
                     // LIFECYCLE-PILL (client request 7 Jun 2026):
                     // pill now reflects the four-state Stay-View
                     // lifecycle (Assigned / Checked-in / Checking out /
@@ -18259,6 +18271,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   })}
                 </tbody>
               </table>
+              {/* Pagination — 10 rows per page over the filtered/sorted set. */}
+              {bookingsTotalPages > 1 && (
+                <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-[#cc5a16]/10 bg-[#faf7f2] flex-wrap">
+                  <span className="text-[11px] text-[#6b5d52]">
+                    Showing <strong className="text-[#3d3128]">{(bookingsPage - 1) * BOOKINGS_PAGE_SIZE + 1}</strong>
+                    –<strong className="text-[#3d3128]">{Math.min(bookingsPage * BOOKINGS_PAGE_SIZE, displayedBookings.length)}</strong>
+                    {' '}of <strong className="text-[#3d3128]">{displayedBookings.length}</strong>
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button type="button" onClick={() => setBookingsPage(1)} disabled={bookingsPage <= 1}
+                      className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">« First</button>
+                    <button type="button" onClick={() => setBookingsPage(p => Math.max(1, p - 1))} disabled={bookingsPage <= 1}
+                      className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">‹ Prev</button>
+                    <span className="px-2 text-[11px] font-bold text-[#3d3128] whitespace-nowrap">Page {bookingsPage} / {bookingsTotalPages}</span>
+                    <button type="button" onClick={() => setBookingsPage(p => Math.min(bookingsTotalPages, p + 1))} disabled={bookingsPage >= bookingsTotalPages}
+                      className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">Next ›</button>
+                    <button type="button" onClick={() => setBookingsPage(bookingsTotalPages)} disabled={bookingsPage >= bookingsTotalPages}
+                      className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">Last »</button>
+                  </div>
+                </div>
+              )}
             </>)}
           </div>
           </>)}{/* /bookingsView === 'LIST' */}
