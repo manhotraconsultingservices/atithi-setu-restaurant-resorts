@@ -11616,6 +11616,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           restaurantId={restaurantId!}
           token={token!}
           propertyName={restaurant?.name || 'your property'}
+          restaurantImageUrl={(restaurant as any)?.logo_url || (restaurant as any)?.cover_image_url || ''}
           isHotelEnabled={isHotelEnabled}
           isRestaurantEnabled={isRestaurantEnabled}
           onOpenHotel={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
@@ -35365,31 +35366,33 @@ const HotelLateFeeBanner: React.FC<{
 // actions. Module-aware: a hotel-only tenant sees one tile, a both-mode tenant
 // sees both (and the tile click also flips dashboardMode via the callbacks).
 function HotelHomeLaunchpad({
-  restaurantId, token, propertyName, isHotelEnabled, isRestaurantEnabled,
+  restaurantId, token, propertyName, restaurantImageUrl, isHotelEnabled, isRestaurantEnabled,
   onOpenHotel, onOpenRestaurant, onNewBooking, onNewOrder, onOpenReports,
 }: {
-  restaurantId: string; token: string; propertyName: string;
+  restaurantId: string; token: string; propertyName: string; restaurantImageUrl?: string;
   isHotelEnabled: boolean; isRestaurantEnabled: boolean;
   onOpenHotel: () => void; onOpenRestaurant: () => void;
   onNewBooking: () => void; onNewOrder: () => void; onOpenReports: () => void;
 }) {
   const [snap, setSnap] = useState<any>(null);
+  const [heroUrl, setHeroUrl] = useState<string>('');
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
   const dateLabel = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
 
-  // Best-effort hotel snapshot from the night-audit summary — drives the
-  // hotel tile stat + the glance strip. Silent on failure (never blocks Home).
+  // Best-effort hotel snapshot (night-audit summary) + the property's own hero
+  // image (property-profile) — drive the tile stats and the wallpaper. Both
+  // are silent on failure so Home always renders.
   useEffect(() => {
     if (!isHotelEnabled) return;
     let abort = false;
     (async () => {
-      try {
-        const today = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
-        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/reports/night-audit?date=${today}`, { headers: { Authorization: `Bearer ${token}` } });
-        const body = await res.json().catch(() => ({}));
-        if (!abort && res.ok) setSnap(body.summary || null);
-      } catch { /* best-effort */ }
+      const get = (p: string) => fetch(`/api/restaurant/${restaurantId}/hotel${p}`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.ok ? r.json() : null).catch(() => null);
+      const today = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+      const [audit, profile] = await Promise.all([get(`/reports/night-audit?date=${today}`), get('/property-profile')]);
+      if (abort) return;
+      if (audit) setSnap(audit.summary || null);
+      if (profile?.hero_image_url) setHeroUrl(profile.hero_image_url);
     })();
     return () => { abort = true; };
   }, [restaurantId, token, isHotelEnabled]);
@@ -35407,35 +35410,61 @@ function HotelHomeLaunchpad({
           <p className="text-sm text-[#6b5d52] mt-1">Welcome back to <span className="font-semibold text-[#3d3128]">{propertyName}</span> · {dateLabel}</p>
         </div>
 
-        {/* Module tiles */}
+        {/* Module tiles — branded with the property's own name + photo. When a
+            hero/cover image is set it becomes the tile wallpaper (dark overlay
+            for legibility); otherwise the tile falls back to a clean accent card. */}
         <div className={cn('grid gap-4 mb-6', tileCount === 2 ? 'sm:grid-cols-2' : 'grid-cols-1')}>
-          {isHotelEnabled && (
-            <button type="button" onClick={onOpenHotel}
-              className="text-left bg-white border border-[#cc5a16]/20 rounded-3xl p-5 hover:border-[#cc5a16]/50 hover:shadow-md transition-all group">
-              <div className="flex items-center justify-between mb-4">
-                <span className="w-12 h-12 rounded-2xl bg-[#fbede4] text-[#cc5a16] flex items-center justify-center"><Bed size={26} /></span>
-                {snap && <span className="text-[10px] font-bold uppercase tracking-widest text-[#1f513f] bg-[#e9f7ef] px-2.5 py-1 rounded-full">{s.occupancy_pct ?? 0}% occupied</span>}
-              </div>
-              <div className="text-xl font-bold text-[#1a1208]">Hotel</div>
-              <div className="text-xs text-[#9c8e85] mb-3">Front desk · rooms · bookings · folios</div>
-              <div className="text-[13px] text-[#3d3128]">
-                {snap ? <>{s.occupied_tonight ?? 0} in-house · {s.arrivals_count ?? 0} arriving · {s.departures_count ?? 0} departing today</> : 'Open front-desk operations'}
-              </div>
-              <div className="mt-4 text-[13px] font-bold text-[#cc5a16] flex items-center gap-1 group-hover:gap-2 transition-all">Manage hotel <ChevronRight size={15} /></div>
-            </button>
-          )}
-          {isRestaurantEnabled && (
-            <button type="button" onClick={onOpenRestaurant}
-              className="text-left bg-white border border-teal-600/20 rounded-3xl p-5 hover:border-teal-600/50 hover:shadow-md transition-all group">
-              <div className="flex items-center justify-between mb-4">
-                <span className="w-12 h-12 rounded-2xl bg-[#e1f5ee] text-[#0f6e56] flex items-center justify-center"><Utensils size={24} /></span>
-              </div>
-              <div className="text-xl font-bold text-[#1a1208]">Restaurant</div>
-              <div className="text-xs text-[#9c8e85] mb-3">Orders · tables · menu · KOT</div>
-              <div className="text-[13px] text-[#3d3128]">Open live orders, tables and the kitchen display</div>
-              <div className="mt-4 text-[13px] font-bold text-[#0f6e56] flex items-center gap-1 group-hover:gap-2 transition-all">Manage restaurant <ChevronRight size={15} /></div>
-            </button>
-          )}
+          {isHotelEnabled && (() => {
+            const hasImg = !!heroUrl;
+            return (
+              <button type="button" onClick={onOpenHotel}
+                className="relative text-left rounded-3xl overflow-hidden border transition-all hover:shadow-lg group min-h-[190px] flex"
+                style={{ borderColor: hasImg ? 'transparent' : 'rgba(204,90,22,0.2)' }}>
+                {hasImg && (<>
+                  <img src={heroUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                  <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, rgba(26,18,8,0.25) 0%, rgba(26,18,8,0.78) 100%)' }} />
+                </>)}
+                <div className={cn('relative p-5 w-full flex flex-col', !hasImg && 'bg-white')}>
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="w-11 h-11 rounded-2xl flex items-center justify-center" style={{ background: hasImg ? 'rgba(255,255,255,0.2)' : '#fbede4', color: hasImg ? '#fff' : '#cc5a16' }}><Bed size={24} /></span>
+                    {snap && <span className="text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-full" style={{ background: hasImg ? 'rgba(255,255,255,0.22)' : '#e9f7ef', color: hasImg ? '#fff' : '#1f513f' }}>{s.occupancy_pct ?? 0}% occupied</span>}
+                  </div>
+                  <div className="mt-auto">
+                    <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#cc5a16' }}>Hotel</div>
+                    <div className="text-xl font-bold font-serif truncate" style={{ color: hasImg ? '#fff' : '#1a1208' }}>{propertyName}</div>
+                    <div className="text-[12px] mb-2" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#3d3128' }}>
+                      {snap ? <>{s.occupied_tonight ?? 0} in-house · {s.arrivals_count ?? 0} arriving · {s.departures_count ?? 0} departing today</> : 'Front desk · rooms · bookings'}
+                    </div>
+                    <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: hasImg ? '#fff' : '#cc5a16' }}>Manage hotel <ChevronRight size={15} /></div>
+                  </div>
+                </div>
+              </button>
+            );
+          })()}
+          {isRestaurantEnabled && (() => {
+            const hasImg = !!restaurantImageUrl;
+            return (
+              <button type="button" onClick={onOpenRestaurant}
+                className="relative text-left rounded-3xl overflow-hidden border transition-all hover:shadow-lg group min-h-[190px] flex"
+                style={{ borderColor: hasImg ? 'transparent' : 'rgba(15,110,86,0.2)' }}>
+                {hasImg && (<>
+                  <img src={restaurantImageUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                  <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, rgba(4,52,44,0.25) 0%, rgba(4,52,44,0.78) 100%)' }} />
+                </>)}
+                <div className={cn('relative p-5 w-full flex flex-col', !hasImg && 'bg-white')}>
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="w-11 h-11 rounded-2xl flex items-center justify-center" style={{ background: hasImg ? 'rgba(255,255,255,0.2)' : '#e1f5ee', color: hasImg ? '#fff' : '#0f6e56' }}><Utensils size={22} /></span>
+                  </div>
+                  <div className="mt-auto">
+                    <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#0f6e56' }}>Restaurant</div>
+                    <div className="text-xl font-bold font-serif truncate" style={{ color: hasImg ? '#fff' : '#1a1208' }}>{propertyName}</div>
+                    <div className="text-[12px] mb-2" style={{ color: hasImg ? 'rgba(255,255,255,0.85)' : '#3d3128' }}>Dining · orders · tables · KOT</div>
+                    <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: hasImg ? '#fff' : '#0f6e56' }}>Manage restaurant <ChevronRight size={15} /></div>
+                  </div>
+                </div>
+              </button>
+            );
+          })()}
         </div>
 
         {/* Today at a glance — hotel snapshot */}
