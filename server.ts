@@ -19942,7 +19942,12 @@ ${data.tenant.name}`;
       for (const b of recentCheckouts) {
         const bci = iso(b.check_in_date);
         const bco = iso(b.check_out_date);
-        const aco = iso(b.actual_checkout_at);
+        // actual_checkout_at is a TIMESTAMP; take its IST calendar date (not
+        // the UTC slice iso() would give) so a checkout in the 00:00–05:30 IST
+        // window doesn't clamp a day early and free a night still occupied.
+        const aco = b.actual_checkout_at
+          ? new Date(b.actual_checkout_at).toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10)
+          : '';
         const effectiveCo = (aco && aco < bco) ? aco : bco;
         for (const d of dates) {
           if (d >= bci && d < effectiveCo) stamp(b.room_id, d, { status: 'CHECKED_OUT', booking_id: b.id, guest_name: b.guest_name, check_in_date: bci, check_out_date: bco });
@@ -21014,29 +21019,36 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const today = new Date().toISOString().slice(0, 10);
-      const from = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.from || '')) ? String(req.query.from) : new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
-      const to   = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.to   || '')) ? String(req.query.to)   : today;
+      // Bucket every series by the IST calendar day, using the exact
+      // expression every other report in this app uses — DATE(col AT TIME
+      // ZONE 'Asia/Kolkata') — so Booking Trend agrees with Payment-Received,
+      // Night-Audit, etc. Bare `::date` buckets in the UTC session timezone,
+      // which pushes late-evening-IST bookings onto the previous day. Defaults
+      // are the IST 'today' / 29-days-ago, not UTC.
+      const istToday = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+      const istMonthAgo = new Date(Date.now() - 29 * 86400000).toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.from || '')) ? String(req.query.from) : istMonthAgo;
+      const to   = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.to   || '')) ? String(req.query.to)   : istToday;
       if (to < from) return res.status(400).json({ error: "to must be on or after from" });
-      // Received — by booking creation date.
+      // Received — by booking creation date (IST).
       const recv: any[] = await tenantDb.query(
-        `SELECT created_at::date AS d, COUNT(*)::int AS c
+        `SELECT to_char(DATE(created_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD') AS d, COUNT(*)::int AS c
            FROM room_bookings
-          WHERE created_at::date BETWEEN ?::date AND ?::date
-          GROUP BY created_at::date`, [from, to]).catch(() => []);
-      // Cancelled — by cancellation date.
+          WHERE DATE(created_at AT TIME ZONE 'Asia/Kolkata') BETWEEN ?::date AND ?::date
+          GROUP BY 1`, [from, to]).catch(() => []);
+      // Cancelled — by cancellation date (IST).
       const canc: any[] = await tenantDb.query(
-        `SELECT cancelled_at::date AS d, COUNT(*)::int AS c
+        `SELECT to_char(DATE(cancelled_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD') AS d, COUNT(*)::int AS c
            FROM room_bookings
-          WHERE cancelled_at IS NOT NULL AND cancelled_at::date BETWEEN ?::date AND ?::date
-          GROUP BY cancelled_at::date`, [from, to]).catch(() => []);
+          WHERE cancelled_at IS NOT NULL AND DATE(cancelled_at AT TIME ZONE 'Asia/Kolkata') BETWEEN ?::date AND ?::date
+          GROUP BY 1`, [from, to]).catch(() => []);
       // Modified — BOOKING_UPDATED rows in the channel-sync audit log (one
-      // per booking edit). Older tenants with no log rows simply read 0.
+      // per booking edit), bucketed in IST. Tenants with no log rows read 0.
       const modi: any[] = await tenantDb.query(
-        `SELECT created_at::date AS d, COUNT(*)::int AS c
+        `SELECT to_char(DATE(created_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD') AS d, COUNT(*)::int AS c
            FROM channel_sync_log
-          WHERE event_type = 'BOOKING_UPDATED' AND created_at::date BETWEEN ?::date AND ?::date
-          GROUP BY created_at::date`, [from, to]).catch(() => []);
+          WHERE event_type = 'BOOKING_UPDATED' AND DATE(created_at AT TIME ZONE 'Asia/Kolkata') BETWEEN ?::date AND ?::date
+          GROUP BY 1`, [from, to]).catch(() => []);
       const iso = (v: any) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
       const mapOf = (rows: any[]) => { const m: Record<string, number> = {}; for (const r of rows) m[iso(r.d)] = Number(r.c || 0); return m; };
       const rMap = mapOf(recv), cMap = mapOf(canc), mMap = mapOf(modi);

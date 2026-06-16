@@ -157,6 +157,20 @@ function csvMoney(v: any): string {
   const n = Number(v);
   return Number.isFinite(n) ? n.toFixed(2) : '';
 }
+// ─── IST date helpers ─────────────────────────────────────────────────────
+// This app serves India hotels; "today" and date labels must be the
+// Asia/Kolkata calendar day. toISOString() returns the UTC day, which is a
+// day behind for the first 5.5h of every IST day — the source of repeated
+// off-by-one bugs. Use these instead of `new Date().toISOString().slice(0,10)`.
+function todayISO(): string {
+  return new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+}
+function toISTDate(v: any): string {
+  if (!v) return '';
+  const d = v instanceof Date ? v : new Date(v);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+}
 
 // ─── Booking lifecycle state (client request 7 Jun 2026) ──────────────────
 // Maps the DB status (BOOKED / CHECKED_IN / CHECKED_OUT / CANCELLED) +
@@ -10567,7 +10581,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // list (num_guests, room_id, room_rate, room_name, dates) so the guest
     // count pre-fills and the room reassignment picker has its inputs.
     const full = hotelBookings.find((x: any) => x.id === b.id) || b;
-    const todayIso = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+    const todayIso = todayISO();
     const scheduledDate = normaliseBookingDate(full.check_in_date);
     if (scheduledDate && scheduledDate > todayIso) {
       setHotelError(`Check-in is not allowed before the check-in date (${scheduledDate}). You can check this guest in on or after that day.`);
@@ -18491,25 +18505,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // card now FETCHES + DISPLAYS the data inline as a table.
             // Separate "Download CSV" button on the table header lets the
             // user export the same data without re-clicking the card.
-            const loadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'ota-inventory') => {
+            // fromArg/toArg let callers (the date pickers / presets) reload the
+            // ACTIVE report against a just-changed range without waiting for the
+            // foDateFrom/foDateTo state to flush — fixes "report shows 1 day even
+            // though a wider period is selected" (the report only loaded on the
+            // card click and never re-fetched when the dates changed).
+            const loadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'ota-inventory', fromArg: string = foDateFrom, toArg: string = foDateTo) => {
               setFoLoading(kind);
               try {
                 let url = '';
                 if (kind === 'arrivals' || kind === 'departures') {
-                  url = `/reports/${kind}?from=${foDateFrom}&to=${foDateTo}`;
+                  url = `/reports/${kind}?from=${fromArg}&to=${toArg}`;
                 } else if (kind === 'room-status') {
-                  url = `/reports/room-status?as_of=${foDateTo}`;
+                  url = `/reports/room-status?as_of=${toArg}`;
                 } else if (kind === 'ota-inventory') {
                   // Forward-looking inventory: reuse the availability grid for
                   // [from, to] inclusive and derive per-type sellable counts
                   // client-side (same math as Calendar V2 Types view). Window
                   // is capped server-side at 90 days.
-                  const a = new Date(foDateFrom + 'T00:00:00Z').getTime();
-                  const b = new Date(foDateTo   + 'T00:00:00Z').getTime();
+                  const a = new Date(fromArg + 'T00:00:00Z').getTime();
+                  const b = new Date(toArg   + 'T00:00:00Z').getTime();
                   const days = Math.max(1, Math.min(90, Math.round((b - a) / 86400000) + 1));
-                  url = `/availability?start=${foDateFrom}&days=${days}`;
+                  url = `/availability?start=${fromArg}&days=${days}`;
                 } else {
-                  url = `/reports/night-audit?date=${foDateTo}`;
+                  url = `/reports/night-audit?date=${toArg}`;
                 }
                 const data: any = await hotelApi(url);
                 setFoActiveReport({ kind, data, loadedAt: Date.now() });
@@ -18518,6 +18537,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               } finally {
                 setFoLoading(null);
               }
+            };
+            // Re-fetch the currently-open report against a new date range (the
+            // live calendar 'stay-view' owns its own dates, so skip it).
+            const reloadActiveReport = (from: string, to: string) => {
+              const k = foActiveReport?.kind;
+              if (k && k !== 'stay-view') loadReport(k as any, from, to);
             };
 
             // OTA inventory: turn the availability grid into a per-room-type
@@ -18539,7 +18564,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 byType.get(k)!.push(r);
               }
               const rows = Array.from(byType.entries()).map(([tid, trooms]) => {
-                const name = typeName.get(tid) || trooms[0]?.type || 'Uncategorised';
+                // Resolve the category name from room_types via type_id only.
+                // NEVER fall back to room.type — that legacy free-text column
+                // often still holds the stale default 'standard' (same fix as
+                // the Stay View CSV export).
+                const name = typeName.get(tid) || 'Uncategorised';
                 const sellable = trooms.filter(r => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED').length;
                 const counts = dates.map(d => {
                   let avail = 0;
@@ -19026,13 +19055,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <div className="flex items-end gap-3 flex-wrap">
                     <div>
                       <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From</label>
-                      <input type="date" value={foDateFrom} onChange={e => setFoDateFrom(e.target.value)}
+                      <input type="date" value={foDateFrom} onChange={e => { const v = e.target.value; setFoDateFrom(v); reloadActiveReport(v, foDateTo); }}
                         className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
                       />
                     </div>
                     <div>
                       <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">To</label>
-                      <input type="date" value={foDateTo} onChange={e => setFoDateTo(e.target.value)}
+                      <input type="date" value={foDateTo} onChange={e => { const v = e.target.value; setFoDateTo(v); reloadActiveReport(foDateFrom, v); }}
                         className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
                       />
                     </div>
@@ -19048,10 +19077,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             // day (e.g. month-start 1st → "…-05-31"), breaking This week
                             // / This month and the "to = today" of every preset.
                             const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                            if (preset === 'today') { setFoDateFrom(iso(now)); setFoDateTo(iso(now)); }
-                            else if (preset === 'yesterday') { const y = new Date(now.getTime() - 86400000); setFoDateFrom(iso(y)); setFoDateTo(iso(y)); }
-                            else if (preset === 'this-week') { const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7)); setFoDateFrom(iso(monday)); setFoDateTo(iso(now)); }
-                            else if (preset === 'this-month') { setFoDateFrom(iso(new Date(now.getFullYear(), now.getMonth(), 1))); setFoDateTo(iso(now)); }
+                            let nf = iso(now), nt = iso(now);
+                            if (preset === 'today') { nf = iso(now); nt = iso(now); }
+                            else if (preset === 'yesterday') { const y = new Date(now.getTime() - 86400000); nf = iso(y); nt = iso(y); }
+                            else if (preset === 'this-week') { const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7)); nf = iso(monday); nt = iso(now); }
+                            else if (preset === 'this-month') { nf = iso(new Date(now.getFullYear(), now.getMonth(), 1)); nt = iso(now); }
+                            setFoDateFrom(nf); setFoDateTo(nt);
+                            reloadActiveReport(nf, nt);
                           }}
                           className="px-2 py-1 rounded-md bg-[#faf7f2] hover:bg-[#cc5a16]/10 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]"
                         >{preset.replace('-', ' ')}</button>
@@ -35400,7 +35432,7 @@ function HotelHomeLaunchpad({
     let abort = false;
     (async () => {
       const get = (p: string) => fetch(`/api/restaurant/${restaurantId}/hotel${p}`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.ok ? r.json() : null).catch(() => null);
-      const today = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+      const today = todayISO();
       const [audit, profile] = await Promise.all([get(`/reports/night-audit?date=${today}`), get('/property-profile')]);
       if (abort) return;
       if (audit) setSnap(audit.summary || null);
@@ -35518,8 +35550,8 @@ function HotelHomeLaunchpad({
 // + CSV. Self-contained: owns its date range + fetch, reuses the shared
 // downloadCsv helper (UTF-8 BOM, Excel-safe). Reads /hotel/reports/booking-trend.
 function BookingTrendReport({ restaurantId, token }: { restaurantId: string; token: string }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const monthAgo = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  const today = todayISO();
+  const monthAgo = toISTDate(new Date(Date.now() - 29 * 86400000));
   const [from, setFrom] = useState(monthAgo);
   const [to, setTo] = useState(today);
   const [data, setData] = useState<any>(null);
@@ -35565,7 +35597,7 @@ function BookingTrendReport({ restaurantId, token }: { restaurantId: string; tok
       <div className="px-5 py-3 bg-[#faf7f2] border-b border-[#e8dccf] flex flex-wrap items-end gap-3">
         <div className="mr-auto">
           <h3 className="text-base font-bold font-serif text-[#1a1208]">Booking Trend</h3>
-          <p className="text-[11px] text-[#9c8e85]">Bookings received vs. cancelled vs. modified, per day.</p>
+          <p className="text-[11px] text-[#9c8e85]">Bookings received vs. cancelled vs. modified, per day. <span className="italic">"Modified" counts booking edits recorded in the change log.</span></p>
         </div>
         <div>
           <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From</label>
