@@ -9,23 +9,32 @@ let pass = 0, fail = 0;
 const ok = (c, label) => { if (c) pass++; else { fail++; console.log(`  ${C.r}✗${C.x} ${label}`); } };
 
 // One type 'DLX' with 3 rooms; 'STD' with 1. R-2 is in maintenance.
+// U-1/U-2 are UNCATEGORISED (no type_id) — the no-type pool.
 const rooms = [
   { id: 'R-1', type_id: 'DLX', status: 'VACANT' },
   { id: 'R-2', type_id: 'DLX', status: 'MAINTENANCE' },
   { id: 'R-3', type_id: 'DLX', status: 'VACANT' },
   { id: 'R-4', type_id: 'DLX', status: 'VACANT' },
   { id: 'R-9', type_id: 'STD', status: 'VACANT' },
+  { id: 'U-1', type_id: null, status: 'VACANT' },
+  { id: 'U-2', type_id: null, status: 'VACANT' },
 ];
 
 // Mirror of the server resolution: explicit room_id → locked; else auto-pick
 // a free room from the type (excluding maintenance/blocked + taken) → floating.
-function resolveRoom({ room_id, room_type_id }, taken = new Set()) {
+// '__UNCATEGORISED__' floats against the no-type pool. preferred_room_id is
+// honoured when free (staff get the room they clicked, still floating).
+function resolveRoom({ room_id, room_type_id, preferred_room_id }, taken = new Set()) {
   if (room_id) return { ok: true, room_id, room_locked: 1 };
   if (room_type_id) {
+    const isUncat = room_type_id === '__UNCATEGORISED__';
     const candidates = rooms
-      .filter(r => r.type_id === room_type_id && r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED')
+      .filter(r => (isUncat ? r.type_id == null : r.type_id === room_type_id)
+        && r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED')
       .sort((a, b) => a.id.localeCompare(b.id));
-    const free = candidates.find(c => !taken.has(c.id));
+    const freePool = candidates.filter(c => !taken.has(c.id));
+    const preferred = preferred_room_id ? freePool.find(c => c.id === preferred_room_id) : null;
+    const free = preferred || freePool[0];
     if (!free) return { ok: false, code: 409 };
     return { ok: true, room_id: free.id, room_locked: 0 };
   }
@@ -57,6 +66,24 @@ ok(resolveRoom({}).code === 400, 'no type and no room → 400');
 // 6. A single-room type still books its one room, floating.
 const e = resolveRoom({ room_type_id: 'STD' });
 ok(e.ok && e.room_id === 'R-9' && e.room_locked === 0, 'single-room type books its room, floating');
+
+// 7. preferred_room_id (room the staff clicked) is honoured when free — and
+//    STAYS floating. Staff clicked R-4; first-free would be R-3.
+const f = resolveRoom({ room_type_id: 'DLX', preferred_room_id: 'R-4' }, new Set(['R-1']));
+ok(f.ok && f.room_id === 'R-4' && f.room_locked === 0, 'preferred room is honoured when free, still FLOATING');
+
+// 8. preferred_room_id taken for the dates → falls back to the first free room.
+//    R-3 (preferred) is taken; first free DLX by name is R-1.
+const g = resolveRoom({ room_type_id: 'DLX', preferred_room_id: 'R-3' }, new Set(['R-3']));
+ok(g.ok && g.room_id === 'R-1' && g.room_locked === 0, 'taken preferred room → first free in type (floating)');
+
+// 9. Uncategorised tenant (no room types) still floats against the no-type pool.
+const h = resolveRoom({ room_type_id: '__UNCATEGORISED__' }, new Set(['U-1']));
+ok(h.ok && h.room_id === 'U-2' && h.room_locked === 0, 'uncategorised pool auto-assigns a free no-type room, floating');
+
+// 10. Uncategorised + preferred free room → that exact room, floating.
+const i = resolveRoom({ room_type_id: '__UNCATEGORISED__', preferred_room_id: 'U-2' });
+ok(i.ok && i.room_id === 'U-2' && i.room_locked === 0, 'uncategorised honours preferred free room, floating');
 
 console.log(`${C.b}\n═══════════════════════════════════════════════════════════════${C.x}`);
 console.log(`  ${C.g}✓ Passed:${C.x} ${pass}`);

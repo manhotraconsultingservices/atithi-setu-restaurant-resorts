@@ -17353,6 +17353,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 const room = hotelRooms.find(r => r.id === roomId);
                 setEditingBooking({
                   room_id: roomId,
+                  // Option A: open as a FLOATING booking against the clicked
+                  // room's category. The room is just a representative/preview —
+                  // submit sends room_type_id so the server auto-assigns (not locks).
+                  room_type_id: room?.type_id || '__UNCATEGORISED__',
+                  room_floating: true,
                   room_rate: room?.base_rate || 0,
                   check_in_date: date,
                   check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
@@ -17383,6 +17388,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 const room = hotelRooms.find(r => r.id === roomId);
                 setEditingBooking({
                   room_id: roomId,
+                  // Option A: open as a FLOATING booking against the clicked
+                  // room's category. The room is just a representative/preview —
+                  // submit sends room_type_id so the server auto-assigns (not locks).
+                  room_type_id: room?.type_id || '__UNCATEGORISED__',
+                  room_floating: true,
                   room_rate: room?.base_rate || 0,
                   check_in_date: date,
                   check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
@@ -18389,6 +18399,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         const room = hotelRooms.find(r => r.id === roomId);
                         setEditingBooking({
                           room_id: roomId,
+                          // Option A — float against the clicked room's category.
+                          room_type_id: room?.type_id || '__UNCATEGORISED__',
+                          room_floating: true,
                           room_rate: room?.base_rate || 0,
                           check_in_date: date,
                           check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
@@ -25245,6 +25258,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 setEditingBooking({
                                   ...editingBooking,
                                   room_id: r.id,
+                                  // Option A — float against this room's category.
+                                  // The picked room is a preview/preferred hint;
+                                  // submit sends room_type_id so the server
+                                  // auto-assigns (floating) instead of locking it.
+                                  room_type_id: (hotelRooms.find(rm => rm.id === r.id)?.type_id) || '__UNCATEGORISED__',
+                                  room_floating: true,
                                   // BCG Tariff Phase 4.2 — don't backfill base_rate.
                                   // Let room_rate stay 0 / explicit so the server's
                                   // matrix resolver handles meal-plan + extras. Only
@@ -26392,17 +26411,31 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   // 0 reach the server so the matrix resolver runs and
                   // the meal-plan + extras combo is honoured. Staff who
                   // really want to override can type a non-zero value.
-                  // Option A (17 Jun 2026): a brand-new FLOATING booking (category
-                  // picked, no specific room drilled) is sent as a room_type_id so
-                  // the server auto-assigns a floating room and decrements type
-                  // inventory — instead of locking the representative room_id we
-                  // used for the live preview. Drilled rooms, edits, and
-                  // uncategorised rooms keep sending room_id (locked).
+                  // Option A (17 Jun 2026, broadened 19 Jun): EVERY new booking
+                  // floats by inventory. We send a room_type_id so the server
+                  // auto-assigns a room of that category and marks it FLOATING
+                  // (room_locked=0, reshufflable until check-in) instead of
+                  // freezing a chosen room. This holds no matter how the modal
+                  // was opened — New Booking button, calendar cell, or Find
+                  // Rooms — so staff can never accidentally block a room number.
+                  // The assigned room is passed as preferred_room_id so staff
+                  // still get the room they clicked when it's free (still
+                  // floating). Two escape hatches keep a locked room_id: editing
+                  // an existing booking, and deliberately drilling a specific
+                  // room via "Change" (sets room_floating === false).
+                  // Uncategorised rooms float via the '__UNCATEGORISED__'
+                  // sentinel — the server picks from the no-type pool.
                   const _payload: any = { ...editingBooking };
-                  if (!editingBooking.id && editingBooking.room_floating
-                      && editingBooking.room_type_id && editingBooking.room_type_id !== '__UNCATEGORISED__') {
-                    _payload.room_type_id = editingBooking.room_type_id;
-                    delete _payload.room_id;
+                  if (!editingBooking.id && editingBooking.room_floating !== false) {
+                    const assignedRoom = hotelRooms.find(r => r.id === editingBooking.room_id);
+                    const typeId = editingBooking.room_type_id
+                      || assignedRoom?.type_id
+                      || (editingBooking.room_id ? '__UNCATEGORISED__' : '');
+                    if (typeId) {
+                      _payload.room_type_id = typeId;
+                      if (editingBooking.room_id) _payload.preferred_room_id = editingBooking.room_id;
+                      delete _payload.room_id;
+                    }
                   }
                   await saveBooking(_payload);
                   setShowBookingModal(false); setEditingBooking(null);

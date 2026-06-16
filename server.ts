@@ -21558,7 +21558,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const {
-        room_id, room_type_id, guest_name, guest_phone, guest_email, guest_id_proof,
+        room_id, room_type_id, preferred_room_id, guest_name, guest_phone, guest_email, guest_id_proof,
         guest_nationality, guest_state, num_guests, check_in_date, check_out_date,
         booking_source, room_rate, special_requests, booking_type,
         // BCG Tariff Phase 3 — meal plan + extra-person counts. All optional;
@@ -21588,9 +21588,15 @@ ${data.tenant.name}`;
       let resolvedRoomId: string = room_id ? String(room_id) : '';
       let roomLocked = 1;
       if (!resolvedRoomId && room_type_id) {
+        // '__UNCATEGORISED__' = float against the pool of rooms that have no
+        // room_type assigned (tenants who haven't set up categories yet still
+        // get inventory-only bookings instead of a frozen room).
+        const isUncat = String(room_type_id) === '__UNCATEGORISED__';
         const candidates: any[] = await tenantDb.query(
-          "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
-          [room_type_id]
+          isUncat
+            ? "SELECT id FROM rooms WHERE type_id IS NULL AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name"
+            : "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
+          isUncat ? [] : [room_type_id]
         );
         const bConf: any[] = await tenantDb.query(
           "SELECT room_id FROM room_bookings WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND check_in_date < ? AND check_out_date > ?",
@@ -21601,7 +21607,14 @@ ${data.tenant.name}`;
           [check_out_date, check_in_date]
         );
         const taken = new Set<string>([...bConf, ...hConf].map((r: any) => String(r.room_id)));
-        const free = candidates.find((c: any) => !taken.has(String(c.id)));
+        const freePool = candidates.filter((c: any) => !taken.has(String(c.id)));
+        // Honour the room the staff clicked (calendar cell / Find Rooms) when it
+        // is still free — they get that exact room, but it stays FLOATING and
+        // reshufflable. Otherwise take the first free room in the category.
+        const preferred = preferred_room_id
+          ? freePool.find((c: any) => String(c.id) === String(preferred_room_id))
+          : null;
+        const free = preferred || freePool[0];
         if (!free) {
           return res.status(409).json({ error: 'No rooms available in this category for the selected dates.' });
         }
