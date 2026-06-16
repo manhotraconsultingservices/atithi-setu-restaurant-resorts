@@ -37800,6 +37800,16 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 
   const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
+  // UC-02 fix (17 Jun 2026): if the customer empties the cart while the order
+  // window is open, close it automatically — don't strand an empty order window
+  // (customer details + ₹0 totals) that they'd otherwise have to dismiss by
+  // hand. Declarative so it covers every cart-emptying path (trash button, qty
+  // step-down). No effect during order placement: placeOrder() sets
+  // isCheckingOut=false before clearing the cart, so this is a no-op there.
+  useEffect(() => {
+    if (isCheckingOut && cart.length === 0) setIsCheckingOut(false);
+  }, [cart.length, isCheckingOut]);
+
   const placeOrder = async (paymentMethod: 'ONLINE' | 'TABLE' | 'CASH' | 'UPI' | 'CARD') => {
     // Block new orders once bill has been requested (session locked)
     if (session?.status === 'bill_requested') {
