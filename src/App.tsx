@@ -6749,7 +6749,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'PUBLIC_BOOKING_PAGE'                       // Marriott-grade direct-booking page profile + galleries
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
     | 'RESTAURANT_REPORTS'                        // F&B reporting hub (separate from Hotel Reports)
-  >('MONITOR');
+    | 'HOME'                                      // post-login launchpad (welcome + Hotel/Restaurant tiles)
+  >('HOME');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
   const [inventorySubTab, setInventorySubTab] = useState<
     'DASHBOARD' | 'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS' | 'INSIGHTS' | 'SETTINGS'
@@ -11536,6 +11537,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           );
         });
 
+        // Standalone "Home" link — always visible, sits above the modules.
+        // Returns the user to the welcome launchpad from anywhere.
+        const renderHomeLink = (collapsed: boolean) => (
+          <button
+            type="button"
+            title="Home"
+            onClick={() => { setActiveTab('HOME'); setMobileNavOpen(false); }}
+            className={cn(
+              "w-full flex items-center gap-2.5 rounded-xl transition-colors mb-1",
+              collapsed ? "justify-center py-2.5" : "px-3 py-2.5",
+              activeTab === 'HOME' ? "bg-[#cc5a16] text-white shadow-sm" : "text-[#3d3128] hover:bg-[#faf7f2]"
+            )}
+          >
+            <span className={cn(activeTab === 'HOME' ? "text-white" : "text-[#9c8e85]")}><LayoutDashboard size={16} /></span>
+            {!collapsed && <span className="flex-1 text-left text-[11px] font-bold uppercase tracking-[0.14em]">Home</span>}
+          </button>
+        );
+
         return (
           <>
             {/* ── DESKTOP: left sidebar rail ─────────────────────────── */}
@@ -11556,6 +11575,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               >
                 {navCollapsed ? <ChevronRight size={16} /> : <><ChevronLeft size={16} /> Collapse</>}
               </button>
+              {renderHomeLink(navCollapsed)}
               {renderModules(navCollapsed)}
             </aside>
 
@@ -11568,6 +11588,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#cc5a16]">Menu</span>
                     <button type="button" onClick={() => setMobileNavOpen(false)} className="p-1.5 rounded-lg hover:bg-[#faf7f2]"><X size={18} className="text-[#1a1208]" /></button>
                   </div>
+                  {renderHomeLink(false)}
                   {renderModules(false)}
                 </div>
               </div>
@@ -11579,7 +11600,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       <div className="flex-1 min-w-0 space-y-6 md:space-y-8">
 
 
-      {allowedTabs && !isTabVisible(activeTab, allowedTabs) ? (
+      {allowedTabs && activeTab !== 'HOME' && !isTabVisible(activeTab, allowedTabs) ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <div className="w-16 h-16 rounded-full bg-red-50 flex items-center justify-center">
             <Lock size={28} className="text-red-400" />
@@ -11590,6 +11611,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             Contact your administrator to request access.
           </p>
         </div>
+      ) : activeTab === 'HOME' ? (
+        <HotelHomeLaunchpad
+          restaurantId={restaurantId!}
+          token={token!}
+          propertyName={restaurant?.name || 'your property'}
+          isHotelEnabled={isHotelEnabled}
+          isRestaurantEnabled={isRestaurantEnabled}
+          onOpenHotel={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
+          onOpenRestaurant={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
+          onNewBooking={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
+          onNewOrder={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
+          onOpenReports={() => { setDashboardMode('HOTEL'); setActiveTab('FRONT_OFFICE_REPORTS'); }}
+        />
       ) : activeTab === 'MENU' ? (
         <div className="space-y-5">
           {/* ── Header ── */}
@@ -35325,6 +35359,120 @@ const HotelLateFeeBanner: React.FC<{
 // occupancy trend, guest directory, purchase spend) plus a petty-cash ledger.
 // Keeps ALL its own state so it never touches the owner dashboard's state bag
 // or the existing report switch — low blast radius by design.
+// Post-login Home launchpad (client request 17 Jun 2026). Replaces the dense
+// "land straight in Command Centre" experience with a branded welcome + two
+// big module tiles (Hotel / Restaurant) + a today-at-a-glance strip + quick
+// actions. Module-aware: a hotel-only tenant sees one tile, a both-mode tenant
+// sees both (and the tile click also flips dashboardMode via the callbacks).
+function HotelHomeLaunchpad({
+  restaurantId, token, propertyName, isHotelEnabled, isRestaurantEnabled,
+  onOpenHotel, onOpenRestaurant, onNewBooking, onNewOrder, onOpenReports,
+}: {
+  restaurantId: string; token: string; propertyName: string;
+  isHotelEnabled: boolean; isRestaurantEnabled: boolean;
+  onOpenHotel: () => void; onOpenRestaurant: () => void;
+  onNewBooking: () => void; onNewOrder: () => void; onOpenReports: () => void;
+}) {
+  const [snap, setSnap] = useState<any>(null);
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const dateLabel = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+
+  // Best-effort hotel snapshot from the night-audit summary — drives the
+  // hotel tile stat + the glance strip. Silent on failure (never blocks Home).
+  useEffect(() => {
+    if (!isHotelEnabled) return;
+    let abort = false;
+    (async () => {
+      try {
+        const today = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/reports/night-audit?date=${today}`, { headers: { Authorization: `Bearer ${token}` } });
+        const body = await res.json().catch(() => ({}));
+        if (!abort && res.ok) setSnap(body.summary || null);
+      } catch { /* best-effort */ }
+    })();
+    return () => { abort = true; };
+  }, [restaurantId, token, isHotelEnabled]);
+
+  const s = snap || {};
+  const inr = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+  const tileCount = (isHotelEnabled ? 1 : 0) + (isRestaurantEnabled ? 1 : 0);
+
+  return (
+    <div className="max-w-5xl mx-auto">
+      <div className="bg-[#faf7f2] rounded-[28px] border border-[#cc5a16]/10 p-6 sm:p-8">
+        {/* Welcome */}
+        <div className="mb-6">
+          <h1 className="text-2xl sm:text-3xl font-bold font-serif text-[#1a1208]">{greeting}</h1>
+          <p className="text-sm text-[#6b5d52] mt-1">Welcome back to <span className="font-semibold text-[#3d3128]">{propertyName}</span> · {dateLabel}</p>
+        </div>
+
+        {/* Module tiles */}
+        <div className={cn('grid gap-4 mb-6', tileCount === 2 ? 'sm:grid-cols-2' : 'grid-cols-1')}>
+          {isHotelEnabled && (
+            <button type="button" onClick={onOpenHotel}
+              className="text-left bg-white border border-[#cc5a16]/20 rounded-3xl p-5 hover:border-[#cc5a16]/50 hover:shadow-md transition-all group">
+              <div className="flex items-center justify-between mb-4">
+                <span className="w-12 h-12 rounded-2xl bg-[#fbede4] text-[#cc5a16] flex items-center justify-center"><Bed size={26} /></span>
+                {snap && <span className="text-[10px] font-bold uppercase tracking-widest text-[#1f513f] bg-[#e9f7ef] px-2.5 py-1 rounded-full">{s.occupancy_pct ?? 0}% occupied</span>}
+              </div>
+              <div className="text-xl font-bold text-[#1a1208]">Hotel</div>
+              <div className="text-xs text-[#9c8e85] mb-3">Front desk · rooms · bookings · folios</div>
+              <div className="text-[13px] text-[#3d3128]">
+                {snap ? <>{s.occupied_tonight ?? 0} in-house · {s.arrivals_count ?? 0} arriving · {s.departures_count ?? 0} departing today</> : 'Open front-desk operations'}
+              </div>
+              <div className="mt-4 text-[13px] font-bold text-[#cc5a16] flex items-center gap-1 group-hover:gap-2 transition-all">Manage hotel <ChevronRight size={15} /></div>
+            </button>
+          )}
+          {isRestaurantEnabled && (
+            <button type="button" onClick={onOpenRestaurant}
+              className="text-left bg-white border border-teal-600/20 rounded-3xl p-5 hover:border-teal-600/50 hover:shadow-md transition-all group">
+              <div className="flex items-center justify-between mb-4">
+                <span className="w-12 h-12 rounded-2xl bg-[#e1f5ee] text-[#0f6e56] flex items-center justify-center"><Utensils size={24} /></span>
+              </div>
+              <div className="text-xl font-bold text-[#1a1208]">Restaurant</div>
+              <div className="text-xs text-[#9c8e85] mb-3">Orders · tables · menu · KOT</div>
+              <div className="text-[13px] text-[#3d3128]">Open live orders, tables and the kitchen display</div>
+              <div className="mt-4 text-[13px] font-bold text-[#0f6e56] flex items-center gap-1 group-hover:gap-2 transition-all">Manage restaurant <ChevronRight size={15} /></div>
+            </button>
+          )}
+        </div>
+
+        {/* Today at a glance — hotel snapshot */}
+        {isHotelEnabled && snap && (
+          <div className="bg-white rounded-2xl border border-[#cc5a16]/10 grid grid-cols-2 sm:grid-cols-5 mb-6">
+            {[
+              { label: 'Arrivals', value: s.arrivals_count ?? 0 },
+              { label: 'Departures', value: s.departures_count ?? 0 },
+              { label: 'In-house', value: s.occupied_tonight ?? 0 },
+              { label: 'Occupancy', value: `${s.occupancy_pct ?? 0}%` },
+              { label: 'Today', value: inr(s.settled_revenue_today) },
+            ].map((k, i) => (
+              <div key={k.label} className={cn('text-center px-3 py-3', i < 4 && 'sm:border-r border-[#cc5a16]/10', i % 2 === 0 && i < 4 && 'border-r sm:border-r', 'border-b sm:border-b-0 border-[#cc5a16]/10')}>
+                <div className="text-xl font-bold font-mono text-[#1a1208]">{k.value}</div>
+                <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mt-0.5">{k.label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Quick actions */}
+        <div className="flex flex-wrap gap-2">
+          {isHotelEnabled && (
+            <button type="button" onClick={onNewBooking} className="text-[12px] font-bold text-[#3d3128] bg-white border border-[#cc5a16]/20 rounded-full px-4 py-2 hover:bg-white/60 hover:border-[#cc5a16]/40 transition-colors">New booking</button>
+          )}
+          {isRestaurantEnabled && (
+            <button type="button" onClick={onNewOrder} className="text-[12px] font-bold text-[#3d3128] bg-white border border-[#cc5a16]/20 rounded-full px-4 py-2 hover:bg-white/60 hover:border-[#cc5a16]/40 transition-colors">Live orders</button>
+          )}
+          {isHotelEnabled && (
+            <button type="button" onClick={onOpenReports} className="text-[12px] font-bold text-[#3d3128] bg-white border border-[#cc5a16]/20 rounded-full px-4 py-2 hover:bg-white/60 hover:border-[#cc5a16]/40 transition-colors">Reports</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Booking Trend — daily bookings RECEIVED vs CANCELLED vs MODIFIED, charted
 // + CSV. Self-contained: owns its date range + fetch, reuses the shared
 // downloadCsv helper (UTF-8 BOM, Excel-safe). Reads /hotel/reports/booking-trend.
