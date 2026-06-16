@@ -1632,6 +1632,15 @@ export default function App() {
     );
   }
 
+  // ── Guest UPI pay page (?pay=<payload>) ──────────────────────────────────
+  // Self-contained from the URL — no auth or tenant context needed. Rendered
+  // before any view/role dispatch so a payment link opened from email/WhatsApp
+  // lands straight on the pay screen (tap-to-pay UPI button + scannable QR).
+  // This is what the email/WhatsApp links now point to (an https URL is
+  // clickable everywhere; the raw upi:// link was not).
+  const __payParam = new URLSearchParams(window.location.search).get('pay');
+  if (__payParam) return <PayPage payload={__payParam} />;
+
   if (view === 'LANDING') {
     return (
       <div className="min-h-screen bg-[#faf7f2] flex flex-col items-center justify-center p-6 font-serif overflow-hidden relative">
@@ -37321,6 +37330,92 @@ function LiveOrderEditModal({ order, restaurantId, token, onClose, onSaved }: {
             <button onClick={onClose} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Close</button>
             <button onClick={save} disabled={saving || kept.length === 0} className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50">{saving ? 'Saving…' : 'Save changes'}</button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── PayPage (17 Jun 2026) — guest-facing UPI pay screen ─────────────────────
+// Reached via the https `?pay=<payload>` link sent in payment emails/WhatsApp.
+// Decodes the base64url payload {u: upi link, amt, cur, payee, vpa, prop} and
+// renders: the amount, a tap-to-pay "Pay with any UPI app" button (fires the
+// upi:// intent — works on mobile), and a scannable UPI QR (works on desktop).
+// Money goes straight to the hotel's VPA — no gateway. Fully self-contained;
+// makes no API calls and needs no auth.
+function PayPage({ payload }: { payload: string }) {
+  const data = useMemo(() => {
+    try {
+      let s = String(payload || '').replace(/-/g, '+').replace(/_/g, '/');
+      while (s.length % 4) s += '=';
+      const bin = atob(s);
+      const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
+      const json = new TextDecoder().decode(bytes);
+      return JSON.parse(json) as { u: string; amt: number; cur: string; payee: string; vpa: string; prop: string };
+    } catch { return null; }
+  }, [payload]);
+  const [copied, setCopied] = useState(false);
+  const isMobile = typeof navigator !== 'undefined' && /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
+
+  if (!data || !data.u) {
+    return (
+      <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center p-6">
+        <div className="bg-white rounded-3xl shadow-sm border border-[#cc5a16]/10 p-8 max-w-sm text-center">
+          <p className="text-4xl mb-3">🔗</p>
+          <h1 className="text-lg font-bold text-[#1a1208] mb-1">Payment link invalid</h1>
+          <p className="text-sm text-[#6b5d52]">This payment link is broken or has expired. Please ask the property to resend it.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const sym = data.cur || '₹';
+  const fmt = (n: number) => `${sym}${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const copyVpa = () => {
+    try { navigator.clipboard?.writeText(data.vpa); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ }
+  };
+  const payButton = (
+    <a
+      href={data.u}
+      className="block w-full text-center bg-[#cc5a16] text-white py-4 rounded-2xl font-bold text-base hover:bg-[#a84612] transition-colors"
+    >
+      Pay {fmt(data.amt)} with any UPI app
+    </a>
+  );
+  const qrBlock = (
+    <div className="flex flex-col items-center gap-2 bg-[#faf7f2] rounded-2xl p-4">
+      <QRCodeSVG value={data.u} size={196} includeMargin level="M" />
+      <p className="text-[11px] text-[#9c8e85] text-center leading-snug">Scan with GPay / PhonePe / Paytm / any UPI app</p>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-sm border border-[#cc5a16]/10 w-full max-w-sm overflow-hidden">
+        <div className="h-1.5 w-full bg-[#cc5a16]" />
+        <div className="p-6 space-y-5">
+          <div className="text-center">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16]">Payment to</p>
+            <h1 className="text-xl font-bold font-serif text-[#1a1208] leading-tight">{data.prop || 'Property'}</h1>
+          </div>
+          <div className="text-center bg-[#faf7f2] rounded-2xl py-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Amount to pay</p>
+            <p className="text-4xl font-bold font-mono text-[#1a1208] mt-1">{fmt(data.amt)}</p>
+          </div>
+
+          {/* Mobile → button first (opens UPI app); desktop → QR first (scan). */}
+          {isMobile ? (<>{payButton}{qrBlock}</>) : (<>{qrBlock}{payButton}</>)}
+
+          <div className="text-center text-[12px] text-[#6b5d52] space-y-1">
+            <p>UPI ID: <strong className="font-mono text-[#1a1208]">{data.vpa}</strong>
+              <button type="button" onClick={copyVpa} className="ml-2 text-[#cc5a16] font-bold underline">{copied ? 'Copied ✓' : 'Copy'}</button>
+            </p>
+            <p className="text-[11px] text-[#9c8e85]">Pays directly to {data.payee || 'the property'} — no gateway fees.</p>
+          </div>
+
+          <p className="text-[11px] text-center text-[#9c8e85] border-t border-[#cc5a16]/10 pt-3 leading-relaxed">
+            After paying, your payment will be confirmed at the front desk. Keep your UPI reference handy.
+          </p>
         </div>
       </div>
     </div>

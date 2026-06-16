@@ -2188,7 +2188,10 @@ async function buildHotelPaymentLinkPayload(
       `&pn=${encodeURIComponent(upiPayee)}` +
       `&am=${grandTotal.toFixed(2)}` +
       `&cu=INR` +
-      `&tn=${encodeURIComponent(`Booking ${bookingId}`)}`
+      `&tn=${encodeURIComponent(`Booking ${bookingId}`)}` +
+      // tr = transaction reference (NPCI spec): carries the booking id so an
+      // incoming UPI credit can be matched back to this stay at reconciliation.
+      `&tr=${encodeURIComponent(String(bookingId))}`
     : '';
 
   return {
@@ -2206,12 +2209,43 @@ async function buildHotelPaymentLinkPayload(
   };
 }
 
+// Build the app's public origin for guest-facing links. Mirrors the password-
+// reset link logic (line ~7682): prefer FRONTEND_URL, else derive from the
+// proxy's forwarded headers. Defaults to https since these links land in
+// emails/WhatsApp and are opened on phones.
+function appOriginFromReq(req: Request): string {
+  if (process.env.FRONTEND_URL) return process.env.FRONTEND_URL.replace(/\/+$/, '');
+  const proto = String((req.headers['x-forwarded-proto'] as string) || 'https').split(',')[0].trim();
+  const host  = String((req.headers['x-forwarded-host'] as string) || (req.headers.host as string) || '').split(',')[0].trim();
+  return host ? `${proto}://${host}` : '';
+}
+
+// Encode a UPI payment into a CLICKABLE https pay-page URL the SPA renders at
+// `?pay=<payload>`. Email/WhatsApp must link to THIS (an https URL is clickable
+// in every email client + on desktop) — NOT the raw `upi://` link, which email
+// clients and desktop browsers render as dead text. The pay page then shows a
+// tap-to-pay UPI button (mobile) + a scannable UPI QR (desktop).
+function buildUpiPayPageUrl(
+  origin: string,
+  p: { upi_link: string; amount: number; currency: string; upi_payee: string; upi_vpa: string; property_name: string }
+): string {
+  if (!origin || !p.upi_link) return '';
+  const data = { u: p.upi_link, amt: p.amount, cur: p.currency, payee: p.upi_payee, vpa: p.upi_vpa, prop: p.property_name };
+  const enc = Buffer.from(JSON.stringify(data), 'utf8').toString('base64url');
+  return `${origin}/?pay=${enc}`;
+}
+
 /**
  * Render the payment-link payload as text / HTML / WhatsApp message.
  * Same surface as the BOOKING_CREATED template, but driven by the
  * folio breakup. Pure formatter — no I/O.
+ *
+ * payUrl — the CLICKABLE https pay-page URL (from buildUpiPayPageUrl). When
+ * present it is used as the link in the email button + WhatsApp/plain text so
+ * the guest gets a tappable link everywhere; falls back to the raw upi:// link
+ * only if no origin could be resolved.
  */
-function renderPaymentLinkMessage(p: Awaited<ReturnType<typeof buildHotelPaymentLinkPayload>>): {
+function renderPaymentLinkMessage(p: Awaited<ReturnType<typeof buildHotelPaymentLinkPayload>>, payUrl?: string): {
   subject: string;
   text:    string;
   html:    string;
@@ -2225,6 +2259,9 @@ function renderPaymentLinkMessage(p: Awaited<ReturnType<typeof buildHotelPayment
     `<td style="padding:4px 8px;text-align:right;font-family:monospace">${fmt(b.amount)}</td></tr>`
   ).join('');
   const hasUpi = !!p.upi_link;
+  // Clickable link for email/WhatsApp: the https pay page when available, else
+  // the raw upi:// link (legacy fallback only when no origin could be resolved).
+  const payLink = payUrl || p.upi_link;
   const subject = `💳 Payment link · ${p.property_name} · ${fmt(p.amount)}`;
   const text =
     `Hello ${p.guest_name || 'Guest'},\n\n` +
@@ -2233,8 +2270,8 @@ function renderPaymentLinkMessage(p: Awaited<ReturnType<typeof buildHotelPayment
     `Breakup:\n${breakupTextLines}\n\n` +
     `TOTAL: ${fmt(p.amount)}\n\n` +
     (hasUpi
-      ? `Pay direct via UPI — no gateway fees:\n${p.upi_link}\n` +
-        `Open this link on your phone and your UPI app (GPay / PhonePe / Paytm) will open with ${fmt(p.amount)} pre-filled. Payee: ${p.upi_payee}.\n\n`
+      ? `Pay securely via UPI — no gateway fees:\n${payLink}\n` +
+        `Open this link on your phone: tap "Pay" to open any UPI app (GPay / PhonePe / Paytm) with ${fmt(p.amount)} pre-filled, or scan the QR on the page. Payee: ${p.upi_payee} (${p.upi_vpa}).\n\n`
       : '') +
     `— ${p.property_name}`;
   const html =
@@ -2249,9 +2286,9 @@ function renderPaymentLinkMessage(p: Awaited<ReturnType<typeof buildHotelPayment
     `</table>` +
     (hasUpi ? (
       `<div style="border-top:2px dashed #cc5a16;padding-top:16px;margin-top:16px;text-align:center">` +
-      `<h3 style="color:#cc5a16;margin-top:0">💰 Pay direct via UPI</h3>` +
-      `<p style="color:#6b5d52;font-size:13px;margin:0 0 12px 0">Tap below on your phone — your UPI app opens with <strong>${fmt(p.amount)}</strong> pre-filled. No gateway fees.</p>` +
-      `<p style="margin:16px 0"><a href="${p.upi_link}" style="background:#cc5a16;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block">Pay ${fmt(p.amount)} via UPI</a></p>` +
+      `<h3 style="color:#cc5a16;margin-top:0">💰 Pay securely via UPI</h3>` +
+      `<p style="color:#6b5d52;font-size:13px;margin:0 0 12px 0">Tap below to open the secure payment page — pay with any UPI app (GPay / PhonePe / Paytm) or scan the QR. <strong>${fmt(p.amount)}</strong>, no gateway fees.</p>` +
+      `<p style="margin:16px 0"><a href="${payLink}" style="background:#cc5a16;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block">Pay ${fmt(p.amount)} via UPI</a></p>` +
       `<p style="color:#9c8e85;font-size:11px;margin:6px 0">Payee: ${p.upi_payee} · UPI ID: <strong>${p.upi_vpa}</strong></p>` +
       `</div>`
     ) : (
@@ -2264,7 +2301,7 @@ function renderPaymentLinkMessage(p: Awaited<ReturnType<typeof buildHotelPayment
     `${p.guest_name || 'Guest'}, ${p.check_in_date} → ${p.check_out_date}\n\n` +
     breakupTextLines + '\n' +
     `*TOTAL: ${fmt(p.amount)}*` +
-    (hasUpi ? `\n\n💰 Pay via UPI:\n${p.upi_link}` : '\n\nPay at front desk on check-out.');
+    (hasUpi ? `\n\n💰 Pay securely via UPI (any app, or scan the QR):\n${payLink}` : '\n\nPay at front desk on check-out.');
   return { subject, text, html, wa };
 }
 
@@ -26310,7 +26347,8 @@ ${data.tenant.name}`;
         try {
           const payload = await buildHotelPaymentLinkPayload(req.params.id, req.params.bookingId);
           if (payload.ok && payload.amount > 0 && payload.guest_email) {
-            const msg = renderPaymentLinkMessage(payload);
+            const payUrl = buildUpiPayPageUrl(appOriginFromReq(req), payload);
+            const msg = renderPaymentLinkMessage(payload, payUrl);
             await sendEmail(payload.guest_email, msg.subject, msg.text, msg.html);
           }
         } catch (e) { console.warn('[hotel-checkin] auto payment-link failed:', e); }
@@ -26357,7 +26395,8 @@ ${data.tenant.name}`;
             `&pn=${encodeURIComponent(payload.upi_payee)}` +
             `&am=${payload.amount.toFixed(2)}` +
             `&cu=INR` +
-            `&tn=${encodeURIComponent(`Booking ${req.params.bookingId} (partial)`)}`;
+            `&tn=${encodeURIComponent(`Booking ${req.params.bookingId} (partial)`)}` +
+            `&tr=${encodeURIComponent(String(req.params.bookingId))}`;
         }
       }
 
@@ -26366,7 +26405,8 @@ ${data.tenant.name}`;
       const overridePhone = String(req.body?.override_phone || '').trim();
       const targetEmail = overrideEmail || payload.guest_email;
       const targetPhone = overridePhone || payload.guest_phone;
-      const msg = renderPaymentLinkMessage(payload);
+      const payUrl = buildUpiPayPageUrl(appOriginFromReq(req), payload);
+      const msg = renderPaymentLinkMessage(payload, payUrl);
       const sent: string[] = [];
       const errors: string[] = [];
 
@@ -26399,6 +26439,7 @@ ${data.tenant.name}`;
         errors:    errors.length ? errors : undefined,
         amount:    payload.amount,
         upi_link:  payload.upi_link,
+        pay_url:   payUrl || undefined,
         breakup:   payload.breakup,
         guest_email: targetEmail,
         guest_phone: targetPhone,
