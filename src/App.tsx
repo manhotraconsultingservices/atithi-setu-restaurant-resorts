@@ -19043,7 +19043,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           type="button"
                           onClick={() => {
                             const now = new Date();
-                            const iso = (d: Date) => d.toISOString().slice(0, 10);
+                            // Format from LOCAL date components — toISOString() is UTC,
+                            // which in IST (UTC+5:30) shifts a locally-built date back a
+                            // day (e.g. month-start 1st → "…-05-31"), breaking This week
+                            // / This month and the "to = today" of every preset.
+                            const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
                             if (preset === 'today') { setFoDateFrom(iso(now)); setFoDateTo(iso(now)); }
                             else if (preset === 'yesterday') { const y = new Date(now.getTime() - 86400000); setFoDateFrom(iso(y)); setFoDateTo(iso(y)); }
                             else if (preset === 'this-week') { const monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7)); setFoDateFrom(iso(monday)); setFoDateTo(iso(now)); }
