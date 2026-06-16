@@ -19131,6 +19131,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             );
           })()}
 
+          {/* Booking trend — received vs cancelled vs modified, charted + CSV. */}
+          <BookingTrendReport restaurantId={restaurantId!} token={token!} />
+
           {/* Management reports (payments, revenue, occupancy, guests,
               purchase) + petty-cash ledger — client request 11 Jun 2026.
               Self-contained component; owns its own state. */}
@@ -35322,6 +35325,111 @@ const HotelLateFeeBanner: React.FC<{
 // occupancy trend, guest directory, purchase spend) plus a petty-cash ledger.
 // Keeps ALL its own state so it never touches the owner dashboard's state bag
 // or the existing report switch — low blast radius by design.
+// Booking Trend — daily bookings RECEIVED vs CANCELLED vs MODIFIED, charted
+// + CSV. Self-contained: owns its date range + fetch, reuses the shared
+// downloadCsv helper (UTF-8 BOM, Excel-safe). Reads /hotel/reports/booking-trend.
+function BookingTrendReport({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const monthAgo = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  const [from, setFrom] = useState(monthAgo);
+  const [to, setTo] = useState(today);
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = async (f = from, t = to) => {
+    setLoading(true); setErr(null);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/reports/booking-trend?from=${f}&to=${t}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      setData(body);
+    } catch (e: any) { setErr(e?.message || 'Failed to load booking trend'); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); /* on mount */ // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const series: any[] = data?.series || [];
+  const totals = data?.totals || { received: 0, cancelled: 0, modified: 0 };
+  const fmtDay = (d: string) => { const dt = new Date(d + 'T00:00:00'); return dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }); };
+  const chartData = series.map((r: any) => ({ ...r, label: fmtDay(r.date) }));
+
+  const exportCsv = () => {
+    if (!series.length) return;
+    downloadCsv(`booking-trend-${from}_to_${to}.csv`,
+      ['Date', 'Received', 'Cancelled', 'Modified'],
+      series.map((r: any) => [r.date, r.received, r.cancelled, r.modified]));
+  };
+
+  const kpi = (label: string, value: number, color: string) => (
+    <div className="bg-white rounded-2xl border border-[#cc5a16]/10 px-4 py-3 flex-1 min-w-[120px]">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{label}</p>
+      <p className="text-2xl font-bold font-mono mt-0.5" style={{ color }}>{value}</p>
+    </div>
+  );
+
+  return (
+    <div className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
+      <div className="px-5 py-3 bg-[#faf7f2] border-b border-[#e8dccf] flex flex-wrap items-end gap-3">
+        <div className="mr-auto">
+          <h3 className="text-base font-bold font-serif text-[#1a1208]">Booking Trend</h3>
+          <p className="text-[11px] text-[#9c8e85]">Bookings received vs. cancelled vs. modified, per day.</p>
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From</label>
+          <input type="date" value={from} max={to} onChange={e => setFrom(e.target.value)}
+            className="bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20" />
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">To</label>
+          <input type="date" value={to} min={from} max={today} onChange={e => setTo(e.target.value)}
+            className="bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20" />
+        </div>
+        <button type="button" onClick={() => load()} disabled={loading}
+          className="px-3 py-2 rounded-xl bg-[#cc5a16] text-white text-[11px] font-bold uppercase tracking-widest hover:bg-[#a84612] disabled:opacity-50">
+          {loading ? 'Loading…' : 'Apply'}
+        </button>
+        <button type="button" onClick={exportCsv} disabled={!series.length}
+          className="px-3 py-2 rounded-xl border border-[#cc5a16]/25 text-[#cc5a16] text-[11px] font-bold uppercase tracking-widest hover:bg-[#cc5a16]/10 disabled:opacity-50 flex items-center gap-1">
+          <Download size={12} /> CSV
+        </button>
+      </div>
+
+      <div className="p-5 space-y-4">
+        {err && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-xl text-sm">{err}</div>}
+        <div className="flex flex-wrap gap-3">
+          {kpi('Received', totals.received, '#cc5a16')}
+          {kpi('Cancelled', totals.cancelled, '#dc2626')}
+          {kpi('Modified', totals.modified, '#b8860b')}
+        </div>
+        <div style={{ width: '100%', height: 320 }}>
+          {series.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-sm text-[#9c8e85] italic">
+              {loading ? 'Loading…' : 'No bookings in this range.'}
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#eadfd2" />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#6b5d52' }} interval="preserveStartEnd" minTickGap={20} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#6b5d52' }} />
+                <Tooltip contentStyle={{ borderRadius: 12, border: '1px solid #e8dccf', fontSize: 12 }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="received" name="Received" fill="#cc5a16" radius={[4, 4, 0, 0]} maxBarSize={28} />
+                <Line type="monotone" dataKey="cancelled" name="Cancelled" stroke="#dc2626" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="modified" name="Modified" stroke="#b8860b" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ManagementReports({ restaurantId, token, audience, onOpenTab }: { restaurantId: string; token: string; audience: 'FRONT_DESK' | 'OWNER'; onOpenTab: (tab: string) => void }) {
   const today = new Date().toISOString().slice(0, 10);
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);

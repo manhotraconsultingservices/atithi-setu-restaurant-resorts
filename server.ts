@@ -21003,6 +21003,60 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── BOOKING TREND (insight: daily received / cancelled / modified) ──
+  // Owner/GM insight: per-day count of bookings RECEIVED (created_at),
+  // CANCELLED (cancelled_at) and MODIFIED (BOOKING_UPDATED events in the
+  // channel-sync audit log). Zero-filled across [from, to] so the chart
+  // has a point for every day. No schema change — all three series come
+  // from columns/logs that already exist.
+  app.get("/api/restaurant/:id/hotel/reports/booking-trend", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const today = new Date().toISOString().slice(0, 10);
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.from || '')) ? String(req.query.from) : new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+      const to   = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.to   || '')) ? String(req.query.to)   : today;
+      if (to < from) return res.status(400).json({ error: "to must be on or after from" });
+      // Received — by booking creation date.
+      const recv: any[] = await tenantDb.query(
+        `SELECT created_at::date AS d, COUNT(*)::int AS c
+           FROM room_bookings
+          WHERE created_at::date BETWEEN ?::date AND ?::date
+          GROUP BY created_at::date`, [from, to]).catch(() => []);
+      // Cancelled — by cancellation date.
+      const canc: any[] = await tenantDb.query(
+        `SELECT cancelled_at::date AS d, COUNT(*)::int AS c
+           FROM room_bookings
+          WHERE cancelled_at IS NOT NULL AND cancelled_at::date BETWEEN ?::date AND ?::date
+          GROUP BY cancelled_at::date`, [from, to]).catch(() => []);
+      // Modified — BOOKING_UPDATED rows in the channel-sync audit log (one
+      // per booking edit). Older tenants with no log rows simply read 0.
+      const modi: any[] = await tenantDb.query(
+        `SELECT created_at::date AS d, COUNT(*)::int AS c
+           FROM channel_sync_log
+          WHERE event_type = 'BOOKING_UPDATED' AND created_at::date BETWEEN ?::date AND ?::date
+          GROUP BY created_at::date`, [from, to]).catch(() => []);
+      const iso = (v: any) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+      const mapOf = (rows: any[]) => { const m: Record<string, number> = {}; for (const r of rows) m[iso(r.d)] = Number(r.c || 0); return m; };
+      const rMap = mapOf(recv), cMap = mapOf(canc), mMap = mapOf(modi);
+      const series: any[] = [];
+      let totReceived = 0, totCancelled = 0, totModified = 0;
+      const start = new Date(from + 'T00:00:00Z').getTime();
+      const end   = new Date(to   + 'T00:00:00Z').getTime();
+      for (let t = start; t <= end; t += 86400000) {
+        const d = new Date(t).toISOString().slice(0, 10);
+        const received = rMap[d] || 0, cancelled = cMap[d] || 0, modified = mMap[d] || 0;
+        totReceived += received; totCancelled += cancelled; totModified += modified;
+        series.push({ date: d, received, cancelled, modified });
+      }
+      res.json({ from, to, series, totals: { received: totReceived, cancelled: totCancelled, modified: totModified } });
+    } catch (err: any) {
+      console.error('[hotel/reports/booking-trend] error:', err?.message);
+      res.status(500).json({ error: err?.message || 'Failed to load booking trend' });
+    }
+  });
+
   // ════════════════════════════════════════════════════════════════════
   // FRONT OFFICE REPORTS (client request 7 Jun 2026)
   // ════════════════════════════════════════════════════════════════════
