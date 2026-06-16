@@ -1072,6 +1072,13 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- NULL on legacy rows / public-page bookings that still send extra_adults
     -- directly — those keep their explicit extra_adults untouched.
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS num_adults INT;
+    -- Room-assignment model (Option A, 17 Jun 2026). room_locked = 1 → staff
+    -- deliberately pinned THIS physical room; 0 → the server AUTO-assigned a
+    -- "floating" room from the chosen room TYPE, i.e. the booking decrements
+    -- the type's inventory and the specific room can be reshuffled until
+    -- check-in. DEFAULT 1 so every existing + explicitly-roomed booking stays
+    -- "locked" (today's behaviour); only type-based bookings store 0.
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS room_locked INTEGER DEFAULT 1;
 
     -- Phase H3 / Sprint B1 — Room holds.
     -- Non-booking unavailability records: maintenance windows, owner stays,
@@ -21551,7 +21558,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const {
-        room_id, guest_name, guest_phone, guest_email, guest_id_proof,
+        room_id, room_type_id, guest_name, guest_phone, guest_email, guest_id_proof,
         guest_nationality, guest_state, num_guests, check_in_date, check_out_date,
         booking_source, room_rate, special_requests, booking_type,
         // BCG Tariff Phase 3 — meal plan + extra-person counts. All optional;
@@ -21568,6 +21575,43 @@ ${data.tenant.name}`;
       if (!guest_name || String(guest_name).trim().length === 0) {
         return res.status(400).json({ error: "Guest name is required." });
       }
+
+      const tenantDb = await getTenantDb(req.params.id);
+      // Option A — book against a room TYPE (17 Jun 2026). When the caller sends
+      // room_type_id (and no specific room_id), the server AUTO-assigns a free
+      // room from that type and marks it FLOATING (room_locked=0): the booking
+      // decrements the type's inventory instead of freezing a chosen room, and
+      // the physical room can be reshuffled right up to check-in. An explicit
+      // room_id still pins/locks that exact room (room_locked=1), preserving the
+      // old behaviour when staff deliberately want a specific room. Mirrors the
+      // public booking auto-pick (one unit; group bookings keep their own path).
+      let resolvedRoomId: string = room_id ? String(room_id) : '';
+      let roomLocked = 1;
+      if (!resolvedRoomId && room_type_id) {
+        const candidates: any[] = await tenantDb.query(
+          "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
+          [room_type_id]
+        );
+        const bConf: any[] = await tenantDb.query(
+          "SELECT room_id FROM room_bookings WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND check_in_date < ? AND check_out_date > ?",
+          [check_out_date, check_in_date]
+        );
+        const hConf: any[] = await tenantDb.query(
+          "SELECT room_id FROM room_holds WHERE start_date < ? AND end_date > ?",
+          [check_out_date, check_in_date]
+        );
+        const taken = new Set<string>([...bConf, ...hConf].map((r: any) => String(r.room_id)));
+        const free = candidates.find((c: any) => !taken.has(String(c.id)));
+        if (!free) {
+          return res.status(409).json({ error: 'No rooms available in this category for the selected dates.' });
+        }
+        resolvedRoomId = String(free.id);
+        roomLocked = 0;   // floating — auto-assigned, reshufflable until check-in
+      }
+      if (!resolvedRoomId) {
+        return res.status(400).json({ error: 'Select a room type or a specific room.' });
+      }
+
       // Adults-capacity workflow — when the form sends the TOTAL adult count,
       // derive the chargeable extra adults from the room's own capacity
       // (capacity = adults included in the base rate). Children are charged
@@ -21580,7 +21624,7 @@ ${data.tenant.name}`;
       let effectiveNumGuests = Math.max(1, Number(num_guests || 1));
       if (num_adults != null && String(num_adults) !== '') {
         const totalAdults = Math.max(1, Math.floor(Number(num_adults) || 1));
-        const derived = await deriveAdultExtras(req.params.id, room_id, totalAdults);
+        const derived = await deriveAdultExtras(req.params.id, resolvedRoomId, totalAdults);
         xpAdults = derived.extraAdults;
         numAdultsToStore = totalAdults;
         effectiveNumGuests = totalAdults + xpChildMat + xpChildNoMat;
@@ -21590,13 +21634,13 @@ ${data.tenant.name}`;
       // room status, double-booking) before INSERT. Returns a friendly
       // error string that surfaces directly in the booking modal.
       const v = await validateBookingRequest(req.params.id, {
-        room_id, check_in_date, check_out_date, booking_type, num_guests: effectiveNumGuests,
+        room_id: resolvedRoomId, check_in_date, check_out_date, booking_type, num_guests: effectiveNumGuests,
       });
       if (!v.ok) return res.status(v.status).json({ error: v.error });
 
       const bookingType = String(booking_type || 'OVERNIGHT').toUpperCase();
       const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-      const tenantDb = await getTenantDb(req.params.id);
+      // tenantDb was created above (for the type-based auto-assign).
       // BCG Tariff Phase 3 — if caller passes an explicit room_rate we still
       // honour it (manual override path stays unchanged). When the rate is
       // 0/unset, we route through computeBookingTotalWithExtras which:
@@ -21673,12 +21717,12 @@ ${data.tenant.name}`;
 
       await tenantDb.run(
         `INSERT INTO room_bookings
-         (id, room_id, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
+         (id, room_id, room_locked, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
           num_guests, check_in_date, check_out_date, status, booking_source, room_rate, total_amount, special_requests, booking_type,
           meal_plan_id, meal_plan_snapshot, extra_adults, extra_children_with_mattress, extra_children_no_mattress, num_adults,
           agent_id, commission_pct, commission_amount, net_amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [bid, room_id, guest_name, guest_phone || null, guest_email || null,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [bid, resolvedRoomId, roomLocked, guest_name, guest_phone || null, guest_email || null,
          guest_id_proof || null, guest_nationality || null, guest_state || null,
          effectiveNumGuests, check_in_date, check_out_date, booking_source || 'DIRECT', rate, total,
          special_requests || null, bookingType,

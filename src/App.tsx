@@ -26382,7 +26382,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   // 0 reach the server so the matrix resolver runs and
                   // the meal-plan + extras combo is honoured. Staff who
                   // really want to override can type a non-zero value.
-                  await saveBooking(editingBooking);
+                  // Option A (17 Jun 2026): a brand-new FLOATING booking (category
+                  // picked, no specific room drilled) is sent as a room_type_id so
+                  // the server auto-assigns a floating room and decrements type
+                  // inventory — instead of locking the representative room_id we
+                  // used for the live preview. Drilled rooms, edits, and
+                  // uncategorised rooms keep sending room_id (locked).
+                  const _payload: any = { ...editingBooking };
+                  if (!editingBooking.id && editingBooking.room_floating
+                      && editingBooking.room_type_id && editingBooking.room_type_id !== '__UNCATEGORISED__') {
+                    _payload.room_type_id = editingBooking.room_type_id;
+                    delete _payload.room_id;
+                  }
+                  await saveBooking(_payload);
                   setShowBookingModal(false); setEditingBooking(null);
                 } catch (err: any) { setHotelError(err.message || 'Save failed'); }
               }}
@@ -26711,7 +26723,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     const cap = Math.max(1, Number(hotelRooms.find(r => r.id === pickRoomId)?.capacity || 1));
                     const adults = Number(editingBooking.num_adults) > 0 ? Number(editingBooking.num_adults) : cap;
                     const d = deriveOccupancy(adults, cap, editingBooking.extra_children_with_mattress, editingBooking.extra_children_no_mattress);
-                    setEditingBooking({ ...editingBooking, room_id: pickRoomId, num_adults: adults, extra_adults: d.extra_adults, num_guests: d.num_guests });
+                    // Option A (17 Jun 2026): picking a CATEGORY books a FLOATING
+                    // room — we keep a representative room_id for the live preview
+                    // + capacity, but flag room_floating so submit sends a
+                    // room_type_id and the server auto-assigns (no locked room).
+                    setEditingBooking({ ...editingBooking, room_id: pickRoomId, room_type_id: typeId, room_floating: true, num_adults: adults, extra_adults: d.extra_adults, num_guests: d.num_guests });
                   };
 
                   const fmtRupee = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
@@ -26769,16 +26785,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       {selectedStats && selectedRoom && (
                         <div className="mt-2 p-2.5 bg-[#cc5a16]/5 rounded-xl border border-[#cc5a16]/10 flex items-center justify-between gap-2 flex-wrap">
                           <div className="text-[11px] text-[#3d3128]">
-                            <span className="text-[#9c8e85]">Assigned room:</span>{' '}
+                            <span className="text-[#9c8e85]">{editingBooking.room_floating && !editingBooking.id ? 'Sample room:' : 'Assigned room:'}</span>{' '}
                             <span className="font-bold text-[#1a1208]">{selectedRoom.name}</span>{' '}
                             <span className="text-[#9c8e85]">(Room #{selectedRoom.room_number || '—'}{selectedRoom.floor ? `, Floor ${selectedRoom.floor}` : ''})</span>
+                            {editingBooking.room_floating && !editingBooking.id && (
+                              <span className="block text-[10px] text-emerald-700 mt-0.5">✓ Booking holds 1 {selectedStats?.type_name || 'room'} — the exact room is auto-assigned (not locked) and can change until check-in. Use “Change” to lock a specific room.</span>
+                            )}
                           </div>
                           {drillRooms.length > 1 && (
                             <div className="flex items-center gap-1.5">
                               <label className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Change:</label>
                               <select
                                 value={editingBooking.room_id || ''}
-                                onChange={e => { const rid = e.target.value; const cap = Math.max(1, Number(hotelRooms.find(r => r.id === rid)?.capacity || 1)); const adults = Number(editingBooking.num_adults) > 0 ? Number(editingBooking.num_adults) : cap; const d = deriveOccupancy(adults, cap, editingBooking.extra_children_with_mattress, editingBooking.extra_children_no_mattress); setEditingBooking({ ...editingBooking, room_id: rid, num_adults: adults, extra_adults: d.extra_adults, num_guests: d.num_guests }); }}
+                                onChange={e => { const rid = e.target.value; const cap = Math.max(1, Number(hotelRooms.find(r => r.id === rid)?.capacity || 1)); const adults = Number(editingBooking.num_adults) > 0 ? Number(editingBooking.num_adults) : cap; const d = deriveOccupancy(adults, cap, editingBooking.extra_children_with_mattress, editingBooking.extra_children_no_mattress); setEditingBooking({ ...editingBooking, room_id: rid, room_floating: false, num_adults: adults, extra_adults: d.extra_adults, num_guests: d.num_guests }); }}
                                 className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[10px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
                               >
                                 {drillRooms.map(r => (
