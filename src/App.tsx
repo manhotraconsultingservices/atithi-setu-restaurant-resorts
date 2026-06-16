@@ -26824,35 +26824,74 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         </p>
                       )}
 
-                      {/* ─── Auto-assigned room + drill-down ──────────── */}
-                      {selectedStats && selectedRoom && (
-                        <div className="mt-2 p-2.5 bg-[#cc5a16]/5 rounded-xl border border-[#cc5a16]/10 flex items-center justify-between gap-2 flex-wrap">
-                          <div className="text-[11px] text-[#3d3128]">
-                            <span className="text-[#9c8e85]">{editingBooking.room_floating && !editingBooking.id ? 'Sample room:' : 'Assigned room:'}</span>{' '}
-                            <span className="font-bold text-[#1a1208]">{selectedRoom.name}</span>{' '}
-                            <span className="text-[#9c8e85]">(Room #{selectedRoom.room_number || '—'}{selectedRoom.floor ? `, Floor ${selectedRoom.floor}` : ''})</span>
-                            {editingBooking.room_floating && !editingBooking.id && (
-                              <span className="block text-[10px] text-emerald-700 mt-0.5">✓ Booking holds 1 {selectedStats?.type_name || 'room'} — the exact room is auto-assigned (not locked) and can change until check-in. Use “Change” to lock a specific room.</span>
+                      {/* ─── Floating reassurance / assigned-room box ───────
+                          New floating bookings (Option A) must NOT surface a
+                          specific room number — that's what made staff think a
+                          room was being blocked. We show only an inventory
+                          reassurance line; the specific-room picker is tucked
+                          into an OPTIONAL collapsed disclosure for the rare case
+                          staff want to pin a room. Edits / already-locked
+                          bookings still show their concrete assigned room. */}
+                      {selectedStats && selectedRoom && (() => {
+                        const isFloatingNew = editingBooking.room_floating && !editingBooking.id;
+                        const changeRoom = (rid: string) => {
+                          const cap = Math.max(1, Number(hotelRooms.find(r => r.id === rid)?.capacity || 1));
+                          const adults = Number(editingBooking.num_adults) > 0 ? Number(editingBooking.num_adults) : cap;
+                          const d = deriveOccupancy(adults, cap, editingBooking.extra_children_with_mattress, editingBooking.extra_children_no_mattress);
+                          setEditingBooking({ ...editingBooking, room_id: rid, room_floating: false, num_adults: adults, extra_adults: d.extra_adults, num_guests: d.num_guests });
+                        };
+                        if (isFloatingNew) {
+                          return (
+                            <div className="mt-2 p-2.5 bg-emerald-50 rounded-xl border border-emerald-200">
+                              <p className="text-[11px] text-emerald-800 leading-snug">
+                                ✓ Holds 1 <span className="font-bold">{selectedStats?.type_name || 'room'}</span> for these dates. The exact room is assigned automatically at check-in — no specific room is blocked, and it can be reassigned any time before arrival.
+                              </p>
+                              {drillRooms.length > 1 && (
+                                <details className="mt-1.5">
+                                  <summary className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] cursor-pointer select-none">Assign a specific room (optional)</summary>
+                                  <select
+                                    value={editingBooking.room_id || ''}
+                                    onChange={e => changeRoom(e.target.value)}
+                                    className="mt-1.5 w-full bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-[11px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
+                                  >
+                                    {drillRooms.map(r => (
+                                      <option key={r.id} value={r.id}>
+                                        {r.name}{r.room_number ? ` #${r.room_number}` : ''}{r.floor ? ` · F${r.floor}` : ''}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <p className="text-[9px] text-[#9c8e85] mt-1">Picking a room here pins it (it won't be reshuffled). Leave this closed to keep the booking floating.</p>
+                                </details>
+                              )}
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="mt-2 p-2.5 bg-[#cc5a16]/5 rounded-xl border border-[#cc5a16]/10 flex items-center justify-between gap-2 flex-wrap">
+                            <div className="text-[11px] text-[#3d3128]">
+                              <span className="text-[#9c8e85]">Assigned room:</span>{' '}
+                              <span className="font-bold text-[#1a1208]">{selectedRoom.name}</span>{' '}
+                              <span className="text-[#9c8e85]">(Room #{selectedRoom.room_number || '—'}{selectedRoom.floor ? `, Floor ${selectedRoom.floor}` : ''})</span>
+                            </div>
+                            {drillRooms.length > 1 && (
+                              <div className="flex items-center gap-1.5">
+                                <label className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Change:</label>
+                                <select
+                                  value={editingBooking.room_id || ''}
+                                  onChange={e => changeRoom(e.target.value)}
+                                  className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[10px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
+                                >
+                                  {drillRooms.map(r => (
+                                    <option key={r.id} value={r.id}>
+                                      {r.name}{r.room_number ? ` #${r.room_number}` : ''}{r.floor ? ` · F${r.floor}` : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
                             )}
                           </div>
-                          {drillRooms.length > 1 && (
-                            <div className="flex items-center gap-1.5">
-                              <label className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Change:</label>
-                              <select
-                                value={editingBooking.room_id || ''}
-                                onChange={e => { const rid = e.target.value; const cap = Math.max(1, Number(hotelRooms.find(r => r.id === rid)?.capacity || 1)); const adults = Number(editingBooking.num_adults) > 0 ? Number(editingBooking.num_adults) : cap; const d = deriveOccupancy(adults, cap, editingBooking.extra_children_with_mattress, editingBooking.extra_children_no_mattress); setEditingBooking({ ...editingBooking, room_id: rid, room_floating: false, num_adults: adults, extra_adults: d.extra_adults, num_guests: d.num_guests }); }}
-                                className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[10px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
-                              >
-                                {drillRooms.map(r => (
-                                  <option key={r.id} value={r.id}>
-                                    {r.name}{r.room_number ? ` #${r.room_number}` : ''}{r.floor ? ` · F${r.floor}` : ''}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                          )}
-                        </div>
-                      )}
+                        );
+                      })()}
 
                       {ciStr && coStr && categoryStats.length > 0 && conflictRoomIds.size > 0 && (
                         <p className="text-[10px] text-[#9c8e85] mt-1">
