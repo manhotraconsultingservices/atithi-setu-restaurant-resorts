@@ -27046,9 +27046,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 <span className="font-mono">{x.total > 0 ? `+ ₹${x.total.toLocaleString('en-IN')}` : '—'}</span>
                               </div>
                             ))}
-                            {preview.extra_lines.some(x => x.total === 0) && (
-                              <p className="text-[9px] italic text-amber-700">₹0 = no extra-person charge set for this season / meal-plan (Settings → Tariff). Pick a meal plan to price extras.</p>
-                            )}
+                            {preview.extra_lines.some(x => x.total === 0) && (() => {
+                              // Context-aware guidance. When a meal plan IS
+                              // selected, the old "Pick a meal plan to price
+                              // extras" line was contradictory — point staff to
+                              // the exact empty extra-person cell instead.
+                              const mpCode = (tariffData.meal_plans || []).find((m: any) => m.id === editingBooking.meal_plan_id)?.code;
+                              const seasonsLbl = seasonsInStay.filter(s => s !== 'no-season').join(' + ') || 'this season';
+                              return (
+                                <p className="text-[9px] italic text-amber-700">
+                                  {editingBooking.meal_plan_id
+                                    ? <>₹0 = no extra-person charge set for <strong>{seasonsLbl} × {mpCode}</strong>. Set it in the extra-person charges grid under <strong>Settings → Room Setup → Tariff</strong>.</>
+                                    : <>₹0 = no meal plan selected. Pick a meal plan above, or set extra-person charges for <strong>{seasonsLbl}</strong> in <strong>Settings → Room Setup → Tariff</strong>.</>}
+                                </p>
+                              );
+                            })()}
                           </div>
                         )}
                         <div className="grid grid-cols-3 gap-2 text-[10px] pt-2 border-t border-[#cc5a16]/10">
