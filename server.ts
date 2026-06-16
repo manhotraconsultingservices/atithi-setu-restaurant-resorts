@@ -11763,7 +11763,7 @@ async function startServer() {
       ).join('\n');
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="timesheet-${start}-to-${end}.csv"`);
-      res.send(head + '\n' + body);
+      res.send('﻿' + head + '\n' + body);
     } catch (err) {
       console.error("Timesheet export error:", err);
       res.status(500).send("Export failed");
@@ -12051,7 +12051,7 @@ async function startServer() {
       const totalsLine = ['TOTAL', '', '', '', '', '', '', '', '', '', '', '', '', totalPayable.toFixed(2), '', '', ''].map(esc).join(',');
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="payroll-${start}-to-${end}.csv"`);
-      res.send(head + '\n' + body + '\n' + totalsLine);
+      res.send('﻿' + head + '\n' + body + '\n' + totalsLine);
     } catch (err) {
       console.error("Payroll export error:", err);
       res.status(500).send("Export failed");
@@ -12998,7 +12998,7 @@ You can also view all your payslips in the employee portal.
       }
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="bank-advice-${run.year}-${String(run.month).padStart(2, '0')}.csv"`);
-      res.send(rows.join('\n'));
+      res.send('﻿' + rows.join('\n'));
     } catch (err: any) {
       console.error('payroll/runs export.csv error:', err);
       res.status(500).json({ error: err?.message || 'Export failed' });
@@ -19879,7 +19879,7 @@ ${data.tenant.name}`;
       );
       // Include CHECKED_OUT in the same window (greyed on the calendar)
       const recentCheckouts: any[] = await tenantDb.query(
-        `SELECT id, room_id, guest_name, status, booking_type, check_in_date, check_out_date
+        `SELECT id, room_id, guest_name, status, booking_type, check_in_date, check_out_date, actual_checkout_at
            FROM room_bookings
           WHERE status = 'CHECKED_OUT'
             AND check_in_date < ?
@@ -19937,12 +19937,15 @@ ${data.tenant.name}`;
           if (d >= bci && d < bco) stamp(b.room_id, d, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: b.booking_type, check_in_date: bci, check_out_date: bco, room_locked: b.room_locked });
         }
       }
-      // Checked-out bookings — show as historical (lowest priority)
+      // Checked-out bookings — show as historical (lowest priority).
+      // Clamp to actual_checkout_at so an early checkout frees future nights.
       for (const b of recentCheckouts) {
         const bci = iso(b.check_in_date);
         const bco = iso(b.check_out_date);
+        const aco = iso(b.actual_checkout_at);
+        const effectiveCo = (aco && aco < bco) ? aco : bco;
         for (const d of dates) {
-          if (d >= bci && d < bco) stamp(b.room_id, d, { status: 'CHECKED_OUT', booking_id: b.id, guest_name: b.guest_name, check_in_date: bci, check_out_date: bco });
+          if (d >= bci && d < effectiveCo) stamp(b.room_id, d, { status: 'CHECKED_OUT', booking_id: b.id, guest_name: b.guest_name, check_in_date: bci, check_out_date: bco });
         }
       }
       // Holds (lowest priority unless no booking on that cell)
@@ -26430,25 +26433,15 @@ ${data.tenant.name}`;
         }
       }
 
-      // Early-check-in rule: by default a guest can only be checked in
-      // on or after their scheduled check-in date. Most hotels do
-      // accommodate early arrivals when a room is ready, so this is an
-      // overridable guard rather than a hard block — pass { force: true }
-      // in the body (the UI shows a confirm banner before sending). The
-      // dropdown's underlying overlap check still runs at booking-create
-      // time, so an early check-in won't collide with another guest
-      // because the date range was already vetted.
-      //
-      // ⚠ normaliseDateIso() — pg returns DATE as a JS Date object, so
-      // String(...).slice(0,10) previously produced "Sun May 24" and the
-      // string comparison against "2026-05-20" tripped on 'S' > '2',
-      // causing the guard to fire for EVERY booking (including today's).
-      const today = new Date().toISOString().slice(0, 10);
+      // Hard block: check-in is never allowed before the scheduled date.
+      // Uses IST (Asia/Kolkata) so midnight-crossover edge cases use the
+      // hotel's local date, not UTC.
+      const today = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
       const scheduledDate = normaliseDateIso(b.check_in_date);
-      if (scheduledDate && scheduledDate > today && !req.body?.force) {
+      if (scheduledDate && scheduledDate > today) {
         return res.status(400).json({
-          error: `This booking is scheduled for ${scheduledDate}. Confirm the early arrival to proceed.`,
-          early_checkin_required: true,
+          error: `Check-in is not allowed before the check-in date (${scheduledDate}). You can check this guest in on or after that day.`,
+          early_checkin_blocked: true,
           scheduled_date: scheduledDate,
           today,
         });

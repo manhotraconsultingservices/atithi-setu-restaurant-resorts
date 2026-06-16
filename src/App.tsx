@@ -153,6 +153,10 @@ function csvEscape(v: any): string {
   const s = v == null ? '' : String(v);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
+function csvMoney(v: any): string {
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(2) : '';
+}
 
 // ─── Booking lifecycle state (client request 7 Jun 2026) ──────────────────
 // Maps the DB status (BOOKED / CHECKED_IN / CHECKED_OUT / CANCELLED) +
@@ -198,7 +202,7 @@ export const LIFECYCLE_PALETTE: Record<BookingLifecycle, { bg: string; text: str
 };
 
 function downloadCsv(filename: string, header: string[], rows: any[][]): void {
-  const lines = [header.join(','), ...rows.map(r => r.map(csvEscape).join(','))];
+  const lines = [header.map(csvEscape).join(','), ...rows.map(r => r.map(csvEscape).join(','))];
   const csv = lines.join('\n');
   const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });  // BOM for Excel ₹
   const url = URL.createObjectURL(blob);
@@ -5012,11 +5016,7 @@ function AnalyticsDashboard({
       o.total_amount, o.gst_amount, o.status, o.payment_status,
       new Date(o.created_at).toLocaleString(),
     ]);
-    const csv = [headers.join(','), ...rows.map((r: any) => r.map((v: any) => `"${v}"`).join(','))].join('\n');
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-    link.download = `report_${restaurantId}_${dateFrom}_to_${dateTo}.csv`;
-    link.click();
+    downloadCsv(`report_${restaurantId}_${dateFrom}_to_${dateTo}.csv`, headers, rows);
   };
 
   // KPI card helper — inline style gradient so Tailwind purge never strips dynamic colour tokens
@@ -10529,6 +10529,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // list (num_guests, room_id, room_rate, room_name, dates) so the guest
     // count pre-fills and the room reassignment picker has its inputs.
     const full = hotelBookings.find((x: any) => x.id === b.id) || b;
+    const todayIso = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+    const scheduledDate = normaliseBookingDate(full.check_in_date);
+    if (scheduledDate && scheduledDate > todayIso) {
+      setHotelError(`Check-in is not allowed before the check-in date (${scheduledDate}). You can check this guest in on or after that day.`);
+      return;
+    }
     setCheckInChecklistTarget(full);
   };
 
@@ -11041,7 +11047,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       item.is_daily_special ? 'true' : 'false',
     ].join(','));
     const csv = [header, ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;
     a.download = `menu_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`;
@@ -11056,7 +11062,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 "Paneer Tikka","Starters","Grilled cottage cheese with spices","VEG",120,220,true
 "Masala Chai","Drinks","Spiced Indian tea","VEG",,60,false
 "Gulab Jamun","Desserts","Soft milk-solid dumplings in syrup","VEG",,80,false`;
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;
     a.download = 'menu_template.csv'; a.click(); URL.revokeObjectURL(url);
@@ -18434,6 +18440,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             };
 
             const exportActiveReportCsv = () => {
+              const fmtINR = (n: any) => csvMoney(n);
               if (!foActiveReport) return;
               const { kind, data } = foActiveReport;
               const stamp = (foDateFrom === foDateTo) ? foDateTo : `${foDateFrom}_to_${foDateTo}`;
@@ -24726,17 +24733,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
               {/* Actions — gated by status */}
               <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    close();
-                    setEditingBooking({ ...b });
-                    setShowBookingModal(true);
-                  }}
-                  className="px-3 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2] flex items-center justify-center gap-1"
-                >
-                  Edit booking
-                </button>
+                {status === 'BOOKED' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      close();
+                      setEditingBooking({ ...b });
+                      setShowBookingModal(true);
+                    }}
+                    className="px-3 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2] flex items-center justify-center gap-1"
+                  >
+                    Edit booking
+                  </button>
+                )}
 
                 {status === 'BOOKED' && (
                   <button
@@ -24759,7 +24768,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       setCheckoutBooking(b);
                       setShowCheckoutModal(true);
                     }}
-                    className="px-3 py-2.5 rounded-2xl bg-[#b8860b] text-white text-sm font-bold hover:bg-[#8f6608]"
+                    className="col-span-2 px-3 py-2.5 rounded-2xl bg-[#b8860b] text-white text-sm font-bold hover:bg-[#8f6608]"
                   >
                     Check out
                   </button>
@@ -32120,9 +32129,9 @@ const AvailabilityCalendarV2: React.FC<{
                     {/* Inventory header lane. In Rooms view the row toggles the
                         per-type drill-down; in Type view its date cells are
                         click-to-book (floating) for that category. */}
-                    <tr className={showRoomNumbers ? 'cursor-pointer' : ''} onClick={showRoomNumbers ? toggle : undefined}>
+                    <tr className="cursor-pointer" onClick={toggle}>
                       <td className="sticky left-0 z-10 bg-[#faf7f2] border-r border-[#cc5a16]/10 px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
-                        {showRoomNumbers && <span className="inline-block w-3 text-[#cc5a16]">{collapsed ? '▸' : '▾'}</span>}{' '}
+                        <span className="inline-block w-3 text-[#cc5a16]">{collapsed ? '▸' : '▾'}</span>{' '}
                         {g.name} · {g.rooms.length} room{g.rooms.length > 1 ? 's' : ''}
                         {floats.length > 0 && <span className="ml-1 text-emerald-700 normal-case">· {floats.length} unassigned</span>}
                       </td>
@@ -32153,7 +32162,7 @@ const AvailabilityCalendarV2: React.FC<{
                         no physical-room rows. Room # is a faint badge only on
                         assigned / in-house guests; floating guests read as
                         "Unassigned". ─────────────────────────────────────── */}
-                    {!showRoomNumbers && allBk.map((bk: any) => {
+                    {!showRoomNumbers && !collapsed && allBk.map((bk: any) => {
                       const floating = bk.room_locked === 0;
                       const firstCovered = data.dates.find((d: string) =>
                         bk.booking_type === 'DAY_USE' ? d === bk.ci : (d >= bk.ci && d < bk.co));
@@ -32192,7 +32201,7 @@ const AvailabilityCalendarV2: React.FC<{
                         </tr>
                       );
                     })}
-                    {!showRoomNumbers && allBk.length === 0 && (
+                    {!showRoomNumbers && !collapsed && allBk.length === 0 && (
                       <tr className="border-b border-[#cc5a16]/5">
                         <td className="sticky left-0 z-10 bg-white border-r border-[#cc5a16]/10 px-3 py-1.5 text-[11px] text-[#9c8e85] italic">No reservations</td>
                         {data.dates.map((d: string) => <td key={d} className="border-l border-[#cc5a16]/5" style={{ minWidth: 44, height: 28 }} />)}
@@ -48178,7 +48187,7 @@ function PartnerPortal({ restaurantId, token, restaurantName }: { restaurantId: 
     if (!data?.rooms?.length) return;
     downloadCsv(
       `rate-sheet_${start}_to_${end}.csv`,
-      ['Room', 'Category', 'Capacity', 'Status', 'Available From', `Sell/Night (₹)`, `Sell Total ${data.nights}n (₹)`],
+      ['Room', 'Category', 'Capacity', 'Status', 'Available From', `Sell/Night (INR)`, `Sell Total ${data.nights}n (INR)`],
       data.rooms.map((r: any) => [
         r.name || r.room_number || r.id,
         r.type_name || '',
