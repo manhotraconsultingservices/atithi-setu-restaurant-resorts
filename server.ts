@@ -2059,6 +2059,27 @@ async function reverseOrderFolioPosting(
 //  folio_id is set it is skipped, so running this on every folio view / at
 //  checkout never double-charges. Returns how many it posted.
 // ════════════════════════════════════════════════════════════════════════
+// Stay-window guard for attributing CHARGE_TO_ROOM orders to a booking
+// (20 Jun 2026 critical fix). An order explicitly tagged with THIS booking_id
+// always belongs to it. An UNtagged room-service order belongs only if it was
+// placed DURING this stay — created on/after check-in and before the day after
+// check-out — so a previous occupant's (or pre-arrival) order on the same
+// physical room is never billed to the new guest. Orders tagged to a DIFFERENT
+// booking never match. `b` must carry id, actual_checkin_at, check_in_date,
+// check_out_date.
+function orderBelongsToStay(o: any, b: any): boolean {
+  const bid = String(b?.id ?? '');
+  if (o?.booking_id && String(o.booking_id) === bid) return true;
+  if (o?.booking_id) return false;                 // tagged to a different booking
+  const ciRaw = b?.actual_checkin_at || b?.check_in_date;
+  if (!ciRaw) return false;                          // no stay anchor → don't attribute by room
+  const t  = new Date(o?.created_at).getTime();
+  const lo = new Date(ciRaw).getTime();
+  if (!Number.isFinite(t) || !Number.isFinite(lo)) return false;
+  const hi = b?.check_out_date ? new Date(b.check_out_date).getTime() + 86400000 : Infinity;
+  return t >= lo && t < hi;
+}
+
 async function postPendingRoomOrdersToFolio(
   restaurantId: string,
   opts: { bookingId?: string | null; roomId?: string | null; postedBy?: string | null }
@@ -2082,6 +2103,17 @@ async function postPendingRoomOrdersToFolio(
   } catch (e: any) {
     console.warn(`[room-fnb sweep] query failed for ${restaurantId} (booking=${bookingId} room=${roomId}): ${e?.message || e}`);
     return { posted: 0, failed: 0 };
+  }
+  // Stay-window guard (20 Jun 2026) — the query over-matches by room_id, which
+  // would otherwise sweep a PREVIOUS occupant's / pre-arrival order on the same
+  // physical room onto this guest's folio. Drop any room-matched order that
+  // wasn't placed during this booking's stay. Orders tagged with this booking
+  // always post; if we can't resolve the booking, post only booking_id-tagged
+  // orders (never an unanchored room match).
+  if (bookingId) {
+    let stayBooking: any = null;
+    try { stayBooking = await tenantDb.get("SELECT id, actual_checkin_at, check_in_date, check_out_date FROM room_bookings WHERE id = ?", [bookingId]); } catch { /* ignore */ }
+    pending = pending.filter((o: any) => stayBooking ? orderBelongsToStay(o, stayBooking) : (String(o.booking_id ?? '') === String(bookingId)));
   }
   let posted = 0, failed = 0;
   for (const o of pending) {
@@ -20862,12 +20894,12 @@ ${data.tenant.name}`;
                                    WHERE o.deleted_at IS NULL
                                      AND UPPER(COALESCE(o.status,'')) <> 'CANCELLED'
                                      AND UPPER(o.payment_method) = 'CHARGE_TO_ROOM'
-                                     AND (o.booking_id = b.id OR o.room_id = b.room_id)), 0) AS fnb_total,
+                                     AND (o.booking_id = b.id OR ((o.booking_id IS NULL OR o.booking_id = '') AND o.room_id = b.room_id AND o.created_at::timestamp >= COALESCE(b.actual_checkin_at::timestamp, b.check_in_date::timestamp) AND o.created_at::timestamp < (b.check_out_date::timestamp + INTERVAL '1 day')))), 0) AS fnb_total,
                         COALESCE((SELECT SUM(o.total_amount) FROM orders o
                                    WHERE o.deleted_at IS NULL
                                      AND UPPER(COALESCE(o.status,'')) <> 'CANCELLED'
                                      AND UPPER(o.payment_method) = 'CHARGE_TO_ROOM'
-                                     AND (o.booking_id = b.id OR o.room_id = b.room_id)
+                                     AND (o.booking_id = b.id OR ((o.booking_id IS NULL OR o.booking_id = '') AND o.room_id = b.room_id AND o.created_at::timestamp >= COALESCE(b.actual_checkin_at::timestamp, b.check_in_date::timestamp) AND o.created_at::timestamp < (b.check_out_date::timestamp + INTERVAL '1 day')))
                                      AND COALESCE(o.folio_post_status,'') <> 'PAID_IN_ROOM'), 0) AS fnb_unpaid
                  FROM room_bookings b
               LEFT JOIN rooms r ON r.id = b.room_id
@@ -21827,8 +21859,15 @@ ${data.tenant.name}`;
       if (!target) return res.status(400).json({ error: 'room_id is required.' });
       const bk: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!bk) return res.status(404).json({ error: 'Booking not found.' });
-      if (String(bk.status || '').toUpperCase() !== 'BOOKED') {
-        return res.status(409).json({ error: 'Only a not-yet-checked-in booking can be reassigned to another room.' });
+      const status = String(bk.status || '').toUpperCase();
+      const isCheckedIn = status === 'CHECKED_IN';
+      // BOOKED → free pre-arrival reassignment (any room/category).
+      // CHECKED_IN → mid-stay room move allowed ONLY within the SAME category
+      //   (room type) so the rate + meal plan are unchanged — for when the guest
+      //   has an issue with the physical room (20 Jun 2026). Anything past
+      //   check-out / cancelled cannot be moved.
+      if (status !== 'BOOKED' && !isCheckedIn) {
+        return res.status(409).json({ error: 'Only a booked or checked-in stay can be moved to another room.' });
       }
       if (String(bk.room_id) === target) {
         // Same room — just apply the (un)lock toggle.
@@ -21836,11 +21875,21 @@ ${data.tenant.name}`;
         await tenantDb.run("UPDATE room_bookings SET room_locked = ? WHERE id = ?", [newLock, req.params.bookingId]).catch(() => {});
         return res.json({ ok: true, room_id: target, room_locked: newLock, unchanged: true });
       }
-      const room: any = await tenantDb.get("SELECT id, status FROM rooms WHERE id = ?", [target]);
+      const room: any = await tenantDb.get("SELECT id, status, type_id FROM rooms WHERE id = ?", [target]);
       if (!room) return res.status(404).json({ error: 'Target room not found.' });
       const rst = String(room.status || '').toUpperCase();
       if (rst === 'MAINTENANCE' || rst === 'BLOCKED') {
         return res.status(409).json({ error: 'Target room is under maintenance / blocked.' });
+      }
+      // CHECKED_IN move must stay within the same room category (type), so the
+      // tariff (category × season × meal plan) and the guest's meal plan are
+      // unchanged — a like-for-like swap, not an upgrade/downgrade.
+      if (isCheckedIn) {
+        const cur: any = await tenantDb.get("SELECT type_id FROM rooms WHERE id = ?", [bk.room_id]);
+        const sameCat = String(cur?.type_id ?? '') === String(room.type_id ?? '');
+        if (!sameCat) {
+          return res.status(409).json({ error: 'After check-in a room can only be switched within the SAME category (and meal plan). To change category, check out and rebook.' });
+        }
       }
       // Reuse the canonical overlap/hold validator — exclude this booking, and
       // skip past-date + capacity guards (dates/occupancy are unchanged).
@@ -21854,12 +21903,21 @@ ${data.tenant.name}`;
         skipCapacityCheck: true,
       });
       if (!v.ok) return res.status(v.status).json({ error: v.error });
-      // Floating stays floating unless the caller explicitly locks the room.
-      const newLock = lock ? 1 : Number(bk.room_locked || 0);
+      // A checked-in stay keeps the room locked; otherwise floating stays
+      // floating unless the caller explicitly locks the room.
+      const newLock = isCheckedIn ? 1 : (lock ? 1 : Number(bk.room_locked || 0));
       await tenantDb.run(
-        "UPDATE room_bookings SET room_id = ?, room_locked = ? WHERE id = ? AND status = 'BOOKED'",
+        "UPDATE room_bookings SET room_id = ?, room_locked = ? WHERE id = ? AND status IN ('BOOKED','CHECKED_IN')",
         [target, newLock, req.params.bookingId]
       );
+      if (isCheckedIn) {
+        // Physically move the guest: free the old room, occupy the new one, and
+        // point the open folio at the new room (rate is unchanged — same
+        // category + meal plan — so posted charges need no recompute).
+        await tenantDb.run("UPDATE rooms SET status = 'VACANT' WHERE id = ?", [bk.room_id]).catch(() => {});
+        await tenantDb.run("UPDATE rooms SET status = 'OCCUPIED' WHERE id = ?", [target]).catch(() => {});
+        await tenantDb.run("UPDATE folios SET room_id = ? WHERE booking_id = ? AND status = 'open'", [target, req.params.bookingId]).catch(() => {});
+      }
       const row: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       res.json({ ok: true, room_id: target, room_locked: row?.room_locked, booking: row });
     } catch (err: any) {
@@ -28377,10 +28435,10 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const b: any = await tenantDb.get("SELECT id, room_id, guest_name FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      const b: any = await tenantDb.get("SELECT id, room_id, guest_name, actual_checkin_at, check_in_date, check_out_date FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!b) return res.status(404).json({ error: 'Booking not found.' });
-      const orders: any[] = await tenantDb.query(
-        `SELECT id, items, total_amount, status, kitchen_status, folio_post_status, folio_id,
+      const allOrders: any[] = await tenantDb.query(
+        `SELECT id, booking_id, room_id, items, total_amount, status, kitchen_status, folio_post_status, folio_id,
                 room_payment_method, room_paid_at, created_at
            FROM orders
           WHERE deleted_at IS NULL
@@ -28390,6 +28448,10 @@ ${data.tenant.name}`;
           ORDER BY created_at ASC`,
         [b.id, b.room_id]
       ).catch(() => []);
+      // Stay-window guard (20 Jun 2026 critical fix) — drop any order that only
+      // matched by physical room but was placed outside THIS stay (a previous
+      // occupant's or pre-arrival order), so it's never billed to this guest.
+      const orders = allOrders.filter((o: any) => orderBelongsToStay(o, b));
       let total = 0, paid = 0, onFolio = 0, pending = 0;
       for (const o of orders) {
         const amt = Number(o.total_amount || 0);
@@ -28423,11 +28485,11 @@ ${data.tenant.name}`;
       const tenantDb = await getTenantDb(req.params.id);
       await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_paid_at TIMESTAMP").catch(() => {});
       await tenantDb.exec("ALTER TABLE orders ADD COLUMN IF NOT EXISTS room_payment_method TEXT").catch(() => {});
-      const b: any = await tenantDb.get("SELECT id, room_id FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      const b: any = await tenantDb.get("SELECT id, room_id, actual_checkin_at, check_in_date, check_out_date FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!b) return res.status(404).json({ error: 'Booking not found.' });
       const method = String(req.body?.payment_method || 'CASH').toUpperCase().trim() || 'CASH';
-      const orders: any[] = await tenantDb.query(
-        `SELECT id, folio_id FROM orders
+      const allOrders: any[] = await tenantDb.query(
+        `SELECT id, booking_id, room_id, created_at, folio_id FROM orders
           WHERE deleted_at IS NULL
             AND UPPER(COALESCE(status,'')) <> 'CANCELLED'
             AND UPPER(payment_method) = 'CHARGE_TO_ROOM'
@@ -28435,6 +28497,9 @@ ${data.tenant.name}`;
             AND COALESCE(folio_post_status,'') <> 'PAID_IN_ROOM'`,
         [b.id, b.room_id]
       ).catch(() => []);
+      // Stay-window guard — only settle orders that belong to THIS stay, never a
+      // prior occupant's room-matched order (20 Jun 2026 critical fix).
+      const orders = allOrders.filter((o: any) => orderBelongsToStay(o, b));
       let marked = 0, reversed = 0;
       for (const o of orders) {
         if (o.folio_id) {
