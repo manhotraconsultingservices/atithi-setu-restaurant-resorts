@@ -7188,7 +7188,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Clicking a different report card replaces the data; CSV export
   // operates on the currently-loaded data.
   const [foActiveReport, setFoActiveReport] = useState<{
-    kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'stay-view';
+    kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'stay-view' | 'ota-inventory';
     data: any;
     loadedAt: number;
   } | null>(null);
@@ -18419,7 +18419,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // card now FETCHES + DISPLAYS the data inline as a table.
             // Separate "Download CSV" button on the table header lets the
             // user export the same data without re-clicking the card.
-            const loadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit') => {
+            const loadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'ota-inventory') => {
               setFoLoading(kind);
               try {
                 let url = '';
@@ -18427,6 +18427,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   url = `/reports/${kind}?from=${foDateFrom}&to=${foDateTo}`;
                 } else if (kind === 'room-status') {
                   url = `/reports/room-status?as_of=${foDateTo}`;
+                } else if (kind === 'ota-inventory') {
+                  // Forward-looking inventory: reuse the availability grid for
+                  // [from, to] inclusive and derive per-type sellable counts
+                  // client-side (same math as Calendar V2 Types view). Window
+                  // is capped server-side at 90 days.
+                  const a = new Date(foDateFrom + 'T00:00:00Z').getTime();
+                  const b = new Date(foDateTo   + 'T00:00:00Z').getTime();
+                  const days = Math.max(1, Math.min(90, Math.round((b - a) / 86400000) + 1));
+                  url = `/availability?start=${foDateFrom}&days=${days}`;
                 } else {
                   url = `/reports/night-audit?date=${foDateTo}`;
                 }
@@ -18439,6 +18448,76 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               }
             };
 
+            // OTA inventory: turn the availability grid into a per-room-type
+            // sellable-count matrix (rows = types, cols = dates). Mirrors the
+            // Calendar V2 Types-view inventory math exactly: a room counts as
+            // sellable on a date when its grid cell is VACANT, and rooms in
+            // MAINTENANCE / BLOCKED are excluded from the type's capacity.
+            const otaInventoryMatrix = (data: any) => {
+              const dates: string[] = data?.dates || [];
+              const rooms: any[] = data?.rooms || [];
+              const grid: any = data?.grid || {};
+              const types: any[] = data?.room_types || [];
+              const typeName = new Map<string, string>();
+              for (const t of types) typeName.set(String(t.id), t.name);
+              const byType = new Map<string, any[]>();
+              for (const r of rooms) {
+                const k = r.type_id ? String(r.type_id) : '__uncat__';
+                if (!byType.has(k)) byType.set(k, []);
+                byType.get(k)!.push(r);
+              }
+              const rows = Array.from(byType.entries()).map(([tid, trooms]) => {
+                const name = typeName.get(tid) || trooms[0]?.type || 'Uncategorised';
+                const sellable = trooms.filter(r => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED').length;
+                const counts = dates.map(d => {
+                  let avail = 0;
+                  for (const r of trooms) {
+                    if (r.status === 'MAINTENANCE' || r.status === 'BLOCKED') continue;
+                    const st = String(grid?.[r.id]?.[d]?.status || 'VACANT').toUpperCase();
+                    if (st === 'VACANT') avail++;
+                  }
+                  return avail;
+                });
+                return { tid, name, sellable, counts };
+              });
+              rows.sort((a, b) => a.name.localeCompare(b.name));
+              return { dates, rows };
+            };
+            // Compact date label for the matrix columns + print sheet.
+            const fmtDateCol = (d: string) => {
+              const dt = new Date(d + 'T00:00:00');
+              return dt.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' });
+            };
+            // Print-friendly OTA inventory sheet (opens a clean new window).
+            const printOtaInventory = () => {
+              if (!foActiveReport) return;
+              const m = otaInventoryMatrix(foActiveReport.data);
+              const esc = (s: any) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+              const w = window.open('', '_blank');
+              if (!w) { alert('Pop-up blocked — allow pop-ups for this site to print.'); return; }
+              const head = m.dates.map(d => `<th>${esc(fmtDateCol(d))}</th>`).join('');
+              const body = m.rows.map(r =>
+                `<tr><td class="t">${esc(r.name)}</td><td>${r.sellable}</td>${
+                  r.counts.map(c => `<td class="${c === 0 ? 'z' : ''}">${c}</td>`).join('')
+                }</tr>`).join('');
+              w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>OTA Inventory ${esc(foDateFrom)} to ${esc(foDateTo)}</title><style>
+                body{font-family:Arial,Helvetica,sans-serif;padding:24px;color:#1a1208}
+                h1{font-size:18px;margin:0 0 4px} p{margin:0 0 16px;color:#666;font-size:12px}
+                table{border-collapse:collapse;width:100%;font-size:12px}
+                th,td{border:1px solid #ccc;padding:6px 8px;text-align:center;white-space:nowrap}
+                thead th{background:#0d9488;color:#fff;font-size:11px}
+                td.t{text-align:left;font-weight:bold;background:#f7faf9}
+                td.z{background:#fde2e7;color:#9f1239;font-weight:bold}
+                @media print{body{padding:0}}
+              </style></head><body>
+                <h1>OTA Inventory — Available Rooms per Type</h1>
+                <p>${esc(foDateFrom)} &rarr; ${esc(foDateTo)} &middot; Sellable rooms available to load on OTA channels</p>
+                <table><thead><tr><th style="text-align:left;background:#0d9488;color:#fff">Room Type</th><th>Sellable</th>${head}</tr></thead><tbody>${body}</tbody></table>
+              </body></html>`);
+              w.document.close();
+              w.focus();
+              w.print();
+            };
             const exportActiveReportCsv = () => {
               const fmtINR = (n: any) => csvMoney(n);
               if (!foActiveReport) return;
@@ -18487,6 +18566,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     r.occupied_check_out?.toString().slice(0,10) || '',
                     r.hold_reason || '', r.notes || '',
                   ]));
+              } else if (kind === 'ota-inventory') {
+                const m = otaInventoryMatrix(data);
+                downloadCsv(`ota-inventory-${stamp}.csv`,
+                  ['Room Type', 'Sellable', ...m.dates],
+                  m.rows.map(r => [r.name, r.sellable, ...r.counts]));
               } else {
                 const s = data.summary || {};
                 const rows: any[][] = [
@@ -18585,16 +18669,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               const tone = kind === 'arrivals' ? 'emerald'
                          : kind === 'departures' ? 'amber'
                          : kind === 'room-status' ? 'blue'
+                         : kind === 'ota-inventory' ? 'teal'
                          : 'violet';
               const title = kind === 'arrivals' ? `Arrival Report · ${foDateFrom}${foDateFrom === foDateTo ? '' : ` → ${foDateTo}`}`
                           : kind === 'departures' ? `Departure Report · ${foDateFrom}${foDateFrom === foDateTo ? '' : ` → ${foDateTo}`}`
                           : kind === 'room-status' ? `Room Status as of ${data.as_of || foDateTo}`
+                          : kind === 'ota-inventory' ? `OTA Inventory · ${foDateFrom}${foDateFrom === foDateTo ? '' : ` → ${foDateTo}`}`
                           : `Night Audit · ${data.as_of || foDateTo}`;
               const toneClasses: Record<string, { bg: string; head: string; text: string; border: string }> = {
                 emerald: { bg: 'bg-emerald-50',  head: 'bg-emerald-100', text: 'text-emerald-900', border: 'border-emerald-200' },
                 amber:   { bg: 'bg-amber-50',    head: 'bg-amber-100',   text: 'text-amber-900',   border: 'border-amber-200'   },
                 blue:    { bg: 'bg-blue-50',     head: 'bg-blue-100',    text: 'text-blue-900',    border: 'border-blue-200'    },
                 violet:  { bg: 'bg-violet-50',   head: 'bg-violet-100',  text: 'text-violet-900',  border: 'border-violet-200'  },
+                teal:    { bg: 'bg-teal-50',     head: 'bg-teal-100',    text: 'text-teal-900',    border: 'border-teal-200'    },
               };
               const t = toneClasses[tone];
 
@@ -18618,6 +18705,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         onClick={() => setFoActiveReport(null)}
                         className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] hover:text-[#1a1208]"
                       >Close</button>
+                      {kind === 'ota-inventory' && (
+                        <button
+                          type="button"
+                          onClick={printOtaInventory}
+                          className="px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest flex items-center gap-1 text-teal-800 border border-teal-300 bg-white hover:bg-teal-50"
+                        >
+                          <Printer size={12} /> Print
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={exportActiveReportCsv}
@@ -18625,6 +18721,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           tone === 'emerald' ? 'bg-emerald-600 hover:bg-emerald-700' :
                           tone === 'amber'   ? 'bg-amber-600 hover:bg-amber-700' :
                           tone === 'blue'    ? 'bg-blue-600 hover:bg-blue-700' :
+                          tone === 'teal'    ? 'bg-teal-600 hover:bg-teal-700' :
                           'bg-violet-600 hover:bg-violet-700')}
                       >
                         <Download size={12} /> Download CSV
@@ -18716,6 +18813,53 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       ))}
                     </div>
                   )}
+
+                  {/* OTA Inventory — room-type × date matrix of sellable counts */}
+                  {kind === 'ota-inventory' && (() => {
+                    const m = otaInventoryMatrix(data);
+                    if (!m.rows.length) return <p className="p-8 text-center text-sm italic text-teal-800">No room types configured. Add room types under Hotel → Rooms to use this report.</p>;
+                    return (
+                      <>
+                        <div className="px-5 py-2.5 bg-teal-50 border-b border-teal-200 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] font-bold uppercase tracking-widest text-teal-800">
+                          <span>Available rooms to sell per type, per night</span>
+                          <span className="flex items-center gap-1 normal-case"><span className="inline-block w-3 h-3 rounded" style={{ background: '#e9f7ef' }} /> Open</span>
+                          <span className="flex items-center gap-1 normal-case"><span className="inline-block w-3 h-3 rounded" style={{ background: '#fef3c7' }} /> Low (≤25%)</span>
+                          <span className="flex items-center gap-1 normal-case"><span className="inline-block w-3 h-3 rounded" style={{ background: '#fde2e7' }} /> Sold out</span>
+                        </div>
+                        <div className="overflow-x-auto bg-white">
+                          <table className="w-full text-xs border-collapse">
+                            <thead className="bg-teal-100">
+                              <tr>
+                                <th className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-teal-900 sticky left-0 bg-teal-100 z-10">Room Type</th>
+                                <th className="text-center px-2 py-2 text-[10px] font-bold uppercase tracking-widest text-teal-900">Sellable</th>
+                                {m.dates.map(d => (
+                                  <th key={d} className="text-center px-2 py-2 text-[10px] font-bold text-teal-900 whitespace-nowrap leading-tight">{fmtDateCol(d)}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {m.rows.map((r, i) => (
+                                <tr key={r.tid} className={cn('border-t border-teal-100', i % 2 === 1 && 'bg-teal-50/40')}>
+                                  <td className={cn('px-3 py-1.5 font-semibold text-teal-900 sticky left-0 z-10', i % 2 === 1 ? 'bg-[#f3faf9]' : 'bg-white')}>{r.name}</td>
+                                  <td className="px-2 py-1.5 text-center font-mono text-[#6b5d52]">{r.sellable}</td>
+                                  {r.counts.map((c, j) => {
+                                    const low = r.sellable >= 4 && c > 0 && c <= Math.ceil(r.sellable * 0.25);
+                                    const bg = c === 0 ? '#fde2e7' : low ? '#fef3c7' : '#e9f7ef';
+                                    const fg = c === 0 ? '#9f1239' : low ? '#92400e' : '#1f513f';
+                                    return (
+                                      <td key={j} className="px-2 py-1.5 text-center">
+                                        <span className="inline-block min-w-[22px] rounded px-1 py-0.5 text-[11px] font-bold font-mono" style={{ background: bg, color: fg }}>{c}</span>
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    );
+                  })()}
 
                   {/* List-shaped reports (arrivals / departures / room-status) */}
                   {listKinds[kind] && (
@@ -18839,7 +18983,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
                     {/* BCG client request 8 Jun 2026: Stay View card —
                         renders the existing AvailabilityCalendar (KPI strip +
                         legend + rooms × dates grid) inline. Same component
@@ -18918,6 +19062,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         {foLoading === 'night-audit' ? <span className="text-[10px] text-violet-700">Loading…</span> : <Eye size={14} className="text-violet-700" />}
                       </div>
                       <p className="text-[10px] text-violet-800 leading-snug">End-of-day rollup for <strong>{foDateTo}</strong>. KPIs + 3 lists.</p>
+                    </button>
+
+                    {/* OTA Inventory — forward-looking sellable rooms per type
+                        across the From→To range, for updating OTA channels.
+                        Reuses the availability grid; CSV + print export. */}
+                    <button
+                      type="button" disabled={foLoading === 'ota-inventory'}
+                      onClick={() => loadReport('ota-inventory')}
+                      className={cn("text-left p-4 rounded-2xl border-2 transition-all disabled:opacity-50",
+                        foActiveReport?.kind === 'ota-inventory'
+                          ? "bg-teal-100 border-teal-500 shadow-md"
+                          : "bg-teal-50 border-teal-200 hover:border-teal-400 hover:bg-teal-100")}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-teal-900">OTA Inventory</span>
+                        {foLoading === 'ota-inventory' ? <span className="text-[10px] text-teal-700">Loading…</span> : <Globe size={14} className="text-teal-700" />}
+                      </div>
+                      <p className="text-[10px] text-teal-800 leading-snug">Available rooms per type, <strong>{foDateFrom}</strong> → <strong>{foDateTo}</strong>. For updating OTA channels.</p>
                     </button>
                   </div>
 
