@@ -27361,6 +27361,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             requireDocs={requireDocs}
             restaurantId={restaurantId}
             token={token}
+            mealPlans={tariffData.meal_plans}
+            tariffModel={tariffData.tariff_model}
             isEarly={isEarly}
             onPreview={(doc: any) => setDocPreview(doc)}
             onCancel={() => setCheckInChecklistTarget(null)}
@@ -32822,12 +32824,14 @@ const CheckInWizardModal: React.FC<{
   requireDocs: boolean;
   restaurantId: string;
   token: string;
+  mealPlans?: any[];
+  tariffModel?: string;
   isEarly?: boolean;
   onPreview?: (doc: any) => void;
   onCancel: () => void;
   onSaved?: (patched: any) => void;
   onCheckIn: (advance?: { amount: number; method: string; reference?: string }) => void | Promise<void>;
-}> = ({ booking, requireDocs, restaurantId, token, isEarly = false, onPreview, onCancel, onSaved, onCheckIn }) => {
+}> = ({ booking, requireDocs, restaurantId, token, mealPlans = [], tariffModel, isEarly = false, onPreview, onCancel, onSaved, onCheckIn }) => {
   const [step, setStep] = useState<1 | 2>(1);
   const [draft, setDraft] = useState<any>({
     guest_name:        booking.guest_name || '',
@@ -32849,6 +32853,10 @@ const CheckInWizardModal: React.FC<{
     // from saveAndNext() lands fine.
     room_id:           booking.room_id || '',
     room_rate:         booking.room_rate ?? 0,
+    // Meal plan is editable at check-in (MATRIX tenants) — changing it re-quotes
+    // the stay total and is PATCHed before check-in so the folio bills the new
+    // plan's rate. null = room-only (EP).
+    meal_plan_id:      booking.meal_plan_id ?? null,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -32888,10 +32896,13 @@ const CheckInWizardModal: React.FC<{
       // (otherwise the booking conflicts with itself and the current room is
       // never priced — leaving the Stay total on the stale stored value).
       if (booking.id) qs.set('exclude_booking_id', booking.id);
-      // Quote each candidate room with THIS booking's meal plan + extra
-      // persons so the picker shows the meal-plan-adjusted rate + stay total
-      // (not the bare base rate). The booking carries these fields.
-      if (booking.meal_plan_id) qs.set('meal_plan_id', booking.meal_plan_id);
+      // Quote each candidate room with the CURRENT (draft) meal plan + extra
+      // persons so the picker + Stay total reflect the live selection. quote=1
+      // forces the server to price even a room-only / no-meal-plan stay (base
+      // rate × nights) so the total never shows ₹0.
+      qs.set('quote', '1');
+      const mpForQuote = draft.meal_plan_id ?? booking.meal_plan_id;
+      if (mpForQuote) qs.set('meal_plan_id', mpForQuote);
       if (booking.extra_adults) qs.set('extra_adults', String(booking.extra_adults));
       if (booking.extra_children_with_mattress) qs.set('extra_children_with_mattress', String(booking.extra_children_with_mattress));
       if (booking.extra_children_no_mattress) qs.set('extra_children_no_mattress', String(booking.extra_children_no_mattress));
@@ -32925,10 +32936,9 @@ const CheckInWizardModal: React.FC<{
     : Number(booking.total_amount || 0);
   const advPaid = Number(booking.advance_paid || 0);
   const outstanding = Math.max(0, stayTotal - advPaid);
-  // Quote on mount so the Stay total is correct immediately (not only after the
-  // staff opens the room picker). loadAvailableRooms quotes every free room —
-  // incl. the current one — with this booking's meal plan + extra persons.
-  useEffect(() => { loadAvailableRooms(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  // Quote on mount AND whenever the meal plan changes, so the Stay total is
+  // correct immediately and re-prices live when staff switch the plan.
+  useEffect(() => { loadAvailableRooms(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [draft.meal_plan_id]);
 
   // Re-fetch document count whenever the embedded widget refreshes.
   useEffect(() => {
@@ -33188,9 +33198,23 @@ const CheckInWizardModal: React.FC<{
               <div className="mt-2 grid grid-cols-2 gap-2">
                 <div className="bg-white rounded-lg border border-[#cc5a16]/10 px-2.5 py-1.5 min-w-0">
                   <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Meal Plan</p>
-                  <p className="text-[12px] text-[#1a1208] font-semibold truncate" title={booking.meal_plan_snapshot || booking.meal_plan_id || 'Room only'}>
-                    {booking.meal_plan_snapshot || booking.meal_plan_id || 'Room only (EP)'}
-                  </p>
+                  {tariffModel === 'MATRIX' && (mealPlans || []).filter((m: any) => m.is_active !== 0).length > 0 ? (
+                    <select
+                      value={draft.meal_plan_id || ''}
+                      onChange={e => updateDraft({ meal_plan_id: e.target.value || null })}
+                      title="Change the meal plan — re-prices the stay; applied to the folio at check-in"
+                      className="w-full bg-transparent text-[12px] text-[#1a1208] font-semibold focus:outline-none cursor-pointer"
+                    >
+                      <option value="">Room only (EP)</option>
+                      {(mealPlans || []).filter((m: any) => m.is_active !== 0)
+                        .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))
+                        .map((m: any) => <option key={m.id} value={m.id}>{m.code} · {m.name}</option>)}
+                    </select>
+                  ) : (
+                    <p className="text-[12px] text-[#1a1208] font-semibold truncate" title={booking.meal_plan_snapshot || booking.meal_plan_id || 'Room only'}>
+                      {booking.meal_plan_snapshot || booking.meal_plan_id || 'Room only (EP)'}
+                    </p>
+                  )}
                 </div>
                 <div className="bg-white rounded-lg border border-[#cc5a16]/10 px-2.5 py-1.5 min-w-0">
                   <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Stay total {draft.room_id !== booking.room_id ? '(new room)' : ''}</p>

@@ -20037,10 +20037,10 @@ ${data.tenant.name}`;
       const qExtraChildMat = Math.max(0, Number(req.query.extra_children_with_mattress || 0));
       const qExtraChildNo  = Math.max(0, Number(req.query.extra_children_no_mattress || 0));
       const qBookingType   = String(req.query.booking_type || 'OVERNIGHT').toUpperCase();
-      // Quote when a meal plan is supplied OR when there are extra persons —
-      // a room-only stay with extra adults/children still needs the extra-person
-      // charge reflected in the quoted total (19 Jun 2026).
-      if (quoteMealPlanId || qExtraAdults > 0 || qExtraChildMat > 0 || qExtraChildNo > 0) {
+      // Quote when a meal plan is supplied, when there are extra persons, OR when
+      // the caller explicitly asks (quote=1 — the check-in wizard does this so a
+      // room-only stay still shows base rate × nights instead of ₹0).
+      if (quoteMealPlanId || qExtraAdults > 0 || qExtraChildMat > 0 || qExtraChildNo > 0 || String(req.query.quote) === '1') {
         await Promise.all(results.filter((r: any) => r.available).map(async (r: any) => {
           try {
             const bd = await computeBookingTotalWithExtras(req.params.id, r.id, start, end, {
