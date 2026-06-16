@@ -220,6 +220,22 @@ function deriveOccupancy(adults: number, capacity: number, childMat: number, chi
   return { extra_adults: Math.max(0, a - cap), num_guests: a + cm + cn };
 }
 
+// Room label for a booking row (Option A, 19 Jun 2026). A FLOATING booking
+// (room_locked = 0) holds a room TYPE, not a specific room — the exact room is
+// only firm once it's locked (at check-in, or when staff explicitly pin it).
+// So a floating reservation reads as "Unassigned" (with its category, so staff
+// know what to assign) rather than surfacing the auto-assigned room number,
+// which made it look like a specific room was already blocked. Locked /
+// checked-in bookings show their concrete room as before.
+function bookingRoomLabel(b: any): string {
+  const floating = Number(b?.room_locked ?? 1) === 0;
+  if (floating) {
+    const cat = b?.room_category || b?.type_name || b?.room_type_name;
+    return cat ? `Unassigned · ${cat}` : 'Unassigned';
+  }
+  return b?.room_name || b?.room_id || '—';
+}
+
 // Reservation-table column registry (12 Jun 2026). Guest + Actions are
 // always shown (Guest pinned left, Actions pinned right); everything else is
 // toggleable via the Columns chooser and persisted per-browser. `def` is the
@@ -17616,7 +17632,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <div key={b.id} className="flex items-center justify-between py-2 border-b border-[#cc5a16]/10 last:border-0">
                       <div>
                         <p className="font-semibold text-[#1a1208] text-sm">{b.guest_name}</p>
-                        <p className="text-xs text-[#9c8e85]">{b.room_name || b.room_id}</p>
+                        <p className="text-xs text-[#9c8e85]">{bookingRoomLabel(b)}</p>
                       </div>
                       {b.status === 'CHECKED_IN'
                         ? <span className="px-3 py-1.5 rounded-lg bg-emerald-100 text-emerald-700 text-xs font-bold inline-flex items-center gap-1">✓ Checked in</span>
@@ -17637,7 +17653,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <div>
                           <p className="font-semibold text-[#1a1208] text-sm">{b.guest_name}</p>
                           <p className="text-xs text-[#9c8e85]">
-                            {b.room_name || b.room_id}
+                            {bookingRoomLabel(b)}
                             {isDayUseBooked && <span className="ml-2 px-1.5 py-0.5 rounded bg-[#0f766e]/10 text-[#0f766e] text-[10px] font-bold uppercase tracking-wider">Day-Use · Not Yet In</span>}
                           </p>
                         </div>
@@ -17936,7 +17952,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             >{b.id}</button>
                           </td>
                         )}
-                        {colOn('room') && <td className="px-4 py-3 text-[#3d3128] whitespace-nowrap">{b.room_name || b.room_id}</td>}
+                        {colOn('room') && <td className="px-4 py-3 text-[#3d3128] whitespace-nowrap">{bookingRoomLabel(b)}</td>}
                         {/* Dates — whitespace-nowrap + min-width so each date shows in full. */}
                         {colOn('dates') && (
                           <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap min-w-[160px]">
@@ -24550,7 +24566,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="bg-[#faf7f2] rounded-2xl p-4 text-sm space-y-1.5 mb-4">
                 <div className="flex justify-between gap-3">
                   <span className="text-[#6b5d52]">Room</span>
-                  <span className="font-semibold text-[#1a1208]">{room?.name || b.room_name || b.room_id}</span>
+                  <span className="font-semibold text-[#1a1208]">{bookingRoomLabel({ ...b, room_name: room?.name || b.room_name })}</span>
                 </div>
                 <div className="flex justify-between gap-3">
                   <span className="text-[#6b5d52]">Check-in</span>

@@ -20839,7 +20839,7 @@ ${data.tenant.name}`;
       // ADV-PAY: include advance_paid (sum of ADVANCE folio payments) and
       // open_folio_id (for direct "open folio" action from the booking row
       // so staff can add F&B charges without navigating to the Folios tab).
-      let sql = `SELECT b.*, r.name AS room_name,
+      let sql = `SELECT b.*, r.name AS room_name, r.room_number, rt.name AS room_category,
                         (SELECT COUNT(*)::int FROM guest_documents gd WHERE gd.booking_id = b.id) AS document_count,
                         COALESCE(
                           (SELECT SUM(fp.amount)
@@ -20871,6 +20871,7 @@ ${data.tenant.name}`;
                                      AND COALESCE(o.folio_post_status,'') <> 'PAID_IN_ROOM'), 0) AS fnb_unpaid
                  FROM room_bookings b
               LEFT JOIN rooms r ON r.id = b.room_id
+              LEFT JOIN room_types rt ON rt.id = r.type_id
                  WHERE 1 = 1`;
 
       // Status filter (comma-separated allowed: "BOOKED,CHECKED_IN").
