@@ -7713,11 +7713,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (seasonId) {
         for (const [pt, count] of Object.entries(extras)) {
           if (count > 0) {
-            const row = (tariffData.extra_person_charges || []).find((r: any) =>
-              r.person_type === pt && r.season_id === seasonId && r.meal_plan_id === opts.meal_plan_id
-            );
-            if (row) {
-              const add = Number(row.charge || 0) * count;
+            // Per-person charge. With a meal plan → exact (type, season, plan)
+            // row. Room-only (no meal plan) → LOWEST configured rate for this
+            // type + season, mirroring the server's getExtraPersonChargeForDate
+            // so the preview matches the folio (19 Jun 2026).
+            let per = 0;
+            if (opts.meal_plan_id) {
+              const row = (tariffData.extra_person_charges || []).find((r: any) =>
+                r.person_type === pt && r.season_id === seasonId && r.meal_plan_id === opts.meal_plan_id
+              );
+              per = row ? Number(row.charge || 0) : 0;
+            } else {
+              const rows = (tariffData.extra_person_charges || []).filter((r: any) =>
+                r.person_type === pt && r.season_id === seasonId && Number(r.charge || 0) > 0
+              );
+              per = rows.length ? Math.min(...rows.map((r: any) => Number(r.charge || 0))) : 0;
+            }
+            if (per > 0) {
+              const add = per * count;
               extrasForNight += add;
               extraTotalsByType[pt] = (extraTotalsByType[pt] || 0) + add;
               anyMatrix = true;
@@ -32277,6 +32290,10 @@ const CheckInWizardModal: React.FC<{
       // capacity made that room (and sometimes ALL rooms) vanish from the
       // picker, leaving "no option to reassign / upgrade".
       const qs = new URLSearchParams({ start: ci, end: co, guests: '1' });
+      // Exclude THIS booking so its own room reads as available + gets quoted
+      // (otherwise the booking conflicts with itself and the current room is
+      // never priced — leaving the Stay total on the stale stored value).
+      if (booking.id) qs.set('exclude_booking_id', booking.id);
       // Quote each candidate room with THIS booking's meal plan + extra
       // persons so the picker shows the meal-plan-adjusted rate + stay total
       // (not the bare base rate). The booking carries these fields.
@@ -32304,11 +32321,20 @@ const CheckInWizardModal: React.FC<{
   // room is picked we use its meal-plan-adjusted quote; otherwise the booking's
   // stored total. advance_paid + total_amount come from the bookings-list row.
   const pickedRoom = (availRooms || []).find((r: any) => r.id === draft.room_id);
-  const stayTotal = (draft.room_id !== booking.room_id && pickedRoom?.quoted_total != null)
+  // Prefer the freshly-quoted total for whichever room is selected (current OR
+  // reassigned). The quote reflects meal plan + extra-person charges — including
+  // room-only extras (19 Jun 2026) — so the Stay total no longer shows a stale
+  // stored value that omitted extra adults/children. Falls back to the booking's
+  // stored total until the quote loads.
+  const stayTotal = pickedRoom?.quoted_total != null
     ? Number(pickedRoom.quoted_total)
     : Number(booking.total_amount || 0);
   const advPaid = Number(booking.advance_paid || 0);
   const outstanding = Math.max(0, stayTotal - advPaid);
+  // Quote on mount so the Stay total is correct immediately (not only after the
+  // staff opens the room picker). loadAvailableRooms quotes every free room —
+  // incl. the current one — with this booking's meal plan + extra persons.
+  useEffect(() => { loadAvailableRooms(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
   // Re-fetch document count whenever the embedded widget refreshes.
   useEffect(() => {

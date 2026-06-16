@@ -1613,11 +1613,28 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
       // for every night.
       const firstNightPlanRate = ratePlan.nights[0]?.rate || 0;
       const useExplicit = explicitRate > 0 && Math.abs(explicitRate - firstNightPlanRate) > 0.01;
-      perNight = ratePlan.nights.map(n => ({
-        date: n.date,
-        base_rate: useExplicit ? explicitRate : n.rate,
-        extras: 0,
-        label: !useExplicit ? n.label : null,
+      // Extra-person charges on a ROOM-ONLY / no-meal-plan stay (19 Jun 2026).
+      // Previously this branch hard-coded extras=0, so extra adults/children on
+      // a room-only booking were never billed. Matrix tenants now charge them
+      // via the per-night extra-person lookup (room-only falls back to the
+      // lowest configured rate). Legacy tenants have no extra_person_charges so
+      // this resolves to 0 — unchanged. A manual rate override is treated as
+      // all-in (no separate extras), matching the matrix branch + the booking
+      // POST (total = rate × nights).
+      const addExtras = tariffModel === 'MATRIX' && !useExplicit && totalExtraHeads > 0;
+      perNight = await Promise.all(ratePlan.nights.map(async n => {
+        let extrasForNight = 0;
+        if (addExtras) {
+          if (xpAdults > 0) extrasForNight += (await getExtraPersonChargeForDate(restaurantId, n.date, booking.meal_plan_id || null, 'ADULT')) * xpAdults;
+          if (xpChildM > 0) extrasForNight += (await getExtraPersonChargeForDate(restaurantId, n.date, booking.meal_plan_id || null, 'CHILD_WITH_MATTRESS')) * xpChildM;
+          if (xpChildN > 0) extrasForNight += (await getExtraPersonChargeForDate(restaurantId, n.date, booking.meal_plan_id || null, 'CHILD_NO_MATTRESS')) * xpChildN;
+        }
+        return {
+          date: n.date,
+          base_rate: useExplicit ? explicitRate : n.rate,
+          extras: Math.round(extrasForNight * 100) / 100,
+          label: !useExplicit ? n.label : null,
+        };
       }));
     }
 
@@ -1646,7 +1663,9 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
       // baseGst + extrasGst === lineGst (exact remainder) — so recompute keeps
       // the folio grand total byte-identical. Legacy / no-extras stays a
       // single ROOM_CHARGE line (extrasAmount = 0).
-      const extrasAmount = (useMatrix && totalExtraHeads > 0)
+      // Itemise extras on any night that has them (matrix meal-plan stays AND
+      // room-only stays that now resolve a per-night extra-person charge).
+      const extrasAmount = (totalExtraHeads > 0 && n.extras > 0)
         ? Math.round(n.extras * 100) / 100 : 0;
       const baseAmount = Math.round((lineAmount - extrasAmount) * 100) / 100;
       const extrasGst = extrasAmount > 0 ? Math.round((extrasAmount * gstPct / 100) * 100) / 100 : 0;
@@ -3155,16 +3174,30 @@ async function getTariffModel(restaurantId: string): Promise<'LEGACY' | 'MATRIX'
 // (which determines season), and meal plan. Returns 0 if no row exists
 // (treat missing config as free — better than blocking the booking).
 async function getExtraPersonChargeForDate(
-  restaurantId: string, isoDate: string, mealPlanId: string, personType: string
+  restaurantId: string, isoDate: string, mealPlanId: string | null, personType: string
 ): Promise<number> {
   try {
     const tenantDb = await getTenantDb(restaurantId);
     const seasonId = await getSeasonForDate(restaurantId, isoDate);
     if (!seasonId) return 0;
+    if (mealPlanId) {
+      const row: any = await tenantDb.get(
+        `SELECT charge FROM extra_person_charges
+          WHERE person_type = ? AND season_id = ? AND meal_plan_id = ?`,
+        [personType, seasonId, mealPlanId]
+      );
+      return Number(row?.charge || 0);
+    }
+    // Room-only / no meal plan (19 Jun 2026): the extra-person matrix is keyed
+    // per meal plan and the config UI has no "no meal plan" column, so a
+    // room-only stay has no exact row. Charge the LOWEST configured extra-person
+    // rate for this person-type + season as the bed-only proxy — an extra person
+    // on a room-only stay gets no meals, so the cheapest plan's rate is the
+    // closest fit. Resolves to 0 when nothing is configured (legacy tenants).
     const row: any = await tenantDb.get(
-      `SELECT charge FROM extra_person_charges
-        WHERE person_type = ? AND season_id = ? AND meal_plan_id = ?`,
-      [personType, seasonId, mealPlanId]
+      `SELECT MIN(charge) AS charge FROM extra_person_charges
+        WHERE person_type = ? AND season_id = ? AND charge > 0`,
+      [personType, seasonId]
     );
     return Number(row?.charge || 0);
   } catch {
@@ -3208,6 +3241,12 @@ async function computeBookingTotalWithExtras(
   };
   const tariffModel = await getTariffModel(restaurantId);
   const useMatrix = tariffModel === 'MATRIX' && !!opts.mealPlanId;
+  // Extra-person charges apply in MATRIX mode regardless of meal plan — a
+  // room-only stay can still have extra adults/children (19 Jun 2026). The
+  // base-rate matrix lookup still needs a meal plan (rates are keyed by it);
+  // only the extras are decoupled, falling back to the lowest configured rate
+  // for room-only via getExtraPersonChargeForDate.
+  const matrixExtras = tariffModel === 'MATRIX';
 
   const perNight: BookingTotalBreakdown['per_night'] = [];
   if (!ci || !co) return { base_total: 0, extras_total: 0, total: 0, per_night: [] };
@@ -3240,10 +3279,10 @@ async function computeBookingTotalWithExtras(
       source = legacy.source;
     }
     let extrasForNight = 0;
-    if (useMatrix) {
+    if (matrixExtras) {
       for (const [pt, count] of Object.entries(extras)) {
         if (count > 0) {
-          const charge = await getExtraPersonChargeForDate(restaurantId, d, opts.mealPlanId!, pt);
+          const charge = await getExtraPersonChargeForDate(restaurantId, d, opts.mealPlanId ?? null, pt);
           extrasForNight += charge * count;
         }
       }
@@ -19905,6 +19944,12 @@ ${data.tenant.name}`;
       const start = (req.query.start as string) || '';
       const end   = (req.query.end as string)   || '';
       const guests = Math.max(1, Number(req.query.guests) || 1);
+      // When the check-in wizard quotes the CURRENT room of a still-BOOKED
+      // booking, that booking would otherwise count as a conflict against its
+      // own room and mark it unavailable (so it'd never get quoted). Excluding
+      // the booking lets its own room read as available + get a fresh quote,
+      // and lets the reassignment picker treat it as a real option.
+      const excludeBookingId = (req.query.exclude_booking_id as string) || '';
       if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
         return res.status(400).json({ error: "start and end must be YYYY-MM-DD" });
       }
@@ -19927,8 +19972,9 @@ ${data.tenant.name}`;
            FROM room_bookings
           WHERE status NOT IN ('CANCELLED', 'CHECKED_OUT')
             AND check_in_date < ?
-            AND check_out_date > ?`,
-        [end, start]
+            AND check_out_date > ?
+            ${excludeBookingId ? 'AND id <> ?' : ''}`,
+        excludeBookingId ? [end, start, excludeBookingId] : [end, start]
       );
       const holdConflicts: any[] = await tenantDb.query(
         `SELECT room_id, kind, end_date AS conflict_end
@@ -19987,11 +20033,14 @@ ${data.tenant.name}`;
       // price (incl. extra persons), not the bare base_rate. Only runs when a
       // meal plan is supplied, so the plain availability search stays cheap.
       const quoteMealPlanId = (req.query.meal_plan_id as string) || null;
-      if (quoteMealPlanId) {
-        const qExtraAdults   = Math.max(0, Number(req.query.extra_adults || 0));
-        const qExtraChildMat = Math.max(0, Number(req.query.extra_children_with_mattress || 0));
-        const qExtraChildNo  = Math.max(0, Number(req.query.extra_children_no_mattress || 0));
-        const qBookingType   = String(req.query.booking_type || 'OVERNIGHT').toUpperCase();
+      const qExtraAdults   = Math.max(0, Number(req.query.extra_adults || 0));
+      const qExtraChildMat = Math.max(0, Number(req.query.extra_children_with_mattress || 0));
+      const qExtraChildNo  = Math.max(0, Number(req.query.extra_children_no_mattress || 0));
+      const qBookingType   = String(req.query.booking_type || 'OVERNIGHT').toUpperCase();
+      // Quote when a meal plan is supplied OR when there are extra persons —
+      // a room-only stay with extra adults/children still needs the extra-person
+      // charge reflected in the quoted total (19 Jun 2026).
+      if (quoteMealPlanId || qExtraAdults > 0 || qExtraChildMat > 0 || qExtraChildNo > 0) {
         await Promise.all(results.filter((r: any) => r.available).map(async (r: any) => {
           try {
             const bd = await computeBookingTotalWithExtras(req.params.id, r.id, start, end, {
@@ -21680,7 +21729,7 @@ ${data.tenant.name}`;
       }
       if (bookingType === 'DAY_USE') {
         if (rate <= 0) {
-          const breakdown = await computeBookingTotalWithExtras(req.params.id, room_id, check_in_date, check_in_date, {
+          const breakdown = await computeBookingTotalWithExtras(req.params.id, resolvedRoomId, check_in_date, check_in_date, {
             mealPlanId: meal_plan_id || null, extraAdults: xpAdults,
             extraChildrenWithMattress: xpChildMat, extraChildrenNoMattress: xpChildNoMat,
             bookingType: 'DAY_USE',
@@ -21693,7 +21742,7 @@ ${data.tenant.name}`;
       } else {
         nights = Math.max(1, Math.ceil((new Date(check_out_date).getTime() - new Date(check_in_date).getTime()) / 86400000));
         if (rate <= 0) {
-          const breakdown = await computeBookingTotalWithExtras(req.params.id, room_id, check_in_date, check_out_date, {
+          const breakdown = await computeBookingTotalWithExtras(req.params.id, resolvedRoomId, check_in_date, check_out_date, {
             mealPlanId: meal_plan_id || null, extraAdults: xpAdults,
             extraChildrenWithMattress: xpChildMat, extraChildrenNoMattress: xpChildNoMat,
             bookingType: 'OVERNIGHT',
