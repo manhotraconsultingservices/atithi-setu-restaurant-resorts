@@ -6832,7 +6832,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingRateOverride, setEditingRateOverride] = useState<any | null>(null);
   // Sprint A1 — Availability calendar view toggle for the Bookings tab
   // (DASHBOARD added in C3 — quick-glance receptionist/GM view)
-  const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR' | 'DASHBOARD'>('LIST');
+  const [bookingsView, setBookingsView] = useState<'LIST' | 'CALENDAR' | 'CALENDAR_V2' | 'DASHBOARD'>('LIST');
   // P2-B-FIX-2: cache + UI state for the collapsible Groups panel above the
   // bookings list. Lazy-fetched on first expand so non-group-using tenants
   // pay zero network cost.
@@ -17347,7 +17347,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="flex items-center gap-2">
               {/* Sprint A1 — view toggle */}
               <div className="flex gap-1 bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shrink-0">
-                {(['LIST','CALENDAR','DASHBOARD'] as const).map(v => (
+                {(['LIST','CALENDAR','CALENDAR_V2','DASHBOARD'] as const).map(v => (
                   <button
                     key={v}
                     onClick={() => setBookingsView(v)}
@@ -17357,6 +17357,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     )}
                   >
                     {v === 'CALENDAR' ? <><CalendarClock size={12}/> Calendar</>
+                      : v === 'CALENDAR_V2' ? <><CalendarClock size={12}/> Calendar V2</>
                       : v === 'DASHBOARD' ? <>📊 Dashboard</>
                       : <>List</>}
                   </button>
@@ -17390,6 +17391,36 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   // Option A: open as a FLOATING booking against the clicked
                   // room's category. The room is just a representative/preview —
                   // submit sends room_type_id so the server auto-assigns (not locks).
+                  room_type_id: room?.type_id || '__UNCATEGORISED__',
+                  room_floating: true,
+                  room_rate: room?.base_rate || 0,
+                  check_in_date: date,
+                  check_out_date: new Date(new Date(date).getTime() + 86400000).toISOString().slice(0,10),
+                  booking_type: 'OVERNIGHT',
+                });
+                setShowBookingModal(true);
+              }}
+              onHoldClick={(roomId) => {
+                const room = hotelRooms.find(r => r.id === roomId);
+                if (room) setBlockingRoom(room);
+              }}
+            />
+          )}
+
+          {/* Calendar V2 (beta, 20 Jun 2026) — floating bookings shown in a
+              per-type Unassigned lane instead of pinned to a tentative room.
+              Same callbacks/wiring as V1 so the booking + hold flows are
+              identical; runs alongside V1 until signed off. */}
+          {bookingsView === 'CALENDAR_V2' && (
+            <AvailabilityCalendarV2
+              restaurantId={restaurantId}
+              token={token}
+              refreshNonce={calendarRefreshNonce}
+              onBookingClick={(bookingId) => setCalendarBookingPopover(bookingId)}
+              onCellClick={(roomId, date) => {
+                const room = hotelRooms.find(r => r.id === roomId);
+                setEditingBooking({
+                  room_id: roomId,
                   room_type_id: room?.type_id || '__UNCATEGORISED__',
                   room_floating: true,
                   room_rate: room?.base_rate || 0,
@@ -31589,6 +31620,363 @@ const AvailabilityCalendar: React.FC<{
                   ))}
                 </React.Fragment>
               ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════
+//  AvailabilityCalendarV2 (20 Jun 2026) — beta, runs alongside V1
+//  ----------------------------------------------------------------------
+//  Same room×date grid as V1, but FLOATING bookings (room_locked = 0) are
+//  pulled OUT of their tentative physical room and shown in a per-type
+//  "Unassigned" lane. The grid therefore never implies a specific room is
+//  blocked before check-in. Physical room rows show only locked / checked-in
+//  guests + holds; a floating booking's tentative room reads as available
+//  (the guest can reshuffle into any free room of the type at check-in).
+//  The per-type inventory header still counts each floating booking against
+//  the sellable total — its tentative room is BOOKED in the grid data, so the
+//  raw "VACANT cell" count is already net of floating holds.
+//  Built as a separate component so the existing calendar is untouched until
+//  V2 is signed off; reuses /hotel/availability (now carrying room_locked on
+//  each booking cell). Once V2 is stable, V1 can be retired.
+// ════════════════════════════════════════════════════════════════════════
+const AvailabilityCalendarV2: React.FC<{
+  restaurantId: string;
+  token: string;
+  onCellClick: (roomId: string, date: string) => void;
+  onHoldClick?: (roomId: string) => void;
+  onBookingClick?: (bookingId: string) => void;
+  refreshNonce?: number;
+}> = ({ restaurantId, token, onCellClick, onHoldClick, onBookingClick, refreshNonce }) => {
+  const [data, setData] = useState<any | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState<number>(14);
+  const [start, setStart] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const fetchAvailability = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/availability?start=${start}&days=${days}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.ok) { setData(await res.json()); setLastRefresh(new Date()); }
+    } finally { if (!silent) setLoading(false); }
+  }, [restaurantId, token, start, days]);
+
+  useEffect(() => { fetchAvailability(false); }, [fetchAvailability]);
+  useEffect(() => {
+    const id = setInterval(() => fetchAvailability(true), 30_000);
+    return () => clearInterval(id);
+  }, [fetchAvailability]);
+  useEffect(() => {
+    const onFocus = () => fetchAvailability(true);
+    const onVisible = () => { if (document.visibilityState === 'visible') fetchAvailability(true); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { window.removeEventListener('focus', onFocus); document.removeEventListener('visibilitychange', onVisible); };
+  }, [fetchAvailability]);
+  useEffect(() => {
+    if (refreshNonce !== undefined) fetchAvailability(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshNonce]);
+
+  const cellPalette: Record<string, { bg: string; fg: string; border: string; label: string }> = {
+    VACANT:       { bg: '#f7faf7', fg: '#1f513f', border: '#cfe7d6', label: 'Available' },
+    BOOKED:       { bg: '#fde2e7', fg: '#9f1239', border: '#f9a8b8', label: 'Assigned' },
+    CHECKED_IN:   { bg: '#d1fae5', fg: '#065f46', border: '#34d399', label: 'Checked-in' },
+    CHECKING_OUT: { bg: '#fef3c7', fg: '#92400e', border: '#fbbf24', label: 'Checking out' },
+    CHECKED_OUT:  { bg: '#e2e8f0', fg: '#475569', border: '#94a3b8', label: 'Checked-out' },
+    MAINTENANCE:  { bg: '#e5e7eb', fg: '#374151', border: '#9ca3af', label: 'Maintenance' },
+    HOLD:         { bg: '#fde68a', fg: '#78350f', border: '#f59e0b', label: 'Hold / Complimentary' },
+    FLOATING:     { bg: '#d1fae5', fg: '#047857', border: '#10b981', label: 'Unassigned (floating)' },
+  };
+
+  const shiftStart = (deltaDays: number) => {
+    const d = new Date(start + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + deltaDays);
+    setStart(d.toISOString().slice(0, 10));
+  };
+
+  const grouped = useMemo(() => {
+    if (!data) return [];
+    const rt = data.room_types || [];
+    const byType: Record<string, any[]> = {};
+    const untagged: any[] = [];
+    for (const r of data.rooms) {
+      if (r.type_id) { (byType[r.type_id] = byType[r.type_id] || []).push(r); }
+      else { untagged.push(r); }
+    }
+    const groups = rt
+      .filter((t: any) => byType[t.id]?.length > 0)
+      .map((t: any) => ({ id: t.id, name: t.name, rooms: byType[t.id] }));
+    if (untagged.length > 0) groups.push({ id: '__untagged__', name: 'Untagged Rooms', rooms: untagged });
+    return groups;
+  }, [data]);
+
+  // Floating bookings keyed by group id — collected from the grid (cells of a
+  // type's rooms that carry a floating booking). Each becomes one Unassigned row.
+  const floatingByGroup = useMemo(() => {
+    const out: Record<string, any[]> = {};
+    if (!data) return out;
+    for (const g of grouped) {
+      const m = new Map<string, any>();
+      for (const r of g.rooms) {
+        const dayMap = data.grid?.[r.id] || {};
+        for (const d of Object.keys(dayMap)) {
+          const c = dayMap[d];
+          if (c?.booking_id && Number(c.room_locked ?? 1) === 0 && !m.has(c.booking_id)) {
+            m.set(c.booking_id, {
+              id: c.booking_id,
+              guest_name: c.guest_name || 'Guest',
+              ci: String(c.check_in_date || '').slice(0, 10),
+              co: String(c.check_out_date || '').slice(0, 10),
+              booking_type: c.booking_type,
+            });
+          }
+        }
+      }
+      out[g.id] = Array.from(m.values()).sort((a, b) =>
+        a.ci.localeCompare(b.ci) || String(a.guest_name).localeCompare(String(b.guest_name)));
+    }
+    return out;
+  }, [data, grouped]);
+
+  const todayKpis = useMemo(() => {
+    const todayIso = new Date().toISOString().slice(0, 10);
+    if (!data?.rooms) return { guests: 0, checkedIn: 0, checkingOut: 0, available: 0, assigned: 0, maintenance: 0, hold: 0 };
+    let guests = 0, checkedIn = 0, checkingOut = 0, available = 0, assigned = 0, maintenance = 0, hold = 0;
+    for (const room of data.rooms) {
+      const cell = data.grid?.[room.id]?.[todayIso] || { status: 'VACANT' };
+      switch (String(cell.status || '').toUpperCase()) {
+        case 'CHECKED_IN': {
+          const co = String(cell.check_out_date || '').slice(0, 10);
+          if (co && co <= todayIso) { checkingOut++; } else { checkedIn++; }
+          guests += Number(cell.num_guests || 1);
+          break;
+        }
+        case 'BOOKED':       assigned++; break;
+        case 'MAINTENANCE':  maintenance++; break;
+        case 'HOLD':
+        case 'BLOCKED':      hold++; break;
+        case 'VACANT':       available++; break;
+        case 'CHECKED_OUT':  available++; break;
+        default:             available++;
+      }
+    }
+    return { guests, checkedIn, checkingOut, available, assigned, maintenance, hold };
+  }, [data]);
+
+  return (
+    <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+      {/* KPI strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-px bg-[#cc5a16]/10 border-b border-[#cc5a16]/10">
+        {([
+          { id: 'guests',       label: 'Guests',        value: todayKpis.guests,       color: '#0f766e', bg: '#ecfdf5' },
+          { id: 'assigned',     label: 'Assigned',      value: todayKpis.assigned,     color: '#9f1239', bg: '#fde2e7' },
+          { id: 'checkedIn',    label: 'Checked-in',    value: todayKpis.checkedIn,    color: '#065f46', bg: '#d1fae5' },
+          { id: 'checkingOut',  label: 'Checking out',  value: todayKpis.checkingOut,  color: '#92400e', bg: '#fef3c7' },
+          { id: 'available',    label: 'Available',     value: todayKpis.available,    color: '#1e40af', bg: '#eff6ff' },
+          { id: 'hold',         label: 'Hold / Comp.',  value: todayKpis.hold,         color: '#78350f', bg: '#fde68a' },
+          { id: 'maintenance',  label: 'Maintenance',   value: todayKpis.maintenance,  color: '#374151', bg: '#f3f4f6' },
+        ] as const).map(k => (
+          <div key={k.id} className="bg-white px-3 py-2.5 flex items-center justify-between gap-2" style={{ background: k.bg }}>
+            <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: k.color }}>{k.label}</span>
+            <span className="text-lg font-bold font-mono" style={{ color: k.color }}>{k.value}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Toolbar */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
+        <span className="text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md bg-emerald-600 text-white">Calendar V2 · beta</span>
+        <div className="flex items-center gap-1">
+          <button onClick={() => shiftStart(-7)} className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs font-bold text-[#3d3128] hover:bg-white">‹ Prev week</button>
+          <button onClick={() => setStart(new Date().toISOString().slice(0,10))} className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs font-bold text-[#3d3128] hover:bg-white">Today</button>
+          <button onClick={() => shiftStart(7)} className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs font-bold text-[#3d3128] hover:bg-white">Next week ›</button>
+        </div>
+        <input type="date" value={start} onChange={e => setStart(e.target.value)} className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs bg-white" />
+        <div className="flex gap-1 bg-white rounded-lg p-1 border border-[#cc5a16]/15 shrink-0">
+          {[7, 14, 30, 60].map(n => (
+            <button key={n} onClick={() => setDays(n)}
+              className={cn('px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-widest',
+                days === n ? 'bg-[#cc5a16] text-white' : 'text-[#6b5d52] hover:bg-[#faf7f2]')}>{n}d</button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 ml-auto">
+          <button type="button" onClick={() => fetchAvailability(false)} disabled={loading} title="Refresh now"
+            className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-xs font-bold hover:bg-white disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1">
+            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
+          {lastRefresh && (
+            <span className="text-[10px] text-[#9c8e85] whitespace-nowrap">
+              Updated {lastRefresh.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div className="px-3 py-2 border-b border-[#cc5a16]/10 bg-white flex items-center gap-3 flex-wrap text-[11px]">
+        <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Legend:</span>
+        {Object.entries(cellPalette).map(([k, p]) => (
+          <span key={k} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full border" style={{ background: p.bg, borderColor: p.border, color: p.fg }}>
+            <span className="inline-block w-2 h-2 rounded-full" style={{ background: p.border }} />
+            <span className="font-semibold">{p.label || k}</span>
+          </span>
+        ))}
+      </div>
+
+      {/* Grid */}
+      {loading || !data ? (
+        <div className="p-12 text-center text-sm text-[#9c8e85] italic">Loading availability…</div>
+      ) : data.rooms.length === 0 ? (
+        <div className="p-12 text-center text-sm text-[#9c8e85] italic">No rooms configured. Add rooms in the Rooms tab first.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-[11px]">
+            <thead>
+              <tr>
+                <th className="sticky left-0 z-10 bg-white border-b border-r border-[#cc5a16]/10 px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] min-w-[180px]">Room / Type</th>
+                {data.dates.map((d: string) => {
+                  const dt = new Date(d + 'T00:00:00');
+                  const isWeekend = dt.getDay() === 0 || dt.getDay() === 6;
+                  const isToday = d === new Date().toISOString().slice(0,10);
+                  return (
+                    <th key={d} className={cn('border-b border-[#cc5a16]/10 px-1 py-2 text-center text-[9px] font-bold uppercase tracking-widest min-w-[44px]',
+                      isWeekend ? 'bg-[#cc5a16]/5 text-[#cc5a16]' : 'bg-white text-[#9c8e85]',
+                      isToday && 'ring-2 ring-inset ring-[#cc5a16]/40')}>
+                      <div>{dt.toLocaleDateString('en-IN', { weekday: 'short' })}</div>
+                      <div className="text-[10px] text-[#3d3128]">{dt.getDate()}</div>
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {grouped.map((g: any) => {
+                const collapsed = collapsedGroups.has(g.id);
+                const sellable = g.rooms.filter((r: any) => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED').length;
+                const toggle = () => setCollapsedGroups(prev => { const n = new Set(prev); n.has(g.id) ? n.delete(g.id) : n.add(g.id); return n; });
+                const floats: any[] = floatingByGroup[g.id] || [];
+                return (
+                  <React.Fragment key={g.id}>
+                    {/* Inventory header lane */}
+                    <tr className="cursor-pointer" onClick={toggle}>
+                      <td className="sticky left-0 z-10 bg-[#faf7f2] border-r border-[#cc5a16]/10 px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                        <span className="inline-block w-3 text-[#cc5a16]">{collapsed ? '▸' : '▾'}</span>{' '}
+                        {g.name} · {g.rooms.length} room{g.rooms.length > 1 ? 's' : ''}
+                        {floats.length > 0 && <span className="ml-1 text-emerald-700 normal-case">· {floats.length} unassigned</span>}
+                      </td>
+                      {data.dates.map((d: string) => {
+                        let avail = 0;
+                        for (const r of g.rooms) {
+                          if (r.status === 'MAINTENANCE' || r.status === 'BLOCKED') continue;
+                          const st = String(data.grid?.[r.id]?.[d]?.status || 'VACANT').toUpperCase();
+                          if (st === 'VACANT') avail++;
+                        }
+                        const low = sellable >= 4 && avail <= Math.ceil(sellable * 0.25);
+                        const bg = avail === 0 ? '#fde2e7' : low ? '#fef3c7' : '#e9f7ef';
+                        const fg = avail === 0 ? '#9f1239' : low ? '#92400e' : '#1f513f';
+                        return (
+                          <td key={d} className="text-center border-l border-[#cc5a16]/5 bg-[#faf7f2]" style={{ minWidth: 44 }}
+                              title={`${avail} of ${sellable} ${g.name} sellable on ${d}`}>
+                            <span className="inline-block min-w-[20px] rounded px-1 py-0.5 text-[10px] font-bold" style={{ background: bg, color: fg }}>{avail}</span>
+                          </td>
+                        );
+                      })}
+                    </tr>
+
+                    {/* Unassigned (floating) lane — one row per floating booking */}
+                    {!collapsed && floats.map((fb: any) => {
+                      const firstCovered = data.dates.find((d: string) =>
+                        fb.booking_type === 'DAY_USE' ? d === fb.ci : (d >= fb.ci && d < fb.co));
+                      return (
+                        <tr key={`float-${fb.id}`} className="border-b border-emerald-100 bg-emerald-50/30">
+                          <td className="sticky left-0 z-10 bg-emerald-50/60 border-r border-[#cc5a16]/10 px-3 py-1.5">
+                            <div className="font-semibold text-emerald-800 text-[12px] truncate" title={fb.guest_name}>↻ {fb.guest_name}</div>
+                            <div className="text-[9px] text-emerald-700 uppercase tracking-widest">Unassigned</div>
+                          </td>
+                          {data.dates.map((d: string) => {
+                            const covered = fb.booking_type === 'DAY_USE' ? d === fb.ci : (d >= fb.ci && d < fb.co);
+                            if (!covered) return <td key={d} className="border-l border-[#cc5a16]/5" style={{ minWidth: 44, height: 36 }} />;
+                            const p = cellPalette.FLOATING;
+                            return (
+                              <td key={d}
+                                  onClick={() => onBookingClick && onBookingClick(fb.id)}
+                                  title={`${fb.guest_name} — floating / unassigned · click for actions`}
+                                  className="p-1 text-center align-middle border-l border-[#cc5a16]/5 cursor-pointer hover:ring-2 hover:ring-emerald-500 hover:brightness-105"
+                                  style={{ background: p.bg, minWidth: 44, height: 36 }}>
+                                {d === firstCovered && (
+                                  <div className="text-[10px] font-bold truncate px-1 leading-tight" style={{ color: p.fg, maxWidth: 60 }}>
+                                    {String(fb.guest_name).split(' ')[0]}
+                                  </div>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+
+                    {/* Physical room rows — floating bookings hidden (their tentative
+                        room reads as available; they live in the Unassigned lane). */}
+                    {!collapsed && g.rooms.map((r: any) => (
+                      <tr key={r.id} className="border-b border-[#cc5a16]/5">
+                        <td className="sticky left-0 z-10 bg-white border-r border-[#cc5a16]/10 px-3 py-1.5">
+                          <div className="font-semibold text-[#1a1208] text-[12px]">{r.name}</div>
+                          <div className="text-[9px] text-[#9c8e85]">{r.room_number ? `#${r.room_number} · ` : ''}₹{Number(r.base_rate || 0).toLocaleString('en-IN')}</div>
+                        </td>
+                        {data.dates.map((d: string) => {
+                          const raw = data.grid[r.id]?.[d];
+                          // Hide a FLOATING booking from its tentative room — show the
+                          // cell as available (the guest isn't pinned here).
+                          const cell = (raw?.booking_id && Number(raw.room_locked ?? 1) === 0) ? undefined : raw;
+                          let status = cell?.status || 'VACANT';
+                          if (status === 'CHECKED_IN' && cell?.check_out_date) {
+                            const co = String(cell.check_out_date).slice(0, 10);
+                            if (co && co <= d) status = 'CHECKING_OUT' as any;
+                          }
+                          const p = cellPalette[status] || cellPalette.HOLD;
+                          const isVacant = status === 'VACANT';
+                          const isBookingCell = !!cell?.booking_id;
+                          return (
+                            <td key={d}
+                                onClick={() => {
+                                  if (isVacant) onCellClick(r.id, d);
+                                  else if (status === 'HOLD' && onHoldClick) onHoldClick(r.id);
+                                  else if (isBookingCell && onBookingClick) onBookingClick(cell.booking_id);
+                                }}
+                                title={
+                                  isVacant ? `Click to create a booking in ${g.name} from ${d} (auto-assigned / floating)` :
+                                  status === 'HOLD' ? `${cell.kind}${cell.reason ? ` — ${cell.reason}` : ''}` :
+                                  cell.guest_name ? `${cell.guest_name} (${status}) · click for actions` : status
+                                }
+                                className={cn('p-1 text-center align-middle border-l border-[#cc5a16]/5',
+                                  isVacant && 'cursor-pointer hover:ring-2 hover:ring-[#cc5a16]/30',
+                                  status === 'HOLD' && 'cursor-pointer hover:ring-2 hover:ring-stone-400',
+                                  isBookingCell && 'cursor-pointer hover:ring-2 hover:ring-amber-500 hover:brightness-105')}
+                                style={{ background: p.bg, minWidth: 44, height: 36 }}>
+                              {cell?.guest_name && (
+                                <div className="text-[10px] font-bold truncate px-1 leading-tight underline decoration-dotted underline-offset-2" style={{ color: p.fg, maxWidth: 60 }}>
+                                  {cell.guest_name.split(' ')[0]}
+                                </div>
+                              )}
+                              {status === 'HOLD' && <div className="text-[9px] font-bold" style={{ color: p.fg }}>×</div>}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

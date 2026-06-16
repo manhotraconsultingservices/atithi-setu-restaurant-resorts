@@ -19838,7 +19838,7 @@ ${data.tenant.name}`;
         "SELECT id, name, room_number, floor, type, type_id, base_rate, status FROM rooms ORDER BY floor, room_number, name"
       );
       const bookings: any[] = await tenantDb.query(
-        `SELECT id, room_id, guest_name, status, booking_type, check_in_date, check_out_date
+        `SELECT id, room_id, guest_name, status, booking_type, check_in_date, check_out_date, room_locked
            FROM room_bookings
           WHERE status NOT IN ('CANCELLED', 'CHECKED_OUT')
             AND check_in_date < ?
@@ -19894,7 +19894,7 @@ ${data.tenant.name}`;
         const bci = iso(b.check_in_date);
         const bco = iso(b.check_out_date);
         if (b.booking_type === 'DAY_USE' && bci === bco) {
-          if (bci >= start && bci < end) stamp(b.room_id, bci, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: 'DAY_USE', check_in_date: bci, check_out_date: bco });
+          if (bci >= start && bci < end) stamp(b.room_id, bci, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: 'DAY_USE', check_in_date: bci, check_out_date: bco, room_locked: b.room_locked });
           continue;
         }
         for (const d of dates) {
@@ -19902,7 +19902,7 @@ ${data.tenant.name}`;
           // cell so the frontend can derive "Checking out today" without
           // a second lookup. Used by the Stay-View KPI strip + the
           // calendar cell colour for departure-day rendering.
-          if (d >= bci && d < bco) stamp(b.room_id, d, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: b.booking_type, check_in_date: bci, check_out_date: bco });
+          if (d >= bci && d < bco) stamp(b.room_id, d, { status: b.status, booking_id: b.id, guest_name: b.guest_name, booking_type: b.booking_type, check_in_date: bci, check_out_date: bco, room_locked: b.room_locked });
         }
       }
       // Checked-out bookings — show as historical (lowest priority)
