@@ -26398,8 +26398,13 @@ ${data.tenant.name}`;
         "SELECT b.*, r.name AS room_name FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id WHERE b.id = ?",
         [req.params.bookingId]
       );
-      // Phase H1 — log channel re-sync for any business-field edit.
-      if (businessTouched) {
+      // Log BOOKING_UPDATED for any edit beyond a pure cancellation status change
+      // so Booking Trend "Modified" KPI captures all edit paths (dates, rate,
+      // guest details, room assignment, etc.), not just the 5 channel-sync
+      // business fields. Pure { status: 'CANCELLED' } patches are excluded —
+      // cancellations are already counted via cancelled_at in the Cancelled series.
+      const editTouched = Object.keys(patch).some(k => k !== 'status');
+      if (editTouched) {
         await logChannelSync(req.params.id, updated, 'BOOKING_UPDATED', { changed: Object.keys(patch) });
       }
       res.json(updated);

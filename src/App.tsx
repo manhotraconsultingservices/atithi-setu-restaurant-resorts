@@ -35505,7 +35505,7 @@ function BookingTrendReport({ restaurantId, token }: { restaurantId: string; tok
       <div className="px-5 py-3 bg-[#faf7f2] border-b border-[#e8dccf] flex flex-wrap items-end gap-3">
         <div className="mr-auto">
           <h3 className="text-base font-bold font-serif text-[#1a1208]">Booking Trend</h3>
-          <p className="text-[11px] text-[#9c8e85]">Bookings received vs. cancelled vs. modified, per day. <span className="italic">"Modified" counts booking edits recorded in the change log.</span></p>
+          <p className="text-[11px] text-[#9c8e85]">Bookings received vs. cancelled vs. modified, per day. <span className="italic">"Modified" counts all booking edits (dates, rate, guest details, room assignment, etc.).</span></p>
         </div>
         <div>
           <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">From</label>
