@@ -30914,6 +30914,10 @@ const AvailabilityCalendar: React.FC<{
   const [days, setDays] = useState<number>(14);
   const [start, setStart] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  // Increment 2 (17 Jun 2026) — collapse a room-type's individual room rows so
+  // the calendar reads as a TYPE/inventory view ("Deluxe: 2 of 5 left" per
+  // date), with the physical rooms as an expandable drill-down.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   // Distinguish first-load (show full "Loading…" state) from background
   // refreshes (silent update — don't blank the grid the user is scanning).
@@ -31217,12 +31221,41 @@ const AvailabilityCalendar: React.FC<{
             <tbody>
               {grouped.map((g: any) => (
                 <React.Fragment key={g.id}>
-                  <tr>
-                    <td colSpan={data.dates.length + 1} className="bg-[#faf7f2] px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
-                      {g.name} · {g.rooms.length} room{g.rooms.length > 1 ? 's' : ''}
-                    </td>
-                  </tr>
-                  {g.rooms.map((r: any) => (
+                  {(() => {
+                    const collapsed = collapsedGroups.has(g.id);
+                    const sellable = g.rooms.filter((r: any) => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED').length;
+                    const toggle = () => setCollapsedGroups(prev => { const n = new Set(prev); n.has(g.id) ? n.delete(g.id) : n.add(g.id); return n; });
+                    return (
+                      <tr className="cursor-pointer" onClick={toggle}>
+                        <td className="sticky left-0 z-10 bg-[#faf7f2] border-r border-[#cc5a16]/10 px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                          <span className="inline-block w-3 text-[#cc5a16]">{collapsed ? '▸' : '▾'}</span>{' '}
+                          {g.name} · {g.rooms.length} room{g.rooms.length > 1 ? 's' : ''}
+                        </td>
+                        {data.dates.map((d: string) => {
+                          // Per-type inventory: rooms in this type that are free
+                          // on this date (excludes maintenance/blocked + any
+                          // booked/held/checked-in cell). This is the "X of N
+                          // left" availability the booking now decrements.
+                          let avail = 0;
+                          for (const r of g.rooms) {
+                            if (r.status === 'MAINTENANCE' || r.status === 'BLOCKED') continue;
+                            const st = String(data.grid?.[r.id]?.[d]?.status || 'VACANT').toUpperCase();
+                            if (st === 'VACANT') avail++;
+                          }
+                          const low = sellable >= 4 && avail <= Math.ceil(sellable * 0.25);
+                          const bg = avail === 0 ? '#fde2e7' : low ? '#fef3c7' : '#e9f7ef';
+                          const fg = avail === 0 ? '#9f1239' : low ? '#92400e' : '#1f513f';
+                          return (
+                            <td key={d} className="text-center border-l border-[#cc5a16]/5 bg-[#faf7f2]" style={{ minWidth: 44 }}
+                                title={`${avail} of ${sellable} ${g.name} available on ${d}`}>
+                              <span className="inline-block min-w-[20px] rounded px-1 py-0.5 text-[10px] font-bold" style={{ background: bg, color: fg }}>{avail}</span>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })()}
+                  {!collapsedGroups.has(g.id) && g.rooms.map((r: any) => (
                     <tr key={r.id} className="border-b border-[#cc5a16]/5">
                       <td className="sticky left-0 z-10 bg-white border-r border-[#cc5a16]/10 px-3 py-1.5">
                         <div className="font-semibold text-[#1a1208] text-[12px]">{r.name}</div>
