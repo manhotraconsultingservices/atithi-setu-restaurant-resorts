@@ -7041,6 +7041,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Holds the booking id; the popover looks up the row from hotelBookings
   // so it stays in sync with the calendar's data without re-fetching.
   const [calendarBookingPopover, setCalendarBookingPopover] = useState<string | null>(null);
+  // The calendar popover resolves the clicked booking from hotelBookings,
+  // which is DATE-FILTERED by the bookings-table presets ("Today" /
+  // "In-house now" set to=today → future bookings excluded). A future
+  // booking clicked on the calendar would then read as "not found /
+  // cancelled" even though it exists. These hold a single-booking fallback
+  // fetched by id when the list doesn't contain it.
+  const [calendarPopoverFallback, setCalendarPopoverFallback] = useState<any>(null);
+  const [calendarPopoverLoading, setCalendarPopoverLoading] = useState(false);
   // Sprint C2 — Group booking modal state. Holds a single "group draft"
   // — name + contact + dates + a list of selected rooms — that the
   // user can build up before clicking Create. Posts as one transaction
@@ -10433,6 +10441,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // availability. Wraps the setState into a stable helper so call sites
   // stay terse.
   const markAvailabilityDirty = () => setCalendarRefreshNonce(n => n + 1);
+
+  // FIX (17 Jun 2026 — "future booking shows as cancelled"): when a booking
+  // is clicked on the availability calendar, the popover looks it up in the
+  // date-filtered hotelBookings list. A future-dated booking outside the
+  // active list filter is absent → the popover used to falsely report
+  // "Booking not found. It may have been cancelled in another tab." Here we
+  // fetch that single booking by id (search, no date filter) so the popover
+  // always resolves the real, current booking.
+  useEffect(() => {
+    if (!calendarBookingPopover) { setCalendarPopoverFallback(null); setCalendarPopoverLoading(false); return; }
+    if (hotelBookings.some((x: any) => x.id === calendarBookingPopover)) {
+      setCalendarPopoverFallback(null); setCalendarPopoverLoading(false); return;
+    }
+    let abort = false;
+    setCalendarPopoverLoading(true);
+    (async () => {
+      try {
+        const rows = await hotelApi('/bookings?search=' + encodeURIComponent(calendarBookingPopover));
+        if (abort) return;
+        const hit = Array.isArray(rows) ? rows.find((r: any) => r.id === calendarBookingPopover) : null;
+        setCalendarPopoverFallback(hit || null);
+      } catch {
+        if (!abort) setCalendarPopoverFallback(null);
+      } finally {
+        if (!abort) setCalendarPopoverLoading(false);
+      }
+    })();
+    return () => { abort = true; };
+  }, [calendarBookingPopover, hotelBookings]);
 
   const saveBooking = async (data: any) => {
     const isNew = !data.id;
@@ -24806,13 +24843,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           calendar view. Falls back to a "not found" message if the
           booking has since been cancelled by another tab. */}
       {calendarBookingPopover && (() => {
-        const b = hotelBookings.find((x: any) => x.id === calendarBookingPopover);
-        const close = () => setCalendarBookingPopover(null);
+        // Resolve from the loaded list first; fall back to the single
+        // booking fetched by id (covers future bookings hidden by the
+        // bookings-table date filter — see the effect above).
+        const b = hotelBookings.find((x: any) => x.id === calendarBookingPopover) || calendarPopoverFallback;
+        const close = () => { setCalendarBookingPopover(null); setCalendarPopoverFallback(null); };
         if (!b) {
           return (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 text-center">
-                <p className="text-sm text-[#6b5d52] mb-3">Booking not found. It may have been cancelled in another tab.</p>
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={close}>
+              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm p-6 text-center" onClick={e => e.stopPropagation()}>
+                {calendarPopoverLoading ? (
+                  <p className="text-sm text-[#6b5d52] mb-3">Loading booking…</p>
+                ) : (
+                  <p className="text-sm text-[#6b5d52] mb-3">Couldn’t load this booking. Please refresh the page and try again.</p>
+                )}
                 <button onClick={close} className="px-4 py-2 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Close</button>
               </div>
             </div>
