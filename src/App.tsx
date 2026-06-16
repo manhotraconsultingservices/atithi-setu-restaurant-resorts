@@ -2228,7 +2228,7 @@ export default function App() {
         <BrandAnnouncementBanner restaurantId={restaurantId} token={token} />
       )}
 
-      <main className="max-w-7xl mx-auto p-3 sm:p-4 md:p-6 xl:p-8">
+      <main className="max-w-[1700px] mx-auto p-3 sm:p-4 md:p-6 xl:p-8">
         {role === 'SUPER_ADMIN' && <SuperAdminDashboard token={token!} />}
         {role === 'CTO' && <CTODashboard token={token!} />}
         {role === 'SALES_REP' && <SalesRepresentativeDashboard token={token!} />}
@@ -3430,7 +3430,7 @@ function BrandAnnouncementBanner({ restaurantId, token }: { restaurantId: string
   if (visible.length === 0) return null;
 
   return (
-    <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 xl:px-8 pt-3 space-y-2">
+    <div className="max-w-[1700px] mx-auto px-3 sm:px-4 md:px-6 xl:px-8 pt-3 space-y-2">
       {visible.map(a => {
         const palette = a.level === 'URGENT'
           ? { bg: 'bg-red-50', border: 'border-red-300', text: 'text-red-900', icon: '🚨' }
@@ -3588,7 +3588,7 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
       || 'Subscription payment overdue';
     return (
       <div className="bg-gradient-to-r from-red-50 via-red-50 to-amber-50 border-b-2 border-red-300 shadow-sm">
-        <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 xl:px-8 py-3">
+        <div className="max-w-[1700px] mx-auto px-3 sm:px-4 md:px-6 xl:px-8 py-3">
           <div className="flex flex-col md:flex-row md:items-center gap-3">
             <div className="shrink-0 w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
               <Clock size={20} className="text-red-700" />
@@ -3658,7 +3658,7 @@ function BillingNotice({ restaurantId, token }: { restaurantId: string; token: s
 
   return (
     <div className="border-b shadow-sm bg-amber-50 border-amber-200">
-      <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 xl:px-8 py-3">
+      <div className="max-w-[1700px] mx-auto px-3 sm:px-4 md:px-6 xl:px-8 py-3">
         <div className="flex flex-col md:flex-row md:items-center gap-3">
           <div className="shrink-0 w-9 h-9 rounded-full flex items-center justify-center bg-amber-100">
             <Clock size={18} className="text-amber-700" />
@@ -17712,7 +17712,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               return false;
             });
             return (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
                 <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5" style={{ borderTop: '3px solid #0f766e' }}>
                   <h3 className="text-sm font-bold uppercase tracking-widest text-[#0f766e] mb-3">Today's Arrivals · {arrivals.length}</h3>
                   {arrivals.length === 0 ? <p className="text-sm text-[#9c8e85]">No arrivals today</p> : arrivals.map((b: any) => (
