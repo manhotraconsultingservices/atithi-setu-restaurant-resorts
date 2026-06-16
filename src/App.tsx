@@ -172,6 +172,53 @@ function toISTDate(v: any): string {
   if (isNaN(d.getTime())) return '';
   return d.toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
 }
+// ─── Room-type inventory math (single source of truth) ─────────────────────
+// Used by the Calendar (V1 + V2) Types view AND the OTA Inventory report so
+// the on-screen "X of N left" counts and the numbers loaded onto OTA channels
+// can never drift apart (a drift here = overbooking / underselling).
+function sellableRoomCount(rooms: any[]): number {
+  return (rooms || []).filter(r => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED').length;
+}
+function availableOnDate(rooms: any[], grid: any, date: string): number {
+  let avail = 0;
+  for (const r of (rooms || [])) {
+    if (r.status === 'MAINTENANCE' || r.status === 'BLOCKED') continue;
+    const st = String(grid?.[r.id]?.[date]?.status || 'VACANT').toUpperCase();
+    if (st === 'VACANT') avail++;
+  }
+  return avail;
+}
+// Colour tier for an availability count: sold-out (red), low ≤25% (amber),
+// open (green). avail===0 always wins — matches the calendar headers.
+function inventoryTier(avail: number, sellable: number): { bg: string; fg: string } {
+  if (avail === 0) return { bg: '#fde2e7', fg: '#9f1239' };
+  if (sellable >= 4 && avail <= Math.ceil(sellable * 0.25)) return { bg: '#fef3c7', fg: '#92400e' };
+  return { bg: '#e9f7ef', fg: '#1f513f' };
+}
+// Per-room-type sellable-count matrix for the OTA Inventory report.
+function computeOtaInventoryMatrix(data: any): { dates: string[]; rows: Array<{ tid: string; name: string; sellable: number; counts: number[] }> } {
+  const dates: string[] = data?.dates || [];
+  const rooms: any[] = data?.rooms || [];
+  const grid: any = data?.grid || {};
+  const typeName = new Map<string, string>();
+  for (const t of (data?.room_types || [])) typeName.set(String(t.id), t.name);
+  const byType = new Map<string, any[]>();
+  for (const r of rooms) {
+    const k = r.type_id ? String(r.type_id) : '__uncat__';
+    if (!byType.has(k)) byType.set(k, []);
+    byType.get(k)!.push(r);
+  }
+  const rows = Array.from(byType.entries()).map(([tid, trooms]) => ({
+    tid,
+    // Resolve category from room_types via type_id only — never room.type
+    // (legacy free-text that still holds the stale default 'standard').
+    name: typeName.get(tid) || 'Uncategorised',
+    sellable: sellableRoomCount(trooms),
+    counts: dates.map(d => availableOnDate(trooms, grid, d)),
+  }));
+  rows.sort((a, b) => a.name.localeCompare(b.name));
+  return { dates, rows };
+}
 
 // ─── Booking lifecycle state (client request 7 Jun 2026) ──────────────────
 // Maps the DB status (BOOKED / CHECKED_IN / CHECKED_OUT / CANCELLED) +
@@ -7216,6 +7263,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     data: any;
     loadedAt: number;
   } | null>(null);
+  // Memoised OTA matrix — recomputed only when the loaded report changes, not
+  // on every unrelated dashboard re-render. Shared by the table, CSV and print.
+  const otaInventoryData = useMemo(
+    () => (foActiveReport?.kind === 'ota-inventory' ? computeOtaInventoryMatrix(foActiveReport.data) : null),
+    [foActiveReport]
+  );
   // Phase 2 & 3 state
   const [hotelBookings, setHotelBookings] = useState<any[]>([]);
   // Reservations table — client-side sort + live filter (13 Jun 2026 fix).
@@ -18519,40 +18572,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // Calendar V2 Types-view inventory math exactly: a room counts as
             // sellable on a date when its grid cell is VACANT, and rooms in
             // MAINTENANCE / BLOCKED are excluded from the type's capacity.
-            const otaInventoryMatrix = (data: any) => {
-              const dates: string[] = data?.dates || [];
-              const rooms: any[] = data?.rooms || [];
-              const grid: any = data?.grid || {};
-              const types: any[] = data?.room_types || [];
-              const typeName = new Map<string, string>();
-              for (const t of types) typeName.set(String(t.id), t.name);
-              const byType = new Map<string, any[]>();
-              for (const r of rooms) {
-                const k = r.type_id ? String(r.type_id) : '__uncat__';
-                if (!byType.has(k)) byType.set(k, []);
-                byType.get(k)!.push(r);
-              }
-              const rows = Array.from(byType.entries()).map(([tid, trooms]) => {
-                // Resolve the category name from room_types via type_id only.
-                // NEVER fall back to room.type — that legacy free-text column
-                // often still holds the stale default 'standard' (same fix as
-                // the Stay View CSV export).
-                const name = typeName.get(tid) || 'Uncategorised';
-                const sellable = trooms.filter(r => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED').length;
-                const counts = dates.map(d => {
-                  let avail = 0;
-                  for (const r of trooms) {
-                    if (r.status === 'MAINTENANCE' || r.status === 'BLOCKED') continue;
-                    const st = String(grid?.[r.id]?.[d]?.status || 'VACANT').toUpperCase();
-                    if (st === 'VACANT') avail++;
-                  }
-                  return avail;
-                });
-                return { tid, name, sellable, counts };
-              });
-              rows.sort((a, b) => a.name.localeCompare(b.name));
-              return { dates, rows };
-            };
+            // Prefer the memoised matrix while this report is active; fall back
+            // to a direct compute (CSV/print can run defensively). Both go
+            // through the shared module helper so calendar + OTA never drift.
+            const otaInventoryMatrix = (data: any) => otaInventoryData || computeOtaInventoryMatrix(data);
             // Compact date label for the matrix columns + print sheet.
             const fmtDateCol = (d: string) => {
               const dt = new Date(d + 'T00:00:00');
@@ -18568,7 +18591,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               const head = m.dates.map(d => `<th>${esc(fmtDateCol(d))}</th>`).join('');
               const body = m.rows.map(r =>
                 `<tr><td class="t">${esc(r.name)}</td><td>${r.sellable}</td>${
-                  r.counts.map(c => `<td class="${c === 0 ? 'z' : ''}">${c}</td>`).join('')
+                  r.counts.map(c => { const t = inventoryTier(c, r.sellable); return `<td style="background:${t.bg};color:${t.fg};font-weight:bold">${c}</td>`; }).join('')
                 }</tr>`).join('');
               w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>OTA Inventory ${esc(foDateFrom)} to ${esc(foDateTo)}</title><style>
                 body{font-family:Arial,Helvetica,sans-serif;padding:24px;color:#1a1208}
@@ -18577,7 +18600,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 th,td{border:1px solid #ccc;padding:6px 8px;text-align:center;white-space:nowrap}
                 thead th{background:#0d9488;color:#fff;font-size:11px}
                 td.t{text-align:left;font-weight:bold;background:#f7faf9}
-                td.z{background:#fde2e7;color:#9f1239;font-weight:bold}
                 @media print{body{padding:0}}
               </style></head><body>
                 <h1>OTA Inventory — Available Rooms per Type</h1>
@@ -18913,12 +18935,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <td className={cn('px-3 py-1.5 font-semibold text-teal-900 sticky left-0 z-10', i % 2 === 1 ? 'bg-[#f3faf9]' : 'bg-white')}>{r.name}</td>
                                   <td className="px-2 py-1.5 text-center font-mono text-[#6b5d52]">{r.sellable}</td>
                                   {r.counts.map((c, j) => {
-                                    const low = r.sellable >= 4 && c > 0 && c <= Math.ceil(r.sellable * 0.25);
-                                    const bg = c === 0 ? '#fde2e7' : low ? '#fef3c7' : '#e9f7ef';
-                                    const fg = c === 0 ? '#9f1239' : low ? '#92400e' : '#1f513f';
+                                    const tier = inventoryTier(c, r.sellable);
                                     return (
                                       <td key={j} className="px-2 py-1.5 text-center">
-                                        <span className="inline-block min-w-[22px] rounded px-1 py-0.5 text-[11px] font-bold font-mono" style={{ background: bg, color: fg }}>{c}</span>
+                                        <span className="inline-block min-w-[22px] rounded px-1 py-0.5 text-[11px] font-bold font-mono" style={{ background: tier.bg, color: tier.fg }}>{c}</span>
                                       </td>
                                     );
                                   })}
@@ -31883,7 +31903,7 @@ const AvailabilityCalendar: React.FC<{
                 <React.Fragment key={g.id}>
                   {(() => {
                     const collapsed = collapsedGroups.has(g.id);
-                    const sellable = g.rooms.filter((r: any) => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED').length;
+                    const sellable = sellableRoomCount(g.rooms);
                     const toggle = () => setCollapsedGroups(prev => { const n = new Set(prev); n.has(g.id) ? n.delete(g.id) : n.add(g.id); return n; });
                     return (
                       <tr className="cursor-pointer" onClick={toggle}>
@@ -31892,23 +31912,14 @@ const AvailabilityCalendar: React.FC<{
                           {g.name} · {g.rooms.length} room{g.rooms.length > 1 ? 's' : ''}
                         </td>
                         {data.dates.map((d: string) => {
-                          // Per-type inventory: rooms in this type that are free
-                          // on this date (excludes maintenance/blocked + any
-                          // booked/held/checked-in cell). This is the "X of N
-                          // left" availability the booking now decrements.
-                          let avail = 0;
-                          for (const r of g.rooms) {
-                            if (r.status === 'MAINTENANCE' || r.status === 'BLOCKED') continue;
-                            const st = String(data.grid?.[r.id]?.[d]?.status || 'VACANT').toUpperCase();
-                            if (st === 'VACANT') avail++;
-                          }
-                          const low = sellable >= 4 && avail <= Math.ceil(sellable * 0.25);
-                          const bg = avail === 0 ? '#fde2e7' : low ? '#fef3c7' : '#e9f7ef';
-                          const fg = avail === 0 ? '#9f1239' : low ? '#92400e' : '#1f513f';
+                          // Per-type inventory: rooms in this type free on this date
+                          // (shared helper — same math as OTA Inventory + V2).
+                          const avail = availableOnDate(g.rooms, data.grid, d);
+                          const tier = inventoryTier(avail, sellable);
                           return (
                             <td key={d} className="text-center border-l border-[#cc5a16]/5 bg-[#faf7f2]" style={{ minWidth: 44 }}
                                 title={`${avail} of ${sellable} ${g.name} available on ${d}`}>
-                              <span className="inline-block min-w-[20px] rounded px-1 py-0.5 text-[10px] font-bold" style={{ background: bg, color: fg }}>{avail}</span>
+                              <span className="inline-block min-w-[20px] rounded px-1 py-0.5 text-[10px] font-bold" style={{ background: tier.bg, color: tier.fg }}>{avail}</span>
                             </td>
                           );
                         })}
@@ -32307,7 +32318,7 @@ const AvailabilityCalendarV2: React.FC<{
             <tbody>
               {grouped.map((g: any) => {
                 const collapsed = collapsedGroups.has(g.id);
-                const sellable = g.rooms.filter((r: any) => r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED').length;
+                const sellable = sellableRoomCount(g.rooms);
                 const toggle = () => setCollapsedGroups(prev => { const n = new Set(prev); n.has(g.id) ? n.delete(g.id) : n.add(g.id); return n; });
                 const floats: any[] = floatingByGroup[g.id] || [];
                 const allBk: any[] = allBookingsByGroup[g.id] || [];
@@ -32326,15 +32337,10 @@ const AvailabilityCalendarV2: React.FC<{
                         {floats.length > 0 && <span className="ml-1 text-emerald-700 normal-case">· {floats.length} unassigned</span>}
                       </td>
                       {data.dates.map((d: string) => {
-                        let avail = 0;
-                        for (const r of g.rooms) {
-                          if (r.status === 'MAINTENANCE' || r.status === 'BLOCKED') continue;
-                          const st = String(data.grid?.[r.id]?.[d]?.status || 'VACANT').toUpperCase();
-                          if (st === 'VACANT') avail++;
-                        }
-                        const low = sellable >= 4 && avail <= Math.ceil(sellable * 0.25);
-                        const bg = avail === 0 ? '#fde2e7' : low ? '#fef3c7' : '#e9f7ef';
-                        const fg = avail === 0 ? '#9f1239' : low ? '#92400e' : '#1f513f';
+                        const avail = availableOnDate(g.rooms, data.grid, d);
+                        const tier = inventoryTier(avail, sellable);
+                        const bg = tier.bg;
+                        const fg = tier.fg;
                         const bookable = !showRoomNumbers && !!repRoom && avail > 0;
                         return (
                           <td key={d}
