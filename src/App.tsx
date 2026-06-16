@@ -129,6 +129,7 @@ const TABS_INTRODUCED_AFTER_V2 = new Set<string>(['LOYALTY', 'ROSTER', 'TIMESHEE
 //                                       the marker existed); grandfather
 //                                       every tab in ALWAYS_VISIBLE_TABS
 function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boolean {
+  if (id === 'HOME') return true;   // launchpad is the default landing — always reachable
   if (!allowedTabs || allowedTabs.length === 0) return true;
   if (allowedTabs.includes(id)) return true;
   if (allowedTabs.includes(PERMS_V3_MARKER)) {
@@ -7357,8 +7358,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // window.confirm was unreliable in the field — sometimes blocked by
   // popup-suppressors, never visually consistent with the rest of the app,
   // and led to the recurring "system not allowing check-in" reports.
-  const [earlyCheckInTarget, setEarlyCheckInTarget] = useState<any>(null);
-  const [earlyCheckInSubmitting, setEarlyCheckInSubmitting] = useState(false);
 
   const [cancelBookingTarget, setCancelBookingTarget] = useState<any>(null);
   const [cancelPreview, setCancelPreview] = useState<{
@@ -10552,32 +10551,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
   };
 
-  // Wrapper that guards against accidental early check-ins AND enforces
-  // the pre-check-in document gate (Req 1b). Two guard layers:
-  //   1. Early check-in → confirm modal (existing behavior)
-  //   2. Missing phone / missing ID-proof docs → checklist modal that
-  //      lets the receptionist fix the gaps inline before retrying
-  // The actual check-in fires only after the cashier clicks the
-  // primary CTA on whichever modal opens.
-  // CHK-2 — "Check In" ALWAYS opens the 2-page wizard. Staff
-  // verifies/edits guest details on page 1, uploads documents on
-  // page 2, then confirms. This is the only moment guest fields
-  // can be changed — CHK-1 server lock kicks in once status flips
-  // to CHECKED_IN.
+  // Opens the 2-page Check-In Wizard (CHK-2) — the only place staff can
+  // verify/edit guest details, reassign/upgrade the room, and upload ID docs
+  // before confirming. CHK-1 server lock kicks in once status flips to
+  // CHECKED_IN.
   //
-  // Early-check-in date guard still runs first: if the booking is
-  // for a future date, we route through the existing confirmation
-  // modal before opening the wizard.
+  // Early check-in is a HARD BLOCK (client request 17 Jun 2026): a guest
+  // cannot be checked in before their scheduled date. The IST-today guard
+  // below short-circuits with an error — there is no override path (the old
+  // "confirm early arrival" modal was removed).
   const confirmAndCheckIn = async (b: any) => {
     if (!b?.id) return;
-    // ALWAYS open the 2-page wizard — for every check-in, early or not. The
-    // wizard is the only place staff can reassign / upgrade the room, so an
-    // early (future-dated) check-in must NOT be diverted to the bare early
-    // confirm modal (which had no room options — the root cause of "one
-    // booking shows reassign/upgrade, another doesn't"). The wizard detects
-    // an early date, shows a warning banner, and forces the check-in through.
-    //
-    // Always open against the freshest FULL booking row from the bookings
+    // Open against the freshest FULL booking row from the bookings
     // list (num_guests, room_id, room_rate, room_name, dates) so the guest
     // count pre-fills and the room reassignment picker has its inputs.
     const full = hotelBookings.find((x: any) => x.id === b.id) || b;
@@ -10590,22 +10575,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     setCheckInChecklistTarget(full);
   };
 
-  // Confirm button on the early-check-in modal. Sends force=true so the
-  // server bypasses the date guard. Errors stay in the modal so the
-  // cashier can see what went wrong without losing context.
-  const submitEarlyCheckIn = async () => {
-    if (!earlyCheckInTarget) return;
-    setEarlyCheckInSubmitting(true);
-    try {
-      await checkInBooking(earlyCheckInTarget.id, true);
-      setEarlyCheckInTarget(null);
-    } catch (err: any) {
-      setHotelError(err?.message || 'Early check-in failed');
-      setEarlyCheckInTarget(null);
-    } finally {
-      setEarlyCheckInSubmitting(false);
-    }
-  };
   const checkOutBooking = async (
     bookingId: string,
     payment: string,
@@ -11614,7 +11583,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       <div className="flex-1 min-w-0 space-y-6 md:space-y-8">
 
 
-      {allowedTabs && activeTab !== 'HOME' && !isTabVisible(activeTab, allowedTabs) ? (
+      {allowedTabs && !isTabVisible(activeTab, allowedTabs) ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <div className="w-16 h-16 rounded-full bg-red-50 flex items-center justify-center">
             <Lock size={28} className="text-red-400" />
@@ -27858,73 +27827,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         );
       })()}
 
-      {/* ═════════ Early check-in confirm modal (Phase H1) ═════════
-          Opened by confirmAndCheckIn() when the booking's scheduled date
-          is in the future. Replaces window.confirm so the prompt is
-          unambiguous + always shows (popup blockers used to suppress it).
-          The actual check-in POST happens on submitEarlyCheckIn() with
-          force=true so the server's date guard is bypassed. */}
-      {earlyCheckInTarget && (() => {
-        const scheduled = normaliseBookingDate(earlyCheckInTarget.check_in_date);
-        const fmt = scheduled
-          ? new Date(scheduled + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short', year: 'numeric' })
-          : '(unknown date)';
-        return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Confirm early check-in</h3>
-                <button onClick={() => setEarlyCheckInTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]">
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3 mb-4">
-                <p className="text-[12px] text-amber-900 leading-snug">
-                  <strong>{earlyCheckInTarget.guest_name || 'This guest'}</strong> is booked for{' '}
-                  <strong>{fmt}</strong> — that's later than today. Confirming will start the
-                  room status and folio <strong>now</strong>.
-                </p>
-              </div>
-
-              <div className="bg-[#faf7f2] rounded-2xl p-4 mb-4 text-sm">
-                <div className="flex justify-between mb-1">
-                  <span className="text-[#6b5d52]">Room</span>
-                  <span className="font-semibold">{earlyCheckInTarget.room_name || earlyCheckInTarget.room_id}</span>
-                </div>
-                {earlyCheckInTarget.check_out_date && (
-                  <div className="flex justify-between">
-                    <span className="text-[#6b5d52]">Check-out</span>
-                    <span>{normaliseBookingDate(earlyCheckInTarget.check_out_date) || '—'}</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEarlyCheckInTarget(null)}
-                  className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]"
-                >
-                  Not yet
-                </button>
-                <button
-                  type="button"
-                  onClick={submitEarlyCheckIn}
-                  disabled={earlyCheckInSubmitting}
-                  className={cn(
-                    "flex-1 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700",
-                    earlyCheckInSubmitting && "opacity-60 cursor-not-allowed"
-                  )}
-                >
-                  {earlyCheckInSubmitting ? 'Checking in…' : 'Confirm early check-in'}
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
       {/* ═════════ Cancel-booking confirm modal (Phase H1) ═════════
           Shows the refund preview computed from the tenant's refund policy
           plus a free-text reason field. The actual cancel POST happens on
@@ -35463,9 +35365,9 @@ function HotelHomeLaunchpad({
             return (
               <button type="button" onClick={onOpenHotel}
                 className="relative text-left rounded-3xl overflow-hidden border transition-all hover:shadow-lg group min-h-[190px] flex"
-                style={{ borderColor: hasImg ? 'transparent' : 'rgba(204,90,22,0.2)' }}>
+                style={{ borderColor: hasImg ? 'transparent' : 'rgba(204,90,22,0.2)', background: hasImg ? '#cc5a16' : undefined }}>
                 {hasImg && (<>
-                  <img src={heroUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                  <img src={heroUrl} alt="" className="absolute inset-0 w-full h-full object-cover" onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
                   <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, rgba(26,18,8,0.25) 0%, rgba(26,18,8,0.78) 100%)' }} />
                 </>)}
                 <div className={cn('relative p-5 w-full flex flex-col', !hasImg && 'bg-white')}>
@@ -35490,9 +35392,9 @@ function HotelHomeLaunchpad({
             return (
               <button type="button" onClick={onOpenRestaurant}
                 className="relative text-left rounded-3xl overflow-hidden border transition-all hover:shadow-lg group min-h-[190px] flex"
-                style={{ borderColor: hasImg ? 'transparent' : 'rgba(15,110,86,0.2)' }}>
+                style={{ borderColor: hasImg ? 'transparent' : 'rgba(15,110,86,0.2)', background: hasImg ? '#0f6e56' : undefined }}>
                 {hasImg && (<>
-                  <img src={restaurantImageUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                  <img src={restaurantImageUrl} alt="" className="absolute inset-0 w-full h-full object-cover" onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
                   <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg, rgba(4,52,44,0.25) 0%, rgba(4,52,44,0.78) 100%)' }} />
                 </>)}
                 <div className={cn('relative p-5 w-full flex flex-col', !hasImg && 'bg-white')}>
