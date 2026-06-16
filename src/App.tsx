@@ -17545,6 +17545,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             )}
           </details>
 
+          {/* Phase 2 — Room Assignment board: reassign FLOATING upcoming
+              bookings to a different room (or lock one) before arrival. */}
+          <RoomAssignmentBoard
+            restaurantId={restaurantId!}
+            token={token!}
+            bookings={hotelBookings}
+            rooms={hotelRooms}
+            onChanged={() => fetchHotelBookings()}
+          />
+
           {/* Today's Arrivals & Departures.
               Bug 5 fix — normaliseBookingDate handles both ISO strings
               and JS Date objects (the API may return either depending
@@ -30895,6 +30905,127 @@ const AvailabilityDashboard: React.FC<{
           >
             🚶 Walk-in & Check-In
           </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── RoomAssignmentBoard (Phase 2, 17 Jun 2026) ─────────────────────────────
+// Front-desk board to manage FLOATING room assignments before arrival. Lists
+// upcoming still-BOOKED bookings with their auto-assigned (floating) or locked
+// room, and lets staff move a booking to any room that's free for its dates, or
+// lock the current one. Drives POST /hotel/bookings/:id/reassign-room. Reads
+// from data already in memory (bookings + rooms) — no extra fetch.
+const RoomAssignmentBoard: React.FC<{
+  restaurantId: string;
+  token: string;
+  bookings: any[];
+  rooms: any[];
+  onChanged: () => void;
+}> = ({ restaurantId, token, bookings, rooms, onChanged }) => {
+  const [open, setOpen] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const horizon = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+  // Reassignable = still BOOKED (not checked-in/out/cancelled) and arriving
+  // within the next two weeks. Sorted by arrival date.
+  const items = (bookings || [])
+    .filter((b: any) => String(b.status || '').toUpperCase() === 'BOOKED'
+      && String(b.check_in_date || '').slice(0, 10) >= today
+      && String(b.check_in_date || '').slice(0, 10) <= horizon)
+    .sort((a: any, b: any) => String(a.check_in_date).localeCompare(String(b.check_in_date)));
+
+  if (items.length === 0) return null;
+
+  // Rooms free for a booking's dates (excludes maintenance/blocked + any other
+  // active booking overlapping the dates); the booking's current room always
+  // stays selectable. Mirrors the server overlap rule.
+  const freeRoomsFor = (bk: any) => {
+    const ci = String(bk.check_in_date).slice(0, 10);
+    const co = String(bk.check_out_date).slice(0, 10);
+    const taken = new Set<string>();
+    for (const o of bookings) {
+      if (o.id === bk.id || !o.room_id) continue;
+      const s = String(o.status || '').toUpperCase();
+      if (s === 'CANCELLED' || s === 'CHECKED_OUT') continue;
+      const oci = String(o.check_in_date).slice(0, 10);
+      const oco = String(o.check_out_date).slice(0, 10);
+      if (oci < co && oco > ci) taken.add(o.room_id);
+    }
+    return rooms.filter((r: any) =>
+      r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED'
+      && (!taken.has(r.id) || r.id === bk.room_id)
+    ).sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
+  };
+
+  const reassign = async (bk: any, roomId: string, lock = false) => {
+    if (!roomId || busyId) return;
+    setBusyId(bk.id);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings/${bk.id}/reassign-room`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ room_id: roomId, lock }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { alert(d?.error || 'Could not reassign the room.'); return; }
+      await onChanged();
+    } catch { alert('Could not reassign the room.'); }
+    finally { setBusyId(null); }
+  };
+
+  return (
+    <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden shadow-sm">
+      <button onClick={() => setOpen(v => !v)} className="w-full flex items-center justify-between px-5 py-4 hover:bg-[#faf7f2]/50 transition-colors">
+        <div className="flex items-center gap-3">
+          <Bed size={16} className="text-[#cc5a16]" />
+          <span className="font-bold text-[#1a1208] text-sm tracking-wide uppercase">Room Assignment</span>
+          <span className="text-[11px] font-black px-2.5 py-0.5 rounded-full bg-[#cc5a16]/10 text-[#cc5a16]">{items.length} upcoming</span>
+        </div>
+        <ChevronDown size={16} className={cn('text-[#9c8e85] transition-transform', !open && '-rotate-90')} />
+      </button>
+      {open && (
+        <div className="border-t border-[#cc5a16]/10 p-4 space-y-2">
+          <p className="text-[11px] text-[#9c8e85] leading-snug mb-1">
+            Move a guest to a different room (any room free for their dates) or lock the current one. Rooms lock automatically at check-in.
+          </p>
+          {items.map((bk: any) => {
+            const locked = Number(bk.room_locked ?? 1) === 1;
+            const free = freeRoomsFor(bk);
+            return (
+              <div key={bk.id} className="flex flex-wrap items-center gap-2 rounded-xl border border-[#f0e8dd] px-3 py-2">
+                <div className="flex-1 min-w-[160px]">
+                  <p className="text-sm font-semibold text-[#1a1208] truncate">{bk.guest_name}</p>
+                  <p className="text-[10px] text-[#9c8e85]">{String(bk.check_in_date).slice(0, 10)} → {String(bk.check_out_date).slice(0, 10)}</p>
+                </div>
+                <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full',
+                  locked ? 'bg-stone-200 text-stone-700' : 'bg-emerald-100 text-emerald-800')}>
+                  {locked ? '🔒 Locked' : '↻ Floating'}
+                </span>
+                <select
+                  value={bk.room_id || ''}
+                  disabled={busyId === bk.id}
+                  onChange={e => { if (e.target.value && e.target.value !== bk.room_id) reassign(bk, e.target.value, false); }}
+                  className="bg-[#faf7f2] border border-[#cc5a16]/20 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-1 ring-[#cc5a16]/30 min-w-[150px]"
+                >
+                  {free.map((r: any) => (
+                    <option key={r.id} value={r.id}>{r.name}{r.room_number ? ` #${r.room_number}` : ''}</option>
+                  ))}
+                </select>
+                {!locked && (
+                  <button
+                    type="button"
+                    onClick={() => reassign(bk, bk.room_id, true)}
+                    disabled={busyId === bk.id || !bk.room_id}
+                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-stone-100 text-stone-700 hover:bg-stone-200 disabled:opacity-50 whitespace-nowrap"
+                    title="Pin this room so it won't be reshuffled"
+                  >🔒 Lock</button>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
