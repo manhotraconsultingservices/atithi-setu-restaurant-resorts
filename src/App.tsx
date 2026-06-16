@@ -31968,6 +31968,43 @@ const AvailabilityCalendarV2: React.FC<{
     return { guests, checkedIn, checkingOut, available, assigned, maintenance, hold };
   }, [data]);
 
+  // CSV export — the room×date occupancy grid (one row per physical room), plus
+  // a per-type Unassigned (floating) section so the export mirrors V2's view.
+  // Codes: V vacant · B assigned · I checked-in · O checked-out · M maintenance
+  // · H hold · U unassigned/floating. A floating booking's tentative room reads
+  // as V here (it isn't pinned), exactly like the on-screen Rooms view.
+  const exportCsv = () => {
+    if (!data) return;
+    const dates: string[] = data.dates || [];
+    const codeFor = (cell: any): string => {
+      if (!cell || cell.status === 'VACANT') return 'V';
+      if (cell.booking_id && Number(cell.room_locked ?? 1) === 0) return 'V'; // floating → not pinned
+      const status = String(cell.status || '').toUpperCase();
+      const code: Record<string, string> = { BOOKED: 'B', CHECKED_IN: 'I', CHECKED_OUT: 'O', CANCELLED: 'X', MAINTENANCE: 'M', BLOCKED: 'X', HOLD: 'H', CLEANING: 'C' };
+      const guest = cell.guest_name ? ` ${String(cell.guest_name).slice(0, 20)}` : '';
+      return `${code[status] || status[0] || '?'}${guest}`;
+    };
+    const header = ['Room / Type', 'Room #', 'Category', ...dates];
+    const rows: any[][] = [];
+    for (const g of grouped) {
+      for (const room of g.rooms) {
+        rows.push([room.name || '', room.room_number || '', g.name, ...dates.map((d: string) => codeFor(data.grid?.[room.id]?.[d]))]);
+      }
+    }
+    // Unassigned (floating) bookings — one row per booking, 'U' across its nights.
+    const floatRows: any[][] = [];
+    for (const g of grouped) {
+      for (const fb of (floatingByGroup[g.id] || [])) {
+        floatRows.push([`↻ ${fb.guest_name}`, 'Unassigned', g.name, ...dates.map((d: string) =>
+          (fb.booking_type === 'DAY_USE' ? d === fb.ci : (d >= fb.ci && d < fb.co)) ? 'U' : '')]);
+      }
+    }
+    const out = floatRows.length
+      ? [...rows, new Array(header.length).fill(''), ['UNASSIGNED (FLOATING)', '', '', ...dates.map(() => '')], ...floatRows]
+      : rows;
+    downloadCsv(`calendar-v2-${start}-to-${dates[dates.length - 1] || start}.csv`, header, out);
+  };
+
   return (
     <div className="bg-white rounded-3xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
       {/* KPI strip */}
@@ -32017,6 +32054,11 @@ const AvailabilityCalendarV2: React.FC<{
           <button type="button" onClick={() => fetchAvailability(false)} disabled={loading} title="Refresh now"
             className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-xs font-bold hover:bg-white disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1">
             <RefreshCw size={12} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
+          <button type="button" onClick={exportCsv} disabled={!data || data.rooms?.length === 0}
+            title="Export this calendar window as CSV"
+            className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold hover:bg-white flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
+            <Download size={12} /> CSV
           </button>
           {lastRefresh && (
             <span className="text-[10px] text-[#9c8e85] whitespace-nowrap">
