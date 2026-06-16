@@ -21740,6 +21740,65 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── Phase 2 (17 Jun 2026): reassign a FLOATING booking to another room ──
+  // Front-desk "room assignment board" primitive. Moves a not-yet-checked-in
+  // booking to a different physical room (e.g. to optimise the block, free a
+  // contiguous run, or honour a request) right up to arrival. Validated against
+  // the same overlap/hold rules as a new booking (excluding this booking).
+  // Refused once the guest is CHECKED_IN (the room is locked at check-in).
+  // Pass lock:true to pin the room (stop it floating); otherwise it stays
+  // floating and can be reshuffled again until check-in.
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/reassign-room", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const target = String(req.body?.room_id || '').trim();
+      const lock = req.body?.lock === true || req.body?.lock === 1 || req.body?.lock === '1';
+      if (!target) return res.status(400).json({ error: 'room_id is required.' });
+      const bk: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      if (!bk) return res.status(404).json({ error: 'Booking not found.' });
+      if (String(bk.status || '').toUpperCase() !== 'BOOKED') {
+        return res.status(409).json({ error: 'Only a not-yet-checked-in booking can be reassigned to another room.' });
+      }
+      if (String(bk.room_id) === target) {
+        // Same room — just apply the (un)lock toggle.
+        const newLock = lock ? 1 : Number(bk.room_locked || 0);
+        await tenantDb.run("UPDATE room_bookings SET room_locked = ? WHERE id = ?", [newLock, req.params.bookingId]).catch(() => {});
+        return res.json({ ok: true, room_id: target, room_locked: newLock, unchanged: true });
+      }
+      const room: any = await tenantDb.get("SELECT id, status FROM rooms WHERE id = ?", [target]);
+      if (!room) return res.status(404).json({ error: 'Target room not found.' });
+      const rst = String(room.status || '').toUpperCase();
+      if (rst === 'MAINTENANCE' || rst === 'BLOCKED') {
+        return res.status(409).json({ error: 'Target room is under maintenance / blocked.' });
+      }
+      // Reuse the canonical overlap/hold validator — exclude this booking, and
+      // skip past-date + capacity guards (dates/occupancy are unchanged).
+      const v = await validateBookingRequest(req.params.id, {
+        room_id: target,
+        check_in_date: String(bk.check_in_date),
+        check_out_date: String(bk.check_out_date),
+        booking_type: bk.booking_type,
+        excludeBookingId: req.params.bookingId,
+        skipPastDateCheck: true,
+        skipCapacityCheck: true,
+      });
+      if (!v.ok) return res.status(v.status).json({ error: v.error });
+      // Floating stays floating unless the caller explicitly locks the room.
+      const newLock = lock ? 1 : Number(bk.room_locked || 0);
+      await tenantDb.run(
+        "UPDATE room_bookings SET room_id = ?, room_locked = ? WHERE id = ? AND status = 'BOOKED'",
+        [target, newLock, req.params.bookingId]
+      );
+      const row: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      res.json({ ok: true, room_id: target, room_locked: row?.room_locked, booking: row });
+    } catch (err: any) {
+      console.error('reassign-room error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to reassign room' });
+    }
+  });
+
   // ─── GROUP BOOKINGS — Sprint C2 ────────────────────────────────────
   // Create N bookings in a single transaction. All share:
   //   - dates (check_in / check_out)
@@ -26279,7 +26338,9 @@ ${data.tenant.name}`;
       // downstream side effects via a duplicate-detection log.
       const now = new Date().toISOString();
       const flipResult = await tenantDb.run(
-        "UPDATE room_bookings SET status = 'CHECKED_IN', actual_checkin_at = ? WHERE id = ? AND status = 'BOOKED'",
+        // Phase 2 (17 Jun 2026): lock the room on check-in — a checked-in guest
+        // physically occupies it, so it can no longer float / be reassigned.
+        "UPDATE room_bookings SET status = 'CHECKED_IN', actual_checkin_at = ?, room_locked = 1 WHERE id = ? AND status = 'BOOKED'",
         [now, req.params.bookingId]
       );
       if (!flipResult || flipResult.changes === 0) {
