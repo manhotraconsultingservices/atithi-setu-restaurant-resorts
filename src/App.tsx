@@ -31860,13 +31860,21 @@ const AvailabilityCalendar: React.FC<{
                 const guest = cell.guest_name ? ` ${String(cell.guest_name).slice(0, 20)}` : '';
                 return `${code[status] || status[0] || '?'}${guest}`;
               };
+              // Category must resolve from the room's TYPE_ID via the
+              // room_types list (same source the on-screen grid groups by) —
+              // NOT room.type, which is a legacy free-text column that often
+              // still holds the stale default "standard". (17 Jun 2026 fix.)
+              const typeName: Record<string, string> = {};
+              for (const t of (data.room_types || [])) typeName[String(t.id)] = t.name;
+              const catOf = (room: any) =>
+                (room.type_id != null && typeName[String(room.type_id)]) || room.type_name || room.type || '';
               const rows: any[][] = [];
               for (const room of data.rooms) {
                 // The server returns availability as `grid[room_id][date]`,
                 // not as a per-room cells array. Earlier export draft read
                 // room.cells (undefined) and produced empty rows — fixed.
                 rows.push([
-                  room.name || '', room.room_number || '', room.type_name || room.type || '',
+                  room.name || '', room.room_number || '', catOf(room),
                   ...dates.map(d => codeFor(data.grid?.[room.id]?.[d])),
                 ]);
               }
