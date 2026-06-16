@@ -26141,7 +26141,7 @@ ${data.tenant.name}`;
       // locked after check-in (they affect the rate and would invalidate
       // the folio). Pre-check-in they're freely editable along with rate.
       const LOCKED_AFTER_CHECKIN = [
-        'room_rate','check_in_date','check_out_date','room_id','booking_type','num_guests','status',
+        'room_rate','check_in_date','check_out_date','room_id','room_locked','booking_type','num_guests','status',
         'guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin',
         'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress','num_adults',
       ];
@@ -26150,7 +26150,7 @@ ${data.tenant.name}`;
       // above so it can't change once the guest is checked in. It was MISSING
       // from this allow list, so reassignment PATCHes silently dropped room_id
       // — the booking row, folio + invoice all kept the OLD room.
-      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','room_id','check_in_date','check_out_date','room_rate','special_requests','status','booking_type',
+      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','room_id','room_locked','check_in_date','check_out_date','room_rate','special_requests','status','booking_type',
         'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress','num_adults',
         // Receivables Phase 2 — agent + booking_source editable post-create
         // so owner can re-tag a misattributed booking. Not locked after

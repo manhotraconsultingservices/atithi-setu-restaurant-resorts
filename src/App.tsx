@@ -26514,6 +26514,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       delete _payload.room_id;
                     }
                   }
+                  // Editing an existing booking: persist an Unassign (float) or a
+                  // deliberate pin via room_locked. Only sent when staff actually
+                  // toggled it, so untouched edits leave room_locked as-is. The
+                  // server keeps the current room_id but flips its locked flag.
+                  if (editingBooking.id) {
+                    if (editingBooking.room_floating === true) _payload.room_locked = 0;
+                    else if (editingBooking.room_floating === false) _payload.room_locked = 1;
+                  }
                   await saveBooking(_payload);
                   setShowBookingModal(false); setEditingBooking(null);
                 } catch (err: any) { setHotelError(err.message || 'Save failed'); }
@@ -26910,14 +26918,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           staff want to pin a room. Edits / already-locked
                           bookings still show their concrete assigned room. */}
                       {selectedStats && selectedRoom && (() => {
-                        const isFloatingNew = editingBooking.room_floating && !editingBooking.id;
+                        // Floating when the staff explicitly floated it (room_floating
+                        // === true), or when an existing booking is already floating
+                        // (room_locked === 0) and hasn't just been pinned. A drilled /
+                        // pinned room sets room_floating === false → shows as assigned.
+                        const isFloating = editingBooking.room_floating === true
+                          || (editingBooking.room_floating !== false && Number(editingBooking.room_locked ?? 1) === 0);
                         const changeRoom = (rid: string) => {
                           const cap = Math.max(1, Number(hotelRooms.find(r => r.id === rid)?.capacity || 1));
                           const adults = Number(editingBooking.num_adults) > 0 ? Number(editingBooking.num_adults) : cap;
                           const d = deriveOccupancy(adults, cap, editingBooking.extra_children_with_mattress, editingBooking.extra_children_no_mattress);
                           setEditingBooking({ ...editingBooking, room_id: rid, room_floating: false, num_adults: adults, extra_adults: d.extra_adults, num_guests: d.num_guests });
                         };
-                        if (isFloatingNew) {
+                        // Unassign — clear the pinned room and let the server
+                        // auto-assign a floating room (at submit for a new booking;
+                        // PATCH sends room_locked=0 for an existing one).
+                        const unassignRoom = () => setEditingBooking({
+                          ...editingBooking,
+                          room_floating: true,
+                          room_type_id: selectedRoom?.type_id || editingBooking.room_type_id || '__UNCATEGORISED__',
+                        });
+                        if (isFloating) {
                           return (
                             <div className="mt-2 p-2.5 bg-emerald-50 rounded-xl border border-emerald-200">
                               <p className="text-[11px] text-emerald-800 leading-snug">
@@ -26950,22 +26971,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <span className="font-bold text-[#1a1208]">{selectedRoom.name}</span>{' '}
                               <span className="text-[#9c8e85]">(Room #{selectedRoom.room_number || '—'}{selectedRoom.floor ? `, Floor ${selectedRoom.floor}` : ''})</span>
                             </div>
-                            {drillRooms.length > 1 && (
-                              <div className="flex items-center gap-1.5">
-                                <label className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Change:</label>
-                                <select
-                                  value={editingBooking.room_id || ''}
-                                  onChange={e => changeRoom(e.target.value)}
-                                  className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[10px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
-                                >
-                                  {drillRooms.map(r => (
-                                    <option key={r.id} value={r.id}>
-                                      {r.name}{r.room_number ? ` #${r.room_number}` : ''}{r.floor ? ` · F${r.floor}` : ''}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            )}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {drillRooms.length > 1 && (
+                                <>
+                                  <label className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Change:</label>
+                                  <select
+                                    value={editingBooking.room_id || ''}
+                                    onChange={e => changeRoom(e.target.value)}
+                                    className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[10px] focus:outline-none focus:ring-1 ring-[#cc5a16]/30"
+                                  >
+                                    {drillRooms.map(r => (
+                                      <option key={r.id} value={r.id}>
+                                        {r.name}{r.room_number ? ` #${r.room_number}` : ''}{r.floor ? ` · F${r.floor}` : ''}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </>
+                              )}
+                              {/* Unassign — clear the pinned room → booking floats
+                                  and a room is auto-assigned at check-in. */}
+                              <button
+                                type="button"
+                                onClick={unassignRoom}
+                                title="Unassign this room — the booking will float and a room is auto-assigned at check-in"
+                                className="px-2 py-1 rounded-lg text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 whitespace-nowrap"
+                              >↻ Unassign</button>
+                            </div>
                           </div>
                         );
                       })()}
