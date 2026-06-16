@@ -87,7 +87,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // to any non-owner with an ancient unmarked allowedTabs list — which is
 // the exact bug the founder flagged on 7 Jun 2026 ("STAFF_ACCESS should
 // only be visible to Business owner. this is critical.").
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'RESTAURANT_REPORTS', 'HR_PAYROLL']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -113,7 +113,7 @@ const PERMS_V3_MARKER = '__perm_v3__';
 // themselves about these tabs (because they hadn't been built yet) — so
 // we grandfather them visible. Once the admin re-saves through the V3 UI,
 // the V3 marker is appended and any exclusion sticks.
-const TABS_INTRODUCED_AFTER_V2 = new Set<string>(['LOYALTY', 'ROSTER', 'TIMESHEET']);
+const TABS_INTRODUCED_AFTER_V2 = new Set<string>(['LOYALTY', 'ROSTER', 'TIMESHEET', 'HR_PAYROLL', 'RESTAURANT_REPORTS']);
 
 // Decide whether a dashboard tab should be visible for a tenant, given the
 // tenant's saved allowedTabs list.
@@ -20934,8 +20934,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'TIMESHEET',         label: 'Timesheet',               description: 'Planned vs actual hours, payroll prep, overtime variance.' },
               { id: 'ATTENDANCE',        label: 'Attendance',              description: 'Clock-in / clock-out records, daily attendance report.' },
               { id: 'HR_PAYROLL',        label: 'HR & Payroll',            description: 'Employee profile + salary structure + payslip + statutory (PF/ESI/TDS) + expenses + offer letters.' },
-              { id: 'REPORTS',           label: 'Reports & Analytics',     description: 'MTD/YTD revenue, top items, peak-hour heatmap, cohort analysis.' },
-              { id: 'FEEDBACK',          label: 'Feedback / Reviews',      description: 'Customer feedback responses, NPS, public review page.' },
+              { id: 'REPORTS',            label: 'Reports & Analytics',     description: 'MTD/YTD revenue, top items, peak-hour heatmap, cohort analysis.' },
+              { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports',      description: 'F&B revenue, top dishes, peak-hour heatmap, delivery settlement, customer cohort — separate reporting hub.' },
+              { id: 'FEEDBACK',           label: 'Feedback / Reviews',      description: 'Customer feedback responses, NPS, public review page.' },
               { id: 'NOTIFICATIONS',     label: 'Notifications',           description: 'WhatsApp / SMS / email template config, delivery logs.' },
               { id: 'SUBSCRIPTION',      label: 'Subscription / Billing',  description: 'Plan tier, invoices for the AtithiSetu subscription itself, payment.' },
               { id: 'SETTINGS',          label: 'Settings',                description: 'GST setup, business profile, hotel settings, channel credentials.' },
@@ -41378,14 +41379,14 @@ function SuperAdminDashboard({ token }: { token: string }) {
   // INVENTORY + DELIVERY were added 2026-05 — see ALWAYS_VISIBLE_TABS /
   // isTabVisible() for how legacy permission sets are grandfathered.
   const RESTAURANT_TABS = [
-    'MONITOR', 'MENU', 'INVENTORY', 'DELIVERY', 'REPORTS', 'QR', 'BOOKINGS',
-    'LOYALTY', 'STAFF', 'ROSTER', 'TIMESHEET', 'ORDERS', 'INVOICES', 'ATTENDANCE',
+    'MONITOR', 'MENU', 'INVENTORY', 'DELIVERY', 'REPORTS', 'RESTAURANT_REPORTS', 'QR', 'BOOKINGS',
+    'LOYALTY', 'STAFF', 'ROSTER', 'TIMESHEET', 'ORDERS', 'INVOICES', 'ATTENDANCE', 'HR_PAYROLL',
     'FEEDBACK', 'SUBSCRIPTION', 'NOTIFICATIONS', 'SETTINGS'
   ];
   // Hotel-only tabs (shown only when the selected restaurant has property_type IN ('HOTEL','BOTH'))
   const HOTEL_TABS = [
     'ROOMS', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS',
-    'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ', 'PUBLIC_BOOKING_PAGE',
+    'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE',
   ];
   // Compose the active tab list based on the currently-selected restaurant's property_type
   const selectedRestaurantRow = restaurants.find(r => r.id === permSelectedRestaurant);
