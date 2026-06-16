@@ -21002,6 +21002,7 @@ ${data.tenant.name}`;
                 b.check_in_date, b.check_out_date, b.actual_checkin_at, b.num_guests,
                 b.status, b.booking_source, b.special_requests, b.meal_plan_id,
                 b.meal_plan_snapshot, b.extra_adults, b.room_rate, b.total_amount,
+                b.room_locked,
                 r.name AS room_name, r.room_number, r.type AS room_type,
                 rt.name AS room_category
            FROM room_bookings b
@@ -21032,7 +21033,7 @@ ${data.tenant.name}`;
         `SELECT b.id, b.guest_name, b.guest_phone, b.guest_email,
                 b.check_in_date, b.check_out_date, b.actual_checkout_at,
                 b.status, b.num_guests, b.room_rate, b.total_amount,
-                b.meal_plan_snapshot, b.booking_source,
+                b.meal_plan_snapshot, b.booking_source, b.room_locked,
                 r.name AS room_name, r.room_number, rt.name AS room_category,
                 (SELECT f.grand_total FROM folios f
                   WHERE f.booking_id = b.id
@@ -21123,8 +21124,10 @@ ${data.tenant.name}`;
       const arrivals: any[] = await tenantDb.query(
         `SELECT b.id, b.guest_name, b.guest_phone, b.check_in_date, b.check_out_date,
                 b.num_guests, b.room_rate, b.total_amount, b.status, b.booking_source,
+                b.room_locked, rt.name AS room_category,
                 r.name AS room_name, r.room_number
            FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+           LEFT JOIN room_types rt ON rt.id = r.type_id
           WHERE b.check_in_date = ? AND b.status <> 'CANCELLED'
           ORDER BY b.guest_name`,
         [asOf]
@@ -21132,7 +21135,7 @@ ${data.tenant.name}`;
       // Departures = check_out_date = asOf
       const departures: any[] = await tenantDb.query(
         `SELECT b.id, b.guest_name, b.guest_phone, b.check_in_date, b.check_out_date,
-                b.total_amount, b.status,
+                b.total_amount, b.status, b.room_locked, rt.name AS room_category,
                 r.name AS room_name, r.room_number,
                 (SELECT f.grand_total FROM folios f WHERE f.booking_id = b.id
                   AND (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
@@ -21141,6 +21144,7 @@ ${data.tenant.name}`;
                   AND (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
                   ORDER BY f.created_at DESC LIMIT 1) AS folio_status
            FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+           LEFT JOIN room_types rt ON rt.id = r.type_id
           WHERE b.check_out_date = ? AND b.status <> 'CANCELLED'
           ORDER BY b.guest_name`,
         [asOf]
@@ -21148,9 +21152,11 @@ ${data.tenant.name}`;
       // In-house = bookings spanning asOf (check_in_date <= asOf < check_out_date)
       const inHouse: any[] = await tenantDb.query(
         `SELECT b.id, b.guest_name, b.guest_phone, b.check_in_date, b.check_out_date,
-                b.num_guests, b.room_rate, b.total_amount,
+                b.num_guests, b.room_rate, b.total_amount, b.room_locked,
+                rt.name AS room_category,
                 r.name AS room_name, r.room_number
            FROM room_bookings b LEFT JOIN rooms r ON r.id = b.room_id
+           LEFT JOIN room_types rt ON rt.id = r.type_id
           WHERE b.check_in_date <= ? AND b.check_out_date > ?
             AND b.status IN ('BOOKED','CHECKED_IN')
           ORDER BY b.guest_name`,

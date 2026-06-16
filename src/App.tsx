@@ -227,9 +227,14 @@ function deriveOccupancy(adults: number, capacity: number, childMat: number, chi
 // know what to assign) rather than surfacing the auto-assigned room number,
 // which made it look like a specific room was already blocked. Locked /
 // checked-in bookings show their concrete room as before.
+function isFloatingBooking(b: any): boolean {
+  // room_locked = 0 → floating (room TYPE held, specific room not yet firm).
+  // Defaults to locked when the field is absent so any row that doesn't carry
+  // room_locked degrades to showing its room (no behaviour change).
+  return Number(b?.room_locked ?? 1) === 0;
+}
 function bookingRoomLabel(b: any): string {
-  const floating = Number(b?.room_locked ?? 1) === 0;
-  if (floating) {
+  if (isFloatingBooking(b)) {
     const cat = b?.room_category || b?.type_name || b?.room_type_name;
     return cat ? `Unassigned · ${cat}` : 'Unassigned';
   }
@@ -18323,7 +18328,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   (data.rows || []).map((r: any) => [
                     r.id || '', r.check_in_date?.toString().slice(0,10) || '',
                     r.guest_name || '', r.guest_phone || '', r.guest_email || '',
-                    r.guest_nationality || '', r.room_name || '', r.room_number || '',
+                    r.guest_nationality || '',
+                    (isFloatingBooking(r) ? 'Unassigned' : (r.room_name || '')),
+                    (isFloatingBooking(r) ? '' : (r.room_number || '')),
                     r.room_category || r.room_type || '', r.num_guests ?? '',
                     r.extra_adults ?? 0, r.meal_plan_snapshot || r.meal_plan_id || '',
                     fmtINR(r.room_rate), fmtINR(r.total_amount),
@@ -18337,7 +18344,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     r.id || '', r.check_in_date?.toString().slice(0,10) || '',
                     r.check_out_date?.toString().slice(0,10) || '',
                     r.guest_name || '', r.guest_phone || '',
-                    r.room_name || '', r.room_number || '', r.room_category || '',
+                    (isFloatingBooking(r) ? 'Unassigned' : (r.room_name || '')),
+                    (isFloatingBooking(r) ? '' : (r.room_number || '')),
+                    r.room_category || '',
                     r.num_guests ?? '', r.meal_plan_snapshot || '',
                     fmtINR(r.room_rate), fmtINR(r.total_amount),
                     fmtINR(r.folio_total), r.folio_status || '—',
@@ -18375,19 +18384,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   ['Booking ID','Guest','Phone','Room','Room #','Guests','Rate','Total','Status'],
                 ];
                 for (const a of (data.arrivals || [])) {
-                  rows.push([a.id, a.guest_name, a.guest_phone, a.room_name, a.room_number, a.num_guests, fmtINR(a.room_rate), fmtINR(a.total_amount), a.status]);
+                  rows.push([a.id, a.guest_name, a.guest_phone,
+                    (isFloatingBooking(a) ? 'Unassigned' : (a.room_name || '')),
+                    (isFloatingBooking(a) ? '' : (a.room_number || '')),
+                    a.num_guests, fmtINR(a.room_rate), fmtINR(a.total_amount), a.status]);
                 }
                 rows.push(['']);
                 rows.push(['── DEPARTURES ──']);
                 rows.push(['Booking ID','Guest','Phone','Room','Room #','Booking Total','Folio Total','Folio Status']);
                 for (const d of (data.departures || [])) {
-                  rows.push([d.id, d.guest_name, d.guest_phone, d.room_name, d.room_number, fmtINR(d.total_amount), fmtINR(d.folio_total), d.folio_status || '—']);
+                  rows.push([d.id, d.guest_name, d.guest_phone,
+                    (isFloatingBooking(d) ? 'Unassigned' : (d.room_name || '')),
+                    (isFloatingBooking(d) ? '' : (d.room_number || '')),
+                    fmtINR(d.total_amount), fmtINR(d.folio_total), d.folio_status || '—']);
                 }
                 rows.push(['']);
                 rows.push(['── IN-HOUSE ──']);
                 rows.push(['Booking ID','Guest','Phone','Room','Room #','Check-in','Check-out','Guests','Rate']);
                 for (const i of (data.in_house || [])) {
-                  rows.push([i.id, i.guest_name, i.guest_phone, i.room_name, i.room_number,
+                  rows.push([i.id, i.guest_name, i.guest_phone,
+                             (isFloatingBooking(i) ? 'Unassigned' : (i.room_name || '')),
+                             (isFloatingBooking(i) ? '' : (i.room_number || '')),
                              i.check_in_date?.toString().slice(0,10),
                              i.check_out_date?.toString().slice(0,10),
                              i.num_guests, fmtINR(i.room_rate)]);
@@ -18539,8 +18556,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         <td className="px-3 py-1.5 font-mono text-[10px]">{r.id}</td>
                                         <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
                                         <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
-                                        <td className="px-3 py-1.5">{r.room_name}</td>
-                                        <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                        <td className="px-3 py-1.5">{isFloatingBooking(r) ? 'Unassigned' : (r.room_name || '—')}</td>
+                                        <td className="px-3 py-1.5 font-mono">{isFloatingBooking(r) ? '—' : (r.room_number || '—')}</td>
                                         <td className="px-3 py-1.5 text-center">{r.num_guests}</td>
                                         <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.room_rate)}</td>
                                         <td className="px-3 py-1.5 text-right font-mono font-bold">{fmtINR(r.total_amount)}</td>
@@ -18550,8 +18567,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         <td className="px-3 py-1.5 font-mono text-[10px]">{r.id}</td>
                                         <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
                                         <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
-                                        <td className="px-3 py-1.5">{r.room_name}</td>
-                                        <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                        <td className="px-3 py-1.5">{isFloatingBooking(r) ? 'Unassigned' : (r.room_name || '—')}</td>
+                                        <td className="px-3 py-1.5 font-mono">{isFloatingBooking(r) ? '—' : (r.room_number || '—')}</td>
                                         <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.total_amount)}</td>
                                         <td className="px-3 py-1.5 text-right font-mono font-bold">{fmtINR(r.folio_total)}</td>
                                         <td className="px-3 py-1.5">{r.folio_status || '—'}</td>
@@ -18560,8 +18577,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         <td className="px-3 py-1.5 font-mono text-[10px]">{r.id}</td>
                                         <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
                                         <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
-                                        <td className="px-3 py-1.5">{r.room_name}</td>
-                                        <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                        <td className="px-3 py-1.5">{isFloatingBooking(r) ? 'Unassigned' : (r.room_name || '—')}</td>
+                                        <td className="px-3 py-1.5 font-mono">{isFloatingBooking(r) ? '—' : (r.room_number || '—')}</td>
                                         <td className="px-3 py-1.5 text-xs">{String(r.check_in_date || '').slice(0,10)}</td>
                                         <td className="px-3 py-1.5 text-xs">{String(r.check_out_date || '').slice(0,10)}</td>
                                         <td className="px-3 py-1.5 text-center">{r.num_guests}</td>
@@ -18616,8 +18633,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <td className="px-3 py-1.5 text-xs">{String(r.check_in_date || '').slice(0,10)}</td>
                                   <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
                                   <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
-                                  <td className="px-3 py-1.5">{r.room_name || '—'}</td>
-                                  <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                  <td className="px-3 py-1.5">{isFloatingBooking(r) ? 'Unassigned' : (r.room_name || '—')}</td>
+                                  <td className="px-3 py-1.5 font-mono">{isFloatingBooking(r) ? '—' : (r.room_number || '—')}</td>
                                   <td className="px-3 py-1.5">{r.room_category || r.room_type || '—'}</td>
                                   <td className="px-3 py-1.5 text-center">{r.num_guests}{r.extra_adults ? ` +${r.extra_adults}A` : ''}</td>
                                   <td className="px-3 py-1.5">{r.meal_plan_snapshot || r.meal_plan_id || '—'}</td>
@@ -18632,8 +18649,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <td className="px-3 py-1.5 text-xs">{String(r.check_out_date || '').slice(0,10)}</td>
                                   <td className="px-3 py-1.5 font-semibold">{r.guest_name}</td>
                                   <td className="px-3 py-1.5">{r.guest_phone || '—'}</td>
-                                  <td className="px-3 py-1.5">{r.room_name || '—'}</td>
-                                  <td className="px-3 py-1.5 font-mono">{r.room_number || '—'}</td>
+                                  <td className="px-3 py-1.5">{isFloatingBooking(r) ? 'Unassigned' : (r.room_name || '—')}</td>
+                                  <td className="px-3 py-1.5 font-mono">{isFloatingBooking(r) ? '—' : (r.room_number || '—')}</td>
                                   <td className="px-3 py-1.5">{r.room_category || '—'}</td>
                                   <td className="px-3 py-1.5 text-center">{r.num_guests}</td>
                                   <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.total_amount)}</td>
