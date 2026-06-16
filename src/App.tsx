@@ -7258,14 +7258,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Reservation-table pagination (10 rows/page) — the list can run to hundreds
   // of rows; paginate the already-filtered/sorted set in-browser. Reset to page
   // 1 on a new search/sort; clamp when the result set shrinks.
-  const BOOKINGS_PAGE_SIZE = 10;
+  const [bookingsPageSize, setBookingsPageSize] = useState(10);
   const [bookingsPage, setBookingsPage] = useState(1);
-  const bookingsTotalPages = Math.max(1, Math.ceil(displayedBookings.length / BOOKINGS_PAGE_SIZE));
-  useEffect(() => { setBookingsPage(1); }, [bookingHistoryFilter.search, bookingSort.col, bookingSort.dir]);
+  const bookingsTotalPages = Math.max(1, Math.ceil(displayedBookings.length / bookingsPageSize));
+  useEffect(() => { setBookingsPage(1); }, [bookingHistoryFilter.search, bookingSort.col, bookingSort.dir, bookingsPageSize]);
   useEffect(() => { setBookingsPage(p => Math.min(Math.max(1, p), bookingsTotalPages)); }, [bookingsTotalPages]);
   const pagedBookings = useMemo(
-    () => displayedBookings.slice((bookingsPage - 1) * BOOKINGS_PAGE_SIZE, bookingsPage * BOOKINGS_PAGE_SIZE),
-    [displayedBookings, bookingsPage],
+    () => displayedBookings.slice((bookingsPage - 1) * bookingsPageSize, bookingsPage * bookingsPageSize),
+    [displayedBookings, bookingsPage, bookingsPageSize],
   );
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
   const [complianceList, setComplianceList] = useState<any[]>([]);
@@ -7286,6 +7286,45 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingBooking, setEditingBooking] = useState<any>(null);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [checkoutBooking, setCheckoutBooking] = useState<any>(null);
+  // Mid-stay room move (20 Jun 2026) — a CHECKED_IN guest can be moved to
+  // another room of the SAME category (e.g. AC fault), based on availability.
+  const [moveRoom, setMoveRoom] = useState<{ booking: any; rooms: any[] | null; loading: boolean; busyId: string; error: string } | null>(null);
+  const openMoveRoom = async (b: any) => {
+    setMoveRoom({ booking: b, rooms: null, loading: true, busyId: '', error: '' });
+    try {
+      const ci = String(b.check_in_date || '').slice(0, 10);
+      const co = String(b.check_out_date || '').slice(0, 10);
+      const curType = hotelRooms.find((r: any) => r.id === b.room_id)?.type_id ?? null;
+      const qs = new URLSearchParams({ start: ci, end: co, guests: '1', quote: '1' });
+      if (b.id) qs.set('exclude_booking_id', b.id);
+      if (b.meal_plan_id) qs.set('meal_plan_id', b.meal_plan_id);
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/find-available-rooms?${qs.toString()}`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      // Same category, available for the stay, and not the current room.
+      const rooms = (Array.isArray(data?.rooms) ? data.rooms : [])
+        .filter((r: any) => r.available && r.id !== b.room_id && (r.type_id ?? null) === curType);
+      setMoveRoom(m => m ? { ...m, rooms, loading: false } : m);
+    } catch {
+      setMoveRoom(m => m ? { ...m, rooms: [], loading: false, error: 'Could not load available rooms.' } : m);
+    }
+  };
+  const confirmMoveRoom = async (roomId: string) => {
+    setMoveRoom(m => m ? { ...m, busyId: roomId, error: '' } : m);
+    try {
+      const bid = moveRoom?.booking?.id;
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings/${bid}/reassign-room`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ room_id: roomId }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setMoveRoom(m => m ? { ...m, busyId: '', error: d?.error || 'Could not move the guest.' } : m); return; }
+      setMoveRoom(null);
+      await Promise.all([fetchHotelBookings(), fetchHotelRooms()]);
+      markAvailabilityDirty();
+    } catch { setMoveRoom(m => m ? { ...m, busyId: '', error: 'Could not move the guest.' } : m); }
+  };
   // RESTAURANT-BILL — booking whose room-service F&B bill is open in the
   // view/mark-paid modal (opened from the reservation table cell).
   const [restaurantBillBooking, setRestaurantBillBooking] = useState<any>(null);
@@ -18125,6 +18164,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               );
                             })()}
                             {b.status === 'BOOKED' && <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600">Check In</button>}
+                            {b.status === 'CHECKED_IN' && <button onClick={() => openMoveRoom(b)} title="Move this guest to another room of the same category (e.g. room issue)" className="px-3 py-1.5 rounded-lg border border-[#0f766e]/30 text-[#0f766e] text-[11px] font-bold hover:bg-[#0f766e]/5">🔄 Move room</button>}
                             {b.status === 'CHECKED_IN' && <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608]">Check Out</button>}
                             {/* ADV-PAY: "💰 Advance" button — record a deposit against this booking at
                                 any time (pre-checkin or mid-stay). Opens the AdvancePaymentModal. */}
@@ -18271,25 +18311,36 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   })}
                 </tbody>
               </table>
-              {/* Pagination — 10 rows per page over the filtered/sorted set. */}
-              {bookingsTotalPages > 1 && (
+              {/* Pagination — page-size selector + prev/next over the filtered
+                  set. Shown whenever there are rows so the selector is always
+                  reachable; the prev/next controls appear only when >1 page. */}
+              {displayedBookings.length > 0 && (
                 <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-[#cc5a16]/10 bg-[#faf7f2] flex-wrap">
-                  <span className="text-[11px] text-[#6b5d52]">
-                    Showing <strong className="text-[#3d3128]">{(bookingsPage - 1) * BOOKINGS_PAGE_SIZE + 1}</strong>
-                    –<strong className="text-[#3d3128]">{Math.min(bookingsPage * BOOKINGS_PAGE_SIZE, displayedBookings.length)}</strong>
-                    {' '}of <strong className="text-[#3d3128]">{displayedBookings.length}</strong>
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <button type="button" onClick={() => setBookingsPage(1)} disabled={bookingsPage <= 1}
-                      className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">« First</button>
-                    <button type="button" onClick={() => setBookingsPage(p => Math.max(1, p - 1))} disabled={bookingsPage <= 1}
-                      className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">‹ Prev</button>
-                    <span className="px-2 text-[11px] font-bold text-[#3d3128] whitespace-nowrap">Page {bookingsPage} / {bookingsTotalPages}</span>
-                    <button type="button" onClick={() => setBookingsPage(p => Math.min(bookingsTotalPages, p + 1))} disabled={bookingsPage >= bookingsTotalPages}
-                      className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">Next ›</button>
-                    <button type="button" onClick={() => setBookingsPage(bookingsTotalPages)} disabled={bookingsPage >= bookingsTotalPages}
-                      className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">Last »</button>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[11px] text-[#6b5d52]">
+                      Showing <strong className="text-[#3d3128]">{(bookingsPage - 1) * bookingsPageSize + 1}</strong>
+                      –<strong className="text-[#3d3128]">{Math.min(bookingsPage * bookingsPageSize, displayedBookings.length)}</strong>
+                      {' '}of <strong className="text-[#3d3128]">{displayedBookings.length}</strong>
+                    </span>
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] ml-2">Rows/page</label>
+                    <select value={bookingsPageSize} onChange={e => setBookingsPageSize(Number(e.target.value))}
+                      className="bg-white border border-[#cc5a16]/20 rounded-lg px-2 py-1 text-[11px] font-bold text-[#3d3128] focus:outline-none focus:ring-1 ring-[#cc5a16]/30">
+                      {[10, 25, 50].map(n => <option key={n} value={n}>{n}</option>)}
+                    </select>
                   </div>
+                  {bookingsTotalPages > 1 && (
+                    <div className="flex items-center gap-1">
+                      <button type="button" onClick={() => setBookingsPage(1)} disabled={bookingsPage <= 1}
+                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">« First</button>
+                      <button type="button" onClick={() => setBookingsPage(p => Math.max(1, p - 1))} disabled={bookingsPage <= 1}
+                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">‹ Prev</button>
+                      <span className="px-2 text-[11px] font-bold text-[#3d3128] whitespace-nowrap">Page {bookingsPage} / {bookingsTotalPages}</span>
+                      <button type="button" onClick={() => setBookingsPage(p => Math.min(bookingsTotalPages, p + 1))} disabled={bookingsPage >= bookingsTotalPages}
+                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">Next ›</button>
+                      <button type="button" onClick={() => setBookingsPage(bookingsTotalPages)} disabled={bookingsPage >= bookingsTotalPages}
+                        className="px-2 py-1 rounded-lg border border-[#cc5a16]/20 text-[11px] font-bold text-[#3d3128] bg-white hover:bg-[#faf7f2] disabled:opacity-40 disabled:cursor-not-allowed">Last »</button>
+                    </div>
+                  )}
                 </div>
               )}
             </>)}
@@ -26509,6 +26560,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               onSubmit={async (e) => {
                 e.preventDefault();
                 setHotelError('');   // clear any prior error before retry
+                // Business rule (20 Jun 2026): a NEW booking must have a room
+                // CATEGORY and (for MATRIX tenants that have meal plans) a MEAL
+                // PLAN — both mandatory. Edits are exempt (the booking already
+                // has them). Legacy / no-meal-plan tenants skip the meal-plan rule.
+                if (!editingBooking.id) {
+                  const hasCategory = !!(editingBooking.room_type_id || editingBooking.room_id);
+                  if (!hasCategory) { setHotelError('Please select a room category before saving the booking.'); return; }
+                  const activeMealPlans = (tariffData.meal_plans || []).filter((m: any) => m.is_active !== 0);
+                  if (tariffData.tariff_model === 'MATRIX' && activeMealPlans.length > 0 && !editingBooking.meal_plan_id) {
+                    setHotelError('Please select a meal plan before saving the booking.'); return;
+                  }
+                }
                 try {
                   // BCG Tariff Phase 4.2 (7 Jun 2026) — DO NOT backfill
                   // room_rate from room.base_rate. Previously this line
@@ -27055,13 +27118,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Meal Plan</label>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Meal Plan <span className="text-[#c13b3b]">*</span></label>
                       <select
                         value={editingBooking.meal_plan_id || ''}
                         onChange={e => setEditingBooking({...editingBooking, meal_plan_id: e.target.value || null})}
-                        className="w-full bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20"
+                        className={cn('w-full bg-white border rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20',
+                          !editingBooking.id && !editingBooking.meal_plan_id ? 'border-[#c13b3b]/50' : 'border-[#cc5a16]/20')}
                       >
-                        <option value="">— None (use base rate) —</option>
+                        <option value="">— Select a meal plan —</option>
                         {tariffData.meal_plans
                           .filter((m: any) => m.is_active !== 0)
                           .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0))
@@ -27656,6 +27720,45 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 {cancelSubmitting ? 'Cancelling…' : 'Confirm cancel'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═════════ Mid-stay Move-Room modal (same-category reassignment for a
+          checked-in guest, e.g. a room fault) ═════════ */}
+      {moveRoom && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setMoveRoom(null)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between mb-1">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-widest text-[#0f766e]">Move room</p>
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">{moveRoom.booking?.guest_name}</h3>
+              </div>
+              <button onClick={() => setMoveRoom(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+            </div>
+            <p className="text-xs text-[#6b5d52] mb-4">
+              Currently in <strong>{bookingRoomLabel(moveRoom.booking)}</strong>. After check-in a guest can only be moved to a <strong>free room of the same category</strong> — the rate &amp; meal plan stay the same.
+            </p>
+            {moveRoom.error && <div className="mb-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">{moveRoom.error}</div>}
+            {moveRoom.loading ? (
+              <p className="text-sm text-[#9c8e85] italic py-6 text-center">Finding available rooms…</p>
+            ) : !moveRoom.rooms || moveRoom.rooms.length === 0 ? (
+              <p className="text-sm text-[#9c8e85] italic py-6 text-center">No other room of this category is free for these dates.</p>
+            ) : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {moveRoom.rooms.map((r: any) => (
+                  <button key={r.id} type="button" disabled={!!moveRoom.busyId}
+                    onClick={() => confirmMoveRoom(r.id)}
+                    className="w-full text-left rounded-xl border border-[#cc5a16]/15 bg-white px-3 py-2.5 hover:border-[#0f766e]/50 hover:bg-[#0f766e]/5 disabled:opacity-50 flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-bold text-[#1a1208]">{r.name || r.room_number}{r.room_number && r.name ? ` · #${r.room_number}` : ''}</p>
+                      <p className="text-[10px] text-[#6b5d52]">{r.type_name || 'Room'} · Sleeps {r.capacity}{r.floor ? ` · Floor ${r.floor}` : ''}</p>
+                    </div>
+                    <span className="text-[11px] font-bold text-[#0f766e] whitespace-nowrap">{moveRoom.busyId === r.id ? 'Moving…' : 'Move here →'}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
