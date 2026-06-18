@@ -52618,6 +52618,17 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ actual_hours: num })
     });
+    // Optimistic update: reflect new value in rows so tsRowMap is up-to-date
+    // when pending is cleared (prevents the cell reverting to the old DB value)
+    setRows(prev => {
+      const idx = prev.findIndex(r => r.staff_id === staffId && String(r.shift_date).slice(0, 10) === date);
+      if (idx >= 0) {
+        const updated = [...prev];
+        updated[idx] = { ...updated[idx], actual_hours: num };
+        return updated;
+      }
+      return [...prev, { staff_id: staffId, shift_date: date, actual_hours: num, planned_hours: 0, status: 'AUTO' }];
+    });
     setTsGridPending(prev => {
       const next = { ...prev };
       if (next[staffId]) { const d = { ...next[staffId] }; delete d[date]; next[staffId] = d; }
