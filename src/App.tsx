@@ -4227,6 +4227,172 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
   const [staffList, setStaffList] = useState<any[]>([]);
   const [user, setUser] = useState<any>(null);
 
+  // Mark Attendance grid (OWNER/MANAGER)
+  const isManager = role === 'OWNER' || role === 'MANAGER';
+  const [attTab, setAttTab] = useState<'logs' | 'grid'>('logs');
+  const getWeekStart = () => {
+    const d = new Date(); d.setDate(d.getDate() - d.getDay() + 1); return d.toISOString().slice(0, 10);
+  };
+  const getWeekEnd = (start: string) => {
+    const d = new Date(start); d.setDate(d.getDate() + 6); return d.toISOString().slice(0, 10);
+  };
+  const [gridStart, setGridStart] = useState(getWeekStart);
+  const [gridEnd, setGridEnd] = useState(() => getWeekEnd(getWeekStart()));
+  const [gridStaff, setGridStaff] = useState<any[]>([]);
+  const [gridAtt, setGridAtt] = useState<Record<string, Record<string, any>>>({}); // staffId → date → att
+  const [gridPending, setGridPending] = useState<Record<string, Record<string, any>>>({}); // pending (unsaved) changes
+  const [gridSelectedRows, setGridSelectedRows] = useState<Set<string>>(new Set());
+  const [gridNameFilter, setGridNameFilter] = useState('');
+  const [gridTypeFilter, setGridTypeFilter] = useState('ALL');
+  const [gridDeptFilter, setGridDeptFilter] = useState('ALL');
+  const [massType, setMassType] = useState('PRESENT');
+  const [massHours, setMassHours] = useState('8');
+  const [gridSaving, setGridSaving] = useState(false);
+
+  const getDatesInRange = (start: string, end: string): string[] => {
+    const dates: string[] = [];
+    const cur = new Date(start);
+    const last = new Date(end);
+    while (cur <= last) { dates.push(cur.toISOString().slice(0, 10)); cur.setDate(cur.getDate() + 1); }
+    return dates;
+  };
+
+  const fetchAttendanceGrid = async () => {
+    if (!isManager) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/attendance/staff?start=${gridStart}&end=${gridEnd}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setGridStaff(data.staff || []);
+      const map: Record<string, Record<string, any>> = {};
+      for (const a of (data.attendance || [])) {
+        const dateStr = String(a.date).slice(0, 10);
+        if (!map[a.user_id]) map[a.user_id] = {};
+        map[a.user_id][dateStr] = a;
+      }
+      setGridAtt(map);
+      setGridPending({});
+    } catch {}
+  };
+
+  useEffect(() => {
+    if (attTab === 'grid' && isManager) fetchAttendanceGrid();
+  }, [attTab, gridStart, gridEnd]);
+
+  const setCellPending = (staffId: string, date: string, val: Partial<{type: string; hours: string; note: string}>) => {
+    setGridPending(prev => ({
+      ...prev,
+      [staffId]: { ...(prev[staffId] || {}), [date]: { ...(prev[staffId]?.[date] || gridAtt[staffId]?.[date] || {}), ...val }
+      }
+    }));
+  };
+
+  const saveCellNow = async (staffId: string, date: string, value: {type: string; hours?: string; note?: string}) => {
+    await fetch(`/api/restaurant/${restaurantId}/attendance/staff/${staffId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ date, type: value.type, hours: value.hours ? parseFloat(value.hours) : undefined, note: value.note })
+    });
+    setGridPending(prev => {
+      const next = { ...prev };
+      if (next[staffId]) { const d = { ...next[staffId] }; delete d[date]; next[staffId] = d; }
+      return next;
+    });
+    fetchAttendanceGrid();
+  };
+
+  const saveAllPending = async () => {
+    setGridSaving(true);
+    const entries: any[] = [];
+    for (const [staffId, dates] of Object.entries(gridPending)) {
+      for (const [date, val] of Object.entries(dates as any)) {
+        entries.push({ staffId, date, type: (val as any).type ?? 'PRESENT', hours: (val as any).hours ? parseFloat((val as any).hours) : undefined, note: (val as any).note });
+      }
+    }
+    if (entries.length > 0) {
+      await fetch(`/api/restaurant/${restaurantId}/attendance/bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ entries })
+      });
+    }
+    setGridPending({});
+    await fetchAttendanceGrid();
+    setGridSaving(false);
+  };
+
+  const applyMassUpdate = async () => {
+    if (gridSelectedRows.size === 0) return;
+    setGridSaving(true);
+    const dates = getDatesInRange(gridStart, gridEnd);
+    const entries: any[] = [];
+    for (const staffId of gridSelectedRows) {
+      for (const date of dates) {
+        entries.push({ staffId, date, type: massType, hours: parseFloat(massHours) || undefined });
+      }
+    }
+    await fetch(`/api/restaurant/${restaurantId}/attendance/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ entries })
+    });
+    setGridSelectedRows(new Set());
+    await fetchAttendanceGrid();
+    setGridSaving(false);
+  };
+
+  const copyPrevWeek = async () => {
+    setGridSaving(true);
+    const prevStart = new Date(gridStart); prevStart.setDate(prevStart.getDate() - 7);
+    const prevEnd = new Date(gridEnd); prevEnd.setDate(prevEnd.getDate() - 7);
+    const prevRes = await fetch(`/api/restaurant/${restaurantId}/attendance/staff?start=${prevStart.toISOString().slice(0,10)}&end=${prevEnd.toISOString().slice(0,10)}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!prevRes.ok) { setGridSaving(false); return; }
+    const prevData = await prevRes.json();
+    const prevMap: Record<string, Record<string, any>> = {};
+    for (const a of (prevData.attendance || [])) {
+      const d = String(a.date).slice(0, 10);
+      if (!prevMap[a.user_id]) prevMap[a.user_id] = {};
+      prevMap[a.user_id][d] = a;
+    }
+    const entries: any[] = [];
+    const curDates = getDatesInRange(gridStart, gridEnd);
+    const prevDates = getDatesInRange(prevStart.toISOString().slice(0,10), prevEnd.toISOString().slice(0,10));
+    for (const staffId of Object.keys(prevMap)) {
+      for (let i = 0; i < curDates.length && i < prevDates.length; i++) {
+        const prev = prevMap[staffId]?.[prevDates[i]];
+        if (prev) entries.push({ staffId, date: curDates[i], type: prev.type, hours: prev.hours });
+      }
+    }
+    if (entries.length > 0) {
+      await fetch(`/api/restaurant/${restaurantId}/attendance/bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ entries })
+      });
+    }
+    await fetchAttendanceGrid();
+    setGridSaving(false);
+  };
+
+  const filteredGridStaff = gridStaff.filter(s => {
+    if (gridNameFilter && !s.name.toLowerCase().includes(gridNameFilter.toLowerCase())) return false;
+    if (gridTypeFilter !== 'ALL' && s.employee_type !== gridTypeFilter) return false;
+    if (gridDeptFilter !== 'ALL' && s.department !== gridDeptFilter) return false;
+    return true;
+  });
+  const uniqueDepts = ['ALL', ...Array.from(new Set(gridStaff.map((s: any) => s.department).filter(Boolean)))];
+  const gridDates = getDatesInRange(gridStart, gridEnd);
+  const ATT_TYPES = ['PRESENT', 'ABSENT', 'HALF_DAY', 'LEAVE', 'LEAVE_WO_PAY'];
+  const ATT_COLORS: Record<string, string> = {
+    PRESENT: 'bg-green-100 text-green-700', ABSENT: 'bg-red-100 text-red-700',
+    HALF_DAY: 'bg-yellow-100 text-yellow-700', LEAVE: 'bg-blue-100 text-blue-600',
+    LEAVE_WO_PAY: 'bg-purple-100 text-purple-700',
+  };
+
   useEffect(() => {
     fetchLogs();
     fetchUser();
@@ -4410,8 +4576,8 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
         </div>
         <div className="flex items-center gap-3 bg-white p-2 rounded-2xl shadow-sm border border-[#cc5a16]/10">
           <Calendar size={18} className="text-[#9c8e85] ml-2" />
-          <input 
-            type="month" 
+          <input
+            type="month"
             value={month}
             onChange={e => setMonth(e.target.value)}
             className="bg-transparent border-none focus:ring-0 text-sm font-bold text-[#1a1208] outline-none"
@@ -4419,8 +4585,157 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
         </div>
       </div>
 
-      {role !== 'OWNER' && (
-        <motion.div 
+      {/* Sub-tabs for manager */}
+      {isManager && (
+        <div className="flex gap-2 p-1 bg-[#faf7f2] rounded-2xl w-fit">
+          {([['logs', 'Attendance Logs'], ['grid', 'Mark Attendance']] as const).map(([t, label]) => (
+            <button key={t} onClick={() => setAttTab(t)}
+              className={`px-5 py-2 rounded-xl text-sm font-bold transition-all ${attTab === t ? 'bg-white shadow text-[#cc5a16]' : 'text-[#9c8e85]'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Excel-style Mark Attendance grid */}
+      {attTab === 'grid' && isManager && (
+        <div className="bg-white rounded-[32px] shadow-sm border border-[#cc5a16]/10 overflow-hidden">
+          {/* Toolbar */}
+          <div className="p-5 border-b border-[#cc5a16]/10 flex flex-wrap gap-3 items-center">
+            <div className="flex items-center gap-2 bg-[#faf7f2] rounded-xl px-3 py-2">
+              <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">From</span>
+              <input type="date" value={gridStart} onChange={e => { setGridStart(e.target.value); setGridEnd(getWeekEnd(e.target.value)); }}
+                className="bg-transparent border-none text-sm font-bold outline-none text-[#1a1208]" />
+              <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">To</span>
+              <input type="date" value={gridEnd} onChange={e => setGridEnd(e.target.value)}
+                className="bg-transparent border-none text-sm font-bold outline-none text-[#1a1208]" />
+            </div>
+            <input placeholder="Search name…" value={gridNameFilter} onChange={e => setGridNameFilter(e.target.value)}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none w-36" />
+            <select value={gridTypeFilter} onChange={e => setGridTypeFilter(e.target.value)}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none">
+              <option value="ALL">All Types</option>
+              <option value="LOGIN">Login</option>
+              <option value="OFFLINE">Offline</option>
+            </select>
+            <select value={gridDeptFilter} onChange={e => setGridDeptFilter(e.target.value)}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none">
+              {uniqueDepts.map(d => <option key={d} value={d}>{d === 'ALL' ? 'All Depts' : d}</option>)}
+            </select>
+            <div className="flex-1" />
+            <button onClick={copyPrevWeek} disabled={gridSaving}
+              className="px-4 py-2 text-sm font-bold rounded-xl bg-zinc-100 text-zinc-600 hover:bg-zinc-200 transition-all disabled:opacity-50">
+              Copy Prev Week
+            </button>
+            {Object.keys(gridPending).length > 0 && (
+              <button onClick={saveAllPending} disabled={gridSaving}
+                className="px-4 py-2 text-sm font-bold rounded-xl bg-[#cc5a16] text-white hover:bg-[#a84612] transition-all disabled:opacity-50">
+                {gridSaving ? 'Saving…' : `Save All (${Object.values(gridPending).reduce((n: number, v) => n + Object.keys(v as any).length, 0)})`}
+              </button>
+            )}
+          </div>
+
+          {/* Mass-update bar */}
+          {gridSelectedRows.size > 0 && (
+            <div className="flex items-center gap-3 px-5 py-3 bg-[#cc5a16]/5 border-b border-[#cc5a16]/10">
+              <span className="text-sm font-bold text-[#cc5a16]">{gridSelectedRows.size} selected</span>
+              <span className="text-sm text-[#6b5d52]">Set to:</span>
+              <select value={massType} onChange={e => setMassType(e.target.value)}
+                className="bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-1.5 text-sm outline-none font-bold">
+                {ATT_TYPES.map(t => <option key={t} value={t}>{t.replace('_', ' ')}</option>)}
+              </select>
+              <input type="number" value={massHours} onChange={e => setMassHours(e.target.value)} placeholder="Hours"
+                className="w-20 bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-1.5 text-sm outline-none font-bold" />
+              <button onClick={applyMassUpdate} disabled={gridSaving}
+                className="px-4 py-1.5 text-sm font-bold rounded-xl bg-[#cc5a16] text-white hover:bg-[#a84612] disabled:opacity-50 transition-all">
+                Apply to all dates
+              </button>
+              <button onClick={() => setGridSelectedRows(new Set())} className="ml-auto text-sm text-[#9c8e85] hover:text-[#1a1208]">Clear</button>
+            </div>
+          )}
+
+          {/* Scrollable grid */}
+          <div className="overflow-auto max-h-[60vh]">
+            <table className="min-w-full text-sm border-collapse">
+              <thead className="sticky top-0 bg-white z-10">
+                <tr>
+                  <th className="w-8 px-3 py-3 border-b border-r border-zinc-100">
+                    <input type="checkbox"
+                      checked={gridSelectedRows.size === filteredGridStaff.length && filteredGridStaff.length > 0}
+                      onChange={e => setGridSelectedRows(e.target.checked ? new Set(filteredGridStaff.map(s => s.id)) : new Set())} />
+                  </th>
+                  <th className="sticky left-0 bg-white px-4 py-3 text-left text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] border-b border-r border-zinc-100 min-w-[160px]">Employee</th>
+                  {gridDates.map(d => (
+                    <th key={d} className="px-2 py-3 text-center text-[10px] font-bold uppercase text-[#6b5d52] border-b border-zinc-100 min-w-[110px]">
+                      {new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', month: 'short', day: 'numeric' })}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredGridStaff.length === 0 && (
+                  <tr><td colSpan={gridDates.length + 2} className="text-center py-10 text-[#9c8e85] italic">No staff found. Adjust filters.</td></tr>
+                )}
+                {filteredGridStaff.map(s => (
+                  <tr key={s.id} className={`border-b border-zinc-50 hover:bg-[#faf7f2]/40 ${gridSelectedRows.has(s.id) ? 'bg-[#cc5a16]/5' : ''}`}>
+                    <td className="px-3 py-2 border-r border-zinc-100">
+                      <input type="checkbox" checked={gridSelectedRows.has(s.id)}
+                        onChange={e => {
+                          const next = new Set(gridSelectedRows);
+                          if (e.target.checked) next.add(s.id); else next.delete(s.id);
+                          setGridSelectedRows(next);
+                        }} />
+                    </td>
+                    <td className="sticky left-0 bg-white px-4 py-2 border-r border-zinc-100 font-bold text-[#1a1208]">
+                      <div className="flex items-center gap-1.5">
+                        <span>{s.name}</span>
+                        {s.employee_type === 'OFFLINE' && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-zinc-200 text-zinc-500 uppercase">Offline</span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-[#9c8e85] mt-0.5">{s.role}</div>
+                    </td>
+                    {gridDates.map(date => {
+                      const pending = gridPending[s.id]?.[date];
+                      const saved = gridAtt[s.id]?.[date];
+                      const cell = pending ?? saved;
+                      const isPending = !!pending;
+                      return (
+                        <td key={date} className={`px-2 py-1.5 text-center border-r border-zinc-50 ${isPending ? 'bg-yellow-50' : ''}`}>
+                          <div className="flex flex-col gap-1 items-center">
+                            <select value={cell?.type ?? ''} onChange={e => {
+                              const val = e.target.value;
+                              if (!val) return;
+                              const updated = { ...(cell || {}), type: val };
+                              setCellPending(s.id, date, updated);
+                              saveCellNow(s.id, date, updated);
+                            }}
+                              className={`text-[10px] font-bold px-2 py-1 rounded-lg border-none outline-none cursor-pointer w-full ${cell?.type ? ATT_COLORS[cell.type] ?? 'bg-zinc-100 text-zinc-600' : 'bg-zinc-100 text-zinc-400'}`}>
+                              <option value="">—</option>
+                              {ATT_TYPES.map(t => <option key={t} value={t}>{t.replace('_', ' ')}</option>)}
+                            </select>
+                            {cell?.type && cell.type !== 'ABSENT' && (
+                              <input type="number" min="0" max="24" step="0.5"
+                                value={cell?.hours ?? ''}
+                                onChange={e => setCellPending(s.id, date, { type: cell.type, hours: e.target.value })}
+                                onBlur={e => { if (cell?.type) saveCellNow(s.id, date, { type: cell.type, hours: e.target.value }); }}
+                                placeholder="hrs"
+                                className="w-14 text-[10px] text-center bg-white border border-zinc-200 rounded-lg px-1 py-0.5 outline-none" />
+                            )}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {attTab === 'logs' && role !== 'OWNER' && (
+        <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           className="bg-white p-8 rounded-[32px] shadow-sm border border-[#cc5a16]/10"
@@ -4511,7 +4826,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
         </motion.div>
       )}
 
-      {role !== 'OWNER' && (
+      {attTab === 'logs' && role !== 'OWNER' && (
         <div className="bg-white rounded-[32px] shadow-sm border border-[#cc5a16]/10 overflow-hidden">
           <div className="p-8 border-b border-[#cc5a16]/10 flex justify-between items-center">
             <h3 className="text-xl font-bold font-serif">Monthly Timesheet</h3>
@@ -4613,7 +4928,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
         </div>
       )}
 
-      {role === 'OWNER' && (
+      {attTab === 'logs' && role === 'OWNER' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-8">
             <div className="bg-white rounded-[32px] shadow-sm border border-[#cc5a16]/10 overflow-hidden">
@@ -4685,7 +5000,12 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
                 {staffList.map(staff => (
                   <div key={staff.id} className="flex items-center justify-between p-4 bg-[#faf7f2] rounded-2xl">
                     <div>
-                      <p className="font-bold text-sm">{staff.name}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="font-bold text-sm">{staff.name}</p>
+                        {staff.employee_type === 'OFFLINE' && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-zinc-200 text-zinc-500 uppercase tracking-wider">Offline</span>
+                        )}
+                      </div>
                       <p className="text-[11px] text-[#6b5d52] uppercase tracking-widest">{staff.role}</p>
                     </div>
                     <div className="text-right">
@@ -4705,7 +5025,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
         </div>
       )}
 
-      <div className="bg-white rounded-[32px] shadow-sm border border-[#cc5a16]/10 overflow-hidden">
+      {attTab === 'logs' && <div className="bg-white rounded-[32px] shadow-sm border border-[#cc5a16]/10 overflow-hidden">
         <div className="p-8 border-b border-[#cc5a16]/10 flex justify-between items-center">
           <h3 className="text-xl font-bold font-serif flex items-center gap-2">
             <History size={20} className="text-[#9c8e85]" />
@@ -4784,7 +5104,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
           </table>
         </div>
         <p className="text-center text-[11px] text-[#9c8e85] py-1.5 md:hidden select-none">‹ scroll ›</p>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -8611,7 +8931,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Default role MANAGER — works for any tenant (RESTAURANT / HOTEL / BOTH).
   // Restaurant-only tenants will pick Chef/Waiter; hotel-only tenants will
   // pick Front Desk / Housekeeping / etc.
-  const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'MANAGER' as UserRole, phone: '', email: '', hourly_rate: 0, payroll_id: '' });
+  const [newStaff, setNewStaff] = useState({ loginId: '', name: '', password: '', role: 'MANAGER' as UserRole, phone: '', email: '', hourly_rate: 0, payroll_id: '', employee_type: 'LOGIN' as 'LOGIN' | 'OFFLINE' });
   const [newItem, setNewItem] = useState<{
     name: string,
     description: string,
@@ -8979,7 +9299,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       if (res.ok) {
         setIsAddingStaff(false);
-        setNewStaff({ loginId: '', name: '', password: '', role: 'MANAGER', phone: '', email: '', hourly_rate: 0, payroll_id: '' });
+        setNewStaff({ loginId: '', name: '', password: '', role: 'MANAGER', phone: '', email: '', hourly_rate: 0, payroll_id: '', employee_type: 'LOGIN' });
         setTimeout(() => fetchStaff(), 100);
       } else {
         const contentType = res.headers.get("content-type");
@@ -15409,53 +15729,78 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </button>
                 </div>
                 <form onSubmit={handleAddStaff} className="space-y-4">
+                  {/* Employee type toggle */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Employee Type</label>
+                    <div className="flex gap-2 p-1 bg-[#faf7f2] rounded-2xl">
+                      {(['LOGIN', 'OFFLINE'] as const).map(t => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => setNewStaff({ ...newStaff, employee_type: t, loginId: '', password: '', email: '' })}
+                          className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${newStaff.employee_type === t ? 'bg-white shadow text-[#cc5a16]' : 'text-[#9c8e85]'}`}
+                        >
+                          {t === 'LOGIN' ? '🔑 Login Employee' : '👤 Offline Employee'}
+                        </button>
+                      ))}
+                    </div>
+                    {newStaff.employee_type === 'OFFLINE' && (
+                      <p className="text-[11px] text-[#9c8e85] ml-2 mt-1">Offline employees cannot log in — their attendance and timesheet are managed by you.</p>
+                    )}
+                  </div>
                   <div className="space-y-1">
                     <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Full Name</label>
-                    <input 
+                    <input
                       required
                       className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
                       value={newStaff.name}
                       onChange={e => setNewStaff({...newStaff, name: e.target.value})}
                     />
                   </div>
+                  {newStaff.employee_type === 'LOGIN' && (
+                    <>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Login ID</label>
+                        <input
+                          className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                          value={newStaff.loginId}
+                          onChange={e => setNewStaff({...newStaff, loginId: e.target.value})}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Password</label>
+                        <input
+                          type="password"
+                          className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                          value={newStaff.password}
+                          onChange={e => setNewStaff({...newStaff, password: e.target.value})}
+                        />
+                      </div>
+                    </>
+                  )}
                   <div className="space-y-1">
-                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Login ID</label>
-                    <input 
-                      required
-                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                      value={newStaff.loginId}
-                      onChange={e => setNewStaff({...newStaff, loginId: e.target.value})}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Password</label>
-                    <input 
-                      required
-                      type="password"
-                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                      value={newStaff.password}
-                      onChange={e => setNewStaff({...newStaff, password: e.target.value})}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">WhatsApp Phone (with country code)</label>
-                    <input 
-                      required
+                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">
+                      WhatsApp Phone {newStaff.employee_type === 'LOGIN' ? '(with country code)' : '(optional)'}
+                    </label>
+                    <input
+                      required={newStaff.employee_type === 'LOGIN'}
                       placeholder="+919876543210"
                       className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
                       value={newStaff.phone}
                       onChange={e => setNewStaff({...newStaff, phone: e.target.value})}
                     />
                   </div>
-                  <div className="space-y-1">
-                    <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Email Address</label>
-                    <input 
-                      type="email"
-                      className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                      value={newStaff.email}
-                      onChange={e => setNewStaff({...newStaff, email: e.target.value})}
-                    />
-                  </div>
+                  {newStaff.employee_type === 'LOGIN' && (
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Email Address</label>
+                      <input
+                        type="email"
+                        className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                        value={newStaff.email}
+                        onChange={e => setNewStaff({...newStaff, email: e.target.value})}
+                      />
+                    </div>
+                  )}
                   <div className="space-y-1">
                     <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Role</label>
                     <select
@@ -15463,9 +15808,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       value={newStaff.role}
                       onChange={e => setNewStaff({...newStaff, role: e.target.value as UserRole})}
                     >
-                      {/* visibleStaffRoles is gated by isHotelEnabled +
-                          isRestaurantEnabled so the dropdown only shows
-                          roles that make sense for this tenant. */}
                       {visibleStaffRoles.map(r => (
                         <option key={r.id} value={r.id}>{r.emoji} {r.label}</option>
                       ))}
@@ -15498,7 +15840,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     type="submit"
                     className="w-full bg-[#cc5a16] text-white py-4 rounded-2xl font-bold hover:bg-[#a84612] transition-all"
                   >
-                    Add Staff
+                    Add {newStaff.employee_type === 'OFFLINE' ? 'Offline ' : ''}Staff
                   </button>
                 </form>
               </motion.div>
@@ -51152,6 +51494,112 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
   const [recomputing, setRecomputing] = useState(false);
   const [message, setMessage] = useState('');
 
+  // Edit Hours Grid sub-tab
+  const [tsTab, setTsTab] = useState<'summary' | 'grid'>('summary');
+  const [tsStaff, setTsStaff] = useState<any[]>([]);
+  const [tsGridPending, setTsGridPending] = useState<Record<string, Record<string, string>>>({}); // staffId -> date -> hours string
+  const [tsGridSaving, setTsGridSaving] = useState(false);
+  const [tsNameFilter, setTsNameFilter] = useState('');
+  const [tsTypeFilter, setTsTypeFilter] = useState('ALL');
+  const [tsSelectedRows, setTsSelectedRows] = useState<Set<string>>(new Set());
+  const [tsMassHours, setTsMassHours] = useState('8');
+  const [tsMassDate, setTsMassDate] = useState('');
+
+  const getDatesInRange2 = (s: string, e: string): string[] => {
+    const dates: string[] = [];
+    const cur = new Date(s); const last = new Date(e);
+    while (cur <= last) { dates.push(cur.toISOString().slice(0, 10)); cur.setDate(cur.getDate() + 1); }
+    return dates;
+  };
+
+  const fetchTsStaff = useCallback(async () => {
+    try {
+      const res = await fetch('/api/owner/staff', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (res.ok) setTsStaff(await res.json());
+    } catch {}
+  }, [token]);
+
+  useEffect(() => { if (tsTab === 'grid') fetchTsStaff(); }, [tsTab, fetchTsStaff]);
+
+  // Build a map from timesheet rows: staffId -> date -> actual_hours
+  const tsRowMap: Record<string, Record<string, any>> = useMemo(() => {
+    const m: Record<string, Record<string, any>> = {};
+    for (const r of rows) {
+      const d = String(r.shift_date).slice(0, 10);
+      if (!m[r.staff_id]) m[r.staff_id] = {};
+      m[r.staff_id][d] = r;
+    }
+    return m;
+  }, [rows]);
+
+  const saveTsHours = async (staffId: string, date: string, hrs: string) => {
+    const num = parseFloat(hrs);
+    if (isNaN(num) || num < 0) return;
+    await fetch(`/api/restaurant/${restaurantId}/timesheet/${staffId}/${date}/hours`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ actual_hours: num })
+    });
+    setTsGridPending(prev => {
+      const next = { ...prev };
+      if (next[staffId]) { const d = { ...next[staffId] }; delete d[date]; next[staffId] = d; }
+      return next;
+    });
+  };
+
+  const saveAllTsPending = async () => {
+    setTsGridSaving(true);
+    const entries: any[] = [];
+    for (const [staffId, dates] of Object.entries(tsGridPending)) {
+      for (const [date, hrs] of Object.entries(dates)) {
+        const num = parseFloat(hrs as string);
+        if (!isNaN(num) && num >= 0) entries.push({ staffId, date, actual_hours: num });
+      }
+    }
+    if (entries.length > 0) {
+      await fetch(`/api/restaurant/${restaurantId}/timesheet/bulk-hours`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ entries })
+      });
+    }
+    setTsGridPending({});
+    await (async () => { setLoading(true); try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/timesheet?start=${start}&end=${end}`, { headers: { 'Authorization': `Bearer ${token}` } });
+      if (r.ok) setRows(await r.json());
+    } finally { setLoading(false); } })();
+    setTsGridSaving(false);
+  };
+
+  const applyTsMassUpdate = async () => {
+    if (tsSelectedRows.size === 0) return;
+    setTsGridSaving(true);
+    const dates = tsMassDate ? [tsMassDate] : getDatesInRange2(start, end);
+    const entries: any[] = [];
+    for (const staffId of tsSelectedRows) {
+      for (const date of dates) {
+        const num = parseFloat(tsMassHours);
+        if (!isNaN(num) && num >= 0) entries.push({ staffId, date, actual_hours: num });
+      }
+    }
+    await fetch(`/api/restaurant/${restaurantId}/timesheet/bulk-hours`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ entries })
+    });
+    setTsSelectedRows(new Set());
+    const r = await fetch(`/api/restaurant/${restaurantId}/timesheet?start=${start}&end=${end}`, { headers: { 'Authorization': `Bearer ${token}` } });
+    if (r.ok) setRows(await r.json());
+    setTsGridSaving(false);
+  };
+
+  const filteredTsStaff = tsStaff.filter(s => {
+    if (tsNameFilter && !s.name.toLowerCase().includes(tsNameFilter.toLowerCase())) return false;
+    if (tsTypeFilter !== 'ALL' && s.employee_type !== tsTypeFilter) return false;
+    return true;
+  });
+  const tsDates = getDatesInRange2(start, end);
+
   const load = useCallback(async () => {
     setLoading(true); setMessage('');
     try {
@@ -51256,9 +51704,140 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
         </div>
       </div>
       {message && <p className="text-xs text-orange-700 font-bold">{message}</p>}
+
+      {/* Sub-tab toggle */}
+      <div className="flex gap-2 p-1 bg-[#faf7f2] rounded-2xl w-fit">
+        {([['summary', 'Summary'], ['grid', 'Edit Hours']] as const).map(([t, label]) => (
+          <button key={t} onClick={() => setTsTab(t)}
+            className={`px-5 py-2 rounded-xl text-sm font-bold transition-all ${tsTab === t ? 'bg-white shadow text-[#cc5a16]' : 'text-[#9c8e85]'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Excel-style Edit Hours grid */}
+      {tsTab === 'grid' && (
+        <div className="bg-white rounded-[32px] shadow-sm border border-[#cc5a16]/10 overflow-hidden">
+          {/* Toolbar */}
+          <div className="p-4 border-b border-[#cc5a16]/10 flex flex-wrap gap-3 items-center">
+            <input placeholder="Search name…" value={tsNameFilter} onChange={e => setTsNameFilter(e.target.value)}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none w-36" />
+            <select value={tsTypeFilter} onChange={e => setTsTypeFilter(e.target.value)}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none">
+              <option value="ALL">All Types</option>
+              <option value="LOGIN">Login</option>
+              <option value="OFFLINE">Offline</option>
+            </select>
+            <div className="flex-1" />
+            {Object.values(tsGridPending).some(d => Object.keys(d).length > 0) && (
+              <button onClick={saveAllTsPending} disabled={tsGridSaving}
+                className="px-4 py-2 text-sm font-bold rounded-xl bg-[#cc5a16] text-white hover:bg-[#a84612] disabled:opacity-50 transition-all">
+                {tsGridSaving ? 'Saving…' : 'Save All'}
+              </button>
+            )}
+          </div>
+
+          {/* Mass-update bar */}
+          {tsSelectedRows.size > 0 && (
+            <div className="flex items-center gap-3 px-5 py-3 bg-[#cc5a16]/5 border-b border-[#cc5a16]/10">
+              <span className="text-sm font-bold text-[#cc5a16]">{tsSelectedRows.size} selected</span>
+              <span className="text-sm text-[#6b5d52]">Set hours to:</span>
+              <input type="number" min="0" max="24" step="0.5" value={tsMassHours} onChange={e => setTsMassHours(e.target.value)}
+                className="w-20 bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-1.5 text-sm outline-none font-bold" />
+              <span className="text-sm text-[#6b5d52]">on date:</span>
+              <input type="date" value={tsMassDate} onChange={e => setTsMassDate(e.target.value)} placeholder="all dates"
+                className="bg-white border border-[#cc5a16]/20 rounded-xl px-3 py-1.5 text-sm outline-none" />
+              <span className="text-xs text-[#9c8e85]">(leave blank for all dates in range)</span>
+              <button onClick={applyTsMassUpdate} disabled={tsGridSaving}
+                className="px-4 py-1.5 text-sm font-bold rounded-xl bg-[#cc5a16] text-white hover:bg-[#a84612] disabled:opacity-50 transition-all">
+                Apply
+              </button>
+              <button onClick={() => setTsSelectedRows(new Set())} className="ml-auto text-sm text-[#9c8e85] hover:text-[#1a1208]">Clear</button>
+            </div>
+          )}
+
+          {/* Scrollable grid */}
+          <div className="overflow-auto max-h-[60vh]">
+            <table className="min-w-full text-sm border-collapse">
+              <thead className="sticky top-0 bg-white z-10">
+                <tr>
+                  <th className="w-8 px-3 py-3 border-b border-r border-zinc-100">
+                    <input type="checkbox"
+                      checked={tsSelectedRows.size === filteredTsStaff.length && filteredTsStaff.length > 0}
+                      onChange={e => setTsSelectedRows(e.target.checked ? new Set(filteredTsStaff.map(s => s.id)) : new Set())} />
+                  </th>
+                  <th className="sticky left-0 bg-white px-4 py-3 text-left text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] border-b border-r border-zinc-100 min-w-[160px]">Employee</th>
+                  {tsDates.map(d => (
+                    <th key={d} className="px-2 py-3 text-center text-[10px] font-bold uppercase text-[#6b5d52] border-b border-zinc-100 min-w-[80px]">
+                      {new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric' })}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredTsStaff.length === 0 && (
+                  <tr><td colSpan={tsDates.length + 2} className="text-center py-10 text-[#9c8e85] italic">No staff found.</td></tr>
+                )}
+                {filteredTsStaff.map(s => (
+                  <tr key={s.id} className={`border-b border-zinc-50 hover:bg-[#faf7f2]/40 ${tsSelectedRows.has(s.id) ? 'bg-[#cc5a16]/5' : ''}`}>
+                    <td className="px-3 py-2 border-r border-zinc-100">
+                      <input type="checkbox" checked={tsSelectedRows.has(s.id)}
+                        onChange={e => { const next = new Set(tsSelectedRows); if (e.target.checked) next.add(s.id); else next.delete(s.id); setTsSelectedRows(next); }} />
+                    </td>
+                    <td className="sticky left-0 bg-white px-4 py-2 border-r border-zinc-100 font-bold text-[#1a1208]">
+                      <div className="flex items-center gap-1.5">
+                        <span>{s.name}</span>
+                        {s.employee_type === 'OFFLINE' && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-zinc-200 text-zinc-500 uppercase">Offline</span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-[#9c8e85]">{s.role}</div>
+                    </td>
+                    {tsDates.map(date => {
+                      const saved = tsRowMap[s.id]?.[date];
+                      const pendingVal = tsGridPending[s.id]?.[date];
+                      const displayVal = pendingVal !== undefined ? pendingVal : (saved?.actual_hours !== undefined ? String(Number(saved.actual_hours).toFixed(1)) : '');
+                      const isApproved = saved?.status === 'APPROVED' && pendingVal === undefined;
+                      const isPending = pendingVal !== undefined;
+                      return (
+                        <td key={date} className={`px-2 py-1.5 text-center border-r border-zinc-50 ${isPending ? 'bg-yellow-50' : ''}`}>
+                          {isApproved ? (
+                            <div className="flex flex-col items-center gap-0.5">
+                              <span className="font-mono text-xs font-bold text-green-700">{displayVal}h</span>
+                              <span className="text-[9px] text-green-600 uppercase">Approved</span>
+                            </div>
+                          ) : (
+                            <input
+                              type="number" min="0" max="24" step="0.5"
+                              value={displayVal}
+                              onChange={e => setTsGridPending(prev => ({
+                                ...prev,
+                                [s.id]: { ...(prev[s.id] || {}), [date]: e.target.value }
+                              }))}
+                              onBlur={e => { if (e.target.value !== '' && e.target.value !== String(Number(saved?.actual_hours || 0).toFixed(1))) saveTsHours(s.id, date, e.target.value); }}
+                              placeholder="—"
+                              className="w-14 text-xs text-center bg-white border border-zinc-200 rounded-lg px-1 py-1 outline-none font-mono hover:border-[#cc5a16]/50 focus:border-[#cc5a16] transition-colors"
+                            />
+                          )}
+                          {saved && (
+                            <div className="text-[9px] text-[#9c8e85] mt-0.5">
+                              Plan: {Number(saved.planned_hours || 0).toFixed(1)}h
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Phase S2 — Pending approvals + payroll panel */}
-      <TimesheetPayrollPanel restaurantId={restaurantId} token={token} start={start} end={end} onApprovalChange={load} />
-      {loading ? (
+      {tsTab === 'summary' && <TimesheetPayrollPanel restaurantId={restaurantId} token={token} start={start} end={end} onApprovalChange={load} />}
+      {tsTab === 'summary' && (loading ? (
         <div className="py-16 text-center text-[#9c8e85]">Loading timesheet…</div>
       ) : (
         <>
@@ -51353,7 +51932,7 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
             </details>
           )}
         </>
-      )}
+      ))}
     </div>
   );
 }

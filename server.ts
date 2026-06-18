@@ -11943,6 +11943,100 @@ async function startServer() {
     }
   });
 
+  // Manager manually sets actual_hours for any staff on a date (used for offline employees
+  // who cannot self-log, and for corrections on login employees with PENDING/AUTO status).
+  app.patch("/api/restaurant/:id/timesheet/:staffId/:date/hours", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const role = req.user?.role ?? '';
+      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+        return res.status(403).json({ error: "Only OWNER or MANAGER can override timesheet hours" });
+      }
+      const { actual_hours, notes } = req.body;
+      if (actual_hours === undefined || actual_hours === null) {
+        return res.status(400).json({ error: "actual_hours is required" });
+      }
+      const hrs = Number(actual_hours);
+      if (isNaN(hrs) || hrs < 0) {
+        return res.status(400).json({ error: "actual_hours must be a non-negative number" });
+      }
+      const db = await getTenantDb(req.params.id);
+      const { staffId, date } = req.params;
+      // Verify staff belongs to this tenant
+      const staff = await db.get("SELECT id FROM attendance_staff WHERE id = ?", [staffId]);
+      if (!staff) return res.status(404).json({ error: "Staff not found" });
+      // Upsert: update if row exists, insert if not
+      const existing = await db.get("SELECT planned_hours FROM timesheet_day WHERE staff_id = ? AND shift_date = ?", [staffId, date]);
+      if (existing) {
+        const planned = Number(existing.planned_hours || 0);
+        await db.run(
+          `UPDATE timesheet_day
+              SET actual_hours   = ?,
+                  variance_hours = ? - planned_hours,
+                  notes          = COALESCE(?, notes),
+                  updated_at     = CURRENT_TIMESTAMP,
+                  status         = CASE WHEN status = 'APPROVED' THEN 'APPROVED' ELSE 'AUTO' END
+            WHERE staff_id = ? AND shift_date = ?`,
+          [hrs, hrs, notes ?? null, staffId, date]
+        );
+      } else {
+        await db.run(
+          `INSERT INTO timesheet_day (staff_id, shift_date, planned_hours, actual_hours, variance_hours, notes, status)
+           VALUES (?, ?, 0, ?, ?, ?, 'AUTO')`,
+          [staffId, date, hrs, hrs, notes ?? null]
+        );
+      }
+      res.json({ success: true, actual_hours: hrs });
+    } catch (err) {
+      console.error("Timesheet hours override error:", err);
+      res.status(500).json({ error: "Failed to update timesheet hours" });
+    }
+  });
+
+  // Manager bulk-set hours for multiple staff/dates in one call (mass update from grid)
+  app.post("/api/restaurant/:id/timesheet/bulk-hours", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const role = req.user?.role ?? '';
+      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const { entries } = req.body; // [{ staffId, date, actual_hours, notes? }]
+      if (!Array.isArray(entries) || entries.length === 0) {
+        return res.status(400).json({ error: "entries array is required" });
+      }
+      const db = await getTenantDb(req.params.id);
+      let written = 0;
+      for (const e of entries) {
+        if (!e.staffId || !e.date || e.actual_hours === undefined) continue;
+        const hrs = Number(e.actual_hours);
+        if (isNaN(hrs) || hrs < 0) continue;
+        const existing = await db.get("SELECT planned_hours FROM timesheet_day WHERE staff_id = ? AND shift_date = ?", [e.staffId, e.date]);
+        if (existing) {
+          await db.run(
+            `UPDATE timesheet_day
+                SET actual_hours   = ?,
+                    variance_hours = ? - planned_hours,
+                    notes          = COALESCE(?, notes),
+                    updated_at     = CURRENT_TIMESTAMP,
+                    status         = CASE WHEN status = 'APPROVED' THEN 'APPROVED' ELSE 'AUTO' END
+              WHERE staff_id = ? AND shift_date = ?`,
+            [hrs, hrs, e.notes ?? null, e.staffId, e.date]
+          );
+        } else {
+          await db.run(
+            `INSERT INTO timesheet_day (staff_id, shift_date, planned_hours, actual_hours, variance_hours, notes, status)
+             VALUES (?, ?, 0, ?, ?, ?, 'AUTO')`,
+            [e.staffId, e.date, hrs, hrs, e.notes ?? null]
+          );
+        }
+        written++;
+      }
+      res.json({ success: true, written });
+    } catch (err) {
+      console.error("Bulk timesheet hours error:", err);
+      res.status(500).json({ error: "Failed to bulk-update timesheet hours" });
+    }
+  });
+
   // Payroll summary: per-staff aggregated totals over a date range.
   // Honours approval status — REJECTED rows are excluded from pay.
   app.get("/api/restaurant/:id/timesheet/payroll-summary", authenticate, async (req: AuthRequest, res: Response) => {
@@ -33191,7 +33285,7 @@ ${data.tenant.name}`;
       const targetId = resolveTargetRestaurantId(req);
       if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
       const db = await getTenantDb(targetId);
-      const staff = await db.query("SELECT id, login_id, name, role, phone, email, is_active FROM attendance_staff ORDER BY name");
+      const staff = await db.query("SELECT id, login_id, name, role, phone, email, is_active, COALESCE(employee_type, 'LOGIN') AS employee_type FROM attendance_staff ORDER BY name");
       res.json(staff);
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch staff" });
@@ -33206,13 +33300,14 @@ ${data.tenant.name}`;
       }
       const targetId = resolveTargetRestaurantId(req);
       if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
-      const { name, role, phone, email, loginId, password, hourly_rate, payroll_id } = req.body;
+      const { name, role, phone, email, loginId, password, hourly_rate, payroll_id, employee_type } = req.body;
       const db = await getTenantDb(targetId);
       const id = randomUUID();
       const rate = Number(hourly_rate || 0);
       const payrollId = payroll_id ? String(payroll_id).trim() : null;
+      const empType = employee_type === 'OFFLINE' ? 'OFFLINE' : 'LOGIN';
 
-      if (loginId && password) {
+      if (empType === 'LOGIN' && loginId && password) {
         // Check for duplicate login_id in this tenant
         const existing = await db.get("SELECT id FROM attendance_staff WHERE login_id = ?", [loginId]);
         if (existing) {
@@ -33220,13 +33315,13 @@ ${data.tenant.name}`;
         }
         const hashedPassword = await bcrypt.hash(password, 12);
         await db.run(
-          "INSERT INTO attendance_staff (id, name, role, phone, email, login_id, password, hourly_rate, payroll_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [id, name, role, phone || null, email || null, loginId, hashedPassword, rate, payrollId]
+          "INSERT INTO attendance_staff (id, name, role, phone, email, login_id, password, hourly_rate, payroll_id, employee_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [id, name, role, phone || null, email || null, loginId, hashedPassword, rate, payrollId, empType]
         );
       } else {
         await db.run(
-          "INSERT INTO attendance_staff (id, name, role, phone, email, hourly_rate, payroll_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          [id, name, role, phone || null, email || null, rate, payrollId]
+          "INSERT INTO attendance_staff (id, name, role, phone, email, hourly_rate, payroll_id, employee_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [id, name, role, phone || null, email || null, rate, payrollId, empType]
         );
       }
       res.json({ success: true, id });
@@ -33308,6 +33403,100 @@ ${data.tenant.name}`;
     } catch (err) {
       console.error("Log attendance error:", err);
       res.status(500).json({ error: "Failed to log attendance" });
+    }
+  });
+
+  // Attendance: Manager marks attendance on behalf of any staff member (including offline employees)
+  app.post("/api/restaurant/:id/attendance/staff/:staffId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const role = req.user?.role ?? '';
+      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+        return res.status(403).json({ error: "Only OWNER or MANAGER can mark attendance for staff" });
+      }
+      const { id: restaurantId, staffId } = req.params;
+      const { date, hours, type, note, check_in, check_out } = req.body;
+      if (!date) return res.status(400).json({ error: "date is required" });
+      const db = await getTenantDb(restaurantId);
+      // Verify staff belongs to this tenant
+      const staff = await db.get("SELECT id FROM attendance_staff WHERE id = ?", [staffId]);
+      if (!staff) return res.status(404).json({ error: "Staff not found" });
+      const attId = `ATT-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      await db.run(`
+        INSERT INTO attendance (id, user_id, date, hours, type, note, check_in, check_out, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED')
+        ON CONFLICT(user_id, date) DO UPDATE SET
+          hours     = excluded.hours,
+          type      = excluded.type,
+          note      = excluded.note,
+          check_in  = excluded.check_in,
+          check_out = excluded.check_out,
+          status    = 'APPROVED'
+      `, [attId, staffId, date, hours ?? null, type ?? 'PRESENT', note ?? null, check_in ?? null, check_out ?? null]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Manager mark attendance error:", err);
+      res.status(500).json({ error: "Failed to mark attendance" });
+    }
+  });
+
+  // Attendance: Manager bulk-mark attendance for multiple staff on a date
+  app.post("/api/restaurant/:id/attendance/bulk", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const role = req.user?.role ?? '';
+      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+        return res.status(403).json({ error: "Only OWNER or MANAGER can bulk-mark attendance" });
+      }
+      const { entries } = req.body; // [{ staffId, date, type, hours, note }]
+      if (!Array.isArray(entries) || entries.length === 0) {
+        return res.status(400).json({ error: "entries array is required" });
+      }
+      const db = await getTenantDb(req.params.id);
+      let written = 0;
+      for (const e of entries) {
+        if (!e.staffId || !e.date) continue;
+        const attId = `ATT-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        await db.run(`
+          INSERT INTO attendance (id, user_id, date, hours, type, note, status)
+          VALUES (?, ?, ?, ?, ?, ?, 'APPROVED')
+          ON CONFLICT(user_id, date) DO UPDATE SET
+            hours  = excluded.hours,
+            type   = excluded.type,
+            note   = excluded.note,
+            status = 'APPROVED'
+        `, [attId, e.staffId, e.date, e.hours ?? null, e.type ?? 'PRESENT', e.note ?? null]);
+        written++;
+      }
+      res.json({ success: true, written });
+    } catch (err) {
+      console.error("Bulk attendance error:", err);
+      res.status(500).json({ error: "Failed to bulk-mark attendance" });
+    }
+  });
+
+  // Attendance: Get all staff attendance for a date range (manager view for the grid)
+  app.get("/api/restaurant/:id/attendance/staff", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const role = req.user?.role ?? '';
+      if (!['OWNER', 'MANAGER', 'SUPER_ADMIN', 'CTO'].includes(role)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const start = String(req.query.start || '').trim();
+      const end   = String(req.query.end   || '').trim();
+      if (!start || !end) return res.status(400).json({ error: "start and end required" });
+      const db = await getTenantDb(req.params.id);
+      const [staffList, attRows] = await Promise.all([
+        db.query("SELECT id, name, role, department, COALESCE(employee_type,'LOGIN') AS employee_type FROM attendance_staff WHERE is_active = 1 ORDER BY name"),
+        db.query(
+          `SELECT a.user_id, a.date, a.hours, a.type, a.note, a.status
+             FROM attendance a
+            WHERE a.date >= ? AND a.date <= ?`,
+          [start, end]
+        ),
+      ]);
+      res.json({ staff: staffList, attendance: attRows });
+    } catch (err) {
+      console.error("Staff attendance grid error:", err);
+      res.status(500).json({ error: "Failed to fetch staff attendance" });
     }
   });
 

@@ -1163,6 +1163,7 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS default_hours DOUBLE PRECISION DEFAULT 8").catch(() => {});
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS login_id TEXT").catch(() => {});
   await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS password TEXT").catch(() => {});
+  await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS employee_type TEXT DEFAULT 'LOGIN'").catch(() => {});
   // Add unique index on login_id (CREATE UNIQUE INDEX IF NOT EXISTS is safe to run multiple times)
   await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_staff_login_id ON attendance_staff (login_id) WHERE login_id IS NOT NULL`).catch(() => {});
   // Bookings migrations
