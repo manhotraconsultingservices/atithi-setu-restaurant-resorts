@@ -73,6 +73,7 @@ import {
   CalendarClock,
   AlertTriangle,
   Database,
+  Terminal,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -42581,7 +42582,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
-  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION'>('RESTAURANTS');
+  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION' | 'SQL_CONSOLE'>('RESTAURANTS');
 
   // Subscription billing state (admin Billing tab)
   const [billingRows, setBillingRows] = useState<any[]>([]);
@@ -42589,7 +42590,15 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [billingEdit, setBillingEdit] = useState<Record<string, any>>({});
   const [billingMsg, setBillingMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  // Data Migration Console state
+  // SQL Console state
+  const [sqlTarget, setSqlTarget] = useState<'tenant' | 'central'>('tenant');
+  const [sqlTenantId, setSqlTenantId] = useState<string>('');
+  const [sqlInput, setSqlInput] = useState<string>('SELECT * FROM room_bookings LIMIT 50');
+  const [sqlRunning, setSqlRunning] = useState(false);
+  const [sqlResult, setSqlResult] = useState<{ columns: string[]; rows: any[]; rowCount: number } | null>(null);
+  const [sqlError, setSqlError] = useState<string>('');
+
+  // Data Migration Console state (renamed from Data Migration)
   const [migTenants, setMigTenants] = useState<any[]>([]);
   const [migSelectedTenant, setMigSelectedTenant] = useState<string>('');
   const [migBookings, setMigBookings] = useState<any[]>([]);
@@ -42717,6 +42726,21 @@ function SuperAdminDashboard({ token }: { token: string }) {
       }
     } catch { setMigMsg({ type: 'err', text: 'Network error' }); }
     finally { setMigImporting(false); }
+  };
+
+  const runSqlQuery = async () => {
+    setSqlRunning(true); setSqlError(''); setSqlResult(null);
+    try {
+      const res = await fetch('/api/admin/sql-console', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenantId: sqlTarget === 'tenant' ? sqlTenantId : undefined, useCentral: sqlTarget === 'central', sql: sqlInput }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setSqlError(data.error || 'Query failed'); }
+      else { setSqlResult(data); }
+    } catch { setSqlError('Network error'); }
+    finally { setSqlRunning(false); }
   };
 
   const fetchTenantBilling = async () => {
@@ -43399,7 +43423,16 @@ function SuperAdminDashboard({ token }: { token: string }) {
               viewMode === 'DATA_MIGRATION' ? "bg-red-600 text-white shadow-md" : "text-[#1a1208] hover:bg-[#cc5a16]/5"
             )}
           >
-            <Database size={16} /> Data Migration
+            <Database size={16} /> Data Loader
+          </button>
+          <button
+            onClick={() => { setViewMode('SQL_CONSOLE'); fetchMigTenants(); }}
+            className={cn(
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'SQL_CONSOLE' ? "bg-violet-600 text-white shadow-md" : "text-[#1a1208] hover:bg-[#cc5a16]/5"
+            )}
+          >
+            <Terminal size={16} /> SQL Console
           </button>
         </div>
       </div>
@@ -44442,7 +44475,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
           <div className="bg-red-50 border border-red-300 rounded-2xl p-4 flex items-start gap-3">
             <AlertTriangle size={18} className="text-red-600 mt-0.5 shrink-0" />
             <div>
-              <p className="text-sm font-bold text-red-800">Super Admin Data Migration Console</p>
+              <p className="text-sm font-bold text-red-800">Super Admin Data Loader</p>
               <p className="text-xs text-red-700 mt-1">All booking business rules are bypassed: past dates allowed, no availability or capacity checks, bulk hard-delete (no cancel flow). Use with extreme care.</p>
             </div>
           </div>
@@ -44461,7 +44494,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
               ))}
             </select>
             {migTenants.length === 0 && (
-              <p className="mt-2 text-xs text-[#9c8e85] italic">Loading tenants… (click Data Migration tab again if empty)</p>
+              <p className="mt-2 text-xs text-[#9c8e85] italic">Loading tenants… (click Data Loader tab again if empty)</p>
             )}
           </div>
 
@@ -44881,6 +44914,154 @@ function SuperAdminDashboard({ token }: { token: string }) {
                 </div>
               )}
             </div>
+          )}
+        </div>
+      ) : viewMode === 'SQL_CONSOLE' ? (
+        <div className="space-y-5">
+          {/* Info banner */}
+          <div className="bg-violet-50 border border-violet-200 rounded-2xl p-4 flex items-start gap-3">
+            <Terminal size={18} className="text-violet-600 mt-0.5 shrink-0" />
+            <div>
+              <p className="text-sm font-bold text-violet-800">SQL Console — Read-Only</p>
+              <p className="text-xs text-violet-700 mt-1">SELECT · WITH · EXPLAIN · PRAGMA only. Mutations must go through Data Loader. Queries run directly on the tenant or central DB.</p>
+            </div>
+          </div>
+
+          {/* Target selector + query input */}
+          <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6 space-y-4">
+            {/* DB target */}
+            <div className="flex items-center gap-4 flex-wrap">
+              <span className="text-sm font-semibold text-[#1a1208]">Target:</span>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="radio" name="sqlTarget" value="tenant" checked={sqlTarget === 'tenant'}
+                  onChange={() => setSqlTarget('tenant')} className="accent-violet-600" />
+                Tenant DB
+              </label>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="radio" name="sqlTarget" value="central" checked={sqlTarget === 'central'}
+                  onChange={() => setSqlTarget('central')} className="accent-violet-600" />
+                Central DB (restaurants / users)
+              </label>
+            </div>
+
+            {sqlTarget === 'tenant' && (
+              <select
+                value={sqlTenantId}
+                onChange={e => setSqlTenantId(e.target.value)}
+                className="w-full max-w-sm bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-violet-400/30"
+              >
+                <option value="">— Select a tenant —</option>
+                {migTenants.map((t: any) => (
+                  <option key={t.id} value={t.id}>{t.name} ({t.id})</option>
+                ))}
+              </select>
+            )}
+
+            {/* Quick-pick snippets */}
+            <div className="flex flex-wrap gap-2">
+              {[
+                { label: 'All bookings', sql: 'SELECT * FROM room_bookings ORDER BY created_at DESC LIMIT 100' },
+                { label: 'Rooms', sql: 'SELECT * FROM hotel_rooms ORDER BY room_number' },
+                { label: 'Room categories', sql: 'SELECT * FROM room_categories ORDER BY name' },
+                { label: 'Tenants (central)', sql: 'SELECT id, name, is_active, created_at FROM restaurants ORDER BY name', central: true },
+                { label: 'Staff', sql: 'SELECT id, name, login_id, role, employee_type FROM attendance_staff ORDER BY name' },
+                { label: 'Tables', sql: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" },
+              ].map(s => (
+                <button key={s.label} onClick={() => { setSqlInput(s.sql); if (s.central) setSqlTarget('central'); else setSqlTarget('tenant'); }}
+                  className="px-3 py-1 rounded-xl bg-violet-50 border border-violet-200 text-xs font-semibold text-violet-700 hover:bg-violet-100 transition-colors">
+                  {s.label}
+                </button>
+              ))}
+            </div>
+
+            {/* SQL textarea */}
+            <div className="relative">
+              <textarea
+                value={sqlInput}
+                onChange={e => setSqlInput(e.target.value)}
+                onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runSqlQuery(); } }}
+                rows={6}
+                spellCheck={false}
+                className="w-full bg-[#1a1208] text-emerald-300 font-mono text-sm rounded-2xl px-5 py-4 outline-none focus:ring-2 ring-violet-400/50 resize-y placeholder-emerald-700"
+                placeholder="SELECT * FROM room_bookings LIMIT 50"
+              />
+              <span className="absolute bottom-3 right-4 text-[10px] text-emerald-600 pointer-events-none">Ctrl+Enter to run</span>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={runSqlQuery}
+                disabled={sqlRunning || (sqlTarget === 'tenant' && !sqlTenantId)}
+                className="flex items-center gap-2 px-5 py-2 rounded-xl bg-violet-600 text-white text-sm font-bold hover:bg-violet-700 transition-colors disabled:opacity-40"
+              >
+                {sqlRunning
+                  ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Running…</>
+                  : <><Terminal size={14} /> Run Query</>
+                }
+              </button>
+              {sqlResult && (
+                <span className="text-xs text-[#6b5d52]">{sqlResult.rowCount} row{sqlResult.rowCount !== 1 ? 's' : ''} returned</span>
+              )}
+              {sqlResult && (
+                <button
+                  onClick={() => {
+                    const header = sqlResult.columns.map(c => `"${c}"`).join(',');
+                    const body = sqlResult.rows.map(r => sqlResult.columns.map(c => `"${String(r[c] ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+                    const blob = new Blob([header + '\n' + body], { type: 'text/csv' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a'); a.href = url; a.download = 'query-result.csv';
+                    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#e8dccf] text-xs font-semibold text-[#6b5d52] hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors"
+                >
+                  <Download size={12} /> Export CSV
+                </button>
+              )}
+            </div>
+
+            {sqlError && (
+              <div className="px-4 py-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700 font-mono whitespace-pre-wrap">{sqlError}</div>
+            )}
+          </div>
+
+          {/* Results table */}
+          {sqlResult && sqlResult.columns.length > 0 && (
+            <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+              <div className="px-6 py-3 border-b border-[#f0ebe4] bg-[#faf7f2]/50 flex items-center gap-3">
+                <Terminal size={14} className="text-violet-500" />
+                <span className="text-sm font-semibold text-[#1a1208]">Results</span>
+                <span className="text-xs text-[#9c8e85]">{sqlResult.rowCount} rows · {sqlResult.columns.length} columns</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="text-xs border-collapse" style={{ minWidth: `${sqlResult.columns.length * 140}px` }}>
+                  <thead>
+                    <tr className="bg-[#faf7f2] border-b border-[#e8dccf]">
+                      {sqlResult.columns.map(col => (
+                        <th key={col} className="px-4 py-2.5 text-left text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap">{col}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#f5ece0]">
+                    {sqlResult.rows.map((row, i) => (
+                      <tr key={i} className="hover:bg-violet-50/40 transition-colors">
+                        {sqlResult.columns.map(col => (
+                          <td key={col} className="px-4 py-2 text-[#1a1208] font-mono whitespace-nowrap max-w-[280px] truncate">
+                            {row[col] === null || row[col] === undefined
+                              ? <span className="text-[#c4bdb8] italic">NULL</span>
+                              : String(row[col])
+                            }
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {sqlResult && sqlResult.columns.length === 0 && !sqlError && (
+            <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-8 text-center text-sm text-[#9c8e85] italic">Query returned 0 rows.</div>
           )}
         </div>
       ) : null}

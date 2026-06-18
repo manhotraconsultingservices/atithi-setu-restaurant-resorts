@@ -35197,6 +35197,39 @@ ${data.tenant.name}`;
   });
 
   // ────────────────────────────────────────────────────────────────────
+  // SQL Console — SUPER_ADMIN read-only query interface
+  // POST /api/admin/sql-console
+  // Body: { tenantId?: string, useCentral?: boolean, sql: string }
+  // Only SELECT statements are permitted.
+  // ────────────────────────────────────────────────────────────────────
+  app.post("/api/admin/sql-console", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { tenantId, useCentral, sql: rawSql } = req.body as { tenantId?: string; useCentral?: boolean; sql: string };
+      if (!rawSql || typeof rawSql !== 'string') return res.status(400).json({ error: 'sql is required' });
+
+      const trimmed = rawSql.trim();
+      const firstWord = trimmed.split(/\s+/)[0].toUpperCase();
+      if (!['SELECT', 'EXPLAIN', 'WITH', 'PRAGMA'].includes(firstWord)) {
+        return res.status(400).json({ error: 'Only SELECT / WITH / EXPLAIN / PRAGMA statements are allowed in the SQL Console. Use Data Loader for mutations.' });
+      }
+
+      let db: DbInterface;
+      if (useCentral) {
+        db = centralDb;
+      } else {
+        if (!tenantId) return res.status(400).json({ error: 'tenantId is required when useCentral is false' });
+        db = await getTenantDb(String(tenantId));
+      }
+
+      const rows = await db.query(trimmed);
+      const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+      return res.json({ success: true, columns, rows, rowCount: rows.length });
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || 'Query failed' });
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────
   // BCG Demo Tariff Seed (client request 7 Jun 2026)
   // ────────────────────────────────────────────────────────────────────
   // One-click GUI alternative to the qa_seed_viveks_tariff.mts CLI
