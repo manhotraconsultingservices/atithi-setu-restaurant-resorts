@@ -28298,14 +28298,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               setHotelBookings((rows: any[]) => rows.map(r => r.id === patched.id ? { ...r, ...patched } : r));
             }}
             onCheckIn={async (advance?: { amount: number; method: string; reference?: string }) => {
-              try {
-                // force=true for an early check-in so the server bypasses the
-                // future-date guard (the wizard already warned the staff).
-                await checkInBooking(b.id, isEarly, advance);
-                setCheckInChecklistTarget(null);
-              } catch (err: any) {
-                alert(err?.message || 'Check-in failed');
-              }
+              // force=true for early check-in so the server bypasses the future-date guard.
+              // Errors propagate to the wizard's confirm() handler which shows inline UI for
+              // FORM_C_REQUIRED and a generic error message for other failures.
+              await checkInBooking(b.id, isEarly, advance);
+              setCheckInChecklistTarget(null);
             }}
           />
         );
@@ -33798,6 +33795,8 @@ const CheckInWizardModal: React.FC<{
   const [docCount, setDocCount] = useState<number>(Number(booking.document_count || 0));
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  const [formCError, setFormCError] = useState(false);
+  const [formCGenerating, setFormCGenerating] = useState(false);
   // Advance payment (10 Jun 2026 critical fix): optional partial /
   // full payment collected at check-in. When amount > 0 + method set,
   // gets posted as a folio_payments row with payment_type='ADVANCE'
@@ -33944,13 +33943,36 @@ const CheckInWizardModal: React.FC<{
   const confirm = async () => {
     if (!canCheckIn || submitting) return;
     setSubmitting(true);
+    setFormCError(false);
     try {
       const amt = Number(advance.amount || 0);
       const adv = amt > 0 && advance.method
         ? { amount: amt, method: advance.method.toUpperCase(), reference: advance.reference || undefined }
         : undefined;
       await onCheckIn(adv);
+    } catch (err: any) {
+      const msg = err?.message || '';
+      if (msg.includes('Form-C must be generated') || msg.includes('FORM_C_REQUIRED')) {
+        setFormCError(true);
+      } else {
+        setError(msg || 'Check-in failed');
+      }
     } finally { setSubmitting(false); }
+  };
+
+  const generateFormCAndRetry = async () => {
+    setFormCGenerating(true);
+    setFormCError(false);
+    try {
+      await fetch(`/api/restaurant/${restaurantId}/hotel/compliance/form-c/${booking.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({}),
+      });
+      await confirm();
+    } catch (e: any) {
+      setError(e?.message || 'Failed to generate Form-C');
+    } finally { setFormCGenerating(false); }
   };
 
   const updateDraft = (patch: any) => setDraft((d: any) => ({ ...d, ...patch }));
@@ -34380,6 +34402,23 @@ const CheckInWizardModal: React.FC<{
               )}
             </div>
 
+            {formCError && (
+              <div className="rounded-2xl bg-amber-50 border border-amber-300 px-4 py-3 mt-3">
+                <p className="text-[12px] font-bold text-amber-900 mb-1">Form-C required (Foreigners Act)</p>
+                <p className="text-[11px] text-amber-800 mb-2">
+                  A Form-C must be generated for foreign nationals before check-in. Click below to generate it automatically and proceed.
+                </p>
+                <button
+                  type="button"
+                  onClick={generateFormCAndRetry}
+                  disabled={formCGenerating}
+                  className="px-4 py-1.5 rounded-xl bg-amber-700 text-white text-[11px] font-bold hover:bg-amber-800 disabled:opacity-50"
+                >
+                  {formCGenerating ? 'Generating Form-C…' : 'Generate Form-C & Check In'}
+                </button>
+              </div>
+            )}
+
             <div className="flex gap-2 pt-3 mt-1 border-t border-[#cc5a16]/10">
               <button
                 onClick={() => setStep(1)}
@@ -34391,10 +34430,10 @@ const CheckInWizardModal: React.FC<{
               >Cancel</button>
               <button
                 onClick={confirm}
-                disabled={!canCheckIn || submitting}
+                disabled={!canCheckIn || submitting || formCGenerating}
                 className={cn(
                   "flex-1 px-4 py-2.5 rounded-2xl text-white text-sm font-bold transition-all",
-                  canCheckIn && !submitting ? "bg-emerald-600 hover:bg-emerald-700" : "bg-stone-300 cursor-not-allowed"
+                  canCheckIn && !submitting && !formCGenerating ? "bg-emerald-600 hover:bg-emerald-700" : "bg-stone-300 cursor-not-allowed"
                 )}
               >{submitting ? 'Checking in…' : 'Confirm Check-In'}</button>
             </div>

@@ -26785,7 +26785,7 @@ ${data.tenant.name}`;
         let formCDone = false;
         try {
           const formCRow: any = await tenantDb.get(
-            "SELECT id FROM form_c_audit WHERE booking_id = ? LIMIT 1",
+            "SELECT id FROM guest_compliance_log WHERE booking_id = ? AND form_type = 'FORM_C' LIMIT 1",
             [req.params.bookingId]
           );
           formCDone = !!formCRow;
