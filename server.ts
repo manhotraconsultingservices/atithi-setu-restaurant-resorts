@@ -21410,7 +21410,7 @@ ${data.tenant.name}`;
       const search = String(req.query.search || '').trim();
       const fromDate = String(req.query.from || '').trim();
       const toDate = String(req.query.to || '').trim();
-      const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+      const limit = Math.min(2000, Math.max(1, Number(req.query.limit) || 1000));
 
       // Build a single straightforward SQL. No CASE-based ranking; we
       // rank in JS after the query lands. Cleaner placeholder math.

@@ -31474,7 +31474,7 @@ const HotelCommandCenter: React.FC<{
       const headers = { Authorization: `Bearer ${token}` };
       const [r1, r2, r3, r4, r5] = await Promise.all([
         fetch(`/api/restaurant/${restaurantId}/hotel/rooms`,            { headers }),
-        fetch(`/api/restaurant/${restaurantId}/hotel/bookings`,         { headers }),
+        fetch(`/api/restaurant/${restaurantId}/hotel/bookings?limit=1000`, { headers }),
         fetch(`/api/restaurant/${restaurantId}/hotel/service-requests?status=PENDING,ACKNOWLEDGED,IN_PROGRESS,DELIVERED`, { headers }),
         fetch(`/api/restaurant/${restaurantId}/hotel/folios?status=open`, { headers }),
         fetch(`/api/restaurant/${restaurantId}/hotel/room-types`,       { headers }),
