@@ -7771,7 +7771,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'LOYALTY'                                   // tier-based customer loyalty (Phase 1)
     | 'ROSTER' | 'TIMESHEET'                      // shift roster + planned-vs-actual (Phase 3)
     | 'ROOMS' | 'ROOM_SETUP' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1 (ROOMS=availability board, ROOM_SETUP=owner-only setup)
-    | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE'  // hospitality Phase 2 & 3
+    | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE' | 'HOTEL_INVENTORY'  // hospitality Phase 2 & 3
     | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
     | 'CHANNEL_MANAGER'                           // OTA credentials + iCal feeds + webhook log + room mappings
     | 'PUBLIC_BOOKING_PAGE'                       // Marriott-grade direct-booking page profile + galleries
@@ -12384,6 +12384,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FRONT_OFFICE_REPORTS', label: 'Hotel Reports' },
               { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
               { id: 'SERVICES',             label: 'Service Catalogue' },
+              { id: 'HOTEL_INVENTORY',      label: 'Hotel Inventory' },
               { id: 'FOLIOS',               label: 'Folios & Settlement' },
               { id: 'COMPLIANCE',           label: 'Guest Compliance' },
               { id: 'CONCIERGE_FAQ',        label: 'Concierge' },
@@ -12398,7 +12399,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'MENU',      label: 'Menu' },
               { id: 'QR',        label: 'QR & Tables' },
               { id: 'BOOKINGS',  label: 'Table Bookings' },
-              { id: 'INVENTORY', label: 'Inventory' },
+              { id: 'INVENTORY', label: 'Kitchen Inventory' },
               { id: 'DELIVERY',  label: 'Delivery Partners' },
               { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports' },
             ],
@@ -13125,14 +13126,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
         </div>
-      ) : activeTab === 'INVENTORY' && dashboardMode === 'HOTEL' ? (
+      ) : activeTab === 'HOTEL_INVENTORY' ? (
         <HotelInventoryView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'INVENTORY' ? (
         <div className="space-y-5">
           {/* ── Inventory Header ── */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h2 className="text-3xl font-bold font-serif">Inventory Management</h2>
+              <h2 className="text-3xl font-bold font-serif">Kitchen Inventory</h2>
               <p className="text-sm text-[#6b5d52] mt-0.5">
                 Ingredients, suppliers, purchase orders & goods receipts
               </p>
