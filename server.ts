@@ -22674,6 +22674,69 @@ ${data.tenant.name}`;
     }
   });
 
+  // Complimentary upgrade: move a CHECKED_IN guest to any available room at no extra charge.
+  // Unlike reassign-room, cross-category moves are allowed. All monetary fields on the
+  // booking stay unchanged; only the physical room assignment moves. A ₹0 folio note
+  // records the upgrade for audit purposes.
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/complimentary-upgrade", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const newRoomId = String(req.body?.new_room_id || '').trim();
+      if (!newRoomId) return res.status(400).json({ error: 'new_room_id is required.' });
+      const bk: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      if (!bk) return res.status(404).json({ error: 'Booking not found.' });
+      if (String(bk.status || '').toUpperCase() !== 'CHECKED_IN') {
+        return res.status(409).json({ error: 'Complimentary upgrade is only available for checked-in guests.' });
+      }
+      if (String(bk.room_id) === newRoomId) {
+        return res.status(400).json({ error: 'New room is the same as the current room.' });
+      }
+      const newRoom: any = await tenantDb.get("SELECT id, status, name, room_number, type_id FROM rooms WHERE id = ?", [newRoomId]);
+      if (!newRoom) return res.status(404).json({ error: 'Target room not found.' });
+      const rst = String(newRoom.status || '').toUpperCase();
+      if (rst === 'MAINTENANCE' || rst === 'BLOCKED') {
+        return res.status(409).json({ error: 'Target room is under maintenance / blocked.' });
+      }
+      const oldRoom: any = await tenantDb.get("SELECT id, name, room_number FROM rooms WHERE id = ?", [bk.room_id]).catch(() => null);
+      // Validate the target room is free for the remaining stay (today → checkout).
+      const today = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
+      const checkOut = String(bk.check_out_date || '').slice(0, 10);
+      const v = await validateBookingRequest(req.params.id, {
+        room_id: newRoomId,
+        check_in_date: today,
+        check_out_date: checkOut,
+        booking_type: bk.booking_type,
+        excludeBookingId: req.params.bookingId,
+        skipPastDateCheck: true,
+        skipCapacityCheck: true,
+      });
+      if (!v.ok) return res.status(v.status).json({ error: `Target room is not available for these dates: ${v.error}` });
+      // Move the physical assignment — keep all monetary fields (room_rate, total_amount, etc.) unchanged.
+      await tenantDb.run("UPDATE room_bookings SET room_id = ? WHERE id = ?", [newRoomId, req.params.bookingId]);
+      await tenantDb.run("UPDATE rooms SET status = 'VACANT' WHERE id = ?", [bk.room_id]).catch(() => {});
+      await tenantDb.run("UPDATE rooms SET status = 'OCCUPIED' WHERE id = ?", [newRoomId]).catch(() => {});
+      await tenantDb.run("UPDATE folios SET room_id = ? WHERE booking_id = ? AND status = 'open'", [newRoomId, req.params.bookingId]).catch(() => {});
+      // Insert a ₹0 folio note documenting the upgrade for the invoice audit trail.
+      const oldLabel = oldRoom?.name || oldRoom?.room_number || String(bk.room_id);
+      const newLabel = newRoom.name || newRoom.room_number || newRoomId;
+      const folio: any = await tenantDb.get("SELECT id FROM folios WHERE booking_id = ? AND status = 'open' LIMIT 1", [req.params.bookingId]).catch(() => null);
+      if (folio?.id) {
+        await tenantDb.run(
+          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+           VALUES (?, ?, 'NOTE', ?, 1, 0, 0, 0, 0)`,
+          [`FE-UPG-${Date.now()}`, folio.id, `Complimentary upgrade: ${oldLabel} → ${newLabel}`]
+        ).catch(() => {});
+      }
+      const row: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      res.json({ ok: true, booking: row, old_room_id: bk.room_id, new_room_id: newRoomId, old_room_label: oldLabel, new_room_label: newLabel });
+    } catch (err: any) {
+      console.error('complimentary-upgrade error:', err);
+      res.status(500).json({ error: err?.message || 'Failed to upgrade room' });
+    }
+  });
+
   // ─── GROUP BOOKINGS — Sprint C2 ────────────────────────────────────
   // Create N bookings in a single transaction. All share:
   //   - dates (check_in / check_out)

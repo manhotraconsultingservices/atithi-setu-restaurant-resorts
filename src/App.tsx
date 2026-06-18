@@ -319,8 +319,8 @@ const BOOKING_COL_DEFS: { key: string; label: string; def: boolean }[] = [
   { key: 'booking_id', label: 'Booking ID', def: true  },
   { key: 'room',      label: 'Room',      def: true  },
   { key: 'dates',     label: 'Dates',     def: true  },
-  { key: 'checked_in',  label: 'Checked in',  def: false },
-  { key: 'checked_out', label: 'Checked out', def: false },
+  { key: 'checked_in',  label: 'Checked in',  def: true  },
+  { key: 'checked_out', label: 'Checked out', def: true  },
   { key: 'nights',    label: 'Nights',    def: false },
   { key: 'guests',    label: 'Guests',    def: false },
   { key: 'adults',    label: 'Adults',    def: false },
@@ -329,7 +329,7 @@ const BOOKING_COL_DEFS: { key: string; label: string; def: boolean }[] = [
   { key: 'total',     label: 'Total',     def: true  },
   { key: 'restaurant', label: 'Restaurant bill', def: true },
   { key: 'advance',   label: 'Advance',   def: true  },
-  { key: 'source',    label: 'Source',    def: false },
+  { key: 'source',    label: 'Source',    def: true  },
   { key: 'created',   label: 'Created',   def: false },
   { key: 'paylink',   label: 'Pay link',  def: true  },
 ];
@@ -7875,8 +7875,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // look up a returning guest by phone/name (mid-call) or pull a past
   // booking by invoice number for an enquiry.
   const [bookingHistoryFilter, setBookingHistoryFilter] = useState<{
-    search: string; status: string; from: string; to: string;
-  }>({ search: '', status: '', from: '', to: '' });
+    search: string; status: string; from: string; to: string; source: string;
+  }>({ search: '', status: '', from: '', to: '', source: '' });
   // Sprint C-WI — Walk-in fast-path modal. Single-screen flow for
   // "guest arrives now": pick a vacant room (auto-suggested), enter
   // name + phone, click "Walk-in & Check-In" → creates booking +
@@ -8275,6 +8275,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         (qd.length >= 3 && String(b.guest_phone || '').replace(/\D/g, '').includes(qd))
       );
     }
+    if (bookingHistoryFilter.source) {
+      rows = rows.filter((b: any) => String(b.booking_source || '') === bookingHistoryFilter.source);
+    }
     const dir = bookingSort.dir === 'asc' ? 1 : -1;
     const keyOf = (b: any): string | number => {
       switch (bookingSort.col) {
@@ -8300,7 +8303,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (av > bv) return 1 * dir;
       return 0;
     });
-  }, [hotelBookings, bookingHistoryFilter.search, bookingSort]);
+  }, [hotelBookings, bookingHistoryFilter.search, bookingHistoryFilter.source, bookingSort]);
   // Reservation-table pagination (10 rows/page) — the list can run to hundreds
   // of rows; paginate the already-filtered/sorted set in-browser. Reset to page
   // 1 on a new search/sort; clamp when the result set shrinks.
@@ -8371,6 +8374,44 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       markAvailabilityDirty();
     } catch { setMoveRoom(m => m ? { ...m, busyId: '', error: 'Could not move the guest.' } : m); }
   };
+  // Complimentary upgrade — move a CHECKED_IN guest to any available room (cross-category)
+  // at no extra charge. Rate stays at original booking rate.
+  const [upgradeRoom, setUpgradeRoom] = useState<{ booking: any; rooms: any[] | null; loading: boolean; busyId: string; error: string } | null>(null);
+  const openUpgradeRoom = async (b: any) => {
+    setUpgradeRoom({ booking: b, rooms: null, loading: true, busyId: '', error: '' });
+    try {
+      const ci = String(b.check_in_date || '').slice(0, 10);
+      const co = String(b.check_out_date || '').slice(0, 10);
+      const qs = new URLSearchParams({ start: ci, end: co, guests: '1', quote: '1' });
+      if (b.id) qs.set('exclude_booking_id', b.id);
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/find-available-rooms?${qs.toString()}`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      // All available rooms except the current one — any category allowed.
+      const rooms = (Array.isArray(data?.rooms) ? data.rooms : [])
+        .filter((r: any) => r.available && r.id !== b.room_id);
+      setUpgradeRoom(m => m ? { ...m, rooms, loading: false } : m);
+    } catch {
+      setUpgradeRoom(m => m ? { ...m, rooms: [], loading: false, error: 'Could not load available rooms.' } : m);
+    }
+  };
+  const confirmUpgradeRoom = async (roomId: string) => {
+    setUpgradeRoom(m => m ? { ...m, busyId: roomId, error: '' } : m);
+    try {
+      const bid = upgradeRoom?.booking?.id;
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings/${bid}/complimentary-upgrade`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ new_room_id: roomId }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setUpgradeRoom(m => m ? { ...m, busyId: '', error: d?.error || 'Could not upgrade the room.' } : m); return; }
+      setUpgradeRoom(null);
+      await Promise.all([fetchHotelBookings(), fetchHotelRooms()]);
+      markAvailabilityDirty();
+    } catch { setUpgradeRoom(m => m ? { ...m, busyId: '', error: 'Could not upgrade the room.' } : m); }
+  };
+
   // RESTAURANT-BILL — booking whose room-service F&B bill is open in the
   // view/mark-paid modal (opened from the reservation table cell).
   const [restaurantBillBooking, setRestaurantBillBooking] = useState<any>(null);
@@ -18912,10 +18953,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="flex items-center gap-2 mb-3">
               <Search size={16} className="text-[#cc5a16]" />
               <h4 className="text-sm font-bold text-[#1a1208]">Search bookings &amp; guest history</h4>
-              {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to) && (
+              {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to || bookingHistoryFilter.source) && (
                 <button
                   onClick={async () => {
-                    setBookingHistoryFilter({ search: '', status: '', from: '', to: '' });
+                    setBookingHistoryFilter({ search: '', status: '', from: '', to: '', source: '' });
                     await fetchHotelBookings();
                   }}
                   className="ml-auto text-[10px] font-bold uppercase tracking-widest text-[#c13b3b] hover:underline"
@@ -18997,7 +19038,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     key={p.label}
                     type="button"
                     onClick={async () => {
-                      setBookingHistoryFilter({ search: bookingHistoryFilter.search, ...p.f });
+                      setBookingHistoryFilter(f => ({ ...f, ...p.f }));
                       await fetchHotelBookings({
                         search: bookingHistoryFilter.search || undefined,
                         ...p.f,
@@ -19008,14 +19049,71 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 ));
               })()}
             </div>
+
+            {/* Source / Agent filter chips — client-side, no server round-trip.
+                Shows every unique booking_source in the loaded data. */}
+            {hotelBookings.length > 0 && (() => {
+              const sources = [...new Set((hotelBookings as any[]).map((b: any) => b.booking_source).filter(Boolean))].sort() as string[];
+              if (sources.length === 0) return null;
+              return (
+                <div className="mt-3 flex flex-wrap gap-1.5 items-center">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Source:</span>
+                  <button
+                    type="button"
+                    onClick={() => setBookingHistoryFilter(f => ({ ...f, source: '' }))}
+                    className={cn("px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest border transition-colors",
+                      !bookingHistoryFilter.source
+                        ? "bg-[#cc5a16] text-white border-[#cc5a16]"
+                        : "bg-white border-[#cc5a16]/20 text-[#3d3128] hover:bg-[#faf7f2]")}
+                  >All</button>
+                  {sources.map((s: string) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setBookingHistoryFilter(f => ({ ...f, source: f.source === s ? '' : s }))}
+                      className={cn("px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest border transition-colors",
+                        bookingHistoryFilter.source === s
+                          ? "bg-[#cc5a16] text-white border-[#cc5a16]"
+                          : "bg-white border-[#cc5a16]/20 text-[#3d3128] hover:bg-[#faf7f2]")}
+                    >{s}</button>
+                  ))}
+                </div>
+              );
+            })()}
           </div>
+
+          {/* Agent / OTA revenue summary banner — shown when a source is selected. */}
+          {bookingHistoryFilter.source && displayedBookings.length > 0 && (() => {
+            const totalRevenue = (displayedBookings as any[]).reduce((s: number, b: any) => s + Number(b.total_amount || 0), 0);
+            const totalCommission = (displayedBookings as any[]).reduce((s: number, b: any) => s + Number(b.commission_amount || 0), 0);
+            const countByStatus: Record<string, number> = {};
+            (displayedBookings as any[]).forEach((b: any) => { countByStatus[b.status] = (countByStatus[b.status] || 0) + 1; });
+            return (
+              <div className="bg-amber-50 border border-amber-200 rounded-[24px] px-5 py-3 mb-4 flex flex-wrap items-center gap-4 text-sm">
+                <span className="font-bold text-amber-900">{bookingHistoryFilter.source}</span>
+                <span className="text-amber-700">{displayedBookings.length} bookings</span>
+                <span className="text-amber-700">Revenue: <strong className="font-mono">₹{totalRevenue.toLocaleString('en-IN')}</strong></span>
+                {totalCommission > 0 && (
+                  <span className="text-amber-700">Commission: <strong className="font-mono">₹{totalCommission.toLocaleString('en-IN')}</strong></span>
+                )}
+                {Object.entries(countByStatus).map(([st, n]) => (
+                  <span key={st} className="text-[10px] font-bold uppercase tracking-widest text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">{st}: {n}</span>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setBookingHistoryFilter(f => ({ ...f, source: '' }))}
+                  className="ml-auto text-[10px] font-bold uppercase tracking-widest text-amber-700 hover:underline"
+                >Clear</button>
+              </div>
+            );
+          })()}
 
           {/* All bookings list — overflow-x-auto so the wide table scrolls
               horizontally instead of clipping its right-hand columns. */}
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-x-auto shadow-sm">
             {displayedBookings.length === 0 ? (
               <div className="p-12 text-center text-sm text-[#6b5d52]">
-                {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to)
+                {(bookingHistoryFilter.search || bookingHistoryFilter.status || bookingHistoryFilter.from || bookingHistoryFilter.to || bookingHistoryFilter.source)
                   ? 'No bookings match your filters. Try a wider date range or clear the search.'
                   : 'No bookings yet. Create your first booking above.'}
               </div>
@@ -19305,6 +19403,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             })()}
                             {b.status === 'BOOKED' && <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600">Check In</button>}
                             {b.status === 'CHECKED_IN' && <button onClick={() => openMoveRoom(b)} title="Move this guest to another room of the same category (e.g. room issue)" className="px-3 py-1.5 rounded-lg border border-[#0f766e]/30 text-[#0f766e] text-[11px] font-bold hover:bg-[#0f766e]/5">🔄 Move room</button>}
+                            {b.status === 'CHECKED_IN' && <button onClick={() => openUpgradeRoom(b)} title="Complimentary upgrade — move guest to a different/higher category room at no extra charge (original rate kept)" className="px-3 py-1.5 rounded-lg border border-violet-300 text-violet-700 text-[11px] font-bold hover:bg-violet-50">⬆ Upgrade</button>}
                             {b.status === 'CHECKED_IN' && <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608]">Check Out</button>}
                             {/* ADV-PAY: "💰 Advance" button — record a deposit against this booking at
                                 any time (pre-checkin or mid-stay). Opens the AdvancePaymentModal. */}
@@ -29066,6 +29165,51 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <span className="text-[11px] font-bold text-[#0f766e] whitespace-nowrap">{moveRoom.busyId === r.id ? 'Moving…' : 'Move here →'}</span>
                   </button>
                 ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ═════════ Complimentary upgrade modal ═════════ */}
+      {upgradeRoom && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setUpgradeRoom(null)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between mb-1">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-widest text-violet-600">Complimentary Upgrade</p>
+                <h3 className="text-xl font-bold font-serif text-[#1a1208]">{upgradeRoom.booking?.guest_name}</h3>
+              </div>
+              <button onClick={() => setUpgradeRoom(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+            </div>
+            <p className="text-xs text-[#6b5d52] mb-1">
+              Currently in <strong>{bookingRoomLabel(upgradeRoom.booking)}</strong>.
+            </p>
+            <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2 mb-4">
+              The original room rate is kept — guest pays nothing extra. A note is added to the folio documenting the upgrade.
+            </p>
+            {upgradeRoom.error && <div className="mb-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">{upgradeRoom.error}</div>}
+            {upgradeRoom.loading ? (
+              <p className="text-sm text-[#9c8e85] italic py-6 text-center">Finding available rooms…</p>
+            ) : !upgradeRoom.rooms || upgradeRoom.rooms.length === 0 ? (
+              <p className="text-sm text-[#9c8e85] italic py-6 text-center">No other rooms are currently available for these dates.</p>
+            ) : (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {upgradeRoom.rooms.map((r: any) => {
+                  const curTypeId = hotelRooms.find((hr: any) => hr.id === upgradeRoom.booking?.room_id)?.type_id;
+                  const isHigher = r.type_id && curTypeId && r.type_id !== curTypeId;
+                  return (
+                    <button key={r.id} type="button" disabled={!!upgradeRoom.busyId}
+                      onClick={() => confirmUpgradeRoom(r.id)}
+                      className="w-full text-left rounded-xl border border-[#cc5a16]/15 bg-white px-3 py-2.5 hover:border-violet-400/60 hover:bg-violet-50 disabled:opacity-50 flex items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-bold text-[#1a1208]">{r.name || r.room_number}{r.room_number && r.name ? ` · #${r.room_number}` : ''}</p>
+                        <p className="text-[10px] text-[#6b5d52]">{r.type_name || 'Room'} · Sleeps {r.capacity}{r.floor ? ` · Floor ${r.floor}` : ''}{isHigher ? ' · ⬆ Higher category' : ''}</p>
+                      </div>
+                      <span className="text-[11px] font-bold text-violet-600 whitespace-nowrap">{upgradeRoom.busyId === r.id ? 'Upgrading…' : 'Upgrade →'}</span>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
