@@ -9543,6 +9543,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [invoicesPage, setInvoicesPage]       = useState(1);
   const [staffSearch, setStaffSearch]         = useState('');
   const [staffRoleFilter, setStaffRoleFilter] = useState<string>('ALL');
+  const [staffViewMode, setStaffViewMode]     = useState<'grid' | 'table'>('grid');
 
   // ── Staff role metadata ─────────────────────────────────────────────
   // Single source of truth for Staff Management dropdowns / filters / chips.
@@ -16087,7 +16088,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
 
-          {/* Search + Role filter */}
+          {/* Search + Role filter + View toggle */}
           <div className="flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">
               <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
@@ -16113,6 +16114,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </button>
               ))}
             </div>
+            {/* Grid / Table toggle */}
+            <div className="flex border border-[#cc5a16]/20 rounded-xl overflow-hidden self-start bg-white shadow-sm">
+              <button
+                onClick={() => setStaffViewMode('grid')}
+                className={cn("px-3 py-2 transition-colors", staffViewMode === 'grid' ? "bg-[#cc5a16] text-white" : "text-[#9c8e85] hover:bg-[#cc5a16]/5")}
+                title="Grid view"
+              >
+                <LayoutGrid size={16} />
+              </button>
+              <button
+                onClick={() => setStaffViewMode('table')}
+                className={cn("px-3 py-2 transition-colors", staffViewMode === 'table' ? "bg-[#cc5a16] text-white" : "text-[#9c8e85] hover:bg-[#cc5a16]/5")}
+                title="Table view"
+              >
+                <List size={16} />
+              </button>
+            </div>
           </div>
 
           {(() => {
@@ -16127,6 +16145,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             const pageItems  = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
             return (
               <>
+                {staffViewMode === 'grid' ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                   {pageItems.length === 0 ? (
                     <div className="col-span-full py-16 text-center text-[#9c8e85]">No staff members found</div>
@@ -16242,6 +16261,76 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
                   ))}
                 </div>
+                ) : (
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
+                    {pageItems.length === 0 ? (
+                      <div className="py-16 text-center text-[#9c8e85]">No staff members found</div>
+                    ) : (
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-[#cc5a16]/10 bg-[#faf7f5] text-left">
+                            <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Name</th>
+                            <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Role</th>
+                            <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Login ID</th>
+                            <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Phone</th>
+                            <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Email</th>
+                            <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Status</th>
+                            <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pageItems.map((s, _ti) => {
+                            const tMeta = staffRoleMetaFor(s.role);
+                            return (
+                              <tr key={s.id} className={cn("border-b border-[#cc5a16]/5 hover:bg-[#faf7f5] transition-colors", _ti % 2 !== 0 ? "bg-[#fdf9f7]/40" : "")}>
+                                <td className="px-4 py-3 font-semibold text-[#1a1208]">{s.name}</td>
+                                <td className="px-4 py-3">
+                                  <span className={cn("inline-block text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full", tMeta.chipBg, tMeta.chipText)}>
+                                    {tMeta.emoji} {tMeta.label}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 font-mono text-xs">
+                                  {s.login_id ? <span className="text-emerald-700">{s.login_id}</span> : <span className="italic text-[#9c8e85]">Not set</span>}
+                                </td>
+                                <td className="px-4 py-3 text-[#1a1208]">{s.phone || '—'}</td>
+                                <td className="px-4 py-3 text-[#1a1208] max-w-[160px] truncate">{s.email || '—'}</td>
+                                <td className="px-4 py-3">
+                                  <span className={cn("inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full",
+                                    s.is_active ? "bg-emerald-100 text-emerald-700" : "bg-zinc-200 text-zinc-600")}>
+                                    <span className={cn("w-1.5 h-1.5 rounded-full", s.is_active ? "bg-emerald-500" : "bg-zinc-400")} />
+                                    {s.is_active ? 'Active' : 'Inactive'}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3">
+                                  <div className="flex items-center gap-1 flex-wrap">
+                                    <button onClick={() => setEditingStaff(s)} className="text-[11px] font-bold px-2.5 py-1 rounded-lg border-2 border-[#cc5a16]/20 hover:bg-[#cc5a16]/5 transition-colors">Edit</button>
+                                    <button onClick={() => setTransferringStaff(s)} className="text-[11px] font-bold px-2.5 py-1 rounded-lg border-2 border-[#cc5a16]/20 text-[#cc5a16] hover:bg-[#cc5a16]/5 transition-colors">Transfer</button>
+                                    <button onClick={() => toggleStaffActive(s)} className={cn("text-[11px] font-bold px-2.5 py-1 rounded-lg border-2 transition-colors",
+                                      s.is_active ? "border-zinc-300 text-zinc-700 hover:bg-zinc-50" : "border-emerald-500 text-emerald-700 bg-emerald-50 hover:bg-emerald-100")}>
+                                      {s.is_active ? 'Deactivate' : 'Activate'}
+                                    </button>
+                                    <button onClick={async () => {
+                                      const newPass = prompt(`Set new password for ${s.name}:`);
+                                      if (!newPass) return;
+                                      const res = await fetch(`/api/owner/staff/${s.id}/reset-password`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                                        body: JSON.stringify({ newPassword: newPass })
+                                      });
+                                      if (res.ok) alert(`✓ Password updated for ${s.name}`);
+                                      else { const d = await res.json().catch(() => ({})); alert(d.error || 'Failed to reset password'); }
+                                    }} className="text-[11px] font-bold px-2.5 py-1 rounded-lg border-2 border-[#cc5a16]/20 hover:bg-[#cc5a16]/5 transition-colors">🔑 Pwd</button>
+                                    <button onClick={() => removeStaff(s.id)} className="text-red-400 hover:text-red-600 p-1 transition-colors"><Trash2 size={15} /></button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                )}
                 {totalPages > 1 && (
                   <div className="bg-white rounded-2xl border border-[#cc5a16]/10 shadow-sm overflow-hidden">
                     <PaginationBar page={safePage} totalPages={totalPages} setPage={setStaffPage} total={filtered.length} />
