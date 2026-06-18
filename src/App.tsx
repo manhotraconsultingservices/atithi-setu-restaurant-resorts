@@ -7777,6 +7777,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'PUBLIC_BOOKING_PAGE'                       // Marriott-grade direct-booking page profile + galleries
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
     | 'RESTAURANT_REPORTS'                        // F&B reporting hub (separate from Hotel Reports)
+    | 'EXPENSE_JOURNAL'                           // standalone Finance tab — operational expenses + petty cash
     | 'HOME'                                      // post-login launchpad (welcome + Hotel/Restaurant tiles)
   >('HOME');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
@@ -12428,10 +12429,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ],
           },
           {
-            id: 'PROCUREMENT', label: 'Procurement', icon: <Package size={16} />,
+            id: 'PROCUREMENT', label: 'Finance', icon: <Receipt size={16} />,
             visible: true,
             tabs: [
-              { id: 'PROCUREMENT', label: 'Procurement & AP' },
+              { id: 'EXPENSE_JOURNAL', label: 'Expense Journal' },
+              { id: 'PROCUREMENT',     label: 'Procurement & AP' },
             ],
           },
           {
@@ -15963,6 +15965,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <TimesheetDashboard restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'HR_PAYROLL' ? (
         <HRPayrollModule restaurantId={restaurantId} token={token!} restaurant={restaurant} />
+      ) : activeTab === 'EXPENSE_JOURNAL' ? (
+        <ExpenseJournalView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'PROCUREMENT' ? (
         <ProcurementView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'REPORTS' ? (
@@ -36654,6 +36658,196 @@ function BookingTrendReport({ restaurantId, token }: { restaurantId: string; tok
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const [from, setFrom] = useState(monthAgo);
+  const [to, setTo] = useState(today);
+  const [modFilter, setModFilter] = useState<'ALL' | 'HOTEL' | 'RESTAURANT' | 'SHARED'>('ALL');
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today, module: 'SHARED' });
+  const [saving, setSaving] = useState(false);
+  const role = (localStorage.getItem('role') || '').toUpperCase();
+  const canDelete = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role);
+
+  const api = useCallback((path: string, opts: RequestInit = {}) =>
+    fetch(`/api/restaurant/${restaurantId}${path}`, {
+      ...opts,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(opts.headers ?? {}) },
+    }).then(r => r.ok ? r.json() : r.json().then((b: any) => Promise.reject(new Error(b.error ?? `HTTP ${r.status}`)))),
+  [restaurantId, token]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    const mod = modFilter !== 'ALL' ? `&module=${modFilter}` : '';
+    api(`/petty-cash?from=${from}&to=${to}${mod}`)
+      .then((d: any) => setRows(d.rows ?? []))
+      .catch(() => setRows([]))
+      .finally(() => setLoading(false));
+  }, [api, from, to, modFilter]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    const amt = Number(form.amount);
+    if (!(amt > 0)) { alert('Enter a valid amount'); return; }
+    setSaving(true);
+    try {
+      await api('/petty-cash', { method: 'POST', body: JSON.stringify({ ...form, amount: amt }) });
+      setForm(f => ({ ...f, amount: '', category: '', notes: '' }));
+      setShowForm(false);
+      load();
+    } catch (e: any) { alert('Failed: ' + (e?.message || 'error')); }
+    finally { setSaving(false); }
+  };
+
+  const del = async (id: string) => {
+    if (!window.confirm('Delete this entry?')) return;
+    try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); load(); }
+    catch (e: any) { alert('Failed: ' + (e?.message || '')); }
+  };
+
+  const modColors: Record<string, string> = {
+    HOTEL: 'bg-blue-100 text-blue-700',
+    RESTAURANT: 'bg-orange-100 text-orange-700',
+    SHARED: 'bg-purple-100 text-purple-700',
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-bold font-serif">Expense Journal</h2>
+          <p className="text-sm text-[#6b5d52] mt-0.5">Record and track operational expenses — utilities, maintenance, fines and more</p>
+        </div>
+        <button
+          onClick={() => setShowForm(f => !f)}
+          className="flex items-center gap-2 bg-[#cc5a16] text-white px-4 py-2.5 rounded-xl text-sm font-bold hover:bg-[#a84612] transition-colors"
+        >
+          <Plus size={16} /> Add Entry
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="bg-white rounded-3xl border border-[#cc5a16]/15 shadow-sm p-6 space-y-4">
+          <h3 className="text-base font-bold text-[#1a1208]">Record Expense / Cash Movement</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Type</label>
+              <select value={form.direction} onChange={e => setForm(f => ({ ...f, direction: e.target.value }))}
+                className="w-full bg-[#faf7f2] border-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                <option value="OUT">Expense (OUT)</option>
+                <option value="IN">Income / Refund (IN)</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Module</label>
+              <select value={form.module} onChange={e => setForm(f => ({ ...f, module: e.target.value }))}
+                className="w-full bg-[#faf7f2] border-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
+                <option value="HOTEL">Hotel</option>
+                <option value="RESTAURANT">Restaurant</option>
+                <option value="SHARED">Shared / Property-wide</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Amount (₹)</label>
+              <input type="number" min="0" step="0.01" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
+                placeholder="0.00" className="w-full bg-[#faf7f2] border-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Category</label>
+              <input value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
+                placeholder="e.g. Electricity, Plumbing, FSSAI Fine…"
+                className="w-full bg-[#faf7f2] border-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Date</label>
+              <input type="date" value={form.entry_date} onChange={e => setForm(f => ({ ...f, entry_date: e.target.value }))}
+                className="w-full bg-[#faf7f2] border-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
+              <input value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
+                placeholder="Supplier, invoice no., reason…"
+                className="w-full bg-[#faf7f2] border-none rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20" />
+            </div>
+          </div>
+          <div className="flex gap-2 pt-1">
+            <button onClick={() => setShowForm(false)}
+              className="px-4 py-2 rounded-xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2] transition-colors">Cancel</button>
+            <button onClick={save} disabled={saving || !form.amount || !form.category}
+              className="px-6 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50 hover:bg-[#a84612] transition-colors">
+              {saving ? 'Saving…' : 'Save Entry'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">From</span>
+          <input type="date" value={from} max={to} onChange={e => setFrom(e.target.value)}
+            className="bg-white border border-[#e8dccf] rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20" />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">To</span>
+          <input type="date" value={to} min={from} onChange={e => setTo(e.target.value)}
+            className="bg-white border border-[#e8dccf] rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 ring-[#cc5a16]/20" />
+        </div>
+        <div className="flex gap-1">
+          {(['ALL', 'HOTEL', 'RESTAURANT', 'SHARED'] as const).map(m => (
+            <button key={m} onClick={() => setModFilter(m)}
+              className={cn('px-3 py-1.5 rounded-xl text-[11px] font-bold transition-all',
+                modFilter === m ? 'bg-[#cc5a16] text-white' : 'bg-white border border-[#e8dccf] text-[#6b5d52] hover:border-[#cc5a16]/40')}>
+              {m === 'ALL' ? 'All' : m.charAt(0) + m.slice(1).toLowerCase()}
+            </button>
+          ))}
+        </div>
+        <button onClick={load}
+          className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold border border-[#e8dccf] text-[#6b5d52] hover:bg-[#faf7f2] transition-colors">
+          <RefreshCw size={12} className={cn(loading && 'animate-spin')} /> Refresh
+        </button>
+      </div>
+
+      <DataTable
+        data={rows}
+        columns={[
+          { key: 'entry_date', label: 'Date', sortable: true,
+            exportValue: (e: any) => String(e.entry_date).slice(0, 10),
+            render: (e: any) => <span className="font-mono text-xs">{String(e.entry_date).slice(0, 10)}</span> },
+          { key: 'module', label: 'Module', sortable: true,
+            render: (e: any) => <span className={cn('px-2 py-0.5 rounded-full text-[11px] font-bold uppercase', modColors[e.module] ?? 'bg-gray-100 text-gray-600')}>{e.module}</span> },
+          { key: 'direction', label: 'Type', sortable: true,
+            render: (e: any) => <span className={cn('font-bold text-sm', e.direction === 'OUT' ? 'text-red-600' : 'text-emerald-600')}>{e.direction === 'OUT' ? 'Expense' : 'Income'}</span>,
+            exportValue: (e: any) => e.direction === 'OUT' ? 'Expense' : 'Income' },
+          { key: 'category', label: 'Category', sortable: true },
+          { key: 'amount', label: 'Amount', sortable: true, align: 'right' as const,
+            getValue: (e: any) => Number(e.amount || 0),
+            render: (e: any) => <span className={cn('font-bold tabular-nums', e.direction === 'OUT' ? 'text-red-600' : 'text-emerald-600')}>
+              {e.direction === 'OUT' ? '−' : '+'}₹{Number(e.amount || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+            </span>,
+            exportValue: (e: any) => `${e.direction === 'OUT' ? '-' : '+'}${Number(e.amount || 0).toFixed(2)}` },
+          { key: 'notes', label: 'Notes' },
+          { key: 'recorded_by', label: 'Recorded By', sortable: true },
+          { key: 'del', label: '', hidden: !canDelete, searchable: false,
+            render: (e: any) => canDelete ? (
+              <button onClick={() => del(e.id)} className="p-1.5 hover:bg-red-50 text-red-400 hover:text-red-600 rounded-lg transition-colors" title="Delete">
+                <Trash2 size={13} />
+              </button>
+            ) : null },
+        ]}
+        rowKey={(e: any, i: number) => e.id ?? i}
+        exportFilename="expense-journal"
+        emptyMessage="No entries in selected range."
+        loading={loading}
+        searchPlaceholder="Search by category, notes…"
+      />
     </div>
   );
 }
