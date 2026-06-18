@@ -35086,18 +35086,25 @@ ${data.tenant.name}`;
     try {
       const tenantId = String(req.query.tenantId || '');
       if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const page  = Math.max(1, Number(req.query.page  || 1));
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit || 250)));
+      const offset = (page - 1) * limit;
       const tenantDb = await getTenantDb(tenantId);
-      const rows = await tenantDb.query(`
-        SELECT b.id, b.room_id,
-               b.guest_name, b.guest_phone, b.guest_email,
-               b.check_in_date, b.check_out_date,
-               b.status, b.booking_type, b.booking_source,
-               b.room_rate, b.total_amount,
-               b.num_guests, b.created_at, b.payment_status
-          FROM room_bookings b
-         ORDER BY b.created_at DESC
-      `);
-      res.json(rows);
+      const [countRow, rows] = await Promise.all([
+        tenantDb.get(`SELECT COUNT(*) AS total FROM room_bookings`),
+        tenantDb.query(`
+          SELECT b.id, b.room_id,
+                 b.guest_name, b.guest_phone, b.guest_email,
+                 b.check_in_date, b.check_out_date,
+                 b.status, b.booking_type, b.booking_source,
+                 b.room_rate, b.total_amount,
+                 b.num_guests, b.created_at, b.payment_status
+            FROM room_bookings b
+           ORDER BY b.created_at DESC
+           LIMIT ? OFFSET ?
+        `, [limit, offset]),
+      ]);
+      res.json({ total: Number(countRow?.total ?? 0), page, limit, rows });
     } catch (err) {
       console.error("Migration bookings list error:", err);
       res.status(500).json({ error: "Failed to fetch bookings" });
