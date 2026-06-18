@@ -22237,8 +22237,8 @@ ${data.tenant.name}`;
   app.delete("/api/restaurant/:id/petty-cash/:entryId", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const role = String(req.user?.role || '').toUpperCase();
-      if (!['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role)) {
-        return res.status(403).json({ error: 'Only an owner or manager can delete a petty-cash entry.' });
+      if (!['OWNER', 'SUPER_ADMIN'].includes(role)) {
+        return res.status(403).json({ error: 'Only the business owner can delete an expense journal entry.' });
       }
       const tenantDb = await getTenantDb(req.params.id);
       await _ensurePettyCash(tenantDb);

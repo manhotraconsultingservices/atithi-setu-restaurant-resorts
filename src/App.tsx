@@ -36880,7 +36880,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
   const [form, setForm] = useState({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today, module: 'SHARED' });
   const [saving, setSaving] = useState(false);
   const role = (localStorage.getItem('role') || '').toUpperCase();
-  const canDelete = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role);
+  const canDelete = ['OWNER', 'SUPER_ADMIN'].includes(role);
 
   const api = useCallback((path: string, opts: RequestInit = {}) =>
     fetch(`/api/restaurant/${restaurantId}${path}`, {
@@ -37073,7 +37073,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
   const [expView, setExpView] = useState<'ledger' | 'daily' | 'category' | 'consolidated'>('ledger');
   const [expExtra, setExpExtra] = useState<any>(null);
   const role = (localStorage.getItem('role') || '').toUpperCase();
-  const canDeletePc = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role);
+  const canDeletePc = ['OWNER', 'SUPER_ADMIN'].includes(role);
 
   const cur = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
   const api = async (path: string, opts: any = {}) => {
