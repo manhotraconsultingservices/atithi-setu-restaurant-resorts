@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { DataTable, exportToCsv } from './components/DataTable';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Utensils, 
@@ -5033,78 +5034,30 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
             {role === 'OWNER' ? 'All Attendance Logs' : 'My Attendance History'}
           </h3>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="bg-[#faf7f2]/50">
-                <th className="px-8 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Date</th>
-                {role === 'OWNER' && <th className="px-8 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Staff</th>}
-                <th className="px-8 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Hours</th>
-                <th className="px-8 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Type</th>
-                <th className="px-8 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Status</th>
-                {role === 'OWNER' && <th className="px-8 py-4 text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] text-right">Actions</th>}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#5A5A40]/5">
-              {logs.map(log => (
-                <tr key={log.id} className="hover:bg-[#faf7f2]/30 transition-colors">
-                  <td className="px-8 py-5 font-mono text-sm">{String(log.date).slice(0, 10)}</td>
-                  {role === 'OWNER' && (
-                    <td className="px-8 py-5 font-bold text-[#1a1208]">
-                      {log.staff_name || staffList.find(s => s.id === log.user_id)?.name || 'Unknown Staff'}
-                    </td>
-                  )}
-                  <td className="px-8 py-5 font-bold">{log.hours} hrs</td>
-                  <td className="px-8 py-5">
-                    <span className={cn(
-                      "px-3 py-1 rounded-full text-[11px] font-bold uppercase tracking-widest",
-                      log.type === 'WORK' ? "bg-blue-50 text-blue-700" : "bg-orange-50 text-orange-700"
-                    )}>
-                      {log.type}
-                    </span>
-                  </td>
-                  <td className="px-8 py-5">
-                    <span className={cn(
-                      "px-3 py-1 rounded-full text-[11px] font-bold uppercase tracking-widest",
-                      log.status === 'APPROVED' ? "bg-green-50 text-green-700" : 
-                      log.status === 'REJECTED' ? "bg-red-50 text-red-700" : "bg-yellow-50 text-yellow-700"
-                    )}>
-                      {log.status}
-                    </span>
-                  </td>
-                  {role === 'OWNER' && (
-                    <td className="px-8 py-5 text-right">
-                      {log.status === 'PENDING' && (
-                        <div className="flex justify-end gap-2">
-                          <button 
-                            onClick={() => handleStatusUpdate(log.id, 'APPROVED')}
-                            className="p-2 bg-green-50 text-green-600 rounded-xl hover:bg-green-600 hover:text-white transition-all"
-                          >
-                            <Check size={16} />
-                          </button>
-                          <button 
-                            onClick={() => handleStatusUpdate(log.id, 'REJECTED')}
-                            className="p-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-600 hover:text-white transition-all"
-                          >
-                            <X size={16} />
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                  )}
-                </tr>
-              ))}
-              {logs.length === 0 && (
-                <tr>
-                  <td colSpan={role === 'OWNER' ? 6 : 4} className="px-8 py-12 text-center text-[#9c8e85] italic">
-                    No logs found for this month
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        <div className="p-4">
+          <DataTable
+            data={logs}
+            rowKey={(log: any) => log.id}
+            searchPlaceholder="Search staff, date, status…"
+            exportFilename="attendance-logs"
+            emptyMessage="No logs found for this month."
+            columns={[
+              { key: 'date', label: 'Date', sortable: true, render: (log: any) => <span className="font-mono text-sm">{String(log.date).slice(0, 10)}</span> },
+              { key: 'staff_name', label: 'Staff', sortable: true, hidden: role !== 'OWNER', getValue: (log: any) => log.staff_name || staffList.find((s: any) => s.id === log.user_id)?.name || '', render: (log: any) => <span className="font-bold text-[#1a1208]">{log.staff_name || staffList.find((s: any) => s.id === log.user_id)?.name || 'Unknown Staff'}</span> },
+              { key: 'hours', label: 'Hours', sortable: true, getValue: (log: any) => Number(log.hours), render: (log: any) => <span className="font-bold">{log.hours} hrs</span> },
+              { key: 'type', label: 'Type', sortable: true, render: (log: any) => <span className={cn("px-3 py-1 rounded-full text-[11px] font-bold uppercase tracking-widest", log.type === 'WORK' ? "bg-blue-50 text-blue-700" : "bg-orange-50 text-orange-700")}>{log.type}</span> },
+              { key: 'status', label: 'Status', sortable: true, render: (log: any) => <span className={cn("px-3 py-1 rounded-full text-[11px] font-bold uppercase tracking-widest", log.status === 'APPROVED' ? "bg-green-50 text-green-700" : log.status === 'REJECTED' ? "bg-red-50 text-red-700" : "bg-yellow-50 text-yellow-700")}>{log.status}</span> },
+              { key: 'actions', label: 'Actions', hidden: role !== 'OWNER', searchable: false, exportValue: () => '', align: 'right', render: (log: any) => (
+                role === 'OWNER' && log.status === 'PENDING' ? (
+                  <div className="flex justify-end gap-2">
+                    <button onClick={() => handleStatusUpdate(log.id, 'APPROVED')} className="p-2 bg-green-50 text-green-600 rounded-xl hover:bg-green-600 hover:text-white transition-all"><Check size={16} /></button>
+                    <button onClick={() => handleStatusUpdate(log.id, 'REJECTED')} className="p-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-600 hover:text-white transition-all"><X size={16} /></button>
+                  </div>
+                ) : null
+              )},
+            ]}
+          />
         </div>
-        <p className="text-center text-[11px] text-[#9c8e85] py-1.5 md:hidden select-none">‹ scroll ›</p>
       </div>}
     </div>
   );
@@ -5803,11 +5756,36 @@ function AnalyticsDashboard({
             <h3 className="text-xl font-bold font-serif">Order History</h3>
             <p className="text-xs text-[#9c8e85] mt-0.5">{reports?.allOrders?.length || 0} orders in selected range</p>
           </div>
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
-            <input type="text" placeholder="Search orders…" value={analyticsOrderSearch}
-              onChange={e => { setAnalyticsOrderSearch(e.target.value); setAnalyticsOrderPage(1); }}
-              className="bg-[#faf7f2] border-none rounded-xl pl-9 pr-4 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 w-52" />
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
+              <input type="text" placeholder="Search orders…" value={analyticsOrderSearch}
+                onChange={e => { setAnalyticsOrderSearch(e.target.value); setAnalyticsOrderPage(1); }}
+                className="bg-[#faf7f2] border-none rounded-xl pl-9 pr-4 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 w-52" />
+            </div>
+            <button
+              onClick={() => {
+                const q = analyticsOrderSearch.toLowerCase();
+                const allOrders = reports?.allOrders || [];
+                const rows = allOrders.filter((o: any) =>
+                  !q || (o.id||'').toLowerCase().includes(q) || (o.customer_name||'').toLowerCase().includes(q) ||
+                  (o.customer_phone||'').includes(q) || (o.table_number||'').toString().includes(q)
+                );
+                exportToCsv(rows, [
+                  { key: 'id', label: 'Order ID', exportValue: (o: any) => String(o.id) },
+                  { key: 'created_at', label: 'Date & Time', exportValue: (o: any) => new Date(o.created_at).toLocaleString() },
+                  { key: 'customer_name', label: 'Customer' },
+                  { key: 'table_number', label: 'Table', exportValue: (o: any) => o.table_number ? `T-${o.table_number}` : '' },
+                  { key: 'total_amount', label: 'Amount', exportValue: (o: any) => Number(o.total_amount || 0).toFixed(2) },
+                  { key: 'payment_method', label: 'Payment', exportValue: (o: any) => o.payment_method || o.payment_status || '' },
+                  { key: 'status', label: 'Status' },
+                ], 'order-history');
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#6b5d52] bg-white border border-[#e8dccf] rounded-xl hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors whitespace-nowrap"
+            >
+              <Download size={13} />
+              Export
+            </button>
           </div>
         </div>
         <div className="overflow-x-auto">
@@ -6415,76 +6393,44 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
           </div>
           {loading ? (
             <div className="text-center py-12 text-[#9c8e85]">Loading…</div>
-          ) : filtered.length === 0 ? (
+          ) : items.length === 0 ? (
             <div className="text-center py-16 text-[#9c8e85]">
               <Package size={40} className="mx-auto mb-3 opacity-30" />
-              <p className="font-bold text-sm">{items.length === 0 ? 'No items yet' : 'No items match your filter'}</p>
-              {items.length === 0 && <p className="text-xs mt-1">Use Quick Setup to seed common hotel supplies, or add items manually.</p>}
-              {items.length === 0 && (
-                <div className="flex gap-2 justify-center mt-4">
-                  <button onClick={openAdd} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold">+ Add Item</button>
-                  <button onClick={() => setTab('SETUP')} className="px-4 py-2 rounded-xl bg-[#faf7f2] text-[#cc5a16] text-sm font-bold border border-[#cc5a16]/20">Quick Setup</button>
-                </div>
-              )}
+              <p className="font-bold text-sm">No items yet</p>
+              <p className="text-xs mt-1">Use Quick Setup to seed common hotel supplies, or add items manually.</p>
+              <div className="flex gap-2 justify-center mt-4">
+                <button onClick={openAdd} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold">+ Add Item</button>
+                <button onClick={() => setTab('SETUP')} className="px-4 py-2 rounded-xl bg-[#faf7f2] text-[#cc5a16] text-sm font-bold border border-[#cc5a16]/20">Quick Setup</button>
+              </div>
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
-              <table className="w-full text-sm">
-                <thead className="bg-[#faf7f2]">
-                  <tr className="text-left text-[10px] font-bold uppercase tracking-wider text-[#9c8e85]">
-                    <th className="px-4 py-3">Item</th>
-                    <th className="px-4 py-3">Category</th>
-                    <th className="px-4 py-3 text-right">Stock</th>
-                    <th className="px-4 py-3 text-right">Par</th>
-                    <th className="px-4 py-3 text-right">Reorder at</th>
-                    <th className="px-4 py-3 text-right">Unit Price</th>
-                    <th className="px-4 py-3 text-right">Value</th>
-                    <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#f0ebe4]">
-                  {filtered.map(it => {
-                    const st = stockStatus(it);
-                    return (
-                      <tr key={it.id} className={cn("hover:bg-[#faf7f2]/60", st === 'critical' ? 'bg-red-50' : st === 'low' ? 'bg-amber-50' : '')}>
-                        <td className="px-4 py-2.5 font-semibold">{it.name}</td>
-                        <td className="px-4 py-2.5 text-xs text-[#6b5d52]">
-                          <span className="bg-[#faf7f2] border border-[#cc5a16]/15 text-[#cc5a16] text-[10px] font-bold px-2 py-0.5 rounded-full">{it.category || '—'}</span>
-                        </td>
-                        <td className={cn("px-4 py-2.5 text-right font-mono font-bold", st === 'critical' ? 'text-rose-700' : st === 'low' ? 'text-amber-700' : 'text-emerald-700')}>
-                          {Number(it.current_stock_qty).toFixed(0)} <span className="text-[10px] font-normal text-[#9c8e85]">{it.unit}</span>
-                        </td>
-                        <td className="px-4 py-2.5 text-right font-mono text-[#9c8e85] text-xs">{Number(it.par_level) > 0 ? Number(it.par_level).toFixed(0) : '—'}</td>
-                        <td className="px-4 py-2.5 text-right font-mono text-[#9c8e85] text-xs">{Number(it.reorder_point) > 0 ? Number(it.reorder_point).toFixed(0) : '—'}</td>
-                        <td className="px-4 py-2.5 text-right text-xs">{it.default_unit_price ? fmtAmt(it.default_unit_price) : '—'}</td>
-                        <td className="px-4 py-2.5 text-right text-xs font-semibold">
-                          {it.default_unit_price ? fmtAmt(Number(it.current_stock_qty || 0) * Number(it.default_unit_price)) : '—'}
-                        </td>
-                        <td className="px-4 py-2.5">
-                          {st === 'critical' ? (
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800">Reorder</span>
-                          ) : st === 'low' ? (
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Low</span>
-                          ) : (
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">OK</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-2.5">
-                          <div className="flex items-center gap-1">
-                            <button onClick={() => openAdj(it)} className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-[10px] font-bold hover:bg-emerald-100 border border-emerald-200">Receive</button>
-                            <button onClick={() => { setAdjItem(it); setAdjForm({ movement_type: 'CONSUME', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }}
-                              className="px-2 py-1 rounded-lg bg-amber-50 text-amber-700 text-[10px] font-bold hover:bg-amber-100 border border-amber-200">Use</button>
-                            <button onClick={() => openEdit(it)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 border border-[#cc5a16]/20">Edit</button>
-                            <button onClick={() => deleteItem(it.id)} className="px-2 py-1 rounded-lg bg-red-50 text-red-700 text-[10px] font-bold hover:bg-red-100">Del</button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              data={filtered}
+              rowKey={(it: any) => it.id}
+              hideSearch
+              exportFilename="inventory-items"
+              emptyMessage="No items match your filter."
+              compact
+              rowClassName={(it: any) => { const st = stockStatus(it); return st === 'critical' ? 'bg-red-50' : st === 'low' ? 'bg-amber-50' : ''; }}
+              columns={[
+                { key: 'name', label: 'Item', sortable: true, render: (it: any) => <span className="font-semibold">{it.name}</span> },
+                { key: 'category', label: 'Category', sortable: true, render: (it: any) => <span className="bg-[#faf7f2] border border-[#cc5a16]/15 text-[#cc5a16] text-[10px] font-bold px-2 py-0.5 rounded-full">{it.category || '—'}</span> },
+                { key: 'current_stock_qty', label: 'Stock', sortable: true, align: 'right', getValue: (it: any) => Number(it.current_stock_qty), render: (it: any) => { const st = stockStatus(it); return <span className={cn('font-mono font-bold', st === 'critical' ? 'text-rose-700' : st === 'low' ? 'text-amber-700' : 'text-emerald-700')}>{Number(it.current_stock_qty).toFixed(0)} <span className="text-[10px] font-normal text-[#9c8e85]">{it.unit}</span></span>; }, exportValue: (it: any) => `${Number(it.current_stock_qty).toFixed(0)} ${it.unit}` },
+                { key: 'par_level', label: 'Par', sortable: true, align: 'right', getValue: (it: any) => Number(it.par_level), render: (it: any) => <span className="font-mono text-[#9c8e85] text-xs">{Number(it.par_level) > 0 ? Number(it.par_level).toFixed(0) : '—'}</span> },
+                { key: 'reorder_point', label: 'Reorder at', sortable: true, align: 'right', getValue: (it: any) => Number(it.reorder_point), render: (it: any) => <span className="font-mono text-[#9c8e85] text-xs">{Number(it.reorder_point) > 0 ? Number(it.reorder_point).toFixed(0) : '—'}</span> },
+                { key: 'default_unit_price', label: 'Unit Price', sortable: true, align: 'right', getValue: (it: any) => Number(it.default_unit_price || 0), render: (it: any) => <span className="text-xs">{it.default_unit_price ? fmtAmt(it.default_unit_price) : '—'}</span> },
+                { key: 'value', label: 'Value', sortable: true, align: 'right', getValue: (it: any) => Number(it.current_stock_qty || 0) * Number(it.default_unit_price || 0), render: (it: any) => <span className="text-xs font-semibold">{it.default_unit_price ? fmtAmt(Number(it.current_stock_qty || 0) * Number(it.default_unit_price)) : '—'}</span>, exportValue: (it: any) => it.default_unit_price ? String(Number(it.current_stock_qty || 0) * Number(it.default_unit_price)) : '' },
+                { key: 'stock_status', label: 'Status', sortable: true, getValue: (it: any) => stockStatus(it), render: (it: any) => { const st = stockStatus(it); return st === 'critical' ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800">Reorder</span> : st === 'low' ? <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Low</span> : <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">OK</span>; } },
+                { key: 'actions', label: 'Actions', searchable: false, exportValue: () => '', render: (it: any) => (
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => openAdj(it)} className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-[10px] font-bold hover:bg-emerald-100 border border-emerald-200">Receive</button>
+                    <button onClick={() => { setAdjItem(it); setAdjForm({ movement_type: 'CONSUME', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }} className="px-2 py-1 rounded-lg bg-amber-50 text-amber-700 text-[10px] font-bold hover:bg-amber-100 border border-amber-200">Use</button>
+                    <button onClick={() => openEdit(it)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 border border-[#cc5a16]/20">Edit</button>
+                    <button onClick={() => deleteItem(it.id)} className="px-2 py-1 rounded-lg bg-red-50 text-red-700 text-[10px] font-bold hover:bg-red-100">Del</button>
+                  </div>
+                )},
+              ]}
+            />
           )}
         </div>
       )}
@@ -6552,37 +6498,23 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
               <p className="text-sm font-bold">No stock movements yet</p>
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
-              <table className="w-full text-sm">
-                <thead className="bg-[#faf7f2]"><tr className="text-[10px] font-bold uppercase tracking-wider text-[#9c8e85] text-left">
-                  <th className="px-4 py-3">Date</th><th className="px-4 py-3">Item</th>
-                  <th className="px-4 py-3">Type</th><th className="px-4 py-3 text-right">Qty</th>
-                  <th className="px-4 py-3 text-right">Unit Price</th><th className="px-4 py-3">Notes</th>
-                  <th className="px-4 py-3">Recorded by</th>
-                </tr></thead>
-                <tbody className="divide-y divide-[#f0ebe4]">
-                  {allMovements.map((m: any) => (
-                    <tr key={m.id} className="hover:bg-[#faf7f2]/60">
-                      <td className="px-4 py-2 text-xs text-[#6b5d52]">{String(m.movement_date || '').slice(0, 10)}</td>
-                      <td className="px-4 py-2 font-semibold text-sm">{m.item_name || m.item_id}</td>
-                      <td className="px-4 py-2">
-                        <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full",
-                          m.movement_type === 'RECEIVE' ? 'bg-emerald-100 text-emerald-800' :
-                          m.movement_type === 'CONSUME' ? 'bg-rose-100 text-rose-800' :
-                          'bg-stone-100 text-stone-700'
-                        )}>{m.movement_type}</span>
-                      </td>
-                      <td className={cn("px-4 py-2 text-right font-mono font-bold", m.movement_type === 'RECEIVE' ? 'text-emerald-700' : 'text-rose-700')}>
-                        {m.movement_type === 'CONSUME' ? '-' : '+'}{Math.abs(Number(m.quantity))}
-                      </td>
-                      <td className="px-4 py-2 text-right text-xs">{m.unit_price ? fmtAmt(m.unit_price) : '—'}</td>
-                      <td className="px-4 py-2 text-xs text-[#6b5d52]">{m.notes || '—'}</td>
-                      <td className="px-4 py-2 text-xs text-[#9c8e85] truncate max-w-[80px]">{m.recorded_by || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              data={allMovements}
+              rowKey={(m: any) => m.id}
+              searchPlaceholder="Search movements…"
+              exportFilename="hotel-stock-movements"
+              emptyMessage="No stock movements found."
+              compact
+              columns={[
+                { key: 'movement_date', label: 'Date', sortable: true, getValue: (m: any) => m.movement_date, render: (m: any) => <span className="text-xs text-[#6b5d52]">{String(m.movement_date || '').slice(0, 10)}</span> },
+                { key: 'item_name', label: 'Item', sortable: true, render: (m: any) => <span className="font-semibold">{m.item_name || m.item_id}</span> },
+                { key: 'movement_type', label: 'Type', sortable: true, render: (m: any) => <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full", m.movement_type === 'RECEIVE' ? 'bg-emerald-100 text-emerald-800' : m.movement_type === 'CONSUME' ? 'bg-rose-100 text-rose-800' : 'bg-stone-100 text-stone-700')}>{m.movement_type}</span> },
+                { key: 'quantity', label: 'Qty', sortable: true, align: 'right', getValue: (m: any) => Number(m.quantity), render: (m: any) => <span className={cn('font-mono font-bold', m.movement_type === 'RECEIVE' ? 'text-emerald-700' : 'text-rose-700')}>{m.movement_type === 'CONSUME' ? '-' : '+'}{Math.abs(Number(m.quantity))}</span> },
+                { key: 'unit_price', label: 'Unit Price', sortable: true, align: 'right', getValue: (m: any) => Number(m.unit_price || 0), render: (m: any) => <span className="text-xs">{m.unit_price ? fmtAmt(m.unit_price) : '—'}</span> },
+                { key: 'notes', label: 'Notes', render: (m: any) => <span className="text-xs text-[#6b5d52]">{m.notes || '—'}</span> },
+                { key: 'recorded_by', label: 'Recorded by', sortable: true, render: (m: any) => <span className="text-xs text-[#9c8e85]">{m.recorded_by || '—'}</span> },
+              ]}
+            />
           )}
         </div>
       )}
@@ -6847,81 +6779,57 @@ function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, o
       )}
 
       {/* Inventory table */}
-      <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
-            <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
-              <th className="px-4 py-2">Name</th><th className="px-4 py-2">Category</th>
-              <th className="px-4 py-2 text-right">Stock</th><th className="px-4 py-2 text-right">Par</th>
-              <th className="px-4 py-2 text-right">Price</th><th className="px-4 py-2 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.length === 0 ? (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-[#9c8e85]">No hotel inventory items yet.</td></tr>
-            ) : items.map(it => {
-              const alert = stockAlert(it);
-              return (
-                <React.Fragment key={it.id}>
-                  <tr className={cn('border-b border-[#cc5a16]/5', alert === 'critical' ? 'bg-red-50' : alert === 'low' ? 'bg-amber-50' : '')}>
-                    <td className="px-4 py-2 font-semibold">
-                      {it.name}
-                      {alert === 'critical' && <span className="ml-2 text-[9px] font-bold bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full uppercase">Reorder</span>}
-                      {alert === 'low' && <span className="ml-2 text-[9px] font-bold bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full uppercase">Low</span>}
+      <DataTable
+        data={items}
+        rowKey={(it: any) => it.id}
+        searchPlaceholder="Search items…"
+        exportFilename="hotel-inventory"
+        emptyMessage="No hotel inventory items yet."
+        compact
+        rowClassName={(it: any) => { const a = stockAlert(it); return a === 'critical' ? 'bg-red-50' : a === 'low' ? 'bg-amber-50' : ''; }}
+        isExpanded={(it: any) => expanded === it.id}
+        renderExpanded={(it: any) => (
+          movLoading ? <p className="text-xs italic text-[#9c8e85]">Loading…</p> : (
+            <table className="w-full text-xs">
+              <thead><tr className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                <th className="py-1 pr-3">Date</th><th className="py-1 pr-3">Type</th>
+                <th className="py-1 pr-3 text-right">Qty</th><th className="py-1 pr-3 text-right">Unit Price</th>
+                <th className="py-1 pr-3">Notes</th><th className="py-1 pr-3">Recorded by</th>
+              </tr></thead>
+              <tbody>
+                {(movements[it.id] || []).length === 0 ? (
+                  <tr><td colSpan={6} className="py-2 italic text-[#9c8e85]">No movements recorded yet.</td></tr>
+                ) : (movements[it.id] || []).map((m: any) => (
+                  <tr key={m.id} className="border-t border-[#e8dccf]">
+                    <td className="py-1 pr-3">{String(m.movement_date || '').slice(0, 10)}</td>
+                    <td className="py-1 pr-3">
+                      <span className={cn('font-bold', m.movement_type === 'RECEIVE' ? 'text-emerald-700' : m.movement_type === 'CONSUME' ? 'text-rose-700' : 'text-[#6b5d52]')}>{m.movement_type}</span>
                     </td>
-                    <td className="px-4 py-2 text-xs">{it.category || '—'}</td>
-                    <td className={cn('px-4 py-2 text-right font-mono font-bold', alert === 'critical' ? 'text-red-700' : alert === 'low' ? 'text-amber-700' : '')}>
-                      {Number(it.current_stock_qty).toFixed(0)} {it.unit}
-                    </td>
-                    <td className="px-4 py-2 text-right font-mono text-[#9c8e85]">{Number(it.par_level).toFixed(0)}</td>
-                    <td className="px-4 py-2 text-right font-mono">{it.default_unit_price ? `₹${Number(it.default_unit_price).toFixed(2)}` : '—'}</td>
-                    <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
-                      <button onClick={() => { setStockModal(it); setStockForm({ movement_type: 'RECEIVE', quantity: '', unit_price: it.default_unit_price ? String(it.default_unit_price) : '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }}
-                        className="text-xs font-bold text-[#cc5a16] hover:underline">Receive</button>
-                      <button onClick={() => loadMovements(it.id)}
-                        className="text-xs text-[#6b5d52] hover:underline">{expanded === it.id ? 'Hide' : 'History'}</button>
-                      <button onClick={() => onDelete(it.id)} className="text-xs text-red-700 hover:underline">Remove</button>
-                    </td>
+                    <td className="py-1 pr-3 text-right font-mono">{m.movement_type === 'CONSUME' ? '-' : '+'}{Number(m.quantity).toFixed(0)}</td>
+                    <td className="py-1 pr-3 text-right font-mono">{m.unit_price ? `₹${Number(m.unit_price).toFixed(2)}` : '—'}</td>
+                    <td className="py-1 pr-3 text-[#6b5d52]">{m.notes || '—'}</td>
+                    <td className="py-1 pr-3 text-[#9c8e85]">{m.recorded_by || '—'}</td>
                   </tr>
-                  {expanded === it.id && (
-                    <tr className="bg-[#faf7f2]">
-                      <td colSpan={6} className="px-4 py-2">
-                        {movLoading ? <p className="text-xs italic text-[#9c8e85]">Loading…</p> : (
-                          <table className="w-full text-xs">
-                            <thead><tr className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">
-                              <th className="py-1 pr-3">Date</th><th className="py-1 pr-3">Type</th>
-                              <th className="py-1 pr-3 text-right">Qty</th><th className="py-1 pr-3 text-right">Unit Price</th>
-                              <th className="py-1 pr-3">Notes</th><th className="py-1 pr-3">Recorded by</th>
-                            </tr></thead>
-                            <tbody>
-                              {(movements[it.id] || []).length === 0 ? (
-                                <tr><td colSpan={6} className="py-2 italic text-[#9c8e85]">No movements recorded yet.</td></tr>
-                              ) : (movements[it.id] || []).map((m: any) => (
-                                <tr key={m.id} className="border-t border-[#e8dccf]">
-                                  <td className="py-1 pr-3">{String(m.movement_date || '').slice(0, 10)}</td>
-                                  <td className="py-1 pr-3">
-                                    <span className={cn('font-bold', m.movement_type === 'RECEIVE' ? 'text-emerald-700' : m.movement_type === 'CONSUME' ? 'text-rose-700' : 'text-[#6b5d52]')}>
-                                      {m.movement_type}
-                                    </span>
-                                  </td>
-                                  <td className="py-1 pr-3 text-right font-mono">{m.movement_type === 'CONSUME' ? '-' : '+'}{Number(m.quantity).toFixed(0)}</td>
-                                  <td className="py-1 pr-3 text-right font-mono">{m.unit_price ? `₹${Number(m.unit_price).toFixed(2)}` : '—'}</td>
-                                  <td className="py-1 pr-3 text-[#6b5d52]">{m.notes || '—'}</td>
-                                  <td className="py-1 pr-3 text-[#9c8e85]">{m.recorded_by || '—'}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        )}
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                ))}
+              </tbody>
+            </table>
+          )
+        )}
+        columns={[
+          { key: 'name', label: 'Name', sortable: true, render: (it: any) => { const a = stockAlert(it); return (<span className="font-semibold">{it.name}{a === 'critical' && <span className="ml-2 text-[9px] font-bold bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full uppercase">Reorder</span>}{a === 'low' && <span className="ml-2 text-[9px] font-bold bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full uppercase">Low</span>}</span>); } },
+          { key: 'category', label: 'Category', sortable: true, render: (it: any) => it.category || '—' },
+          { key: 'current_stock_qty', label: 'Stock', sortable: true, align: 'right', getValue: (it: any) => Number(it.current_stock_qty), render: (it: any) => { const a = stockAlert(it); return <span className={cn('font-mono font-bold', a === 'critical' ? 'text-red-700' : a === 'low' ? 'text-amber-700' : '')}>{Number(it.current_stock_qty).toFixed(0)} {it.unit}</span>; }, exportValue: (it: any) => `${Number(it.current_stock_qty).toFixed(0)} ${it.unit}` },
+          { key: 'par_level', label: 'Par', sortable: true, align: 'right', getValue: (it: any) => Number(it.par_level), render: (it: any) => <span className="font-mono text-[#9c8e85]">{Number(it.par_level).toFixed(0)}</span> },
+          { key: 'default_unit_price', label: 'Price', sortable: true, align: 'right', getValue: (it: any) => Number(it.default_unit_price || 0), render: (it: any) => it.default_unit_price ? `₹${Number(it.default_unit_price).toFixed(2)}` : '—' },
+          { key: 'actions', label: 'Actions', sortable: false, align: 'right', searchable: false, exportValue: () => '', render: (it: any) => (
+            <div className="flex justify-end gap-2">
+              <button onClick={() => { setStockModal(it); setStockForm({ movement_type: 'RECEIVE', quantity: '', unit_price: it.default_unit_price ? String(it.default_unit_price) : '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }} className="text-xs font-bold text-[#cc5a16] hover:underline">Receive</button>
+              <button onClick={() => loadMovements(it.id)} className="text-xs text-[#6b5d52] hover:underline">{expanded === it.id ? 'Hide' : 'History'}</button>
+              <button onClick={() => onDelete(it.id)} className="text-xs text-red-700 hover:underline">Remove</button>
+            </div>
+          )},
+        ]}
+      />
 
       {/* Stock Movement Modal */}
       {stockModal && (
@@ -37061,21 +36969,23 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
         </div>
         {expView === 'ledger' && (<>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">{kpi('Opening', cur(s.opening_balance))}{kpi('Cash in', cur(s.total_in))}{kpi('Cash out', cur(s.total_out))}{kpi('Closing', cur(s.closing_balance))}</div>
-          {rows.length === 0 ? empty() : (
-            <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Date', 'Module', 'Type', 'Category', 'Amount', 'Notes', ''].map(th)}</tr></thead>
-              <tbody>{rows.map((r: any) => (
-                <tr key={r.id} className="border-b border-[#f1ece3]">
-                  <td className="py-1.5 px-3">{String(r.entry_date || '').slice(0, 10)}</td>
-                  <td className="py-1.5 px-3"><span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-full', modColors[r.module || 'RESTAURANT'] || '')}>{r.module || 'RESTAURANT'}</span></td>
-                  <td className={cn('py-1.5 px-3 font-bold', r.direction === 'OUT' ? 'text-rose-700' : 'text-emerald-700')}>{r.direction}</td>
-                  <td className="py-1.5 px-3">{r.category || '—'}</td>
-                  <td className="py-1.5 px-3 font-bold">{cur(r.amount)}</td>
-                  <td className="py-1.5 px-3 text-[#6b5d52]">{r.notes || '—'}</td>
-                  <td className="py-1.5 px-3">{canDeletePc && <button type="button" onClick={() => deletePettyCash(r.id)} className="text-[10px] text-rose-600 hover:underline">Delete</button>}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          )}
+          <DataTable
+            data={rows}
+            rowKey={(r: any) => r.id}
+            searchPlaceholder="Search category, notes, module…"
+            exportFilename="expense-journal"
+            emptyMessage="No entries for this period."
+            compact
+            columns={[
+              { key: 'entry_date', label: 'Date', sortable: true, render: (r: any) => String(r.entry_date || '').slice(0, 10) },
+              { key: 'module', label: 'Module', sortable: true, render: (r: any) => <span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-full', modColors[r.module || 'RESTAURANT'] || '')}>{r.module || 'RESTAURANT'}</span> },
+              { key: 'direction', label: 'Type', sortable: true, render: (r: any) => <span className={cn('font-bold', r.direction === 'OUT' ? 'text-rose-700' : 'text-emerald-700')}>{r.direction}</span> },
+              { key: 'category', label: 'Category', sortable: true },
+              { key: 'amount', label: 'Amount', sortable: true, align: 'right', getValue: (r: any) => Number(r.amount), render: (r: any) => <span className="font-bold">{cur(r.amount)}</span> },
+              { key: 'notes', label: 'Notes', render: (r: any) => <span className="text-[#6b5d52]">{r.notes || '—'}</span> },
+              { key: 'del', label: '', searchable: false, exportValue: () => '', hidden: !canDeletePc, render: (r: any) => <button type="button" onClick={() => deletePettyCash(r.id)} className="text-[10px] text-rose-600 hover:underline">Delete</button> },
+            ]}
+          />
         </>)}
         {expView === 'daily' && renderDailyTrend()}
         {expView === 'category' && renderCategory()}
@@ -50769,55 +50679,31 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
               <button onClick={openCreateInvoice} className="mt-4 px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold">+ New Invoice</button>
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
-              <table className="w-full text-sm">
-                <thead className="bg-[#faf7f2]">
-                  <tr className="text-left text-[10px] font-bold uppercase tracking-wider text-[#9c8e85]">
-                    <th className="px-4 py-3">Date</th>
-                    <th className="px-4 py-3">Invoice #</th>
-                    <th className="px-4 py-3">Supplier</th>
-                    <th className="px-4 py-3">Module</th>
-                    <th className="px-4 py-3 text-right">Total</th>
-                    <th className="px-4 py-3 text-right">Paid</th>
-                    <th className="px-4 py-3 text-right">Outstanding</th>
-                    <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#f0ebe4]">
-                  {invoices.map((inv: any) => (
-                    <tr key={inv.id} className="hover:bg-[#faf7f2]/60">
-                      <td className="px-4 py-2.5 text-xs text-[#6b5d52] whitespace-nowrap">{String(inv.invoice_date || '').slice(0, 10)}</td>
-                      <td className="px-4 py-2.5 font-mono text-xs">{inv.invoice_number || <span className="text-[#9c8e85] italic">—</span>}</td>
-                      <td className="px-4 py-2.5 font-semibold text-sm">{inv.supplier_name}</td>
-                      <td className="px-4 py-2.5">
-                        <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full uppercase", modColor[inv.module] || 'bg-stone-100 text-stone-700')}>{inv.module}</span>
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-semibold">{fmtAmt(inv.total_amount)}</td>
-                      <td className="px-4 py-2.5 text-right text-emerald-700">{fmtAmt(inv.paid_amount)}</td>
-                      <td className="px-4 py-2.5 text-right font-bold text-rose-700">{fmtAmt(inv.outstanding_amount)}</td>
-                      <td className="px-4 py-2.5">
-                        <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full", statusColor[inv.status] || 'bg-stone-100 text-stone-600')}>{inv.status}</span>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <div className="flex items-center gap-1">
-                          {inv.outstanding_amount > 0 && (
-                            <button onClick={() => openPayModal(inv)}
-                              className="px-2 py-1 rounded-lg bg-emerald-600 text-white text-[10px] font-bold hover:bg-emerald-700">Pay</button>
-                          )}
-                          <button onClick={() => openEditInvoice(inv)}
-                            className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 border border-[#cc5a16]/20">Edit</button>
-                          {inv.paid_amount <= 0 && (
-                            <button onClick={() => deleteInvoice(inv.id)}
-                              className="px-2 py-1 rounded-lg bg-red-50 text-red-700 text-[10px] font-bold hover:bg-red-100">Del</button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              data={invoices}
+              rowKey={(inv: any) => inv.id}
+              searchPlaceholder="Search supplier, invoice #…"
+              exportFilename="supplier-invoices"
+              emptyMessage="No invoices match your filters."
+              compact
+              columns={[
+                { key: 'invoice_date', label: 'Date', sortable: true, render: (inv: any) => <span className="text-xs text-[#6b5d52] whitespace-nowrap">{String(inv.invoice_date || '').slice(0, 10)}</span> },
+                { key: 'invoice_number', label: 'Invoice #', sortable: true, render: (inv: any) => <span className="font-mono text-xs">{inv.invoice_number || '—'}</span> },
+                { key: 'supplier_name', label: 'Supplier', sortable: true, render: (inv: any) => <span className="font-semibold">{inv.supplier_name}</span> },
+                { key: 'module', label: 'Module', sortable: true, render: (inv: any) => <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full uppercase", modColor[inv.module] || 'bg-stone-100 text-stone-700')}>{inv.module}</span> },
+                { key: 'total_amount', label: 'Total', sortable: true, align: 'right', getValue: (inv: any) => Number(inv.total_amount), render: (inv: any) => <span className="font-semibold">{fmtAmt(inv.total_amount)}</span> },
+                { key: 'paid_amount', label: 'Paid', sortable: true, align: 'right', getValue: (inv: any) => Number(inv.paid_amount), render: (inv: any) => <span className="text-emerald-700">{fmtAmt(inv.paid_amount)}</span> },
+                { key: 'outstanding_amount', label: 'Outstanding', sortable: true, align: 'right', getValue: (inv: any) => Number(inv.outstanding_amount), render: (inv: any) => <span className="font-bold text-rose-700">{fmtAmt(inv.outstanding_amount)}</span> },
+                { key: 'status', label: 'Status', sortable: true, render: (inv: any) => <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full", statusColor[inv.status] || 'bg-stone-100 text-stone-600')}>{inv.status}</span> },
+                { key: 'actions', label: 'Actions', searchable: false, exportValue: () => '', render: (inv: any) => (
+                  <div className="flex items-center gap-1">
+                    {inv.outstanding_amount > 0 && <button onClick={() => openPayModal(inv)} className="px-2 py-1 rounded-lg bg-emerald-600 text-white text-[10px] font-bold hover:bg-emerald-700">Pay</button>}
+                    <button onClick={() => openEditInvoice(inv)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 border border-[#cc5a16]/20">Edit</button>
+                    {inv.paid_amount <= 0 && <button onClick={() => deleteInvoice(inv.id)} className="px-2 py-1 rounded-lg bg-red-50 text-red-700 text-[10px] font-bold hover:bg-red-100">Del</button>}
+                  </div>
+                )},
+              ]}
+            />
           )}
         </div>
       )}
@@ -50832,41 +50718,24 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
               <p className="text-xs mt-1">Payments appear here when you pay a supplier invoice.</p>
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
-              <table className="w-full text-sm">
-                <thead className="bg-[#faf7f2]">
-                  <tr className="text-left text-[10px] font-bold uppercase tracking-wider text-[#9c8e85]">
-                    <th className="px-4 py-3">Date</th>
-                    <th className="px-4 py-3">Supplier</th>
-                    <th className="px-4 py-3">Invoice #</th>
-                    <th className="px-4 py-3">Method</th>
-                    <th className="px-4 py-3">Reference</th>
-                    <th className="px-4 py-3 text-right">Amount</th>
-                    <th className="px-4 py-3">By</th>
-                    <th className="px-4 py-3"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#f0ebe4]">
-                  {payments.map((p: any) => (
-                    <tr key={p.id} className="hover:bg-[#faf7f2]/60">
-                      <td className="px-4 py-2.5 text-xs text-[#6b5d52]">{String(p.payment_date || '').slice(0, 10)}</td>
-                      <td className="px-4 py-2.5 font-semibold">{p.supplier_name}</td>
-                      <td className="px-4 py-2.5 font-mono text-xs">{p.invoice_number || '—'}</td>
-                      <td className="px-4 py-2.5">
-                        <span className="bg-[#faf7f2] border border-[#cc5a16]/20 text-[#cc5a16] text-[10px] font-bold px-2 py-0.5 rounded-full">{p.payment_method}</span>
-                      </td>
-                      <td className="px-4 py-2.5 font-mono text-xs text-[#6b5d52]">{p.reference_number || '—'}</td>
-                      <td className="px-4 py-2.5 text-right font-bold text-emerald-700">{fmtAmt(p.amount)}</td>
-                      <td className="px-4 py-2.5 text-xs text-[#9c8e85] truncate max-w-[80px]">{p.recorded_by || '—'}</td>
-                      <td className="px-4 py-2.5">
-                        <button onClick={() => deletePayment(p.id)}
-                          className="text-[10px] font-bold text-rose-600 hover:underline">Reverse</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              data={payments}
+              rowKey={(p: any) => p.id}
+              searchPlaceholder="Search supplier, method, reference…"
+              exportFilename="supplier-payments"
+              emptyMessage="No payments recorded."
+              compact
+              columns={[
+                { key: 'payment_date', label: 'Date', sortable: true, render: (p: any) => <span className="text-xs text-[#6b5d52]">{String(p.payment_date || '').slice(0, 10)}</span> },
+                { key: 'supplier_name', label: 'Supplier', sortable: true, render: (p: any) => <span className="font-semibold">{p.supplier_name}</span> },
+                { key: 'invoice_number', label: 'Invoice #', sortable: true, render: (p: any) => <span className="font-mono text-xs">{p.invoice_number || '—'}</span> },
+                { key: 'payment_method', label: 'Method', sortable: true, render: (p: any) => <span className="bg-[#faf7f2] border border-[#cc5a16]/20 text-[#cc5a16] text-[10px] font-bold px-2 py-0.5 rounded-full">{p.payment_method}</span> },
+                { key: 'reference_number', label: 'Reference', render: (p: any) => <span className="font-mono text-xs text-[#6b5d52]">{p.reference_number || '—'}</span> },
+                { key: 'amount', label: 'Amount', sortable: true, align: 'right', getValue: (p: any) => Number(p.amount), render: (p: any) => <span className="font-bold text-emerald-700">{fmtAmt(p.amount)}</span> },
+                { key: 'recorded_by', label: 'By', sortable: true, render: (p: any) => <span className="text-xs text-[#9c8e85]">{p.recorded_by || '—'}</span> },
+                { key: 'actions', label: '', searchable: false, exportValue: () => '', render: (p: any) => <button onClick={() => deletePayment(p.id)} className="text-[10px] font-bold text-rose-600 hover:underline">Reverse</button> },
+              ]}
+            />
           )}
         </div>
       )}
@@ -51964,53 +51833,25 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
         </div>
 
         {loading && <p className="text-center text-sm text-[#9c8e85] py-8">Loading…</p>}
-        {!loading && data && data.employees.length === 0 && (
-          <div className="text-center text-sm text-[#9c8e85] py-12 bg-[#faf7f2] rounded-2xl">
-            No employees match these filters.
-          </div>
-        )}
-        {!loading && data && data.employees.length > 0 && (
-          <div className="overflow-x-auto rounded-2xl border border-[#f0e8dd]">
-            <table className="w-full text-sm min-w-[800px]">
-              <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
-                <tr>
-                  <th className="text-left px-3 py-2">Name</th>
-                  <th className="text-left px-3 py-2">Designation</th>
-                  <th className="text-left px-3 py-2">Department</th>
-                  <th className="text-left px-3 py-2">Role</th>
-                  <th className="text-left px-3 py-2">Joining</th>
-                  <th className="text-right px-3 py-2">CTC / Hourly</th>
-                  <th className="text-center px-3 py-2">HR status</th>
-                  <th className="text-center px-3 py-2"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.employees.map(e => (
-                  <tr key={e.id} className="border-t border-[#f0e8dd] hover:bg-[#faf7f2]/60">
-                    <td className="px-3 py-2">
-                      <div className="font-semibold text-[#1a1208]">{e.name}</div>
-                      <div className="text-[10px] text-[#9c8e85]">{e.phone || '—'} {e.email ? `· ${e.email}` : ''}</div>
-                    </td>
-                    <td className="px-3 py-2 text-[#3d3128]">{e.designation || <span className="text-[#9c8e85] italic">—</span>}</td>
-                    <td className="px-3 py-2 text-[#3d3128]">{e.department || <span className="text-[#9c8e85] italic">—</span>}</td>
-                    <td className="px-3 py-2 text-[10px] uppercase tracking-widest">{e.role}</td>
-                    <td className="px-3 py-2 text-[11px]">{e.joining_date ? formatDateForTenant(e.joining_date, restaurant?.date_format) : <span className="text-[#9c8e85] italic">—</span>}</td>
-                    <td className="px-3 py-2 text-right font-mono text-[11px]">
-                      {e.ctc ? `₹${Number(e.ctc).toLocaleString('en-IN')}` : (e.hourly_rate ? `₹${Number(e.hourly_rate).toFixed(0)}/hr` : '—')}
-                    </td>
-                    <td className="px-3 py-2 text-center">
-                      <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold', STATUS_PILL[e.hr_status || 'ACTIVE'])}>
-                        {e.hr_status || 'ACTIVE'}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-center">
-                      <button onClick={() => setEditingId(e.id)} className="text-[#cc5a16] hover:underline text-[11px] font-bold">Edit HR profile</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        {!loading && data && (
+          <DataTable
+            data={data.employees}
+            rowKey={(e: any) => e.id}
+            hideSearch
+            exportFilename="hr-employees"
+            emptyMessage="No employees match these filters."
+            compact
+            columns={[
+              { key: 'name', label: 'Name', sortable: true, getValue: (e: any) => e.name, render: (e: any) => (<div><div className="font-semibold text-[#1a1208]">{e.name}</div><div className="text-[10px] text-[#9c8e85]">{e.phone || '—'}{e.email ? ` · ${e.email}` : ''}</div></div>), exportValue: (e: any) => e.name },
+              { key: 'designation', label: 'Designation', sortable: true, render: (e: any) => e.designation || '—' },
+              { key: 'department', label: 'Department', sortable: true, render: (e: any) => e.department || '—' },
+              { key: 'role', label: 'Role', sortable: true, render: (e: any) => <span className="text-[10px] uppercase tracking-widest">{e.role}</span> },
+              { key: 'joining_date', label: 'Joining', sortable: true, render: (e: any) => e.joining_date ? formatDateForTenant(e.joining_date, restaurant?.date_format) : '—' },
+              { key: 'ctc', label: 'CTC / Hourly', sortable: true, align: 'right', getValue: (e: any) => Number(e.ctc || e.hourly_rate || 0), render: (e: any) => <span className="font-mono text-[11px]">{e.ctc ? `₹${Number(e.ctc).toLocaleString('en-IN')}` : e.hourly_rate ? `₹${Number(e.hourly_rate).toFixed(0)}/hr` : '—'}</span>, exportValue: (e: any) => e.ctc ? `${e.ctc}` : e.hourly_rate ? `${e.hourly_rate}/hr` : '' },
+              { key: 'hr_status', label: 'Status', sortable: true, align: 'center', render: (e: any) => <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold', STATUS_PILL[e.hr_status || 'ACTIVE'])}>{e.hr_status || 'ACTIVE'}</span> },
+              { key: 'edit', label: '', searchable: false, exportValue: () => '', align: 'center', render: (e: any) => <button onClick={() => setEditingId(e.id)} className="text-[#cc5a16] hover:underline text-[11px] font-bold">Edit HR profile</button> },
+            ]}
+          />
         )}
       </div>
       {editingId && (
@@ -53860,11 +53701,36 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
           </div>
 
           {/* Search bar */}
-          <div className="relative">
-            <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
-            <input type="text" placeholder="Search by customer name, phone, email…"
-              value={bookingSearch} onChange={e => { setBookingSearch(e.target.value); setBookingPage(1); }}
-              className="w-full bg-white border border-black/5 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 shadow-sm" />
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
+              <input type="text" placeholder="Search by customer name, phone, email…"
+                value={bookingSearch} onChange={e => { setBookingSearch(e.target.value); setBookingPage(1); }}
+                className="w-full bg-white border border-black/5 rounded-2xl pl-10 pr-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20 shadow-sm" />
+            </div>
+            <button
+              onClick={() => {
+                const q = bookingSearch.toLowerCase();
+                const rows = filteredBookings.filter((b: any) =>
+                  !q || (b.customer_name||'').toLowerCase().includes(q) ||
+                  (b.customer_phone||'').includes(q) || (b.customer_email||'').toLowerCase().includes(q)
+                );
+                exportToCsv(rows, [
+                  { key: 'customer_name', label: 'Customer Name' },
+                  { key: 'customer_phone', label: 'Phone' },
+                  { key: 'customer_email', label: 'Email' },
+                  { key: 'booking_date', label: 'Date', exportValue: (b: any) => String(b.booking_date).slice(0,10) },
+                  { key: 'booking_time', label: 'Time', exportValue: (b: any) => String(b.booking_time).slice(0,5) },
+                  { key: 'guests', label: 'Guests' },
+                  { key: 'source', label: 'Source', exportValue: (b: any) => b.booked_by ? 'Staff' : 'Online' },
+                  { key: 'status', label: 'Status' },
+                ], 'table-reservations');
+              }}
+              className="flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold text-[#6b5d52] bg-white border border-[#e8dccf] rounded-2xl hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors whitespace-nowrap shadow-sm"
+            >
+              <Download size={13} />
+              Export
+            </button>
           </div>
 
           {/* Filter tabs */}
