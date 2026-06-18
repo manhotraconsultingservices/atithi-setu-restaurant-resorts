@@ -6192,12 +6192,65 @@ function NotificationTemplateEditor({ templates, onSave }: { templates: any[]; o
   );
 }
 
-function HotelInventoryPanel({ items, onCreate, onDelete }: {
-  items: any[]; onCreate: (p: any) => void; onDelete: (id: string) => void;
+function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, onRefresh }: {
+  items: any[]; restaurantId: string; token: string;
+  onCreate: (p: any) => void; onDelete: (id: string) => void; onRefresh: () => void;
 }) {
   const [form, setForm] = useState({ name: '', category: '', unit: 'unit', current_stock_qty: '', par_level: '', reorder_point: '', default_unit_price: '' });
+  const [stockModal, setStockModal] = useState<any | null>(null);
+  const [stockForm, setStockForm] = useState({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) });
+  const [stockSaving, setStockSaving] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [movements, setMovements] = useState<Record<string, any[]>>({});
+  const [movLoading, setMovLoading] = useState(false);
+
+  const loadMovements = async (itemId: string) => {
+    if (expanded === itemId) { setExpanded(null); return; }
+    setExpanded(itemId); setMovLoading(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel-inventory/${itemId}/movements`, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      setMovements(prev => ({ ...prev, [itemId]: Array.isArray(data) ? data : [] }));
+    } catch { setMovements(prev => ({ ...prev, [itemId]: [] })); }
+    finally { setMovLoading(false); }
+  };
+
+  const submitStock = async () => {
+    if (!stockModal) return;
+    const qty = Number(stockForm.quantity);
+    if (!(Math.abs(qty) > 0)) { alert('Enter a valid quantity'); return; }
+    setStockSaving(true);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel-inventory/${stockModal.id}/stock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ ...stockForm, quantity: qty, unit_price: stockForm.unit_price ? Number(stockForm.unit_price) : null }),
+      });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error || 'Failed'); }
+      setStockModal(null);
+      setStockForm({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) });
+      if (expanded === stockModal.id) {
+        const r2 = await fetch(`/api/restaurant/${restaurantId}/hotel-inventory/${stockModal.id}/movements`, { headers: { Authorization: `Bearer ${token}` } });
+        const d2 = await r2.json();
+        setMovements(prev => ({ ...prev, [stockModal.id]: Array.isArray(d2) ? d2 : [] }));
+      }
+      onRefresh();
+    } catch (e: any) { alert('Failed: ' + (e?.message || 'error')); }
+    finally { setStockSaving(false); }
+  };
+
+  const stockAlert = (item: any) => {
+    const qty = Number(item.current_stock_qty || 0);
+    const reorder = Number(item.reorder_point || 0);
+    const par = Number(item.par_level || 0);
+    if (reorder > 0 && qty <= reorder) return 'critical';
+    if (par > 0 && qty < par) return 'low';
+    return 'ok';
+  };
+
   return (
     <div className="space-y-3">
+      {/* Add item form */}
       <div className="bg-white rounded-2xl border border-[#cc5a16]/10 p-4">
         <h3 className="text-sm font-bold mb-3">Add Hotel Inventory Item</h3>
         <div className="grid grid-cols-1 md:grid-cols-7 gap-2">
@@ -6229,33 +6282,136 @@ function HotelInventoryPanel({ items, onCreate, onDelete }: {
             className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">Add Item</button>
         </div>
       </div>
+
+      {/* Low-stock alerts banner */}
+      {items.some(it => stockAlert(it) !== 'ok') && (
+        <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-xs text-amber-800">
+          <span className="font-bold shrink-0">Stock alerts:</span>
+          <span>{items.filter(it => stockAlert(it) !== 'ok').map(it => it.name).join(', ')}</span>
+        </div>
+      )}
+
+      {/* Inventory table */}
       <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-[#faf7f2]/60 border-b border-[#cc5a16]/10">
             <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">
               <th className="px-4 py-2">Name</th><th className="px-4 py-2">Category</th>
               <th className="px-4 py-2 text-right">Stock</th><th className="px-4 py-2 text-right">Par</th>
-              <th className="px-4 py-2 text-right">Price</th><th className="px-4 py-2"></th>
+              <th className="px-4 py-2 text-right">Price</th><th className="px-4 py-2 text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {items.length === 0 ? (
               <tr><td colSpan={6} className="px-4 py-8 text-center text-[#9c8e85]">No hotel inventory items yet.</td></tr>
-            ) : items.map(it => (
-              <tr key={it.id} className="border-b border-[#cc5a16]/5">
-                <td className="px-4 py-2 font-semibold">{it.name}</td>
-                <td className="px-4 py-2 text-xs">{it.category || '—'}</td>
-                <td className="px-4 py-2 text-right font-mono">{Number(it.current_stock_qty).toFixed(0)} {it.unit}</td>
-                <td className="px-4 py-2 text-right font-mono">{Number(it.par_level).toFixed(0)}</td>
-                <td className="px-4 py-2 text-right font-mono">{it.default_unit_price ? `₹${Number(it.default_unit_price).toFixed(2)}` : '—'}</td>
-                <td className="px-4 py-2 text-right">
-                  <button onClick={() => onDelete(it.id)} className="text-xs text-red-700 hover:underline">Remove</button>
-                </td>
-              </tr>
-            ))}
+            ) : items.map(it => {
+              const alert = stockAlert(it);
+              return (
+                <React.Fragment key={it.id}>
+                  <tr className={cn('border-b border-[#cc5a16]/5', alert === 'critical' ? 'bg-red-50' : alert === 'low' ? 'bg-amber-50' : '')}>
+                    <td className="px-4 py-2 font-semibold">
+                      {it.name}
+                      {alert === 'critical' && <span className="ml-2 text-[9px] font-bold bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full uppercase">Reorder</span>}
+                      {alert === 'low' && <span className="ml-2 text-[9px] font-bold bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full uppercase">Low</span>}
+                    </td>
+                    <td className="px-4 py-2 text-xs">{it.category || '—'}</td>
+                    <td className={cn('px-4 py-2 text-right font-mono font-bold', alert === 'critical' ? 'text-red-700' : alert === 'low' ? 'text-amber-700' : '')}>
+                      {Number(it.current_stock_qty).toFixed(0)} {it.unit}
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono text-[#9c8e85]">{Number(it.par_level).toFixed(0)}</td>
+                    <td className="px-4 py-2 text-right font-mono">{it.default_unit_price ? `₹${Number(it.default_unit_price).toFixed(2)}` : '—'}</td>
+                    <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                      <button onClick={() => { setStockModal(it); setStockForm({ movement_type: 'RECEIVE', quantity: '', unit_price: it.default_unit_price ? String(it.default_unit_price) : '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }}
+                        className="text-xs font-bold text-[#cc5a16] hover:underline">Receive</button>
+                      <button onClick={() => loadMovements(it.id)}
+                        className="text-xs text-[#6b5d52] hover:underline">{expanded === it.id ? 'Hide' : 'History'}</button>
+                      <button onClick={() => onDelete(it.id)} className="text-xs text-red-700 hover:underline">Remove</button>
+                    </td>
+                  </tr>
+                  {expanded === it.id && (
+                    <tr className="bg-[#faf7f2]">
+                      <td colSpan={6} className="px-4 py-2">
+                        {movLoading ? <p className="text-xs italic text-[#9c8e85]">Loading…</p> : (
+                          <table className="w-full text-xs">
+                            <thead><tr className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                              <th className="py-1 pr-3">Date</th><th className="py-1 pr-3">Type</th>
+                              <th className="py-1 pr-3 text-right">Qty</th><th className="py-1 pr-3 text-right">Unit Price</th>
+                              <th className="py-1 pr-3">Notes</th><th className="py-1 pr-3">Recorded by</th>
+                            </tr></thead>
+                            <tbody>
+                              {(movements[it.id] || []).length === 0 ? (
+                                <tr><td colSpan={6} className="py-2 italic text-[#9c8e85]">No movements recorded yet.</td></tr>
+                              ) : (movements[it.id] || []).map((m: any) => (
+                                <tr key={m.id} className="border-t border-[#e8dccf]">
+                                  <td className="py-1 pr-3">{String(m.movement_date || '').slice(0, 10)}</td>
+                                  <td className="py-1 pr-3">
+                                    <span className={cn('font-bold', m.movement_type === 'RECEIVE' ? 'text-emerald-700' : m.movement_type === 'CONSUME' ? 'text-rose-700' : 'text-[#6b5d52]')}>
+                                      {m.movement_type}
+                                    </span>
+                                  </td>
+                                  <td className="py-1 pr-3 text-right font-mono">{m.movement_type === 'CONSUME' ? '-' : '+'}{Number(m.quantity).toFixed(0)}</td>
+                                  <td className="py-1 pr-3 text-right font-mono">{m.unit_price ? `₹${Number(m.unit_price).toFixed(2)}` : '—'}</td>
+                                  <td className="py-1 pr-3 text-[#6b5d52]">{m.notes || '—'}</td>
+                                  <td className="py-1 pr-3 text-[#9c8e85]">{m.recorded_by || '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {/* Stock Movement Modal */}
+      {stockModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={e => { if (e.target === e.currentTarget) setStockModal(null); }}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-[#1a1208]">Record Stock Movement — <span className="text-[#cc5a16]">{stockModal.name}</span></h3>
+              <button onClick={() => setStockModal(null)} className="text-[#9c8e85] hover:text-[#cc5a16] text-lg leading-none">×</button>
+            </div>
+            <p className="text-xs text-[#6b5d52]">Current stock: <strong>{Number(stockModal.current_stock_qty).toFixed(0)} {stockModal.unit}</strong></p>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-xs text-[#6b5d52]">Movement Type
+                <select value={stockForm.movement_type} onChange={e => setStockForm({ ...stockForm, movement_type: e.target.value })}
+                  className="block mt-1 w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm">
+                  <option value="RECEIVE">Receive (add stock)</option>
+                  <option value="CONSUME">Consume (deduct stock)</option>
+                  <option value="ADJUST">Adjust (set delta)</option>
+                  <option value="RETURN">Return</option>
+                </select>
+              </label>
+              <label className="text-xs text-[#6b5d52]">Date
+                <input type="date" value={stockForm.movement_date} onChange={e => setStockForm({ ...stockForm, movement_date: e.target.value })}
+                  className="block mt-1 w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm" />
+              </label>
+              <label className="text-xs text-[#6b5d52]">Quantity ({stockModal.unit})
+                <input type="number" min="0.01" step="0.01" value={stockForm.quantity} onChange={e => setStockForm({ ...stockForm, quantity: e.target.value })}
+                  className="block mt-1 w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm" />
+              </label>
+              <label className="text-xs text-[#6b5d52]">Unit Price ₹ (optional)
+                <input type="number" min="0" step="0.01" value={stockForm.unit_price} onChange={e => setStockForm({ ...stockForm, unit_price: e.target.value })}
+                  className="block mt-1 w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm" />
+              </label>
+            </div>
+            <label className="text-xs text-[#6b5d52]">Notes
+              <input value={stockForm.notes} onChange={e => setStockForm({ ...stockForm, notes: e.target.value })} placeholder="Vendor name, reason…"
+                className="block mt-1 w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm" />
+            </label>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setStockModal(null)} className="px-4 py-2 rounded-xl border border-[#e8dccf] text-sm text-[#6b5d52]">Cancel</button>
+              <button onClick={submitStock} disabled={stockSaving || !stockForm.quantity}
+                className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">{stockSaving ? 'Saving…' : 'Save Movement'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -14801,6 +14957,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                   <HotelInventoryPanel
                     items={hotelInventory}
+                    restaurantId={restaurantId}
+                    token={token}
                     onCreate={async (payload) => {
                       await fetch(`/api/restaurant/${restaurantId}/hotel-inventory`, {
                         method: 'POST',
@@ -14811,9 +14969,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     }}
                     onDelete={async (id) => {
                       if (!window.confirm('Remove this hotel inventory item?')) return;
-                      await fetch(`/api/hotel-inventory/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+                      await fetch(`/api/restaurant/${restaurantId}/hotel-inventory/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
                       fetchHotelInventory();
                     }}
+                    onRefresh={fetchHotelInventory}
                   />
                 </div>
               )}
@@ -35994,8 +36153,11 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
   const [active, setActive] = useState<string | null>(null);
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [pcForm, setPcForm] = useState<any>({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today });
+  const [pcForm, setPcForm] = useState<any>({ direction: 'OUT', amount: '', category: '', notes: '', entry_date: today, module: 'RESTAURANT' });
   const [pcSaving, setPcSaving] = useState(false);
+  const [pcModule, setPcModule] = useState<'ALL' | 'RESTAURANT' | 'HOTEL' | 'SHARED'>('ALL');
+  const [expView, setExpView] = useState<'ledger' | 'daily' | 'category' | 'consolidated'>('ledger');
+  const [expExtra, setExpExtra] = useState<any>(null);
   const role = (localStorage.getItem('role') || '').toUpperCase();
   const canDeletePc = ['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role);
 
@@ -36014,7 +36176,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
   const ALL_REPORTS = [
     { key: 'payment-received', aud: 'FRONT_DESK', label: 'Payment Received', desc: 'Cash collected — by day/week/month, method, guest vs OTA', path: () => `/hotel/reports/payment-received?from=${from}&to=${to}&grain=${grain}` },
     { key: 'cancellations', aud: 'FRONT_DESK', label: 'Cancelled Reservations', desc: 'Cancelled bookings — when, why, refund', path: () => `/hotel/reports/cancellations?from=${from}&to=${to}` },
-    { key: 'petty-cash', aud: 'FRONT_DESK', label: 'Petty Cash', desc: 'Cash in/out ledger with running balance', path: () => `/petty-cash?from=${from}&to=${to}` },
+    { key: 'expense-journal', aud: 'FRONT_DESK', label: 'Expense Journal', desc: 'Hotel & Restaurant cash in/out ledger with trend reports', path: () => `/petty-cash?from=${from}&to=${to}${pcModule !== 'ALL' ? `&module=${pcModule}` : ''}` },
     { key: 'revenue-by-room-type', aud: 'OWNER', label: 'Revenue by Room Type', desc: 'Settled revenue, room nights, ADR per room type', path: () => `/hotel/reports/revenue-by-room-type?from=${from}&to=${to}` },
     { key: 'occupancy-trend', aud: 'OWNER', label: 'Occupancy Trend', desc: 'Occupancy % per night across the range', path: () => `/hotel/reports/occupancy-trend?from=${from}&to=${to}` },
     { key: 'customers', aud: 'OWNER', label: 'Guest Directory', desc: 'Every guest — stays, total spend, last visit', path: () => `/hotel/reports/customers` },
@@ -36022,16 +36184,27 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
   ];
   const REPORTS = ALL_REPORTS.filter(r => r.aud === audience);
 
+  const loadExpenseExtras = async () => {
+    const modParam = pcModule !== 'ALL' ? `&module=${pcModule}` : '';
+    const [daily, cat, consolidated] = await Promise.all([
+      api(`/expense-reports/daily?from=${from}&to=${to}${modParam}`).catch(() => null),
+      api(`/expense-reports/category?from=${from}&to=${to}`).catch(() => null),
+      api(`/expense-reports/consolidated?from=${from}&to=${to}`).catch(() => null),
+    ]);
+    setExpExtra({ daily, cat, consolidated });
+  };
+
   const load = async (key: string) => {
     setActive(key); setLoading(true); setData(null);
     try {
       const r = ALL_REPORTS.find(x => x.key === key)!;
       setData(await api(r.path()));
+      if (key === 'expense-journal') await loadExpenseExtras();
     } catch (e: any) { alert('Report failed: ' + (e?.message || 'error')); }
     finally { setLoading(false); }
   };
   // Re-run the active report when the date range / grain changes.
-  useEffect(() => { if (active) load(active); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [from, to, grain]);
+  useEffect(() => { if (active) load(active); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [from, to, grain, pcModule]);
   // Clear the open report when the audience toggle flips (its key may not
   // belong to the newly-selected group).
   useEffect(() => { setActive(null); setData(null); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [audience]);
@@ -36042,14 +36215,14 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
     setPcSaving(true);
     try {
       await api('/petty-cash', { method: 'POST', body: JSON.stringify({ ...pcForm, amount: amt }) });
-      setPcForm({ direction: pcForm.direction, amount: '', category: '', notes: '', entry_date: pcForm.entry_date });
-      load('petty-cash');
+      setPcForm({ direction: pcForm.direction, amount: '', category: '', notes: '', entry_date: pcForm.entry_date, module: pcForm.module });
+      load('expense-journal');
     } catch (e: any) { alert('Save failed: ' + (e?.message || 'error')); }
     finally { setPcSaving(false); }
   };
   const deletePettyCash = async (id: string) => {
-    if (!confirm('Delete this petty-cash entry?')) return;
-    try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); load('petty-cash'); }
+    if (!confirm('Delete this entry?')) return;
+    try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); load('expense-journal'); }
     catch (e: any) { alert('Delete failed: ' + (e?.message || 'error')); }
   };
 
@@ -36074,9 +36247,9 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
     } else if (active === 'purchase') {
       downloadCsv(`purchase-spend-${stamp}.csv`, ['Date', 'PO', 'Supplier', 'Status', 'Amount'],
         (data.rows || []).map((r: any) => [String(r.raised_at || '').slice(0, 10), r.id, r.supplier_name, r.status, r.amount]));
-    } else if (active === 'petty-cash') {
-      downloadCsv(`petty-cash-${stamp}.csv`, ['Date', 'Direction', 'Category', 'Amount', 'Notes'],
-        (data.rows || []).map((r: any) => [String(r.entry_date || '').slice(0, 10), r.direction, r.category, r.amount, r.notes]));
+    } else if (active === 'expense-journal') {
+      downloadCsv(`expense-journal-${stamp}.csv`, ['Date', 'Module', 'Direction', 'Category', 'Amount', 'Notes'],
+        (data.rows || []).map((r: any) => [String(r.entry_date || '').slice(0, 10), r.module || 'RESTAURANT', r.direction, r.category, r.amount, r.notes]));
     }
   };
 
@@ -36155,15 +36328,153 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
         )}
       </>);
     }
-    if (active === 'petty-cash') {
+    if (active === 'expense-journal') {
       const rows = data.rows || [];
       const s = data.summary || {};
+      const modColors: Record<string, string> = { RESTAURANT: 'bg-orange-100 text-orange-800', HOTEL: 'bg-blue-100 text-blue-800', SHARED: 'bg-purple-100 text-purple-800' };
+
+      const renderDailyTrend = () => {
+        if (!expExtra?.daily) return <p className="text-xs italic text-[#9c8e85]">Loading…</p>;
+        const drows: any[] = expExtra.daily.rows || [];
+        const dates = [...new Set(drows.map((r: any) => r.date))].sort().reverse();
+        const modules = [...new Set(drows.map((r: any) => r.module))];
+        const byDate: Record<string, Record<string, number>> = {};
+        drows.forEach((r: any) => {
+          if (r.direction !== 'OUT') return;
+          if (!byDate[r.date]) byDate[r.date] = {};
+          byDate[r.date][r.module] = (byDate[r.date][r.module] || 0) + Number(r.total);
+        });
+        if (dates.length === 0) return empty();
+        return (
+          <table className="w-full text-xs">
+            <thead><tr className="border-b border-[#e8dccf]">
+              {[th('Date'), ...modules.map(m => th(m)), th('Total')]}
+            </tr></thead>
+            <tbody>{dates.map(d => {
+              const row = byDate[d] || {};
+              const total = modules.reduce((n, m) => n + (row[m] || 0), 0);
+              return (
+                <tr key={d} className="border-b border-[#f1ece3]">
+                  <td className="py-1.5 px-3 font-mono">{d}</td>
+                  {modules.map(m => <td key={m} className="py-1.5 px-3 font-mono text-right">{row[m] ? cur(row[m]) : '—'}</td>)}
+                  <td className="py-1.5 px-3 font-bold font-mono text-right">{cur(total)}</td>
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        );
+      };
+
+      const renderCategory = () => {
+        if (!expExtra?.cat) return <p className="text-xs italic text-[#9c8e85]">Loading…</p>;
+        const crow: any[] = (expExtra.cat.rows || []).filter((r: any) => r.direction === 'OUT');
+        if (crow.length === 0) return empty();
+        return (
+          <table className="w-full text-xs">
+            <thead><tr className="border-b border-[#e8dccf]">{['Module', 'Category', 'Entries', 'Total Expense'].map(th)}</tr></thead>
+            <tbody>{crow.map((r: any, i: number) => (
+              <tr key={i} className="border-b border-[#f1ece3]">
+                <td className="py-1.5 px-3"><span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-full', modColors[r.module] || '')}>{r.module}</span></td>
+                <td className="py-1.5 px-3 font-semibold">{r.category}</td>
+                <td className="py-1.5 px-3">{r.count}</td>
+                <td className="py-1.5 px-3 font-bold font-mono">{cur(r.total)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        );
+      };
+
+      const renderConsolidated = () => {
+        if (!expExtra?.consolidated) return <p className="text-xs italic text-[#9c8e85]">Loading…</p>;
+        const { current = [], prior = [], topCategories = [], prevFrom, prevTo } = expExtra.consolidated;
+        const toMap = (arr: any[]) => {
+          const m: Record<string, { in: number; out: number }> = {};
+          arr.forEach((r: any) => {
+            if (!m[r.module]) m[r.module] = { in: 0, out: 0 };
+            if (r.direction === 'OUT') m[r.module].out += Number(r.total);
+            else m[r.module].in += Number(r.total);
+          });
+          return m;
+        };
+        const cur2 = toMap(current);
+        const pri2 = toMap(prior);
+        const mods = [...new Set([...Object.keys(cur2), ...Object.keys(pri2)])];
+        const pct = (a: number, b: number) => b === 0 ? '—' : `${((a - b) / b * 100).toFixed(1)}%`;
+        return (<div className="space-y-4">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Module Summary — Current vs Prior Period ({prevFrom} → {prevTo})</p>
+            <table className="w-full text-xs">
+              <thead><tr className="border-b border-[#e8dccf]">{['Module', 'Curr. Expense', 'Curr. Income', 'Prior Expense', 'Change'].map(th)}</tr></thead>
+              <tbody>{mods.map(mod => {
+                const c = cur2[mod] || { in: 0, out: 0 };
+                const p = pri2[mod] || { in: 0, out: 0 };
+                const chg = c.out - p.out;
+                return (
+                  <tr key={mod} className="border-b border-[#f1ece3]">
+                    <td className="py-1.5 px-3"><span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-full', modColors[mod] || '')}>{mod}</span></td>
+                    <td className="py-1.5 px-3 font-bold font-mono text-rose-700">{cur(c.out)}</td>
+                    <td className="py-1.5 px-3 font-mono text-emerald-700">{cur(c.in)}</td>
+                    <td className="py-1.5 px-3 font-mono text-[#9c8e85]">{cur(p.out)}</td>
+                    <td className={cn('py-1.5 px-3 font-bold', chg > 0 ? 'text-rose-700' : 'text-emerald-700')}>{chg >= 0 ? '+' : ''}{pct(c.out, p.out)}</td>
+                  </tr>
+                );
+              })}</tbody>
+            </table>
+          </div>
+          {topCategories.length > 0 && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Top Expense Categories</p>
+              <table className="w-full text-xs">
+                <thead><tr className="border-b border-[#e8dccf]">{['Module', 'Category', 'Expense'].map(th)}</tr></thead>
+                <tbody>{topCategories.slice(0, 10).map((r: any, i: number) => (
+                  <tr key={i} className="border-b border-[#f1ece3]">
+                    <td className="py-1.5 px-3"><span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-full', modColors[r.module] || '')}>{r.module}</span></td>
+                    <td className="py-1.5 px-3">{r.category}</td>
+                    <td className="py-1.5 px-3 font-bold font-mono">{cur(r.expense)}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+        </div>);
+      };
+
       return (<>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">{kpi('Opening', cur(s.opening_balance))}{kpi('Cash in', cur(s.total_in))}{kpi('Cash out', cur(s.total_out))}{kpi('Closing', cur(s.closing_balance))}</div>
-        {rows.length === 0 ? empty() : (
-          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Date', 'Type', 'Category', 'Amount', 'Notes', ''].map(th)}</tr></thead>
-            <tbody>{rows.map((r: any) => (<tr key={r.id} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3">{String(r.entry_date || '').slice(0, 10)}</td><td className={cn('py-1.5 px-3 font-bold', r.direction === 'OUT' ? 'text-rose-700' : 'text-emerald-700')}>{r.direction === 'OUT' ? 'OUT' : 'IN'}</td><td className="py-1.5 px-3">{r.category || '—'}</td><td className="py-1.5 px-3 font-bold">{cur(r.amount)}</td><td className="py-1.5 px-3 text-[#6b5d52]">{r.notes || '—'}</td><td className="py-1.5 px-3">{canDeletePc && <button type="button" onClick={() => deletePettyCash(r.id)} className="text-[10px] text-rose-600 hover:underline">Delete</button>}</td></tr>))}</tbody></table>
-        )}
+        {/* Module filter tabs */}
+        <div className="flex gap-1.5 flex-wrap mb-3">
+          {(['ALL', 'RESTAURANT', 'HOTEL', 'SHARED'] as const).map(m => (
+            <button key={m} type="button" onClick={() => setPcModule(m)}
+              className={cn('px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest', pcModule === m ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52] border border-[#e8dccf]')}>{m}</button>
+          ))}
+        </div>
+        {/* Sub-view tabs */}
+        <div className="flex gap-1 mb-3">
+          {([['ledger', 'Ledger'], ['daily', 'Daily Trend'], ['category', 'By Category'], ['consolidated', 'Consolidated']] as const).map(([v, label]) => (
+            <button key={v} type="button" onClick={() => setExpView(v)}
+              className={cn('px-3 py-1.5 rounded-xl text-[11px] font-bold', expView === v ? 'bg-[#1a1208] text-white' : 'bg-[#faf7f2] text-[#6b5d52] border border-[#e8dccf]')}>{label}</button>
+          ))}
+        </div>
+        {expView === 'ledger' && (<>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">{kpi('Opening', cur(s.opening_balance))}{kpi('Cash in', cur(s.total_in))}{kpi('Cash out', cur(s.total_out))}{kpi('Closing', cur(s.closing_balance))}</div>
+          {rows.length === 0 ? empty() : (
+            <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Date', 'Module', 'Type', 'Category', 'Amount', 'Notes', ''].map(th)}</tr></thead>
+              <tbody>{rows.map((r: any) => (
+                <tr key={r.id} className="border-b border-[#f1ece3]">
+                  <td className="py-1.5 px-3">{String(r.entry_date || '').slice(0, 10)}</td>
+                  <td className="py-1.5 px-3"><span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-full', modColors[r.module || 'RESTAURANT'] || '')}>{r.module || 'RESTAURANT'}</span></td>
+                  <td className={cn('py-1.5 px-3 font-bold', r.direction === 'OUT' ? 'text-rose-700' : 'text-emerald-700')}>{r.direction}</td>
+                  <td className="py-1.5 px-3">{r.category || '—'}</td>
+                  <td className="py-1.5 px-3 font-bold">{cur(r.amount)}</td>
+                  <td className="py-1.5 px-3 text-[#6b5d52]">{r.notes || '—'}</td>
+                  <td className="py-1.5 px-3">{canDeletePc && <button type="button" onClick={() => deletePettyCash(r.id)} className="text-[10px] text-rose-600 hover:underline">Delete</button>}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </>)}
+        {expView === 'daily' && renderDailyTrend()}
+        {expView === 'category' && renderCategory()}
+        {expView === 'consolidated' && renderConsolidated()}
       </>);
     }
     return null;
@@ -36214,12 +36525,13 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
           </div>
         )}
 
-        {active === 'petty-cash' && (
+        {active === 'expense-journal' && (
           <div className="rounded-2xl border border-[#e8dccf] p-3 bg-[#faf7f2]">
-            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Record cash movement</p>
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Record expense / cash movement</p>
             <div className="flex flex-wrap items-end gap-2 text-xs">
               <label>Date<input type="date" value={pcForm.entry_date} onChange={e => setPcForm({ ...pcForm, entry_date: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
-              <label>Type<select value={pcForm.direction} onChange={e => setPcForm({ ...pcForm, direction: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]"><option value="OUT">Cash Out</option><option value="IN">Cash In</option></select></label>
+              <label>Module<select value={pcForm.module} onChange={e => setPcForm({ ...pcForm, module: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]"><option value="RESTAURANT">Restaurant</option><option value="HOTEL">Hotel</option><option value="SHARED">Shared</option></select></label>
+              <label>Type<select value={pcForm.direction} onChange={e => setPcForm({ ...pcForm, direction: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]"><option value="OUT">Expense (OUT)</option><option value="IN">Income (IN)</option></select></label>
               <label>Amount<input type="number" value={pcForm.amount} onChange={e => setPcForm({ ...pcForm, amount: e.target.value })} className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf] w-28" /></label>
               <label>Category<input value={pcForm.category} onChange={e => setPcForm({ ...pcForm, category: e.target.value })} placeholder="e.g. Stationery" className="block mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
               <label className="flex-1 min-w-[160px]">Notes<input value={pcForm.notes} onChange={e => setPcForm({ ...pcForm, notes: e.target.value })} className="block mt-1 w-full px-2 py-1.5 rounded-lg border border-[#e8dccf]" /></label>
@@ -37341,6 +37653,7 @@ function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: s
   const [data, setData] = useState<any>(null);
   const [petty, setPetty] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [pcModuleR, setPcModuleR] = useState<'ALL' | 'RESTAURANT' | 'HOTEL' | 'SHARED'>('RESTAURANT');
 
   const cur = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
   const api = async (path: string) => {
@@ -37362,9 +37675,10 @@ function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: s
   }, [from, to]);
   useEffect(() => {
     if (active !== 'petty-cash') return;
-    api(`/petty-cash?from=${from}&to=${to}`).then(setPetty).catch(() => setPetty(null));
+    const modParam = pcModuleR !== 'ALL' ? `&module=${pcModuleR}` : '';
+    api(`/petty-cash?from=${from}&to=${to}${modParam}`).then(setPetty).catch(() => setPetty(null));
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
-  }, [active, from, to]);
+  }, [active, from, to, pcModuleR]);
 
   const OPS = [
     { key: 'daily-sales', label: 'Daily Sales', desc: 'Revenue & orders per day' },
@@ -37421,9 +37735,29 @@ function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: s
   const renderTable = () => {
     if (active === 'petty-cash') {
       const s = petty?.summary || {};
+      const modColors: Record<string, string> = { RESTAURANT: 'bg-orange-100 text-orange-800', HOTEL: 'bg-blue-100 text-blue-800', SHARED: 'bg-purple-100 text-purple-800' };
       return (<>
+        <div className="flex gap-1.5 flex-wrap mb-3">
+          {(['ALL', 'RESTAURANT', 'HOTEL', 'SHARED'] as const).map(m => (
+            <button key={m} type="button" onClick={() => setPcModuleR(m)}
+              className={cn('px-2.5 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-widest', pcModuleR === m ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52] border border-[#e8dccf]')}>{m}</button>
+          ))}
+        </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">{kpi('Opening', cur(s.opening_balance))}{kpi('Cash in', cur(s.total_in))}{kpi('Cash out', cur(s.total_out))}{kpi('Closing', cur(s.closing_balance))}</div>
-        {simpleTable(['Date', 'Type', 'Category', 'Amount', 'Notes'], (petty?.rows || []).map((r: any) => [String(r.entry_date || '').slice(0, 10), r.direction, r.category || '—', cur(r.amount), r.notes || '—']))}
+        {(petty?.rows || []).length === 0 ? empty() : (
+          <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Date', 'Module', 'Type', 'Category', 'Amount', 'Notes'].map(c => <th key={c} className="text-left py-1.5 px-3 text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">{c}</th>)}</tr></thead>
+            <tbody>{(petty?.rows || []).map((r: any) => (
+              <tr key={r.id} className="border-b border-[#f1ece3]">
+                <td className="py-1.5 px-3">{String(r.entry_date || '').slice(0, 10)}</td>
+                <td className="py-1.5 px-3"><span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-full', modColors[r.module || 'RESTAURANT'] || '')}>{r.module || 'RESTAURANT'}</span></td>
+                <td className={cn('py-1.5 px-3 font-bold', r.direction === 'OUT' ? 'text-rose-700' : 'text-emerald-700')}>{r.direction}</td>
+                <td className="py-1.5 px-3">{r.category || '—'}</td>
+                <td className="py-1.5 px-3 font-bold font-mono">{cur(r.amount)}</td>
+                <td className="py-1.5 px-3 text-[#6b5d52]">{r.notes || '—'}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
       </>);
     }
     if (loading) return <p className="text-xs text-[#9c8e85] italic">Loading…</p>;

@@ -18883,9 +18883,9 @@ ${data.tenant.name}`;
     }
   });
 
-  app.patch("/api/hotel-inventory/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel-inventory/:itemId", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const db = await getTenantDb(req.user!.restaurantId);
+      const db = await getTenantDb(req.params.id);
       const allowed = ['name', 'category', 'unit', 'current_stock_qty', 'par_level', 'reorder_point', 'default_unit_price', 'sku', 'notes'];
       const updates: string[] = [];
       const params: any[] = [];
@@ -18894,7 +18894,7 @@ ${data.tenant.name}`;
       }
       if (updates.length === 0) return res.status(400).json({ error: "No fields to update" });
       updates.push("updated_at = CURRENT_TIMESTAMP");
-      params.push(req.params.id);
+      params.push(req.params.itemId);
       await db.run(`UPDATE hotel_inventory_items SET ${updates.join(', ')} WHERE id = ?`, params);
       res.json({ success: true });
     } catch (err) {
@@ -18903,14 +18903,63 @@ ${data.tenant.name}`;
     }
   });
 
-  app.delete("/api/hotel-inventory/:id", authenticate, async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/hotel-inventory/:itemId", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const db = await getTenantDb(req.user!.restaurantId);
-      await db.run("UPDATE hotel_inventory_items SET is_active = 0 WHERE id = ?", [req.params.id]);
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE hotel_inventory_items SET is_active = 0 WHERE id = ?", [req.params.itemId]);
       res.json({ success: true });
     } catch (err) {
       console.error("Hotel inventory delete error:", err);
       res.status(500).json({ error: "Failed to delete hotel inventory item" });
+    }
+  });
+
+  // Stock receive / adjust — updates qty and logs a movement row
+  app.post("/api/restaurant/:id/hotel-inventory/:itemId/stock", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const movement_type = String(req.body?.movement_type || 'RECEIVE').toUpperCase();
+      const validTypes = ['RECEIVE', 'CONSUME', 'ADJUST', 'RETURN'];
+      if (!validTypes.includes(movement_type)) return res.status(400).json({ error: 'Invalid movement_type' });
+      const quantity = Number(req.body?.quantity);
+      if (!(Math.abs(quantity) > 0)) return res.status(400).json({ error: 'quantity must be non-zero' });
+      const unit_price = req.body?.unit_price != null ? Number(req.body.unit_price) : null;
+      const movement_date = String(req.body?.movement_date || new Date().toISOString().slice(0, 10));
+      const notes = req.body?.notes || null;
+      const mid = `HSM-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const delta = movement_type === 'CONSUME' ? -Math.abs(quantity)
+                  : movement_type === 'ADJUST'  ? quantity
+                  : Math.abs(quantity);
+      await db.run(
+        `INSERT INTO hotel_stock_movements (id, item_id, movement_type, quantity, unit_price, notes, recorded_by, movement_date)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [mid, req.params.itemId, movement_type, Math.abs(quantity), unit_price, notes,
+         req.user?.id || req.user?.email || null, movement_date]
+      );
+      await db.run(
+        `UPDATE hotel_inventory_items SET current_stock_qty = current_stock_qty + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [delta, req.params.itemId]
+      );
+      const item: any = await db.get(`SELECT * FROM hotel_inventory_items WHERE id = ?`, [req.params.itemId]).catch(() => null);
+      res.json({ success: true, id: mid, new_stock_qty: item?.current_stock_qty });
+    } catch (err: any) {
+      console.error("Hotel stock movement error:", err);
+      res.status(500).json({ error: err?.message || "Failed to record stock movement" });
+    }
+  });
+
+  // Movement history for one item
+  app.get("/api/restaurant/:id/hotel-inventory/:itemId/movements", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const limit = Math.min(Number(req.query.limit || 50), 200);
+      const rows: any[] = await db.query(
+        `SELECT * FROM hotel_stock_movements WHERE item_id = ? ORDER BY movement_date DESC, created_at DESC LIMIT ?`,
+        [req.params.itemId, limit]
+      ).catch(() => []);
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch movements" });
     }
   });
 
@@ -21693,7 +21742,7 @@ ${data.tenant.name}`;
     }
   });
 
-  // 6) PETTY CASH — cash in/out ledger with running balance.
+  // 6) PETTY CASH / EXPENSE JOURNAL — per-module (RESTAURANT|HOTEL|SHARED) ledger.
   const _ensurePettyCash = async (tenantDb: any) => {
     await tenantDb.exec(`CREATE TABLE IF NOT EXISTS petty_cash (
       id TEXT PRIMARY KEY,
@@ -21705,6 +21754,7 @@ ${data.tenant.name}`;
       recorded_by TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`).catch(() => {});
+    await tenantDb.exec("ALTER TABLE petty_cash ADD COLUMN IF NOT EXISTS module TEXT DEFAULT 'RESTAURANT'").catch(() => {});
   };
 
   app.post("/api/restaurant/:id/petty-cash", authenticate, async (req: AuthRequest, res: Response) => {
@@ -21715,16 +21765,48 @@ ${data.tenant.name}`;
       const amount = Math.abs(Number(req.body?.amount || 0));
       if (!(amount > 0)) return res.status(400).json({ error: 'amount must be greater than 0' });
       const entry_date = String(req.body?.entry_date || new Date().toISOString().slice(0, 10));
+      const rawModule = String(req.body?.module || 'RESTAURANT').toUpperCase();
+      const module = ['RESTAURANT', 'HOTEL', 'SHARED'].includes(rawModule) ? rawModule : 'RESTAURANT';
       const id = `PC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       await tenantDb.run(
-        `INSERT INTO petty_cash (id, entry_date, direction, category, amount, notes, recorded_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO petty_cash (id, entry_date, direction, category, amount, notes, recorded_by, module)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, entry_date, direction, req.body?.category || null, amount, req.body?.notes || null,
-         req.user?.id || req.user?.email || null]
+         req.user?.id || req.user?.email || null, module]
       );
       res.json({ success: true, id });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to record petty cash entry" });
+    }
+  });
+
+  app.patch("/api/restaurant/:id/petty-cash/:entryId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const role = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'SUPER_ADMIN', 'CTO', 'MANAGER'].includes(role)) {
+        return res.status(403).json({ error: 'Only an owner or manager can edit a petty-cash entry.' });
+      }
+      const tenantDb = await getTenantDb(req.params.id);
+      await _ensurePettyCash(tenantDb);
+      const allowed = ['entry_date', 'direction', 'category', 'amount', 'notes', 'module'];
+      const updates: string[] = [];
+      const params: any[] = [];
+      for (const k of allowed) {
+        if (k in req.body) {
+          let v = req.body[k];
+          if (k === 'direction') v = String(v).toUpperCase() === 'OUT' ? 'OUT' : 'IN';
+          if (k === 'module') v = ['RESTAURANT','HOTEL','SHARED'].includes(String(v).toUpperCase()) ? String(v).toUpperCase() : 'RESTAURANT';
+          if (k === 'amount') v = Math.abs(Number(v));
+          updates.push(`${k} = ?`);
+          params.push(v);
+        }
+      }
+      if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
+      params.push(req.params.entryId);
+      await tenantDb.run(`UPDATE petty_cash SET ${updates.join(', ')} WHERE id = ?`, params);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to update petty cash entry" });
     }
   });
 
@@ -21734,11 +21816,14 @@ ${data.tenant.name}`;
       await _ensurePettyCash(tenantDb);
       const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
       const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const moduleFilter = req.query.module ? String(req.query.module).toUpperCase() : null;
+      const modClause = moduleFilter ? ` AND COALESCE(module,'RESTAURANT') = ?` : '';
+      const modParam = moduleFilter ? [moduleFilter] : [];
       const rows: any[] = await tenantDb.query(
         `SELECT * FROM petty_cash
-          WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?
+          WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?${modClause}
           ORDER BY entry_date DESC, created_at DESC`,
-        [from, to]
+        [from, to, ...modParam]
       ).catch(() => []);
       let totalIn = 0, totalOut = 0;
       for (const r of rows) {
@@ -21747,7 +21832,8 @@ ${data.tenant.name}`;
       }
       const openRow: any = await tenantDb.get(
         `SELECT COALESCE(SUM(CASE WHEN direction='OUT' THEN -amount ELSE amount END),0)::float AS bal
-           FROM petty_cash WHERE TO_CHAR(entry_date,'YYYY-MM-DD') < ?`, [from]
+           FROM petty_cash WHERE TO_CHAR(entry_date,'YYYY-MM-DD') < ?${modClause}`,
+        [from, ...modParam]
       ).catch(() => ({ bal: 0 }));
       const opening = Number(openRow?.bal || 0);
       res.json({
@@ -21776,6 +21862,108 @@ ${data.tenant.name}`;
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to delete petty cash entry" });
+    }
+  });
+
+  // ── EXPENSE REPORTS ──────────────────────────────────────────────────────
+  // Daily expense trend: total OUT grouped by date, split by module and category.
+  app.get("/api/restaurant/:id/expense-reports/daily", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await _ensurePettyCash(tenantDb);
+      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const moduleFilter = req.query.module ? String(req.query.module).toUpperCase() : null;
+      const modClause = moduleFilter ? ` AND COALESCE(module,'RESTAURANT') = ?` : '';
+      const modParam = moduleFilter ? [moduleFilter] : [];
+      const rows: any[] = await tenantDb.query(
+        `SELECT TO_CHAR(entry_date,'YYYY-MM-DD') AS date,
+                COALESCE(module,'RESTAURANT') AS module,
+                category,
+                direction,
+                SUM(amount)::float AS total,
+                COUNT(*)::int AS count
+           FROM petty_cash
+          WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?${modClause}
+          GROUP BY 1, 2, 3, 4
+          ORDER BY 1 DESC`,
+        [from, to, ...modParam]
+      ).catch(() => []);
+      res.json({ from, to, rows });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to load daily expense report" });
+    }
+  });
+
+  // Category breakdown: expenses by category + module for trend pie / bar.
+  app.get("/api/restaurant/:id/expense-reports/category", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await _ensurePettyCash(tenantDb);
+      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const rows: any[] = await tenantDb.query(
+        `SELECT COALESCE(module,'RESTAURANT') AS module,
+                COALESCE(category,'Uncategorised') AS category,
+                direction,
+                SUM(amount)::float AS total,
+                COUNT(*)::int AS count
+           FROM petty_cash
+          WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY 1, 2, 3
+          ORDER BY 1, total DESC`,
+        [from, to]
+      ).catch(() => []);
+      res.json({ from, to, rows });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to load category expense report" });
+    }
+  });
+
+  // Consolidated: module-level summary with period-over-period comparison.
+  app.get("/api/restaurant/:id/expense-reports/consolidated", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await _ensurePettyCash(tenantDb);
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const diffMs = new Date(to).getTime() - new Date(from).getTime();
+      const prevTo   = new Date(new Date(from).getTime() - 86400000).toISOString().slice(0, 10);
+      const prevFrom = new Date(new Date(from).getTime() - diffMs - 86400000).toISOString().slice(0, 10);
+
+      const current: any[] = await tenantDb.query(
+        `SELECT COALESCE(module,'RESTAURANT') AS module, direction,
+                SUM(amount)::float AS total, COUNT(*)::int AS count
+           FROM petty_cash
+          WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY 1, 2`,
+        [from, to]
+      ).catch(() => []);
+
+      const prior: any[] = await tenantDb.query(
+        `SELECT COALESCE(module,'RESTAURANT') AS module, direction,
+                SUM(amount)::float AS total
+           FROM petty_cash
+          WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY 1, 2`,
+        [prevFrom, prevTo]
+      ).catch(() => []);
+
+      const topCategories: any[] = await tenantDb.query(
+        `SELECT COALESCE(module,'RESTAURANT') AS module,
+                COALESCE(category,'Uncategorised') AS category,
+                SUM(CASE WHEN direction='OUT' THEN amount ELSE 0 END)::float AS expense
+           FROM petty_cash
+          WHERE TO_CHAR(entry_date,'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY 1, 2
+          ORDER BY 3 DESC
+          LIMIT 20`,
+        [from, to]
+      ).catch(() => []);
+
+      res.json({ from, to, prevFrom, prevTo, current, prior, topCategories });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to load consolidated expense report" });
     }
   });
 

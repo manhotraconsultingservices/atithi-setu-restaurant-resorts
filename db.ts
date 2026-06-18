@@ -1593,6 +1593,23 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   `);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_hotel_items_active ON hotel_inventory_items (is_active)`);
 
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS hotel_stock_movements (
+      id TEXT PRIMARY KEY,
+      item_id TEXT NOT NULL,
+      movement_type TEXT NOT NULL,
+      quantity DOUBLE PRECISION NOT NULL,
+      unit_price DOUBLE PRECISION,
+      reference_type TEXT,
+      reference_id TEXT,
+      notes TEXT,
+      recorded_by TEXT,
+      movement_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_hotel_movements_item ON hotel_stock_movements (item_id, movement_date DESC)`);
+
   // Owner-customisable notification templates. Falls back to hard-coded
   // defaults in notificationService.ts when row absent.
   await db.exec(`
