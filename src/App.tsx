@@ -19279,8 +19279,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <td className="px-4 py-3 whitespace-nowrap">
                             <button
                               type="button"
-                              title="Booking reference — click to copy (use for cancellations & support)"
-                              onClick={() => { try { navigator.clipboard?.writeText(String(b.id)); } catch { /* ignore */ } }}
+                              title="Open folio for this booking · right-click to copy ID"
+                              onClick={async () => {
+                                if (b.open_folio_id) { try { await loadFolio(b.open_folio_id); } catch { /* ignore */ } return; }
+                                try {
+                                  const _fr = await fetch(`/api/restaurant/${restaurantId}/hotel/folios?booking_id=${b.id}`, { headers: { Authorization: `Bearer ${token}` } });
+                                  const _fl = await _fr.json();
+                                  if (Array.isArray(_fl) && _fl.length > 0) { await loadFolio(_fl[0].id); return; }
+                                } catch { /* ignore */ }
+                                try { navigator.clipboard?.writeText(String(b.id)); } catch { /* ignore */ }
+                              }}
                               className="font-mono text-[10px] text-[#6b5d52] hover:text-[#cc5a16] hover:underline"
                             >{b.id}</button>
                           </td>
@@ -34557,14 +34565,19 @@ const CheckInWizardModal: React.FC<{
   // room is picked we use its meal-plan-adjusted quote; otherwise the booking's
   // stored total. advance_paid + total_amount come from the bookings-list row.
   const pickedRoom = (availRooms || []).find((r: any) => r.id === draft.room_id);
-  // Prefer the freshly-quoted total for whichever room is selected (current OR
-  // reassigned). The quote reflects meal plan + extra-person charges — including
-  // room-only extras (19 Jun 2026) — so the Stay total no longer shows a stale
-  // stored value that omitted extra adults/children. Falls back to the booking's
-  // stored total until the quote loads.
-  const stayTotal = pickedRoom?.quoted_total != null
-    ? Number(pickedRoom.quoted_total)
-    : Number(booking.total_amount || 0);
+  // When the booking has a manually negotiated rate (room_rate > 0) use it for
+  // the Stay total instead of the matrix quote — the server quote is unaware of
+  // the per-booking override. draft.room_rate may change if the agent switches
+  // to a different room category (pickRoom() resets it to 0 for a category
+  // change), so we prefer draft first and fall back to the stored booking value.
+  const negotiatedRate = Number(draft.room_rate ?? booking.room_rate ?? 0);
+  const _ciMs = new Date(String(booking.check_in_date || '').slice(0, 10)).getTime();
+  const _coMs = new Date(String(booking.check_out_date || '').slice(0, 10)).getTime();
+  const nightCount = !isNaN(_ciMs) && !isNaN(_coMs) && _coMs > _ciMs
+    ? Math.round((_coMs - _ciMs) / 86400000) : 1;
+  const stayTotal = negotiatedRate > 0
+    ? negotiatedRate * nightCount
+    : (pickedRoom?.quoted_total != null ? Number(pickedRoom.quoted_total) : Number(booking.total_amount || 0));
   const advPaid = Number(booking.advance_paid || 0);
   const outstanding = Math.max(0, stayTotal - advPaid);
   // Quote on mount AND whenever the meal plan changes, so the Stay total is
@@ -52967,6 +52980,7 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'RESIGNED' | 'TERMINATED' | 'ON_HOLD'>('ACTIVE');
   const [query, setQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
 
   const fetch = async () => {
     if (!restaurantId) return;
@@ -53008,12 +53022,24 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
               Full HR profile — PAN, Aadhaar, UAN, ESIC, bank, emergency contact. CSV export available.
             </p>
           </div>
-          <a
-            href={`/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees.csv?_=${Date.now()}`}
-            target="_blank"
-            rel="noreferrer"
-            className="px-3 py-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5"
-          >📥 Export CSV</a>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 bg-[#faf7f2] rounded-xl p-1">
+              <button onClick={() => setViewMode('table')} title="Table view"
+                className={cn('p-1.5 rounded-lg transition-all', viewMode === 'table' ? 'bg-[#cc5a16]/10 text-[#cc5a16]' : 'text-[#9c8e85] hover:text-[#6b5d52]')}>
+                <List size={15}/>
+              </button>
+              <button onClick={() => setViewMode('grid')} title="Grid view"
+                className={cn('p-1.5 rounded-lg transition-all', viewMode === 'grid' ? 'bg-[#cc5a16]/10 text-[#cc5a16]' : 'text-[#9c8e85] hover:text-[#6b5d52]')}>
+                <LayoutGrid size={15}/>
+              </button>
+            </div>
+            <a
+              href={`/api/restaurant/${encodeURIComponent(restaurantId)}/hr/employees.csv?_=${Date.now()}`}
+              target="_blank"
+              rel="noreferrer"
+              className="px-3 py-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5"
+            >📥 Export CSV</a>
+          </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
@@ -53040,7 +53066,7 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
         </div>
 
         {loading && <p className="text-center text-sm text-[#9c8e85] py-8">Loading…</p>}
-        {!loading && data && (
+        {!loading && data && viewMode === 'table' && (
           <DataTable
             data={data.employees}
             rowKey={(e: any) => e.id}
@@ -53059,6 +53085,33 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
               { key: 'edit', label: '', searchable: false, exportValue: () => '', align: 'center', render: (e: any) => <button onClick={() => setEditingId(e.id)} className="text-[#cc5a16] hover:underline text-[11px] font-bold">Edit HR profile</button> },
             ]}
           />
+        )}
+        {!loading && data && viewMode === 'grid' && (
+          data.employees.length === 0
+            ? <p className="text-center text-sm text-[#9c8e85] py-8">No employees match these filters.</p>
+            : <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+                {data.employees.map((e: any) => (
+                  <div key={e.id} className="rounded-2xl border border-[#cc5a16]/10 bg-[#faf7f2] p-4 flex flex-col gap-2 hover:border-[#cc5a16]/30 transition-colors">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="font-bold text-[#1a1208] truncate">{e.name}</p>
+                        <p className="text-[10px] text-[#9c8e85] truncate">{e.phone || '—'}{e.email ? ` · ${e.email}` : ''}</p>
+                      </div>
+                      <span className={cn('shrink-0 px-2 py-0.5 rounded-full text-[10px] font-bold', STATUS_PILL[e.hr_status || 'ACTIVE'])}>{e.hr_status || 'ACTIVE'}</span>
+                    </div>
+                    <div className="text-[11px] text-[#6b5d52] space-y-0.5">
+                      {e.designation && <p className="font-medium">{e.designation}</p>}
+                      {e.department && <p className="text-[#9c8e85]">{e.department}</p>}
+                    </div>
+                    <div className="flex items-center justify-between gap-2 mt-auto pt-2 border-t border-[#cc5a16]/10">
+                      <span className="font-mono text-[11px] text-[#3d3128]">
+                        {e.ctc ? `₹${Number(e.ctc).toLocaleString('en-IN')} CTC` : e.hourly_rate ? `₹${Number(e.hourly_rate).toFixed(0)}/hr` : '—'}
+                      </span>
+                      <button onClick={() => setEditingId(e.id)} className="text-[#cc5a16] hover:underline text-[11px] font-bold shrink-0">Edit HR</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
         )}
       </div>
       {editingId && (
