@@ -11841,7 +11841,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'ROOM_SETUP') { fetchHotelRooms(); fetchHotelRoomTypes(); fetchRateOverrides(); }
     if (activeTab === 'SERVICES') fetchHotelServices();
     if (activeTab === 'SERVICE_REQUESTS') fetchHotelRequests();
-    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); fetchTariff(); fetchPendingFolioOrders(); }
+    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); fetchTariff(); fetchPendingFolioOrders(); fetchTravelAgents(); }
     // BCG client request 8 Jun 2026 — Front Desk tab now embeds Stay View
     // (AvailabilityCalendar). The cell-click handler resolves room.base_rate
     // from hotelRooms, so we eagerly fetch rooms + bookings + tariff when
