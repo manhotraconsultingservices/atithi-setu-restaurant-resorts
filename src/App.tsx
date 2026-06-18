@@ -20914,15 +20914,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // when the property has the hotel module enabled.
             // RBAC-5c: `description` field explains what each tab does
             // for non-technical owners (hover tooltip).
-            const PERMISSIBLE_TABS: { id: string; label: string; description: string; hotelOnly?: boolean }[] = [
+            // hotelOnly      = hidden for RESTAURANT tenants
+            // restaurantOnly = hidden for HOTEL-only tenants
+            const PERMISSIBLE_TABS: { id: string; label: string; description: string; hotelOnly?: boolean; restaurantOnly?: boolean }[] = [
               { id: 'MONITOR',           label: 'Monitor / Dashboard',     description: 'Real-time KPIs, today\'s revenue, live order board, daily summary.' },
-              { id: 'ORDERS',            label: 'Orders (POS)',            description: 'Place dine-in / takeaway orders, view current orders, kitchen ticket status.' },
+              { id: 'ORDERS',            label: 'Orders (POS)',            description: 'Place dine-in / takeaway orders, view current orders, kitchen ticket status.',        restaurantOnly: true },
               { id: 'INVOICES',          label: 'Invoices',                description: 'Manual invoice creation, GST invoice download, invoice list, refunds.' },
-              { id: 'MENU',              label: 'Menu Management',         description: 'Add/edit menu items, categories, prices, photos, recipe management.' },
-              { id: 'INVENTORY',         label: 'Inventory',               description: 'Ingredients, suppliers, purchase orders, wastage, stock counts, recipe cost.' },
-              { id: 'DELIVERY',          label: 'Aggregator Delivery',     description: 'Swiggy / Zomato / Dunzo channel pricing, settlement reports, sync controls.' },
-              { id: 'QR',                label: 'QR / Table Management',   description: 'Configure tables, generate QR codes for postpaid ordering.' },
-              { id: 'BOOKINGS',          label: 'Table Reservations',      description: 'Table booking calendar, walk-in queue, reservation confirmations.' },
+              { id: 'MENU',              label: 'Menu Management',         description: 'Add/edit menu items, categories, prices, photos, recipe management.',                 restaurantOnly: true },
+              { id: 'INVENTORY',         label: 'Inventory',               description: 'Ingredients, suppliers, purchase orders, wastage, stock counts, recipe cost.',        restaurantOnly: true },
+              { id: 'DELIVERY',          label: 'Aggregator Delivery',     description: 'Swiggy / Zomato / Dunzo channel pricing, settlement reports, sync controls.',         restaurantOnly: true },
+              { id: 'QR',                label: 'QR / Table Management',   description: 'Configure tables, generate QR codes for postpaid ordering.',                          restaurantOnly: true },
+              { id: 'BOOKINGS',          label: 'Table Reservations',      description: 'Table booking calendar, walk-in queue, reservation confirmations.',                   restaurantOnly: true },
               { id: 'LOYALTY',           label: 'Loyalty',                 description: 'Bronze/Silver/Gold tiers, promo codes, customer enrolment, birthday rewards.' },
               { id: 'STAFF',             label: 'Staff Directory',         description: 'Add/edit staff accounts, set passwords, role assignment.' },
               // NB: STAFF_ACCESS (the matrix itself) is intentionally NOT a
@@ -20934,13 +20936,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'TIMESHEET',         label: 'Timesheet',               description: 'Planned vs actual hours, payroll prep, overtime variance.' },
               { id: 'ATTENDANCE',        label: 'Attendance',              description: 'Clock-in / clock-out records, daily attendance report.' },
               { id: 'HR_PAYROLL',        label: 'HR & Payroll',            description: 'Employee profile + salary structure + payslip + statutory (PF/ESI/TDS) + expenses + offer letters.' },
-              { id: 'REPORTS',            label: 'Reports & Analytics',     description: 'MTD/YTD revenue, top items, peak-hour heatmap, cohort analysis.' },
-              { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports',      description: 'F&B revenue, top dishes, peak-hour heatmap, delivery settlement, customer cohort — separate reporting hub.' },
-              { id: 'FEEDBACK',           label: 'Feedback / Reviews',      description: 'Customer feedback responses, NPS, public review page.' },
+              { id: 'REPORTS',            label: 'Reports & Analytics',    description: 'MTD/YTD revenue, top items, peak-hour heatmap, cohort analysis.' },
+              { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports',     description: 'F&B revenue, top dishes, peak-hour heatmap, delivery settlement, customer cohort — separate reporting hub.', restaurantOnly: true },
+              { id: 'FEEDBACK',           label: 'Feedback / Reviews',     description: 'Customer feedback responses, NPS, public review page.' },
               { id: 'NOTIFICATIONS',     label: 'Notifications',           description: 'WhatsApp / SMS / email template config, delivery logs.' },
               { id: 'SUBSCRIPTION',      label: 'Subscription / Billing',  description: 'Plan tier, invoices for the AtithiSetu subscription itself, payment.' },
               { id: 'SETTINGS',          label: 'Settings',                description: 'GST setup, business profile, hotel settings, channel credentials.' },
-              // Hotel tabs
+              // Hotel-only tabs
               { id: 'ROOMS',             label: 'Room Availability',       description: 'Live room status board (vacant / occupied / cleaning / etc). Room setup is owner-only.', hotelOnly: true },
               { id: 'HOTEL_BOOKINGS',    label: 'Hotel Bookings',          description: 'Create/edit bookings, check-in, check-out, cancellations, calendar.', hotelOnly: true },
               { id: 'SERVICES',          label: 'Hotel Services',          description: 'Configure room-service offerings (Extra towels, AC repair, etc.) and pricing.', hotelOnly: true },
@@ -20948,24 +20950,34 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FOLIOS',            label: 'Folios / Hotel Bills',    description: 'View / settle folios, add F&B charges, apply promos, credit notes.', hotelOnly: true },
               { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
-              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk', description: 'Live Stay View + Arrival / Departure / Room Status / Night Audit reports for any date range. CSV download.', hotelOnly: true },
-              { id: 'CHANNEL_MANAGER', label: 'Channel Manager', description: 'OTA integrations: API credentials, iCal feeds (Booking.com/Airbnb/Vrbo/Agoda/MMT/Goibibo), inbound webhook log, room-code mappings.', hotelOnly: true },
-              { id: 'PUBLIC_BOOKING_PAGE', label: 'Public Booking Page', description: 'Customer-facing direct-booking page: hero, photo galleries, amenities, slug URL, cancellation policy. 0% commission channel.', hotelOnly: true },
+              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk Reports',  description: 'Live Stay View + Arrival / Departure / Room Status / Night Audit reports for any date range. CSV download.', hotelOnly: true },
+              { id: 'CHANNEL_MANAGER',      label: 'Channel Manager',      description: 'OTA integrations: API credentials, iCal feeds (Booking.com/Airbnb/Vrbo/Agoda/MMT/Goibibo), inbound webhook log, room-code mappings.', hotelOnly: true },
+              { id: 'PUBLIC_BOOKING_PAGE',  label: 'Public Booking Page',  description: 'Customer-facing direct-booking page: hero, photo galleries, amenities, slug URL, cancellation policy. 0% commission channel.', hotelOnly: true },
             ];
-            const visibleTabs = PERMISSIBLE_TABS.filter(t => !t.hotelOnly || isHotelEnabled);
+            // Filter: hotelOnly rows require hotel module; restaurantOnly rows require restaurant module.
+            const visibleTabs = PERMISSIBLE_TABS.filter(t =>
+              (!t.hotelOnly      || isHotelEnabled) &&
+              (!t.restaurantOnly || isRestaurantEnabled)
+            );
 
             // Roles to manage. OWNER + SUPER_ADMIN/CTO are excluded —
             // they always see everything (server enforces this too).
-            const MANAGED_ROLES: { id: string; label: string; hint: string }[] = [
+            // Module-aware: hotel-only roles are hidden for restaurant-only
+            // tenants; restaurant-only roles are hidden for hotel-only tenants.
+            const ALL_MANAGED_ROLES: { id: string; label: string; hint: string; hotelOnly?: boolean; restaurantOnly?: boolean }[] = [
               { id: 'MANAGER',      label: 'Manager',      hint: 'Senior staff — typically full operational access' },
-              { id: 'FRONT_DESK',   label: 'Front Desk',   hint: 'Receptionist — bookings, folios, guest services' },
-              { id: 'CONCIERGE',    label: 'Concierge',    hint: 'Guest service coordinator' },
-              { id: 'CASHIER',      label: 'Cashier',      hint: 'Orders + invoices, no settings' },
-              { id: 'WAITER',       label: 'Waiter',       hint: 'Table orders, KOT' },
-              { id: 'CHEF',         label: 'Chef / KDS',   hint: 'Kitchen display, recipes' },
-              { id: 'HOUSEKEEPING', label: 'Housekeep.',   hint: 'Service requests + room status' },
-              { id: 'MAINTENANCE',  label: 'Maintenance',  hint: 'Service requests, room status' },
+              { id: 'FRONT_DESK',   label: 'Front Desk',   hint: 'Receptionist — bookings, folios, guest services',  hotelOnly: true },
+              { id: 'CONCIERGE',    label: 'Concierge',    hint: 'Guest service coordinator',                         hotelOnly: true },
+              { id: 'CASHIER',      label: 'Cashier',      hint: 'Orders + invoices, no settings',                    restaurantOnly: true },
+              { id: 'WAITER',       label: 'Waiter',       hint: 'Table orders, KOT',                                 restaurantOnly: true },
+              { id: 'CHEF',         label: 'Chef / KDS',   hint: 'Kitchen display, recipes',                          restaurantOnly: true },
+              { id: 'HOUSEKEEPING', label: 'Housekeep.',   hint: 'Service requests + room status',                    hotelOnly: true },
+              { id: 'MAINTENANCE',  label: 'Maintenance',  hint: 'Service requests, room status',                     hotelOnly: true },
             ];
+            const MANAGED_ROLES = ALL_MANAGED_ROLES.filter(r =>
+              (!r.hotelOnly      || isHotelEnabled) &&
+              (!r.restaurantOnly || isRestaurantEnabled)
+            );
 
             // TRANSPOSE (founder request 7 Jun 2026): the original layout
             // had roles as rows and tabs as columns with -12deg rotated

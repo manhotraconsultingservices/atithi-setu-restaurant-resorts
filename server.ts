@@ -19382,7 +19382,8 @@ ${data.tenant.name}`;
   };
 
   // ─── Enable / toggle the hotel module for a tenant ────────────────────────
-  // POST /api/restaurant/:id/hotel/enable    body: { enabled: boolean }
+  // POST /api/restaurant/:id/hotel/enable
+  //   body: { enabled: boolean, type?: 'HOTEL' | 'BOTH' }
   //
   // ⚠ ADMIN-ONLY. Previously this allowed the tenant's own OWNER role to
   // flip the Hotel module on for their restaurant, which is a billing leak:
@@ -19390,6 +19391,11 @@ ${data.tenant.name}`;
   // module without ever passing through the billing system. Activation is
   // now restricted to SUPER_ADMIN / CTO so it can only happen after the
   // sales/billing team has confirmed the customer is on a Hotel tier.
+  //
+  // `type` controls the resulting property_type when enabling:
+  //   'BOTH'  (default) → restaurant + hotel (existing behaviour, no regression)
+  //   'HOTEL'           → pure hotel only — restaurant nav/features are hidden
+  //                        for this tenant (use for hotel-only clients)
   //
   // Idempotent: creating tables multiple times is safe.
   app.post("/api/restaurant/:id/hotel/enable", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
@@ -19406,6 +19412,9 @@ ${data.tenant.name}`;
       }
 
       const enabled: boolean = req.body?.enabled !== false;  // default true
+      // 'type' only matters when enabling. 'HOTEL' = pure hotel (no restaurant
+      // nav); 'BOTH' = hotel + restaurant (default, preserves existing behaviour).
+      const targetType: 'HOTEL' | 'BOTH' = req.body?.type === 'HOTEL' ? 'HOTEL' : 'BOTH';
 
       const current: any = await centralDb.get("SELECT property_type FROM restaurants WHERE id = ?", [restaurantId]);
       if (!current) return res.status(404).json({ error: "Restaurant not found" });
@@ -19413,10 +19422,12 @@ ${data.tenant.name}`;
 
       let newType: 'RESTAURANT' | 'HOTEL' | 'BOTH';
       if (enabled) {
-        // Turning ON hotel: RESTAURANT → BOTH, anything else → keep hotel-capable
-        newType = currentType === 'RESTAURANT' ? 'BOTH' : (currentType === 'HOTEL' ? 'HOTEL' : 'BOTH');
+        // Turning ON hotel: use caller-supplied target type.
+        // Default is BOTH (preserves existing behaviour for current tenants).
+        // Pass type='HOTEL' to provision a hotel-only client.
+        newType = targetType;
       } else {
-        // Turning OFF hotel: BOTH → RESTAURANT, HOTEL → RESTAURANT
+        // Turning OFF hotel: always revert to RESTAURANT (preserves F&B data).
         newType = 'RESTAURANT';
       }
 
