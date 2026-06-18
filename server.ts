@@ -18963,6 +18963,25 @@ ${data.tenant.name}`;
     }
   });
 
+  // All hotel stock movements (cross-item log for the Movements sub-tab)
+  app.get("/api/restaurant/:id/hotel-inventory/movements", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const limit = Math.min(Number(req.query.limit || 200), 500);
+      const rows: any[] = await db.query(
+        `SELECT m.*, i.name AS item_name, i.unit
+         FROM hotel_stock_movements m
+         JOIN hotel_inventory_items i ON i.id = m.item_id
+         ORDER BY m.movement_date DESC, m.created_at DESC
+         LIMIT ?`,
+        [limit]
+      ).catch(() => []);
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch movements" });
+    }
+  });
+
   // ════════════════════════════════════════════════════════════════════════
   // PROCUREMENT & ACCOUNTS PAYABLE
   // Supplier invoices + payments. Completes the 3-way match:

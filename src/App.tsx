@@ -70,6 +70,7 @@ import {
   Globe,
   Package,
   CalendarClock,
+  AlertTriangle,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -6192,6 +6193,560 @@ function NotificationTemplateEditor({ templates, onSave }: { templates: any[]; o
   );
 }
 
+// ── HotelInventoryView ────────────────────────────────────────────────────
+// Full-page Inventory tab for HOTEL-only tenants.
+// Covers hotel supplies: linen, toiletries, housekeeping consumables, F&B staples.
+// Sub-tabs: Items | Low Stock | Movements | Quick Setup
+function HotelInventoryView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  type HTab = 'ITEMS' | 'LOW_STOCK' | 'MOVEMENTS' | 'SETUP';
+  const [tab, setTab] = useState<HTab>('ITEMS');
+  const [items, setItems] = useState<any[]>([]);
+  const [allMovements, setAllMovements] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [catFilter, setCatFilter] = useState('ALL');
+  const [search, setSearch] = useState('');
+
+  // item form / modal
+  const [showForm, setShowForm] = useState(false);
+  const [editItem, setEditItem] = useState<any>(null);
+  const [form, setForm] = useState({ name: '', category: '', unit: 'unit', current_stock_qty: '0', par_level: '', reorder_point: '', default_unit_price: '', notes: '' });
+  const [saving, setSaving] = useState(false);
+
+  // stock adjustment modal
+  const [adjItem, setAdjItem] = useState<any>(null);
+  const [adjForm, setAdjForm] = useState({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) });
+  const [adjSaving, setAdjSaving] = useState(false);
+
+  const api = async (path: string, init: RequestInit = {}) => {
+    const r = await fetch(`/api/restaurant/${restaurantId}${path}`, {
+      ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers || {}) },
+    });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(b.error || `HTTP ${r.status}`);
+    return b;
+  };
+
+  const load = async () => {
+    setLoading(true);
+    try { setItems(await api('/hotel-inventory')); } catch { /* silent */ }
+    finally { setLoading(false); }
+  };
+
+  const loadMovements = async () => {
+    try { setAllMovements(await api('/hotel-inventory/movements')); } catch { /* silent */ }
+  };
+
+  useEffect(() => { load(); }, []);
+  useEffect(() => { if (tab === 'MOVEMENTS') loadMovements(); }, [tab]);
+
+  const categories = ['ALL', ...Array.from(new Set(items.map(i => i.category).filter(Boolean)))];
+
+  const filtered = items.filter(i => {
+    if (catFilter !== 'ALL' && i.category !== catFilter) return false;
+    if (search && !i.name.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+  const lowStock = items.filter(i => {
+    const qty = Number(i.current_stock_qty || 0);
+    const reorder = Number(i.reorder_point || 0);
+    const par = Number(i.par_level || 0);
+    return (reorder > 0 && qty <= reorder) || (par > 0 && qty < par);
+  });
+
+  const openAdd = () => {
+    setEditItem(null);
+    setForm({ name: '', category: '', unit: 'unit', current_stock_qty: '0', par_level: '', reorder_point: '', default_unit_price: '', notes: '' });
+    setShowForm(true);
+  };
+  const openEdit = (it: any) => {
+    setEditItem(it);
+    setForm({ name: it.name, category: it.category || '', unit: it.unit || 'unit', current_stock_qty: String(it.current_stock_qty || 0), par_level: String(it.par_level || ''), reorder_point: String(it.reorder_point || ''), default_unit_price: String(it.default_unit_price || ''), notes: it.notes || '' });
+    setShowForm(true);
+  };
+
+  const saveItem = async () => {
+    if (!form.name) return;
+    setSaving(true);
+    try {
+      const body = { ...form, current_stock_qty: Number(form.current_stock_qty || 0), par_level: Number(form.par_level || 0), reorder_point: Number(form.reorder_point || 0), default_unit_price: form.default_unit_price ? Number(form.default_unit_price) : null };
+      if (editItem) await api(`/hotel-inventory/${editItem.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+      else await api('/hotel-inventory', { method: 'POST', body: JSON.stringify(body) });
+      setShowForm(false);
+      await load();
+    } catch (e: any) { alert(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const deleteItem = async (id: string) => {
+    if (!window.confirm('Remove this item?')) return;
+    try { await api(`/hotel-inventory/${id}`, { method: 'DELETE' }); await load(); }
+    catch (e: any) { alert(e.message); }
+  };
+
+  const openAdj = (it: any) => {
+    setAdjItem(it);
+    setAdjForm({ movement_type: 'RECEIVE', quantity: '', unit_price: it.default_unit_price ? String(it.default_unit_price) : '', notes: '', movement_date: new Date().toISOString().slice(0, 10) });
+  };
+
+  const saveAdj = async () => {
+    if (!adjItem || !adjForm.quantity) return;
+    setAdjSaving(true);
+    try {
+      await api(`/hotel-inventory/${adjItem.id}/stock`, { method: 'POST', body: JSON.stringify({ ...adjForm, quantity: Number(adjForm.quantity), unit_price: adjForm.unit_price ? Number(adjForm.unit_price) : null }) });
+      setAdjItem(null);
+      await load();
+    } catch (e: any) { alert(e.message); }
+    finally { setAdjSaving(false); }
+  };
+
+  // Quick-setup: seed common hotel supplies
+  const QUICK_SEEDS = [
+    { name: 'Bed Sheets (Double)', category: 'Linen', unit: 'pcs', par_level: 20, reorder_point: 8 },
+    { name: 'Pillow Covers', category: 'Linen', unit: 'pcs', par_level: 40, reorder_point: 15 },
+    { name: 'Bath Towels', category: 'Linen', unit: 'pcs', par_level: 30, reorder_point: 10 },
+    { name: 'Hand Towels', category: 'Linen', unit: 'pcs', par_level: 40, reorder_point: 15 },
+    { name: 'Bath Mat', category: 'Linen', unit: 'pcs', par_level: 20, reorder_point: 8 },
+    { name: 'Shampoo (Sachet)', category: 'Toiletries', unit: 'sachets', par_level: 100, reorder_point: 30 },
+    { name: 'Soap Bar', category: 'Toiletries', unit: 'bars', par_level: 100, reorder_point: 30 },
+    { name: 'Toothbrush Kit', category: 'Toiletries', unit: 'kits', par_level: 50, reorder_point: 15 },
+    { name: 'Conditioner (Sachet)', category: 'Toiletries', unit: 'sachets', par_level: 80, reorder_point: 25 },
+    { name: 'Toilet Paper Roll', category: 'Housekeeping', unit: 'rolls', par_level: 200, reorder_point: 60 },
+    { name: 'Tissue Box', category: 'Housekeeping', unit: 'boxes', par_level: 50, reorder_point: 15 },
+    { name: 'Garbage Bags', category: 'Housekeeping', unit: 'pcs', par_level: 100, reorder_point: 30 },
+    { name: 'Floor Cleaner (L)', category: 'Housekeeping', unit: 'ltrs', par_level: 10, reorder_point: 3 },
+    { name: 'Milk (Packet 500ml)', category: 'F&B', unit: 'packets', par_level: 20, reorder_point: 5 },
+    { name: 'Tea Bags', category: 'F&B', unit: 'boxes', par_level: 10, reorder_point: 3 },
+    { name: 'Coffee Sachets', category: 'F&B', unit: 'boxes', par_level: 10, reorder_point: 3 },
+    { name: 'Sugar Sachets', category: 'F&B', unit: 'boxes', par_level: 10, reorder_point: 3 },
+    { name: 'Rice (Kg)', category: 'Kitchen', unit: 'kg', par_level: 25, reorder_point: 8 },
+    { name: 'Dal (Kg)', category: 'Kitchen', unit: 'kg', par_level: 10, reorder_point: 3 },
+    { name: 'Cooking Oil (L)', category: 'Kitchen', unit: 'ltrs', par_level: 10, reorder_point: 3 },
+    { name: 'Napkins (Pack)', category: 'F&B', unit: 'packs', par_level: 30, reorder_point: 10 },
+  ];
+  const [seedLoading, setSeedLoading] = useState(false);
+  const [seeded, setSeeded] = useState(false);
+
+  const runQuickSetup = async () => {
+    setSeedLoading(true);
+    try {
+      const existing = new Set(items.map(i => i.name.toLowerCase()));
+      const toAdd = QUICK_SEEDS.filter(s => !existing.has(s.name.toLowerCase()));
+      for (const s of toAdd) {
+        await api('/hotel-inventory', { method: 'POST', body: JSON.stringify({ ...s, current_stock_qty: 0, default_unit_price: null }) });
+      }
+      setSeeded(true);
+      await load();
+      setTab('ITEMS');
+    } catch (e: any) { alert('Setup failed: ' + e.message); }
+    finally { setSeedLoading(false); }
+  };
+
+  const stockStatus = (it: any) => {
+    const qty = Number(it.current_stock_qty || 0);
+    if (Number(it.reorder_point) > 0 && qty <= Number(it.reorder_point)) return 'critical';
+    if (Number(it.par_level) > 0 && qty < Number(it.par_level)) return 'low';
+    return 'ok';
+  };
+  const fmtAmt = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const TABS: { id: HTab; label: string; icon: React.ReactNode; badge?: number }[] = [
+    { id: 'ITEMS', label: 'All Items', icon: <Package size={14} /> },
+    { id: 'LOW_STOCK', label: 'Low Stock', icon: <AlertTriangle size={14} />, badge: lowStock.length },
+    { id: 'MOVEMENTS', label: 'Stock Log', icon: <History size={14} /> },
+    { id: 'SETUP', label: 'Quick Setup', icon: <Zap size={14} /> },
+  ];
+
+  return (
+    <div className="p-4 md:p-6 max-w-7xl mx-auto">
+      {/* Header */}
+      <div className="flex items-start justify-between mb-5 flex-wrap gap-3">
+        <div>
+          <h2 className="text-2xl font-bold font-serif text-[#1a1208]">Hotel Inventory</h2>
+          <p className="text-[12px] text-[#6b5d52] mt-0.5">Linen, toiletries, housekeeping supplies, kitchen staples — track stock and reorder levels.</p>
+        </div>
+        <button onClick={openAdd} className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">
+          <Plus size={14} /> Add Item
+        </button>
+      </div>
+
+      {/* KPI strip */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+        {[
+          { label: 'Total Items', val: items.length, isCount: true, color: 'text-[#1a1208]' },
+          { label: 'Low / Critical', val: lowStock.length, isCount: true, color: lowStock.length > 0 ? 'text-rose-700' : 'text-emerald-700' },
+          { label: 'Stock Value', val: fmtAmt(items.reduce((s, i) => s + Number(i.current_stock_qty || 0) * Number(i.default_unit_price || 0), 0)), isCount: false, color: 'text-[#1a1208]' },
+          { label: 'Categories', val: categories.length - 1, isCount: true, color: 'text-[#1a1208]' },
+        ].map(c => (
+          <div key={c.label} className="bg-[#faf7f2] rounded-2xl px-4 py-3 border border-[#cc5a16]/10">
+            <p className="text-[10px] font-bold text-[#9c8e85] uppercase tracking-wider">{c.label}</p>
+            <p className={cn("text-xl font-bold mt-0.5", c.color)}>{c.isCount ? c.val : c.val}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Sub-tabs */}
+      <div className="flex gap-2 mb-5 flex-wrap">
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            className={cn("flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[12px] font-bold transition-all relative",
+              tab === t.id ? "bg-[#cc5a16] text-white shadow-sm" : "bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10"
+            )}>
+            {t.icon}{t.label}
+            {t.badge !== undefined && t.badge > 0 && (
+              <span className="absolute -top-1 -right-1 bg-rose-600 text-white text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">{t.badge}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* ── ITEMS TAB ── */}
+      {tab === 'ITEMS' && (
+        <div>
+          <div className="flex gap-2 mb-3 flex-wrap items-center">
+            <input placeholder="Search items…" value={search} onChange={e => setSearch(e.target.value)}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none w-52 focus:ring-2 ring-[#cc5a16]/20" />
+            <select value={catFilter} onChange={e => setCatFilter(e.target.value)}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none">
+              {categories.map(c => <option key={c} value={c}>{c === 'ALL' ? 'All Categories' : c}</option>)}
+            </select>
+            <button onClick={load} className="p-2 rounded-xl bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10">
+              <RefreshCw size={14} />
+            </button>
+          </div>
+          {loading ? (
+            <div className="text-center py-12 text-[#9c8e85]">Loading…</div>
+          ) : filtered.length === 0 ? (
+            <div className="text-center py-16 text-[#9c8e85]">
+              <Package size={40} className="mx-auto mb-3 opacity-30" />
+              <p className="font-bold text-sm">{items.length === 0 ? 'No items yet' : 'No items match your filter'}</p>
+              {items.length === 0 && <p className="text-xs mt-1">Use Quick Setup to seed common hotel supplies, or add items manually.</p>}
+              {items.length === 0 && (
+                <div className="flex gap-2 justify-center mt-4">
+                  <button onClick={openAdd} className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold">+ Add Item</button>
+                  <button onClick={() => setTab('SETUP')} className="px-4 py-2 rounded-xl bg-[#faf7f2] text-[#cc5a16] text-sm font-bold border border-[#cc5a16]/20">Quick Setup</button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
+              <table className="w-full text-sm">
+                <thead className="bg-[#faf7f2]">
+                  <tr className="text-left text-[10px] font-bold uppercase tracking-wider text-[#9c8e85]">
+                    <th className="px-4 py-3">Item</th>
+                    <th className="px-4 py-3">Category</th>
+                    <th className="px-4 py-3 text-right">Stock</th>
+                    <th className="px-4 py-3 text-right">Par</th>
+                    <th className="px-4 py-3 text-right">Reorder at</th>
+                    <th className="px-4 py-3 text-right">Unit Price</th>
+                    <th className="px-4 py-3 text-right">Value</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#f0ebe4]">
+                  {filtered.map(it => {
+                    const st = stockStatus(it);
+                    return (
+                      <tr key={it.id} className={cn("hover:bg-[#faf7f2]/60", st === 'critical' ? 'bg-red-50' : st === 'low' ? 'bg-amber-50' : '')}>
+                        <td className="px-4 py-2.5 font-semibold">{it.name}</td>
+                        <td className="px-4 py-2.5 text-xs text-[#6b5d52]">
+                          <span className="bg-[#faf7f2] border border-[#cc5a16]/15 text-[#cc5a16] text-[10px] font-bold px-2 py-0.5 rounded-full">{it.category || '—'}</span>
+                        </td>
+                        <td className={cn("px-4 py-2.5 text-right font-mono font-bold", st === 'critical' ? 'text-rose-700' : st === 'low' ? 'text-amber-700' : 'text-emerald-700')}>
+                          {Number(it.current_stock_qty).toFixed(0)} <span className="text-[10px] font-normal text-[#9c8e85]">{it.unit}</span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono text-[#9c8e85] text-xs">{Number(it.par_level) > 0 ? Number(it.par_level).toFixed(0) : '—'}</td>
+                        <td className="px-4 py-2.5 text-right font-mono text-[#9c8e85] text-xs">{Number(it.reorder_point) > 0 ? Number(it.reorder_point).toFixed(0) : '—'}</td>
+                        <td className="px-4 py-2.5 text-right text-xs">{it.default_unit_price ? fmtAmt(it.default_unit_price) : '—'}</td>
+                        <td className="px-4 py-2.5 text-right text-xs font-semibold">
+                          {it.default_unit_price ? fmtAmt(Number(it.current_stock_qty || 0) * Number(it.default_unit_price)) : '—'}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          {st === 'critical' ? (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800">Reorder</span>
+                          ) : st === 'low' ? (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Low</span>
+                          ) : (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">OK</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <div className="flex items-center gap-1">
+                            <button onClick={() => openAdj(it)} className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 text-[10px] font-bold hover:bg-emerald-100 border border-emerald-200">Receive</button>
+                            <button onClick={() => { setAdjItem(it); setAdjForm({ movement_type: 'CONSUME', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) }); }}
+                              className="px-2 py-1 rounded-lg bg-amber-50 text-amber-700 text-[10px] font-bold hover:bg-amber-100 border border-amber-200">Use</button>
+                            <button onClick={() => openEdit(it)} className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 border border-[#cc5a16]/20">Edit</button>
+                            <button onClick={() => deleteItem(it.id)} className="px-2 py-1 rounded-lg bg-red-50 text-red-700 text-[10px] font-bold hover:bg-red-100">Del</button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── LOW STOCK TAB ── */}
+      {tab === 'LOW_STOCK' && (
+        <div>
+          {lowStock.length === 0 ? (
+            <div className="text-center py-16 text-[#9c8e85]">
+              <CheckCircle2 size={40} className="mx-auto mb-3 text-emerald-400" />
+              <p className="font-bold text-sm text-emerald-700">All stock levels are healthy</p>
+              <p className="text-xs mt-1">No items are below their par or reorder levels.</p>
+            </div>
+          ) : (
+            <>
+              <div className="mb-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-2.5 text-sm text-amber-800 font-semibold">
+                {lowStock.filter(i => stockStatus(i) === 'critical').length} critical reorder — {lowStock.filter(i => stockStatus(i) === 'low').length} below par level
+              </div>
+              <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
+                <table className="w-full text-sm">
+                  <thead className="bg-[#faf7f2]"><tr className="text-[10px] font-bold uppercase tracking-wider text-[#9c8e85] text-left">
+                    <th className="px-4 py-3">Item</th><th className="px-4 py-3">Category</th>
+                    <th className="px-4 py-3 text-right">Current</th><th className="px-4 py-3 text-right">Par</th>
+                    <th className="px-4 py-3 text-right">Reorder at</th><th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Action</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-[#f0ebe4]">
+                    {lowStock.map(it => {
+                      const st = stockStatus(it);
+                      return (
+                        <tr key={it.id} className={st === 'critical' ? 'bg-red-50' : 'bg-amber-50'}>
+                          <td className="px-4 py-2.5 font-semibold">{it.name}</td>
+                          <td className="px-4 py-2.5 text-xs text-[#6b5d52]">{it.category || '—'}</td>
+                          <td className={cn("px-4 py-2.5 text-right font-mono font-bold", st === 'critical' ? 'text-rose-700' : 'text-amber-700')}>
+                            {Number(it.current_stock_qty).toFixed(0)} {it.unit}
+                          </td>
+                          <td className="px-4 py-2.5 text-right text-xs font-mono">{Number(it.par_level).toFixed(0)}</td>
+                          <td className="px-4 py-2.5 text-right text-xs font-mono">{Number(it.reorder_point).toFixed(0)}</td>
+                          <td className="px-4 py-2.5">
+                            <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full", st === 'critical' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800')}>
+                              {st === 'critical' ? 'Reorder Now' : 'Low'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <button onClick={() => { openAdj(it); setTab('ITEMS'); }}
+                              className="px-2 py-1 rounded-lg bg-emerald-600 text-white text-[10px] font-bold hover:bg-emerald-700">Receive Stock</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── MOVEMENTS TAB ── */}
+      {tab === 'MOVEMENTS' && (
+        <div>
+          {allMovements.length === 0 ? (
+            <div className="text-center py-16 text-[#9c8e85]">
+              <History size={40} className="mx-auto mb-3 opacity-30" />
+              <p className="text-sm font-bold">No stock movements yet</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
+              <table className="w-full text-sm">
+                <thead className="bg-[#faf7f2]"><tr className="text-[10px] font-bold uppercase tracking-wider text-[#9c8e85] text-left">
+                  <th className="px-4 py-3">Date</th><th className="px-4 py-3">Item</th>
+                  <th className="px-4 py-3">Type</th><th className="px-4 py-3 text-right">Qty</th>
+                  <th className="px-4 py-3 text-right">Unit Price</th><th className="px-4 py-3">Notes</th>
+                  <th className="px-4 py-3">Recorded by</th>
+                </tr></thead>
+                <tbody className="divide-y divide-[#f0ebe4]">
+                  {allMovements.map((m: any) => (
+                    <tr key={m.id} className="hover:bg-[#faf7f2]/60">
+                      <td className="px-4 py-2 text-xs text-[#6b5d52]">{String(m.movement_date || '').slice(0, 10)}</td>
+                      <td className="px-4 py-2 font-semibold text-sm">{m.item_name || m.item_id}</td>
+                      <td className="px-4 py-2">
+                        <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full",
+                          m.movement_type === 'RECEIVE' ? 'bg-emerald-100 text-emerald-800' :
+                          m.movement_type === 'CONSUME' ? 'bg-rose-100 text-rose-800' :
+                          'bg-stone-100 text-stone-700'
+                        )}>{m.movement_type}</span>
+                      </td>
+                      <td className={cn("px-4 py-2 text-right font-mono font-bold", m.movement_type === 'RECEIVE' ? 'text-emerald-700' : 'text-rose-700')}>
+                        {m.movement_type === 'CONSUME' ? '-' : '+'}{Math.abs(Number(m.quantity))}
+                      </td>
+                      <td className="px-4 py-2 text-right text-xs">{m.unit_price ? fmtAmt(m.unit_price) : '—'}</td>
+                      <td className="px-4 py-2 text-xs text-[#6b5d52]">{m.notes || '—'}</td>
+                      <td className="px-4 py-2 text-xs text-[#9c8e85] truncate max-w-[80px]">{m.recorded_by || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── QUICK SETUP TAB ── */}
+      {tab === 'SETUP' && (
+        <div className="max-w-2xl">
+          <div className="rounded-2xl bg-[#faf7f2] border border-[#cc5a16]/15 p-5 mb-5">
+            <h3 className="text-sm font-bold text-[#1a1208] mb-1">One-click Hotel Inventory Setup</h3>
+            <p className="text-xs text-[#6b5d52] mb-4">Adds {QUICK_SEEDS.length} common hotel supply items across 5 categories: Linen, Toiletries, Housekeeping, F&B, Kitchen. Existing items are not duplicated. You can edit par levels and prices after setup.</p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
+              {['Linen', 'Toiletries', 'Housekeeping', 'F&B', 'Kitchen'].map(cat => (
+                <div key={cat} className="bg-white rounded-xl border border-[#cc5a16]/10 px-3 py-2 text-xs">
+                  <p className="font-bold text-[#1a1208]">{cat}</p>
+                  <p className="text-[#9c8e85]">{QUICK_SEEDS.filter(s => s.category === cat).length} items</p>
+                </div>
+              ))}
+            </div>
+            {seeded ? (
+              <div className="flex items-center gap-2 text-emerald-700 font-bold text-sm">
+                <CheckCircle2 size={16} /> Setup complete — {QUICK_SEEDS.length} items added. Go to Items tab to review.
+              </div>
+            ) : (
+              <button onClick={runQuickSetup} disabled={seedLoading}
+                className="px-5 py-2.5 rounded-xl bg-[#cc5a16] text-white font-bold text-sm disabled:opacity-50 flex items-center gap-2">
+                <Zap size={14} />{seedLoading ? 'Setting up…' : 'Run Quick Setup'}
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-[#9c8e85]">After setup, use Procurement → New Invoice to record supplier bills for your hotel supplies, and Receive Stock on each item to track deliveries.</p>
+        </div>
+      )}
+
+      {/* ── Add/Edit Item Modal ── */}
+      {showForm && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowForm(false)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold font-serif">{editItem ? 'Edit Item' : 'Add Inventory Item'}</h3>
+              <button onClick={() => setShowForm(false)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+            </div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Name *</label>
+                  <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Bath Towels"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Category</label>
+                  <input value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))} placeholder="Linen, Toiletries…"
+                    list="hotel-cats" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                  <datalist id="hotel-cats">
+                    {['Linen', 'Toiletries', 'Housekeeping', 'F&B', 'Kitchen', 'Stationery', 'Mini-Bar'].map(c => <option key={c} value={c} />)}
+                  </datalist>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Unit</label>
+                  <input value={form.unit} onChange={e => setForm(f => ({ ...f, unit: e.target.value }))} placeholder="pcs, kg, ltrs…"
+                    list="hotel-units" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                  <datalist id="hotel-units">
+                    {['pcs', 'kg', 'ltrs', 'packets', 'boxes', 'rolls', 'sets', 'sachets', 'bars', 'packs', 'kits'].map(u => <option key={u} value={u} />)}
+                  </datalist>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Current Stock</label>
+                  <input type="number" min="0" value={form.current_stock_qty} onChange={e => setForm(f => ({ ...f, current_stock_qty: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Par Level</label>
+                  <input type="number" min="0" value={form.par_level} onChange={e => setForm(f => ({ ...f, par_level: e.target.value }))}
+                    placeholder="Ideal stock" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Reorder Point</label>
+                  <input type="number" min="0" value={form.reorder_point} onChange={e => setForm(f => ({ ...f, reorder_point: e.target.value }))}
+                    placeholder="Alert threshold" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Unit Price (₹)</label>
+                  <input type="number" min="0" step="0.01" value={form.default_unit_price} onChange={e => setForm(f => ({ ...f, default_unit_price: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
+                  <input value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} placeholder="Optional"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setShowForm(false)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Cancel</button>
+              <button onClick={saveItem} disabled={saving || !form.name}
+                className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">
+                {saving ? 'Saving…' : (editItem ? 'Save Changes' : 'Add Item')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Stock Adjustment Modal ── */}
+      {adjItem && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setAdjItem(null)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-lg font-bold font-serif">{adjForm.movement_type === 'RECEIVE' ? 'Receive Stock' : 'Record Usage'}</h3>
+              <button onClick={() => setAdjItem(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+            </div>
+            <div className="rounded-xl bg-[#faf7f2] px-4 py-2.5 mb-4 text-sm font-semibold text-[#1a1208]">
+              {adjItem.name} <span className="text-[#9c8e85] font-normal ml-1">— Current: {Number(adjItem.current_stock_qty).toFixed(0)} {adjItem.unit}</span>
+            </div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Type</label>
+                  <select value={adjForm.movement_type} onChange={e => setAdjForm(f => ({ ...f, movement_type: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
+                    <option value="RECEIVE">Receive (add)</option>
+                    <option value="CONSUME">Use / Consume</option>
+                    <option value="ADJUST">Manual Adjust</option>
+                    <option value="WASTAGE">Wastage / Damage</option>
+                    <option value="TRANSFER">Transfer Out</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Quantity *</label>
+                  <input type="number" min="0.01" step="1" value={adjForm.quantity} onChange={e => setAdjForm(f => ({ ...f, quantity: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm font-bold outline-none" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Date</label>
+                  <input type="date" value={adjForm.movement_date} onChange={e => setAdjForm(f => ({ ...f, movement_date: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Unit Price ₹ (opt)</label>
+                  <input type="number" min="0" step="0.01" value={adjForm.unit_price} onChange={e => setAdjForm(f => ({ ...f, unit_price: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
+                <input value={adjForm.notes} onChange={e => setAdjForm(f => ({ ...f, notes: e.target.value }))} placeholder="Supplier name, room no., etc."
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setAdjItem(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Cancel</button>
+              <button onClick={saveAdj} disabled={adjSaving || !adjForm.quantity}
+                className={cn("flex-1 px-4 py-2.5 rounded-2xl text-white text-sm font-bold disabled:opacity-50", adjForm.movement_type === 'RECEIVE' ? 'bg-emerald-600' : 'bg-[#cc5a16]')}>
+                {adjSaving ? 'Saving…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, onRefresh }: {
   items: any[]; restaurantId: string; token: string;
   onCreate: (p: any) => void; onDelete: (id: string) => void; onRefresh: () => void;
@@ -8000,7 +8555,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // — a benign UI bug, not a crash.
   useEffect(() => {
     if (!bothEnabled) return;
-    const restaurantOnlyIds = new Set(['MENU', 'INVENTORY', 'DELIVERY', 'QR', 'BOOKINGS', 'ORDERS']);
+    const restaurantOnlyIds = new Set(['MENU', 'DELIVERY', 'QR', 'BOOKINGS', 'ORDERS']);
     const hotelOnlyIds      = new Set(['ROOMS', 'ROOM_SETUP', 'HOTEL_BOOKINGS', 'SERVICES', 'SERVICE_REQUESTS', 'FOLIOS', 'COMPLIANCE', 'CONCIERGE_FAQ']);
     const hidden =
       (dashboardMode === 'RESTAURANT' && hotelOnlyIds.has(activeTab)) ||
@@ -12662,6 +13217,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
         </div>
+      ) : activeTab === 'INVENTORY' && dashboardMode === 'HOTEL' ? (
+        <HotelInventoryView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'INVENTORY' ? (
         <div className="space-y-5">
           {/* ── Inventory Header ── */}
