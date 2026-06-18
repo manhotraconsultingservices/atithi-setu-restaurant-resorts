@@ -4161,6 +4161,17 @@ async function getTabPermissionsForRole(tenantId: string, role: string): Promise
         }
       } catch { perms = null; }
     }
+    // Tabs added to the product after the permission matrix was first built.
+    // Any tenant whose role-permissions were saved before these tabs existed
+    // won't have them in tab_permissions. Default them to Full(3) so staff
+    // keep seeing these tabs until the owner explicitly restricts them via
+    // the updated Staff Access UI.
+    if (perms !== null) {
+      const RBAC_NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT'];
+      for (const tab of RBAC_NEWLY_ADDED) {
+        if (!(tab in perms)) perms[tab] = 3;
+      }
+    }
     _tabCache.set(key, { perms, loadedAt: now });
     return perms;
   } catch {

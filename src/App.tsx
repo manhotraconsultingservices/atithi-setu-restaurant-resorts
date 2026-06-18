@@ -11310,7 +11310,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const res = await fetch(`/api/restaurant/${restaurantId}/role-permissions`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) setStaffAccess(await res.json() || {});
+      if (res.ok) {
+        const raw: Record<string, Record<string, number>> = await res.json() || {};
+        // Tabs added to the product after the matrix first shipped — pre-fill at
+        // Full(3) for any role that doesn't have them configured yet. This prevents
+        // an owner from accidentally revoking access simply by opening the matrix
+        // and saving before explicitly setting a level for these new tabs.
+        const NEWLY_ADDED = ['HOTEL_INVENTORY', 'EXPENSE_JOURNAL', 'PROCUREMENT'];
+        for (const roleId of Object.keys(raw)) {
+          for (const tab of NEWLY_ADDED) {
+            if (!(tab in (raw[roleId] || {}))) raw[roleId] = { ...(raw[roleId] || {}), [tab]: 3 };
+          }
+        }
+        setStaffAccess(raw);
+      }
     } catch {/* swallow — non-blocking */}
   };
   const saveStaffAccess = async () => {
@@ -22106,6 +22119,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk Reports',  description: 'Live Stay View + Arrival / Departure / Room Status / Night Audit reports for any date range. CSV download.', hotelOnly: true },
               { id: 'CHANNEL_MANAGER',      label: 'Channel Manager',      description: 'OTA integrations: API credentials, iCal feeds (Booking.com/Airbnb/Vrbo/Agoda/MMT/Goibibo), inbound webhook log, room-code mappings.', hotelOnly: true },
               { id: 'PUBLIC_BOOKING_PAGE',  label: 'Public Booking Page',  description: 'Customer-facing direct-booking page: hero, photo galleries, amenities, slug URL, cancellation policy. 0% commission channel.', hotelOnly: true },
+              { id: 'HOTEL_INVENTORY',      label: 'Hotel Inventory',       description: 'Housekeeping consumables, amenities, linen — stock levels, movements, low-stock alerts.', hotelOnly: true },
+              // Finance tabs (visible for both HOTEL and RESTAURANT tenants)
+              { id: 'EXPENSE_JOURNAL',      label: 'Expense Journal',       description: 'Daily operating expenses, petty cash entries, vendor payments, expense reports and approval.' },
+              { id: 'PROCUREMENT',          label: 'Procurement & AP',      description: 'Purchase orders, supplier invoices, goods-received notes, accounts payable aging.' },
             ];
             // Filter: hotelOnly rows require hotel module; restaurantOnly rows require restaurant module.
             const visibleTabs = PERMISSIBLE_TABS.filter(t =>
