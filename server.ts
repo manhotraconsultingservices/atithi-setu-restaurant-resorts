@@ -18963,6 +18963,333 @@ ${data.tenant.name}`;
     }
   });
 
+  // ════════════════════════════════════════════════════════════════════════
+  // PROCUREMENT & ACCOUNTS PAYABLE
+  // Supplier invoices + payments. Completes the 3-way match:
+  //   Purchase Order → Goods Receipt → Supplier Invoice → Payment
+  // Accessible to ALL property types (RESTAURANT, HOTEL, BOTH).
+  // ════════════════════════════════════════════════════════════════════════
+
+  // ── Supplier Invoices ────────────────────────────────────────────────────
+
+  // List invoices with filters
+  app.get("/api/restaurant/:id/procurement/supplier-invoices", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { module, status, supplier_id, from, to, search } = req.query as Record<string, string>;
+      const params: any[] = [];
+      const clauses: string[] = [];
+      if (module && module !== 'ALL') { clauses.push("si.module = ?"); params.push(module); }
+      if (status && status !== 'ALL') { clauses.push("si.status = ?"); params.push(status); }
+      if (supplier_id) { clauses.push("si.supplier_id = ?"); params.push(supplier_id); }
+      if (from) { clauses.push("si.invoice_date >= ?"); params.push(from); }
+      if (to) { clauses.push("si.invoice_date <= ?"); params.push(to); }
+      if (search) {
+        clauses.push("(si.invoice_number ILIKE ? OR s.name ILIKE ? OR si.notes ILIKE ?)");
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const rows: any[] = await db.query(
+        `SELECT si.*, s.name AS supplier_name, s.phone AS supplier_phone, s.email AS supplier_email
+         FROM supplier_invoices si
+         LEFT JOIN suppliers s ON s.id = si.supplier_id
+         ${where}
+         ORDER BY si.invoice_date DESC, si.created_at DESC
+         LIMIT 500`,
+        params
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch invoices" });
+    }
+  });
+
+  // Create supplier invoice
+  app.post("/api/restaurant/:id/procurement/supplier-invoices", authenticate, async (req: AuthRequest, res: Response) => {
+    const role = (req as any).user?.role;
+    if (!['OWNER','MANAGER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { supplier_id, invoice_number, invoice_date, due_date, po_id, grn_id, module,
+              subtotal, gst_amount, total_amount, notes } = req.body;
+      if (!supplier_id || !total_amount) return res.status(400).json({ error: 'supplier_id and total_amount are required' });
+      const id = `SI-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
+      const sub = Number(subtotal || total_amount);
+      const gst = Number(gst_amount || 0);
+      const total = Number(total_amount);
+      const outstanding = total;
+      await db.run(
+        `INSERT INTO supplier_invoices
+          (id, supplier_id, invoice_number, invoice_date, due_date, po_id, grn_id, module,
+           subtotal, gst_amount, total_amount, paid_amount, outstanding_amount, status, notes, created_by)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,'UNPAID',?,?)`,
+        [id, supplier_id, invoice_number || null, invoice_date || new Date().toISOString().slice(0,10),
+         due_date || null, po_id || null, grn_id || null, module || 'RESTAURANT',
+         sub, gst, total, outstanding, notes || null, (req as any).user?.email || (req as any).user?.id]
+      );
+      const created: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [id]);
+      res.status(201).json(created);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to create invoice" });
+    }
+  });
+
+  // Update invoice (edit before payment)
+  app.patch("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, async (req: AuthRequest, res: Response) => {
+    const role = (req as any).user?.role;
+    if (!['OWNER','MANAGER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
+      if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+      const { invoice_number, invoice_date, due_date, subtotal, gst_amount, total_amount, status, notes, module } = req.body;
+      const newTotal = total_amount !== undefined ? Number(total_amount) : inv.total_amount;
+      const newOutstanding = Math.max(0, newTotal - inv.paid_amount);
+      const newStatus = newOutstanding <= 0 ? 'PAID' : (status || inv.status);
+      await db.run(
+        `UPDATE supplier_invoices SET
+          invoice_number = COALESCE(?, invoice_number),
+          invoice_date = COALESCE(?, invoice_date),
+          due_date = COALESCE(?, due_date),
+          subtotal = COALESCE(?, subtotal),
+          gst_amount = COALESCE(?, gst_amount),
+          total_amount = ?,
+          outstanding_amount = ?,
+          status = ?,
+          notes = COALESCE(?, notes),
+          module = COALESCE(?, module),
+          updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [invoice_number ?? null, invoice_date ?? null, due_date ?? null,
+         subtotal !== undefined ? Number(subtotal) : null,
+         gst_amount !== undefined ? Number(gst_amount) : null,
+         newTotal, newOutstanding, newStatus, notes ?? null, module ?? null,
+         req.params.invoiceId]
+      );
+      const updated: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [req.params.invoiceId]);
+      res.json(updated);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to update invoice" });
+    }
+  });
+
+  // Delete invoice (only DRAFT/UNPAID with zero payments)
+  app.delete("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, async (req: AuthRequest, res: Response) => {
+    const role = (req as any).user?.role;
+    if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
+      if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+      if (inv.paid_amount > 0) return res.status(409).json({ error: 'Cannot delete invoice with recorded payments' });
+      await db.run("DELETE FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to delete invoice" });
+    }
+  });
+
+  // ── Supplier Payments ────────────────────────────────────────────────────
+
+  // Record payment against an invoice (or standalone advance)
+  app.post("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId/payments", authenticate, async (req: AuthRequest, res: Response) => {
+    const role = (req as any).user?.role;
+    if (!['OWNER','MANAGER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
+      if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+      const { amount, payment_method, payment_date, reference_number, notes } = req.body;
+      if (!amount || Number(amount) <= 0) return res.status(400).json({ error: 'amount must be > 0' });
+      const payAmt = Number(amount);
+      const pid = `SP-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO supplier_payments (id, supplier_id, invoice_id, payment_date, amount, payment_method, reference_number, notes, recorded_by)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
+        [pid, inv.supplier_id, inv.id,
+         payment_date || new Date().toISOString().slice(0,10),
+         payAmt, payment_method || 'CASH', reference_number || null, notes || null,
+         (req as any).user?.email || (req as any).user?.id]
+      );
+      const newPaid = inv.paid_amount + payAmt;
+      const newOutstanding = Math.max(0, inv.total_amount - newPaid);
+      const newStatus = newOutstanding <= 0 ? 'PAID' : 'PARTIAL';
+      await db.run(
+        "UPDATE supplier_invoices SET paid_amount = ?, outstanding_amount = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [newPaid, newOutstanding, newStatus, inv.id]
+      );
+      const updatedInv: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [inv.id]);
+      res.status(201).json({ payment_id: pid, invoice: updatedInv });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to record payment" });
+    }
+  });
+
+  // List all payments (across all invoices) for this tenant
+  app.get("/api/restaurant/:id/procurement/payments", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { supplier_id, from, to } = req.query as Record<string, string>;
+      const params: any[] = [];
+      const clauses: string[] = [];
+      if (supplier_id) { clauses.push("sp.supplier_id = ?"); params.push(supplier_id); }
+      if (from) { clauses.push("sp.payment_date >= ?"); params.push(from); }
+      if (to) { clauses.push("sp.payment_date <= ?"); params.push(to); }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const rows: any[] = await db.query(
+        `SELECT sp.*, s.name AS supplier_name, si.invoice_number
+         FROM supplier_payments sp
+         LEFT JOIN suppliers s ON s.id = sp.supplier_id
+         LEFT JOIN supplier_invoices si ON si.id = sp.invoice_id
+         ${where}
+         ORDER BY sp.payment_date DESC, sp.created_at DESC
+         LIMIT 500`,
+        params
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch payments" });
+    }
+  });
+
+  // Delete a payment (reversal — re-opens the invoice)
+  app.delete("/api/restaurant/:id/procurement/payments/:paymentId", authenticate, async (req: AuthRequest, res: Response) => {
+    const role = (req as any).user?.role;
+    if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const pay: any = await db.get("SELECT * FROM supplier_payments WHERE id = ?", [req.params.paymentId]);
+      if (!pay) return res.status(404).json({ error: 'Payment not found' });
+      await db.run("DELETE FROM supplier_payments WHERE id = ?", [req.params.paymentId]);
+      if (pay.invoice_id) {
+        const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [pay.invoice_id]);
+        if (inv) {
+          const newPaid = Math.max(0, inv.paid_amount - pay.amount);
+          const newOutstanding = Math.max(0, inv.total_amount - newPaid);
+          const newStatus = newPaid <= 0 ? 'UNPAID' : 'PARTIAL';
+          await db.run(
+            "UPDATE supplier_invoices SET paid_amount = ?, outstanding_amount = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [newPaid, newOutstanding, newStatus, inv.id]
+          );
+        }
+      }
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to delete payment" });
+    }
+  });
+
+  // ── Supplier Ledger ──────────────────────────────────────────────────────
+
+  // Per-supplier ledger: all invoices + payments + running balance + aging
+  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId/ledger", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as Record<string, string>;
+      const params: any[] = [req.params.supplierId];
+      let dateFilter = '';
+      if (from) { dateFilter += ` AND invoice_date >= '${from}'`; }
+      if (to)   { dateFilter += ` AND invoice_date <= '${to}'`; }
+      const supplier: any = await db.get("SELECT * FROM suppliers WHERE id = ?", [req.params.supplierId]);
+      if (!supplier) return res.status(404).json({ error: 'Supplier not found' });
+      const invoices: any[] = await db.query(
+        `SELECT * FROM supplier_invoices WHERE supplier_id = ? ${dateFilter} ORDER BY invoice_date DESC`,
+        params
+      );
+      const payments: any[] = await db.query(
+        `SELECT * FROM supplier_payments WHERE supplier_id = ? ORDER BY payment_date DESC LIMIT 200`,
+        [req.params.supplierId]
+      );
+      const today = new Date().toISOString().slice(0,10);
+      const summary = invoices.reduce((acc: any, inv: any) => {
+        acc.total_billed += inv.total_amount;
+        acc.total_paid += inv.paid_amount;
+        acc.total_outstanding += inv.outstanding_amount;
+        const daysOverdue = inv.due_date && inv.due_date < today && inv.outstanding_amount > 0
+          ? Math.floor((Date.now() - new Date(inv.due_date).getTime()) / 86400000) : 0;
+        if (daysOverdue > 60) acc.aging_60plus += inv.outstanding_amount;
+        else if (daysOverdue > 30) acc.aging_31_60 += inv.outstanding_amount;
+        else if (daysOverdue > 0) acc.aging_0_30 += inv.outstanding_amount;
+        return acc;
+      }, { total_billed: 0, total_paid: 0, total_outstanding: 0, aging_0_30: 0, aging_31_60: 0, aging_60plus: 0 });
+      res.json({ supplier, invoices, payments, summary });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch ledger" });
+    }
+  });
+
+  // ── Procurement Reports ──────────────────────────────────────────────────
+
+  // Outstanding payables summary (all suppliers with unpaid invoices)
+  app.get("/api/restaurant/:id/procurement/reports/payables", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const today = new Date().toISOString().slice(0,10);
+      const rows: any[] = await db.query(
+        `SELECT s.id AS supplier_id, s.name AS supplier_name, s.phone, s.email,
+                COUNT(si.id) AS invoice_count,
+                SUM(si.total_amount) AS total_billed,
+                SUM(si.paid_amount) AS total_paid,
+                SUM(si.outstanding_amount) AS total_outstanding,
+                SUM(CASE WHEN si.due_date < ? AND si.outstanding_amount > 0 THEN si.outstanding_amount ELSE 0 END) AS overdue_amount,
+                MIN(si.due_date) AS earliest_due
+         FROM supplier_invoices si
+         JOIN suppliers s ON s.id = si.supplier_id
+         WHERE si.status IN ('UNPAID','PARTIAL','OVERDUE')
+         GROUP BY s.id, s.name, s.phone, s.email
+         ORDER BY total_outstanding DESC`,
+        [today]
+      );
+      const totals = rows.reduce((acc: any, r: any) => ({
+        total_outstanding: acc.total_outstanding + Number(r.total_outstanding || 0),
+        overdue_amount: acc.overdue_amount + Number(r.overdue_amount || 0),
+        invoice_count: acc.invoice_count + Number(r.invoice_count || 0),
+      }), { total_outstanding: 0, overdue_amount: 0, invoice_count: 0 });
+      res.json({ suppliers: rows, totals });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch payables" });
+    }
+  });
+
+  // Monthly spend report: by supplier and by module
+  app.get("/api/restaurant/:id/procurement/reports/spending", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { months = '6' } = req.query as Record<string, string>;
+      const fromDate = new Date();
+      fromDate.setMonth(fromDate.getMonth() - (Number(months) - 1));
+      const fromStr = `${fromDate.getFullYear()}-${String(fromDate.getMonth()+1).padStart(2,'0')}-01`;
+      const byMonth: any[] = await db.query(
+        `SELECT TO_CHAR(invoice_date, 'YYYY-MM') AS month,
+                module,
+                SUM(total_amount) AS total_billed,
+                SUM(paid_amount) AS total_paid,
+                COUNT(*) AS invoice_count
+         FROM supplier_invoices
+         WHERE invoice_date >= ?
+         GROUP BY TO_CHAR(invoice_date, 'YYYY-MM'), module
+         ORDER BY month DESC, module`,
+        [fromStr]
+      );
+      const bySupplier: any[] = await db.query(
+        `SELECT s.name AS supplier_name, si.module,
+                SUM(si.total_amount) AS total_billed,
+                SUM(si.paid_amount) AS total_paid,
+                COUNT(si.id) AS invoice_count
+         FROM supplier_invoices si
+         JOIN suppliers s ON s.id = si.supplier_id
+         WHERE si.invoice_date >= ?
+         GROUP BY s.name, si.module
+         ORDER BY total_billed DESC
+         LIMIT 20`,
+        [fromStr]
+      );
+      res.json({ by_month: byMonth, by_supplier: bySupplier });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch spending report" });
+    }
+  });
+
   // ─── Storage Locations CRUD (multi-location stock) ──────────────────────
   app.get("/api/restaurant/:id/storage-locations", authenticate, async (req: AuthRequest, res: Response) => {
     try {

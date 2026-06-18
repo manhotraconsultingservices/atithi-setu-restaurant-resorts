@@ -1610,6 +1610,66 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   `);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_hotel_movements_item ON hotel_stock_movements (item_id, movement_date DESC)`);
 
+  // ── Procurement & Accounts Payable ─────────────────────────────────────
+  // Supplier invoices (the bill you receive from a supplier after goods are
+  // delivered). Completes the 3-way match: PO → GRN → Invoice → Payment.
+  // Works for both restaurant ingredients and hotel supplies.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS supplier_invoices (
+      id TEXT PRIMARY KEY,
+      supplier_id TEXT NOT NULL,
+      invoice_number TEXT,
+      invoice_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      due_date DATE,
+      po_id TEXT,
+      grn_id TEXT,
+      module TEXT NOT NULL DEFAULT 'RESTAURANT',
+      subtotal DOUBLE PRECISION NOT NULL DEFAULT 0,
+      gst_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+      total_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+      paid_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+      outstanding_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'UNPAID',
+      bill_image_url TEXT,
+      notes TEXT,
+      created_by TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_sup_inv_supplier ON supplier_invoices (supplier_id, invoice_date DESC)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_sup_inv_status ON supplier_invoices (status, due_date)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_sup_inv_module ON supplier_invoices (module, invoice_date DESC)`);
+
+  // Supplier payments — actual cash/bank outflow per payment.
+  // Multiple payments can apply to one invoice (partial payments).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS supplier_payments (
+      id TEXT PRIMARY KEY,
+      supplier_id TEXT NOT NULL,
+      invoice_id TEXT,
+      payment_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      amount DOUBLE PRECISION NOT NULL,
+      payment_method TEXT NOT NULL DEFAULT 'CASH',
+      reference_number TEXT,
+      notes TEXT,
+      recorded_by TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_sup_pay_supplier ON supplier_payments (supplier_id, payment_date DESC)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_sup_pay_invoice ON supplier_payments (invoice_id)`);
+
+  // Extend suppliers with bank details and payment terms for NEFT/RTGS
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS bank_account_number TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS bank_name TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS ifsc_code TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS credit_days INTEGER DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS supplier_type TEXT DEFAULT 'GENERAL'").catch(() => {});
+
+  // module flag on purchase_orders allows hotel items to use the same PO workflow
+  await db.exec("ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS module TEXT DEFAULT 'RESTAURANT'").catch(() => {});
+
   // Owner-customisable notification templates. Falls back to hard-coded
   // defaults in notificationService.ts when row absent.
   await db.exec(`

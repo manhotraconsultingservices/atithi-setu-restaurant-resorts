@@ -87,7 +87,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // to any non-owner with an ancient unmarked allowedTabs list — which is
 // the exact bug the founder flagged on 7 Jun 2026 ("STAFF_ACCESS should
 // only be visible to Business owner. this is critical.").
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'RESTAURANT_REPORTS', 'HR_PAYROLL']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'RESTAURANT_REPORTS', 'HR_PAYROLL', 'PROCUREMENT']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -11964,6 +11964,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ],
           },
           {
+            id: 'PROCUREMENT', label: 'Procurement', icon: <Package size={16} />,
+            visible: true,
+            tabs: [
+              { id: 'PROCUREMENT', label: 'Procurement & AP' },
+            ],
+          },
+          {
             id: 'ADMIN', label: 'Administration', icon: <Settings size={16} />,
             visible: true,
             tabs: [
@@ -15490,6 +15497,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <TimesheetDashboard restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'HR_PAYROLL' ? (
         <HRPayrollModule restaurantId={restaurantId} token={token!} restaurant={restaurant} />
+      ) : activeTab === 'PROCUREMENT' ? (
+        <ProcurementView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'REPORTS' ? (
         // Hotel-mode owners get hotel-focused KPIs (occupancy, ADR,
         // RevPAR, ancillary, guest rating) instead of restaurant
@@ -49967,6 +49976,702 @@ function _formatTimeRange(start: string, end: string): string {
 // HR & Payroll Module (Phase 1, 10 Jun 2026)
 // ════════════════════════════════════════════════════════════════════════
 // Top-level tab with sub-tabs. Phase 1 ships the Employees sub-tab
+// ── ProcurementView ────────────────────────────────────────────────────────
+// Unified Procurement & Accounts Payable module.
+// Visible to ALL property types (HOTEL, RESTAURANT, BOTH).
+// Sub-tabs: Invoices | Payments | Supplier Ledger | Reports
+function ProcurementView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  type ProcTab = 'INVOICES' | 'PAYMENTS' | 'LEDGER' | 'REPORTS';
+  const [subTab, setSubTab] = useState<ProcTab>('INVOICES');
+
+  // ── shared state ─────────────────────────────────────────────────────────
+  const [invoices, setInvoices] = useState<any[]>([]);
+  const [payments, setPayments] = useState<any[]>([]);
+  const [suppliers, setSuppliers] = useState<any[]>([]);
+  const [payables, setPayables] = useState<any>({ suppliers: [], totals: {} });
+  const [spending, setSpending] = useState<any>({ by_month: [], by_supplier: [] });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  // ── invoice filters ───────────────────────────────────────────────────────
+  const [invFilter, setInvFilter] = useState({ module: 'ALL', status: 'ALL', search: '', from: '', to: '' });
+
+  // ── ledger state ──────────────────────────────────────────────────────────
+  const [ledgerSupplierId, setLedgerSupplierId] = useState('');
+  const [ledger, setLedger] = useState<any>(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+
+  // ── create/edit invoice modal ─────────────────────────────────────────────
+  const [showInvModal, setShowInvModal] = useState(false);
+  const [editInv, setEditInv] = useState<any>(null);
+  const [invForm, setInvForm] = useState({
+    supplier_id: '', invoice_number: '', invoice_date: new Date().toISOString().slice(0, 10),
+    due_date: '', module: 'RESTAURANT', subtotal: '', gst_amount: '', total_amount: '', notes: '',
+  });
+  const [invSaving, setInvSaving] = useState(false);
+
+  // ── pay modal ────────────────────────────────────────────────────────────
+  const [payTarget, setPayTarget] = useState<any>(null);
+  const [payForm, setPayForm] = useState({ amount: '', payment_method: 'CASH', payment_date: new Date().toISOString().slice(0, 10), reference_number: '', notes: '' });
+  const [paySaving, setPaySaving] = useState(false);
+
+  const api = async (path: string, init: RequestInit = {}) => {
+    const r = await fetch(`/api/restaurant/${restaurantId}${path}`, {
+      ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers || {}) },
+    });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(b.error || `HTTP ${r.status}`);
+    return b;
+  };
+
+  const loadSuppliers = async () => {
+    try { setSuppliers(await api('/inventory/suppliers')); } catch { /* silent */ }
+  };
+
+  const loadInvoices = async () => {
+    setLoading(true); setError('');
+    try {
+      const qs = new URLSearchParams();
+      if (invFilter.module !== 'ALL') qs.set('module', invFilter.module);
+      if (invFilter.status !== 'ALL') qs.set('status', invFilter.status);
+      if (invFilter.search) qs.set('search', invFilter.search);
+      if (invFilter.from) qs.set('from', invFilter.from);
+      if (invFilter.to) qs.set('to', invFilter.to);
+      setInvoices(await api(`/procurement/supplier-invoices?${qs}`));
+    } catch (e: any) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const loadPayments = async () => {
+    setLoading(true);
+    try { setPayments(await api('/procurement/payments')); } catch (e: any) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const loadPayables = async () => {
+    try { setPayables(await api('/procurement/reports/payables')); } catch { /* silent */ }
+  };
+
+  const loadSpending = async () => {
+    try { setSpending(await api('/procurement/reports/spending?months=6')); } catch { /* silent */ }
+  };
+
+  const loadLedger = async (sid: string) => {
+    if (!sid) return;
+    setLedgerLoading(true);
+    try { setLedger(await api(`/procurement/suppliers/${sid}/ledger`)); }
+    catch { setLedger(null); }
+    finally { setLedgerLoading(false); }
+  };
+
+  useEffect(() => { loadSuppliers(); }, []);
+  useEffect(() => { if (subTab === 'INVOICES') loadInvoices(); }, [subTab, invFilter]);
+  useEffect(() => { if (subTab === 'PAYMENTS') loadPayments(); }, [subTab]);
+  useEffect(() => { if (subTab === 'REPORTS') { loadPayables(); loadSpending(); } }, [subTab]);
+
+  const openCreateInvoice = () => {
+    setEditInv(null);
+    setInvForm({ supplier_id: '', invoice_number: '', invoice_date: new Date().toISOString().slice(0, 10), due_date: '', module: 'RESTAURANT', subtotal: '', gst_amount: '', total_amount: '', notes: '' });
+    setShowInvModal(true);
+  };
+  const openEditInvoice = (inv: any) => {
+    setEditInv(inv);
+    setInvForm({
+      supplier_id: inv.supplier_id, invoice_number: inv.invoice_number || '', invoice_date: String(inv.invoice_date || '').slice(0, 10),
+      due_date: String(inv.due_date || '').slice(0, 10), module: inv.module || 'RESTAURANT',
+      subtotal: String(inv.subtotal || ''), gst_amount: String(inv.gst_amount || ''), total_amount: String(inv.total_amount || ''), notes: inv.notes || '',
+    });
+    setShowInvModal(true);
+  };
+
+  const saveInvoice = async () => {
+    if (!invForm.supplier_id || !invForm.total_amount) return;
+    setInvSaving(true);
+    try {
+      const body = { ...invForm, subtotal: Number(invForm.subtotal || invForm.total_amount), gst_amount: Number(invForm.gst_amount || 0), total_amount: Number(invForm.total_amount) };
+      if (editInv) await api(`/procurement/supplier-invoices/${editInv.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+      else await api('/procurement/supplier-invoices', { method: 'POST', body: JSON.stringify(body) });
+      setShowInvModal(false);
+      await loadInvoices();
+    } catch (e: any) { alert(e.message); }
+    finally { setInvSaving(false); }
+  };
+
+  const deleteInvoice = async (id: string) => {
+    if (!window.confirm('Delete this invoice? This cannot be undone.')) return;
+    try { await api(`/procurement/supplier-invoices/${id}`, { method: 'DELETE' }); await loadInvoices(); }
+    catch (e: any) { alert(e.message); }
+  };
+
+  const openPayModal = (inv: any) => {
+    setPayTarget(inv);
+    setPayForm({ amount: String(inv.outstanding_amount || ''), payment_method: 'CASH', payment_date: new Date().toISOString().slice(0, 10), reference_number: '', notes: '' });
+  };
+
+  const savePayment = async () => {
+    if (!payTarget || !payForm.amount) return;
+    setPaySaving(true);
+    try {
+      await api(`/procurement/supplier-invoices/${payTarget.id}/payments`, { method: 'POST', body: JSON.stringify({ ...payForm, amount: Number(payForm.amount) }) });
+      setPayTarget(null);
+      await loadInvoices();
+      if (subTab === 'PAYMENTS') await loadPayments();
+    } catch (e: any) { alert(e.message); }
+    finally { setPaySaving(false); }
+  };
+
+  const deletePayment = async (id: string) => {
+    if (!window.confirm('Reverse this payment? The invoice will return to Partial/Unpaid.')) return;
+    try { await api(`/procurement/payments/${id}`, { method: 'DELETE' }); await loadPayments(); }
+    catch (e: any) { alert(e.message); }
+  };
+
+  const statusColor: Record<string, string> = {
+    UNPAID: 'bg-red-100 text-red-800', PARTIAL: 'bg-amber-100 text-amber-800',
+    PAID: 'bg-emerald-100 text-emerald-800', OVERDUE: 'bg-rose-200 text-rose-900',
+    DRAFT: 'bg-stone-100 text-stone-700', DISPUTED: 'bg-purple-100 text-purple-800',
+  };
+  const fmtAmt = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const modColor: Record<string, string> = { RESTAURANT: 'bg-orange-100 text-orange-800', HOTEL: 'bg-blue-100 text-blue-800', SHARED: 'bg-purple-100 text-purple-800' };
+
+  const SUB_TABS: { id: ProcTab; label: string; icon: React.ReactNode }[] = [
+    { id: 'INVOICES', label: 'Supplier Invoices', icon: <FileText size={14} /> },
+    { id: 'PAYMENTS', label: 'Payments', icon: <CreditCard size={14} /> },
+    { id: 'LEDGER', label: 'Supplier Ledger', icon: <Receipt size={14} /> },
+    { id: 'REPORTS', label: 'Reports', icon: <BarChart3 size={14} /> },
+  ];
+
+  return (
+    <div className="p-4 md:p-6 max-w-7xl mx-auto">
+      {/* Header */}
+      <div className="mb-5">
+        <h2 className="text-2xl font-bold font-serif text-[#1a1208]">Procurement & Payables</h2>
+        <p className="text-[12px] text-[#6b5d52] mt-0.5">Supplier invoices, payment recording, and accounts payable — for hotel and restaurant supplies.</p>
+      </div>
+
+      {/* Sub-tab bar */}
+      <div className="flex gap-2 mb-5 flex-wrap">
+        {SUB_TABS.map(t => (
+          <button
+            key={t.id}
+            onClick={() => setSubTab(t.id)}
+            className={cn(
+              "flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[12px] font-bold transition-all",
+              subTab === t.id ? "bg-[#cc5a16] text-white shadow-sm" : "bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10"
+            )}
+          >{t.icon}{t.label}</button>
+        ))}
+      </div>
+
+      {error && <div className="mb-4 rounded-xl bg-red-50 border border-red-200 px-4 py-2 text-sm text-red-700">{error}</div>}
+
+      {/* ── INVOICES TAB ── */}
+      {subTab === 'INVOICES' && (
+        <div>
+          {/* Filters row */}
+          <div className="flex flex-wrap gap-2 mb-4 items-center">
+            <input
+              placeholder="Search supplier, invoice #..."
+              value={invFilter.search}
+              onChange={e => setInvFilter(f => ({ ...f, search: e.target.value }))}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none w-52 focus:ring-2 ring-[#cc5a16]/20"
+            />
+            <select value={invFilter.module} onChange={e => setInvFilter(f => ({ ...f, module: e.target.value }))}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none">
+              <option value="ALL">All Modules</option>
+              <option value="RESTAURANT">Restaurant</option>
+              <option value="HOTEL">Hotel</option>
+              <option value="SHARED">Shared</option>
+            </select>
+            <select value={invFilter.status} onChange={e => setInvFilter(f => ({ ...f, status: e.target.value }))}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none">
+              <option value="ALL">All Statuses</option>
+              <option value="UNPAID">Unpaid</option>
+              <option value="PARTIAL">Partial</option>
+              <option value="PAID">Paid</option>
+              <option value="OVERDUE">Overdue</option>
+            </select>
+            <input type="date" value={invFilter.from} onChange={e => setInvFilter(f => ({ ...f, from: e.target.value }))}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none" title="From date" />
+            <input type="date" value={invFilter.to} onChange={e => setInvFilter(f => ({ ...f, to: e.target.value }))}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none" title="To date" />
+            <div className="flex-1" />
+            <button onClick={openCreateInvoice}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">
+              <Plus size={14} /> New Invoice
+            </button>
+          </div>
+
+          {loading ? (
+            <div className="text-center py-12 text-[#9c8e85]">Loading…</div>
+          ) : invoices.length === 0 ? (
+            <div className="text-center py-16 text-[#9c8e85]">
+              <Package size={40} className="mx-auto mb-3 opacity-30" />
+              <p className="font-bold text-sm">No invoices yet</p>
+              <p className="text-xs mt-1">Record supplier invoices when you receive goods or services.</p>
+              <button onClick={openCreateInvoice} className="mt-4 px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold">+ New Invoice</button>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
+              <table className="w-full text-sm">
+                <thead className="bg-[#faf7f2]">
+                  <tr className="text-left text-[10px] font-bold uppercase tracking-wider text-[#9c8e85]">
+                    <th className="px-4 py-3">Date</th>
+                    <th className="px-4 py-3">Invoice #</th>
+                    <th className="px-4 py-3">Supplier</th>
+                    <th className="px-4 py-3">Module</th>
+                    <th className="px-4 py-3 text-right">Total</th>
+                    <th className="px-4 py-3 text-right">Paid</th>
+                    <th className="px-4 py-3 text-right">Outstanding</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#f0ebe4]">
+                  {invoices.map((inv: any) => (
+                    <tr key={inv.id} className="hover:bg-[#faf7f2]/60">
+                      <td className="px-4 py-2.5 text-xs text-[#6b5d52] whitespace-nowrap">{String(inv.invoice_date || '').slice(0, 10)}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs">{inv.invoice_number || <span className="text-[#9c8e85] italic">—</span>}</td>
+                      <td className="px-4 py-2.5 font-semibold text-sm">{inv.supplier_name}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full uppercase", modColor[inv.module] || 'bg-stone-100 text-stone-700')}>{inv.module}</span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-semibold">{fmtAmt(inv.total_amount)}</td>
+                      <td className="px-4 py-2.5 text-right text-emerald-700">{fmtAmt(inv.paid_amount)}</td>
+                      <td className="px-4 py-2.5 text-right font-bold text-rose-700">{fmtAmt(inv.outstanding_amount)}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full", statusColor[inv.status] || 'bg-stone-100 text-stone-600')}>{inv.status}</span>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center gap-1">
+                          {inv.outstanding_amount > 0 && (
+                            <button onClick={() => openPayModal(inv)}
+                              className="px-2 py-1 rounded-lg bg-emerald-600 text-white text-[10px] font-bold hover:bg-emerald-700">Pay</button>
+                          )}
+                          <button onClick={() => openEditInvoice(inv)}
+                            className="px-2 py-1 rounded-lg bg-[#faf7f2] text-[#cc5a16] text-[10px] font-bold hover:bg-[#cc5a16]/10 border border-[#cc5a16]/20">Edit</button>
+                          {inv.paid_amount <= 0 && (
+                            <button onClick={() => deleteInvoice(inv.id)}
+                              className="px-2 py-1 rounded-lg bg-red-50 text-red-700 text-[10px] font-bold hover:bg-red-100">Del</button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── PAYMENTS TAB ── */}
+      {subTab === 'PAYMENTS' && (
+        <div>
+          {loading ? <div className="text-center py-12 text-[#9c8e85]">Loading…</div> : payments.length === 0 ? (
+            <div className="text-center py-16 text-[#9c8e85]">
+              <CreditCard size={40} className="mx-auto mb-3 opacity-30" />
+              <p className="font-bold text-sm">No payments recorded</p>
+              <p className="text-xs mt-1">Payments appear here when you pay a supplier invoice.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
+              <table className="w-full text-sm">
+                <thead className="bg-[#faf7f2]">
+                  <tr className="text-left text-[10px] font-bold uppercase tracking-wider text-[#9c8e85]">
+                    <th className="px-4 py-3">Date</th>
+                    <th className="px-4 py-3">Supplier</th>
+                    <th className="px-4 py-3">Invoice #</th>
+                    <th className="px-4 py-3">Method</th>
+                    <th className="px-4 py-3">Reference</th>
+                    <th className="px-4 py-3 text-right">Amount</th>
+                    <th className="px-4 py-3">By</th>
+                    <th className="px-4 py-3"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#f0ebe4]">
+                  {payments.map((p: any) => (
+                    <tr key={p.id} className="hover:bg-[#faf7f2]/60">
+                      <td className="px-4 py-2.5 text-xs text-[#6b5d52]">{String(p.payment_date || '').slice(0, 10)}</td>
+                      <td className="px-4 py-2.5 font-semibold">{p.supplier_name}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs">{p.invoice_number || '—'}</td>
+                      <td className="px-4 py-2.5">
+                        <span className="bg-[#faf7f2] border border-[#cc5a16]/20 text-[#cc5a16] text-[10px] font-bold px-2 py-0.5 rounded-full">{p.payment_method}</span>
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-xs text-[#6b5d52]">{p.reference_number || '—'}</td>
+                      <td className="px-4 py-2.5 text-right font-bold text-emerald-700">{fmtAmt(p.amount)}</td>
+                      <td className="px-4 py-2.5 text-xs text-[#9c8e85] truncate max-w-[80px]">{p.recorded_by || '—'}</td>
+                      <td className="px-4 py-2.5">
+                        <button onClick={() => deletePayment(p.id)}
+                          className="text-[10px] font-bold text-rose-600 hover:underline">Reverse</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── LEDGER TAB ── */}
+      {subTab === 'LEDGER' && (
+        <div>
+          <div className="flex gap-3 mb-5 items-center">
+            <select
+              value={ledgerSupplierId}
+              onChange={e => { setLedgerSupplierId(e.target.value); loadLedger(e.target.value); }}
+              className="bg-[#faf7f2] border-none rounded-xl px-3 py-2.5 text-sm outline-none w-64"
+            >
+              <option value="">— Select a supplier —</option>
+              {suppliers.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+          {ledgerLoading && <div className="text-center py-12 text-[#9c8e85]">Loading ledger…</div>}
+          {!ledgerLoading && ledger && (
+            <div>
+              {/* Supplier summary card */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+                {[
+                  { label: 'Total Billed', val: ledger.summary.total_billed, color: 'text-[#1a1208]' },
+                  { label: 'Total Paid', val: ledger.summary.total_paid, color: 'text-emerald-700' },
+                  { label: 'Outstanding', val: ledger.summary.total_outstanding, color: 'text-rose-700' },
+                  { label: 'Overdue (60d+)', val: ledger.summary.aging_60plus, color: 'text-rose-800' },
+                ].map(card => (
+                  <div key={card.label} className="bg-[#faf7f2] rounded-2xl px-4 py-3 border border-[#cc5a16]/10">
+                    <p className="text-[10px] font-bold text-[#9c8e85] uppercase tracking-wider">{card.label}</p>
+                    <p className={cn("text-xl font-bold mt-0.5", card.color)}>{fmtAmt(card.val)}</p>
+                  </div>
+                ))}
+              </div>
+              {/* Aging strip */}
+              <div className="flex gap-2 mb-5 text-[11px]">
+                {[
+                  { label: '0–30 days', val: ledger.summary.aging_0_30, cls: 'bg-amber-50 text-amber-800' },
+                  { label: '31–60 days', val: ledger.summary.aging_31_60, cls: 'bg-orange-100 text-orange-800' },
+                  { label: '60+ days', val: ledger.summary.aging_60plus, cls: 'bg-red-100 text-red-800' },
+                ].map(a => (
+                  <div key={a.label} className={cn("flex-1 rounded-xl px-3 py-2 font-bold", a.cls)}>
+                    <span className="font-normal opacity-70">{a.label} overdue: </span>{fmtAmt(a.val)}
+                  </div>
+                ))}
+              </div>
+              {/* Invoices */}
+              <h4 className="text-[11px] font-bold uppercase tracking-wider text-[#9c8e85] mb-2">Invoices</h4>
+              <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10 mb-5">
+                <table className="w-full text-sm">
+                  <thead className="bg-[#faf7f2]"><tr className="text-[10px] font-bold uppercase tracking-wider text-[#9c8e85] text-left">
+                    <th className="px-4 py-2.5">Date</th><th className="px-4 py-2.5">Invoice #</th>
+                    <th className="px-4 py-2.5 text-right">Total</th><th className="px-4 py-2.5 text-right">Paid</th>
+                    <th className="px-4 py-2.5 text-right">Outstanding</th><th className="px-4 py-2.5">Status</th>
+                    <th className="px-4 py-2.5">Due</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-[#f0ebe4]">
+                    {ledger.invoices.map((inv: any) => (
+                      <tr key={inv.id} className="hover:bg-[#faf7f2]/60">
+                        <td className="px-4 py-2 text-xs text-[#6b5d52]">{String(inv.invoice_date || '').slice(0, 10)}</td>
+                        <td className="px-4 py-2 font-mono text-xs">{inv.invoice_number || '—'}</td>
+                        <td className="px-4 py-2 text-right font-semibold">{fmtAmt(inv.total_amount)}</td>
+                        <td className="px-4 py-2 text-right text-emerald-700">{fmtAmt(inv.paid_amount)}</td>
+                        <td className="px-4 py-2 text-right font-bold text-rose-700">{fmtAmt(inv.outstanding_amount)}</td>
+                        <td className="px-4 py-2"><span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full", statusColor[inv.status] || '')}>{inv.status}</span></td>
+                        <td className="px-4 py-2 text-xs text-[#6b5d52]">{inv.due_date ? String(inv.due_date).slice(0, 10) : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {/* Payments */}
+              <h4 className="text-[11px] font-bold uppercase tracking-wider text-[#9c8e85] mb-2">Payments</h4>
+              <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
+                <table className="w-full text-sm">
+                  <thead className="bg-[#faf7f2]"><tr className="text-[10px] font-bold uppercase tracking-wider text-[#9c8e85] text-left">
+                    <th className="px-4 py-2.5">Date</th><th className="px-4 py-2.5">Method</th>
+                    <th className="px-4 py-2.5">Reference</th><th className="px-4 py-2.5 text-right">Amount</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-[#f0ebe4]">
+                    {ledger.payments.length === 0 ? (
+                      <tr><td colSpan={4} className="text-center py-6 text-xs text-[#9c8e85]">No payments yet</td></tr>
+                    ) : ledger.payments.map((p: any) => (
+                      <tr key={p.id} className="hover:bg-[#faf7f2]/60">
+                        <td className="px-4 py-2 text-xs">{String(p.payment_date || '').slice(0, 10)}</td>
+                        <td className="px-4 py-2"><span className="bg-[#faf7f2] border border-[#cc5a16]/20 text-[#cc5a16] text-[10px] font-bold px-2 py-0.5 rounded-full">{p.payment_method}</span></td>
+                        <td className="px-4 py-2 font-mono text-xs text-[#6b5d52]">{p.reference_number || '—'}</td>
+                        <td className="px-4 py-2 text-right font-bold text-emerald-700">{fmtAmt(p.amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          {!ledgerLoading && !ledger && ledgerSupplierId && (
+            <div className="text-center py-12 text-[#9c8e85] text-sm">No data found for this supplier.</div>
+          )}
+          {!ledgerSupplierId && (
+            <div className="text-center py-16 text-[#9c8e85]">
+              <Receipt size={40} className="mx-auto mb-3 opacity-30" />
+              <p className="text-sm font-bold">Select a supplier to view their ledger</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── REPORTS TAB ── */}
+      {subTab === 'REPORTS' && (
+        <div className="space-y-6">
+          {/* Payables summary */}
+          <div>
+            <h3 className="text-sm font-bold text-[#1a1208] mb-3">Outstanding Payables</h3>
+            {payables.suppliers?.length === 0 ? (
+              <div className="rounded-2xl bg-emerald-50 border border-emerald-200 px-5 py-4 text-emerald-800 text-sm font-semibold">All invoices are paid. No outstanding payables.</div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+                  {[
+                    { label: 'Total Outstanding', val: payables.totals?.total_outstanding },
+                    { label: 'Overdue', val: payables.totals?.overdue_amount },
+                    { label: 'Open Invoices', val: payables.totals?.invoice_count, isCount: true },
+                  ].map(c => (
+                    <div key={c.label} className="bg-[#faf7f2] rounded-2xl px-4 py-3 border border-[#cc5a16]/10">
+                      <p className="text-[10px] font-bold text-[#9c8e85] uppercase tracking-wider">{c.label}</p>
+                      <p className="text-xl font-bold mt-0.5 text-[#1a1208]">{c.isCount ? c.val : fmtAmt(c.val)}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[#faf7f2]"><tr className="text-[10px] font-bold uppercase tracking-wider text-[#9c8e85] text-left">
+                      <th className="px-4 py-3">Supplier</th><th className="px-4 py-3 text-right">Invoices</th>
+                      <th className="px-4 py-3 text-right">Total Billed</th><th className="px-4 py-3 text-right">Outstanding</th>
+                      <th className="px-4 py-3 text-right">Overdue</th><th className="px-4 py-3">Earliest Due</th>
+                    </tr></thead>
+                    <tbody className="divide-y divide-[#f0ebe4]">
+                      {payables.suppliers?.map((s: any) => (
+                        <tr key={s.supplier_id} className="hover:bg-[#faf7f2]/60">
+                          <td className="px-4 py-2.5">
+                            <p className="font-semibold">{s.supplier_name}</p>
+                            <p className="text-xs text-[#9c8e85]">{s.phone || s.email || ''}</p>
+                          </td>
+                          <td className="px-4 py-2.5 text-right text-[#6b5d52]">{s.invoice_count}</td>
+                          <td className="px-4 py-2.5 text-right font-semibold">{fmtAmt(s.total_billed)}</td>
+                          <td className="px-4 py-2.5 text-right font-bold text-rose-700">{fmtAmt(s.total_outstanding)}</td>
+                          <td className="px-4 py-2.5 text-right font-bold text-rose-900">{Number(s.overdue_amount) > 0 ? fmtAmt(s.overdue_amount) : '—'}</td>
+                          <td className="px-4 py-2.5 text-xs text-[#6b5d52]">{s.earliest_due ? String(s.earliest_due).slice(0, 10) : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Monthly spend by module */}
+          <div>
+            <h3 className="text-sm font-bold text-[#1a1208] mb-3">Monthly Spend (last 6 months)</h3>
+            {spending.by_month?.length === 0 ? (
+              <div className="text-center py-8 text-[#9c8e85] text-sm">No invoice data for the period.</div>
+            ) : (
+              <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
+                <table className="w-full text-sm">
+                  <thead className="bg-[#faf7f2]"><tr className="text-[10px] font-bold uppercase tracking-wider text-[#9c8e85] text-left">
+                    <th className="px-4 py-3">Month</th><th className="px-4 py-3">Module</th>
+                    <th className="px-4 py-3 text-right">Invoices</th><th className="px-4 py-3 text-right">Billed</th><th className="px-4 py-3 text-right">Paid</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-[#f0ebe4]">
+                    {spending.by_month?.map((row: any, i: number) => (
+                      <tr key={i} className="hover:bg-[#faf7f2]/60">
+                        <td className="px-4 py-2.5 font-mono text-xs">{row.month}</td>
+                        <td className="px-4 py-2.5"><span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full", modColor[row.module] || 'bg-stone-100')}>{row.module}</span></td>
+                        <td className="px-4 py-2.5 text-right text-[#6b5d52]">{row.invoice_count}</td>
+                        <td className="px-4 py-2.5 text-right font-semibold">{fmtAmt(row.total_billed)}</td>
+                        <td className="px-4 py-2.5 text-right text-emerald-700">{fmtAmt(row.total_paid)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Top suppliers */}
+          {spending.by_supplier?.length > 0 && (
+            <div>
+              <h3 className="text-sm font-bold text-[#1a1208] mb-3">Top Suppliers (6 months)</h3>
+              <div className="overflow-x-auto rounded-2xl border border-[#cc5a16]/10">
+                <table className="w-full text-sm">
+                  <thead className="bg-[#faf7f2]"><tr className="text-[10px] font-bold uppercase tracking-wider text-[#9c8e85] text-left">
+                    <th className="px-4 py-3">Supplier</th><th className="px-4 py-3">Module</th>
+                    <th className="px-4 py-3 text-right">Invoices</th><th className="px-4 py-3 text-right">Total Billed</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-[#f0ebe4]">
+                    {spending.by_supplier?.map((row: any, i: number) => (
+                      <tr key={i} className="hover:bg-[#faf7f2]/60">
+                        <td className="px-4 py-2.5 font-semibold">{row.supplier_name}</td>
+                        <td className="px-4 py-2.5"><span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full", modColor[row.module] || 'bg-stone-100')}>{row.module}</span></td>
+                        <td className="px-4 py-2.5 text-right text-[#6b5d52]">{row.invoice_count}</td>
+                        <td className="px-4 py-2.5 text-right font-bold">{fmtAmt(row.total_billed)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Create/Edit Invoice Modal ── */}
+      {showInvModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowInvModal(false)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold font-serif">{editInv ? 'Edit Invoice' : 'New Supplier Invoice'}</h3>
+              <button onClick={() => setShowInvModal(false)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Supplier *</label>
+                <select value={invForm.supplier_id} onChange={e => setInvForm(f => ({ ...f, supplier_id: e.target.value }))}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
+                  <option value="">— Select supplier —</option>
+                  {suppliers.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Invoice #</label>
+                  <input value={invForm.invoice_number} onChange={e => setInvForm(f => ({ ...f, invoice_number: e.target.value }))}
+                    placeholder="Supplier's ref no." className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Module *</label>
+                  <select value={invForm.module} onChange={e => setInvForm(f => ({ ...f, module: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
+                    <option value="RESTAURANT">Restaurant</option>
+                    <option value="HOTEL">Hotel</option>
+                    <option value="SHARED">Shared</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Invoice Date</label>
+                  <input type="date" value={invForm.invoice_date} onChange={e => setInvForm(f => ({ ...f, invoice_date: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Due Date</label>
+                  <input type="date" value={invForm.due_date} onChange={e => setInvForm(f => ({ ...f, due_date: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Subtotal (₹)</label>
+                  <input type="number" min="0" step="0.01" value={invForm.subtotal}
+                    onChange={e => setInvForm(f => ({ ...f, subtotal: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">GST (₹)</label>
+                  <input type="number" min="0" step="0.01" value={invForm.gst_amount}
+                    onChange={e => setInvForm(f => ({ ...f, gst_amount: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Total (₹) *</label>
+                  <input type="number" min="0" step="0.01" value={invForm.total_amount}
+                    onChange={e => setInvForm(f => ({ ...f, total_amount: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm font-bold outline-none" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
+                <input value={invForm.notes} onChange={e => setInvForm(f => ({ ...f, notes: e.target.value }))}
+                  placeholder="e.g. Bedsheets — 50 units, Dal 20kg..." className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setShowInvModal(false)}
+                className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Cancel</button>
+              <button onClick={saveInvoice} disabled={invSaving || !invForm.supplier_id || !invForm.total_amount}
+                className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50">
+                {invSaving ? 'Saving…' : (editInv ? 'Save Changes' : 'Create Invoice')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Record Payment Modal ── */}
+      {payTarget && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setPayTarget(null)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-lg font-bold font-serif">Record Payment</h3>
+              <button onClick={() => setPayTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+            </div>
+            <div className="rounded-xl bg-[#faf7f2] px-4 py-2.5 mb-4 text-sm">
+              <span className="font-semibold">{payTarget.supplier_name}</span>
+              {payTarget.invoice_number && <span className="text-[#6b5d52] ml-2 font-mono text-xs">#{payTarget.invoice_number}</span>}
+              <span className="float-right font-bold text-rose-700">{fmtAmt(payTarget.outstanding_amount)} outstanding</span>
+            </div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Amount (₹) *</label>
+                  <input type="number" min="0.01" step="0.01" value={payForm.amount}
+                    onChange={e => setPayForm(f => ({ ...f, amount: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm font-bold outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment Method</label>
+                  <select value={payForm.payment_method} onChange={e => setPayForm(f => ({ ...f, payment_method: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
+                    <option value="CASH">Cash</option>
+                    <option value="UPI">UPI</option>
+                    <option value="NEFT">NEFT</option>
+                    <option value="RTGS">RTGS</option>
+                    <option value="CHEQUE">Cheque</option>
+                    <option value="IMPS">IMPS</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment Date</label>
+                  <input type="date" value={payForm.payment_date} onChange={e => setPayForm(f => ({ ...f, payment_date: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">UTR / Cheque # / Ref</label>
+                  <input value={payForm.reference_number} onChange={e => setPayForm(f => ({ ...f, reference_number: e.target.value }))}
+                    placeholder="For NEFT/UPI/Cheque" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
+                <input value={payForm.notes} onChange={e => setPayForm(f => ({ ...f, notes: e.target.value }))}
+                  placeholder="Optional" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setPayTarget(null)}
+                className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Cancel</button>
+              <button onClick={savePayment} disabled={paySaving || !payForm.amount}
+                className="flex-1 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold disabled:opacity-50">
+                {paySaving ? 'Saving…' : 'Record Payment'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // fully wired; subsequent commits will fill in Salary Structure /
 // Components / Payroll / Expenses / Offer Letters / Reports.
 function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
