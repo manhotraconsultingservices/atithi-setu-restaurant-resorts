@@ -11861,6 +11861,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, isHotelEnabled]);
 
+  // Load travel agents as soon as hotel is confirmed enabled so they are
+  // always ready in the booking modal regardless of which tab the user
+  // navigated to first.
+  useEffect(() => {
+    if (isHotelEnabled) fetchTravelAgents();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHotelEnabled]);
+
   const updateRestaurant = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!restaurant) return;
@@ -28873,7 +28881,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
                   >
                     <option value="">— no agent —</option>
-                    {travelAgents.filter((a: any) => a.is_active).map((a: any) => (
+                    {travelAgents.filter((a: any) => a.is_active !== 0).map((a: any) => (
                       <option key={a.id} value={a.id}>{a.name} ({a.type}) — {Number(a.commission_pct||0).toFixed(1)}% comm</option>
                     ))}
                   </select>
