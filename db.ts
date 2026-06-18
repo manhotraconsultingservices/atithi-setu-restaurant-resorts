@@ -699,6 +699,12 @@ export async function initDb() {
       PRIMARY KEY (restaurant_id, role)
     )
   `);
+  // RBAC-6: object-level permission levels (None/View/Edit/Full) per tab.
+  // Stored as JSON object: { "MENU": 3, "ORDERS": 2, "INVOICES": 1 }.
+  // null/absent = no restriction (backward compat). Migrated lazily from
+  // the legacy allowed_tabs array the first time the owner saves via the
+  // new matrix UI.
+  await centralDb.exec(`ALTER TABLE restaurant_role_permissions ADD COLUMN IF NOT EXISTS tab_permissions TEXT DEFAULT NULL`);
 
   // RBAC-5a — Audit log of every permission change. Captured on each POST
   // to /role-permissions so the owner can answer "who removed CASHIER's
@@ -708,8 +714,8 @@ export async function initDb() {
       id                   SERIAL PRIMARY KEY,
       restaurant_id        TEXT NOT NULL,
       role                 TEXT NOT NULL,
-      allowed_tabs_before  TEXT,    -- JSON array (nullable for fresh inserts)
-      allowed_tabs_after   TEXT,    -- JSON array
+      allowed_tabs_before  TEXT,    -- JSON (legacy array OR new level-object)
+      allowed_tabs_after   TEXT,    -- JSON (legacy array OR new level-object)
       changed_by_id        TEXT,    -- user id of the actor
       changed_by_email     TEXT,    -- email (for legacy users without ids)
       changed_by_role      TEXT,

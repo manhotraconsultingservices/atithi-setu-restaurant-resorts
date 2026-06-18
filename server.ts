@@ -4123,42 +4123,57 @@ const restaurantAdmin = requireRole(RESTAURANT_ADMIN_ROLES);
 // rarely (when the owner clicks Save in Settings), so 30s staleness is
 // acceptable. Cache key is (tenantId, role). Save flow can also invalidate
 // the cache explicitly (TODO if needed).
-type CachedTabs = { tabs: string[] | null; loadedAt: number };
+// RBAC-6: permission levels per tab per role.
+// 0=None, 1=View, 2=Edit (create+update), 3=Full (create+update+delete)
+type TabPerms = Record<string, number>;
+type CachedTabs = { perms: TabPerms | null; loadedAt: number };
 const _tabCache = new Map<string, CachedTabs>();
 const TAB_CACHE_TTL_MS = 30 * 1000;
 
-async function getAllowedTabsForRole(tenantId: string, role: string): Promise<string[] | null> {
+async function getTabPermissionsForRole(tenantId: string, role: string): Promise<TabPerms | null> {
   if (!tenantId || !role) return null;
   const key = `${tenantId}::${role.toUpperCase()}`;
   const cached = _tabCache.get(key);
-  // (Date.now intentionally allowed here even though some loops are
-  // forbidden — middleware request-time clock is fine.)
   const now = Date.now ? Date.now() : new Date().getTime();
-  if (cached && (now - cached.loadedAt) < TAB_CACHE_TTL_MS) {
-    return cached.tabs;
-  }
+  if (cached && (now - cached.loadedAt) < TAB_CACHE_TTL_MS) return cached.perms;
   try {
     const row: any = await centralDb.get(
-      "SELECT allowed_tabs FROM restaurant_role_permissions WHERE restaurant_id = ? AND role = ?",
+      "SELECT allowed_tabs, tab_permissions FROM restaurant_role_permissions WHERE restaurant_id = ? AND role = ?",
       [tenantId, role.toUpperCase()]
     );
-    let parsed: string[] | null = null;
-    if (row?.allowed_tabs) {
+    let perms: TabPerms | null = null;
+    if (row?.tab_permissions) {
+      // New format: { "MENU": 3, "ORDERS": 2 } — null/empty = no restriction
+      try {
+        const obj = JSON.parse(row.tab_permissions);
+        if (obj && typeof obj === 'object' && !Array.isArray(obj) && Object.keys(obj).length > 0) {
+          perms = obj as TabPerms;
+        }
+      } catch { perms = null; }
+    } else if (row?.allowed_tabs) {
+      // Legacy format: string[] — treat each as Full(3)
       try {
         const arr = JSON.parse(row.allowed_tabs);
-        // Empty array means "no restriction" by convention (matches
-        // `my-permissions` and isTabVisible). null also means no
-        // restriction. Treat both the same.
-        parsed = Array.isArray(arr) && arr.length > 0 ? arr : null;
-      } catch { parsed = null; }
+        if (Array.isArray(arr) && arr.length > 0) {
+          const obj: TabPerms = {};
+          for (const t of arr) obj[t] = 3;
+          perms = obj;
+        }
+      } catch { perms = null; }
     }
-    _tabCache.set(key, { tabs: parsed, loadedAt: now });
-    return parsed;
+    _tabCache.set(key, { perms, loadedAt: now });
+    return perms;
   } catch {
-    // On DB failure, fail OPEN (don't 500 mutating requests) — the
-    // role-class check still applies. We log so ops can see this.
-    return null;
+    return null; // fail-open; role-class check is the baseline
   }
+}
+
+// Backward-compat wrapper: returns the subset of tabs the role can at least VIEW
+async function getAllowedTabsForRole(tenantId: string, role: string): Promise<string[] | null> {
+  const perms = await getTabPermissionsForRole(tenantId, role);
+  if (perms === null) return null;
+  const tabs = Object.keys(perms).filter(k => (perms[k] ?? 0) >= 1);
+  return tabs.length > 0 ? tabs : null;
 }
 
 // Bust the cache after a write to restaurant_role_permissions so the new
@@ -4183,27 +4198,33 @@ function invalidateTabCacheForTenant(tenantId: string) {
  *   app.post('/api/restaurant/:id/hotel/bookings',
  *     authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), handler);
  */
-function requireTabAccess(tabId: string) {
+// RBAC-6: action-level enforcement. action levels: READ=1, CREATE/UPDATE=2, DELETE=3
+function requireTabAction(tabId: string, action: 'READ' | 'CREATE' | 'UPDATE' | 'DELETE' = 'READ') {
+  const minLevel = action === 'DELETE' ? 3 : action === 'READ' ? 1 : 2;
   return async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const role = String(req.user?.role || '').toUpperCase();
-      // Privileged roles bypass per-tab restrictions
       if (role === 'SUPER_ADMIN' || role === 'CTO' || role === 'OWNER') return next();
       const tenantId = req.params.id;
-      if (!tenantId) return next();   // unscoped routes — nothing to check
-      const allowed = await getAllowedTabsForRole(tenantId, role);
-      if (allowed === null) return next();   // no restriction configured
-      if (allowed.includes(tabId)) return next();
+      if (!tenantId) return next();
+      const perms = await getTabPermissionsForRole(tenantId, role);
+      if (perms === null) return next(); // no restriction configured
+      const level = (perms[tabId] ?? 0) as number;
+      if (level >= minLevel) return next();
       return res.status(403).json({
-        error: `Your role (${role}) does not have access to "${tabId}". The owner can grant it via Settings → Staff Access.`,
+        error: `Your role (${role}) does not have ${action} access to "${tabId}". Ask the owner to update Staff Access.`,
         required_tab: tabId,
+        required_action: action,
       });
     } catch {
-      // Fail-open on unexpected errors; role-class check above is the
-      // defense baseline. Log for ops visibility.
-      next();
+      next(); // fail-open
     }
   };
+}
+
+// Backward-compat alias: tab visibility = READ access
+function requireTabAccess(tabId: string) {
+  return requireTabAction(tabId, 'READ');
 }
 
 // Resolve the target tenant for a request:
@@ -5488,13 +5509,26 @@ async function startServer() {
     if (!requireOwnerOrAdmin(req, res)) return;
     try {
       const rows = await centralDb.query(
-        "SELECT role, allowed_tabs FROM restaurant_role_permissions WHERE restaurant_id = ?",
+        "SELECT role, allowed_tabs, tab_permissions FROM restaurant_role_permissions WHERE restaurant_id = ?",
         [req.params.id]
       );
-      const result: Record<string, string[]> = {};
+      // Return new format: Record<role, Record<tabId, level>>
+      // Falls back to legacy allowed_tabs (each tab = level 3) when tab_permissions is absent
+      const result: Record<string, TabPerms> = {};
       for (const row of rows) {
-        try { result[row.role] = JSON.parse(row.allowed_tabs || '[]'); }
-        catch { result[row.role] = []; }
+        if (row.tab_permissions) {
+          try {
+            const parsed = JSON.parse(row.tab_permissions);
+            result[row.role] = (typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+          } catch { result[row.role] = {}; }
+        } else {
+          try {
+            const arr = JSON.parse(row.allowed_tabs || '[]');
+            const obj: TabPerms = {};
+            if (Array.isArray(arr)) for (const t of arr) obj[t] = 3;
+            result[row.role] = obj;
+          } catch { result[row.role] = {}; }
+        }
       }
       res.json(result);
     } catch (err) {
@@ -5506,51 +5540,60 @@ async function startServer() {
   app.post("/api/restaurant/:id/role-permissions", authenticate, async (req: AuthRequest, res: Response) => {
     if (!requireOwnerOrAdmin(req, res)) return;
     try {
-      const permissions: Record<string, string[]> = req.body || {};
+      // RBAC-6: body is now Record<role, Record<tabId, level (0-3)>>
+      const permissions: Record<string, TabPerms> = req.body || {};
       if (typeof permissions !== 'object' || Array.isArray(permissions)) {
-        return res.status(400).json({ error: "Body must be an object mapping role → allowedTabs[]" });
+        return res.status(400).json({ error: "Body must be an object mapping role → { tabId: level }" });
       }
-      // Safety: never let the OWNER lock themselves out by saving an
-      // empty allowedTabs list against their own role. We DROP any
-      // OWNER row from the payload — OWNER always sees everything.
-      const sanitized: Record<string, string[]> = {};
-      for (const [role, tabs] of Object.entries(permissions)) {
+      // Drop privileged roles — they always have full access
+      const sanitized: Record<string, TabPerms> = {};
+      for (const [role, perms] of Object.entries(permissions)) {
         const upper = String(role).toUpperCase();
         if (upper === 'OWNER' || upper === 'SUPER_ADMIN' || upper === 'CTO') continue;
-        if (!Array.isArray(tabs)) continue;
-        sanitized[upper] = tabs.map(t => String(t));
+        if (typeof perms !== 'object' || Array.isArray(perms)) continue;
+        // Clamp levels to 0-3
+        const clean: TabPerms = {};
+        for (const [tab, lvl] of Object.entries(perms)) {
+          const n = Number(lvl);
+          clean[tab] = isNaN(n) ? 0 : Math.min(3, Math.max(0, Math.round(n)));
+        }
+        sanitized[upper] = clean;
       }
-      // RBAC-5a — Pre-load existing rows so we can emit before/after diffs
-      // to the audit log. One SELECT covers every role in the payload.
-      const existing: Record<string, string[]> = {};
+
+      // Pre-load existing rows for audit diffs
+      const existing: Record<string, TabPerms> = {};
       const roles = Object.keys(sanitized);
       if (roles.length > 0) {
         const placeholders = roles.map(() => '?').join(',');
         const rows: any[] = await centralDb.query(
-          `SELECT role, allowed_tabs FROM restaurant_role_permissions
+          `SELECT role, tab_permissions, allowed_tabs FROM restaurant_role_permissions
             WHERE restaurant_id = ? AND role IN (${placeholders})`,
           [req.params.id, ...roles]
         );
         for (const r of rows) {
-          try { existing[r.role] = JSON.parse(r.allowed_tabs || '[]'); }
-          catch { existing[r.role] = []; }
+          if (r.tab_permissions) {
+            try { existing[r.role] = JSON.parse(r.tab_permissions) || {}; } catch { existing[r.role] = {}; }
+          } else {
+            try {
+              const arr = JSON.parse(r.allowed_tabs || '[]');
+              const obj: TabPerms = {};
+              if (Array.isArray(arr)) for (const t of arr) obj[t] = 3;
+              existing[r.role] = obj;
+            } catch { existing[r.role] = {}; }
+          }
         }
       }
 
-      for (const [role, tabs] of Object.entries(sanitized)) {
+      for (const [role, perms] of Object.entries(sanitized)) {
         const beforeJson = existing[role] !== undefined ? JSON.stringify(existing[role]) : null;
-        const afterJson = JSON.stringify(tabs);
-        // Skip the write + audit row if nothing actually changed — keeps
-        // the log clean and avoids touching updated_at unnecessarily.
+        const afterJson = JSON.stringify(perms);
         if (beforeJson === afterJson) continue;
         await centralDb.run(
-          `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, updated_at)
+          `INSERT INTO restaurant_role_permissions (restaurant_id, role, tab_permissions, updated_at)
            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT (restaurant_id, role) DO UPDATE SET allowed_tabs = EXCLUDED.allowed_tabs, updated_at = CURRENT_TIMESTAMP`,
+           ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
           [req.params.id, role, afterJson]
         );
-        // RBAC-5a — write audit row. Captures both directions so the
-        // owner can answer "what changed and when".
         await centralDb.run(
           `INSERT INTO permission_audit_log
              (restaurant_id, role, allowed_tabs_before, allowed_tabs_after,
@@ -5560,9 +5603,6 @@ async function startServer() {
            req.user?.id || null, req.user?.email || null, req.user?.role || null]
         );
       }
-      // RBAC-4: invalidate the in-memory tab cache so the new matrix
-      // takes effect on the next mutation (instead of waiting up to 30s
-      // for the TTL).
       invalidateTabCacheForTenant(req.params.id);
       res.json({ success: true, saved_roles: Object.keys(sanitized) });
     } catch (err) {
@@ -5665,7 +5705,7 @@ async function startServer() {
       }
 
       const sourceRows: any[] = await centralDb.query(
-        "SELECT role, allowed_tabs FROM restaurant_role_permissions WHERE restaurant_id = ?",
+        "SELECT role, allowed_tabs, tab_permissions FROM restaurant_role_permissions WHERE restaurant_id = ?",
         [sourceId]
       );
       if (sourceRows.length === 0) {
@@ -5675,22 +5715,22 @@ async function startServer() {
       // Pre-load target's existing rows so audit captures real diffs.
       const targetExisting: Record<string, string> = {};
       const targetRows: any[] = await centralDb.query(
-        "SELECT role, allowed_tabs FROM restaurant_role_permissions WHERE restaurant_id = ?",
+        "SELECT role, tab_permissions, allowed_tabs FROM restaurant_role_permissions WHERE restaurant_id = ?",
         [targetId]
       );
-      for (const r of targetRows) targetExisting[r.role] = r.allowed_tabs || '[]';
+      for (const r of targetRows) targetExisting[r.role] = r.tab_permissions || r.allowed_tabs || null;
 
       let copied = 0;
       for (const r of sourceRows) {
-        // Skip privileged roles defensively.
         if (['OWNER', 'SUPER_ADMIN', 'CTO'].includes(r.role)) continue;
+        const srcPerms = r.tab_permissions || null;
         const before = targetExisting[r.role] ?? null;
-        const after = r.allowed_tabs;
-        if (before === after) continue;
+        const after = srcPerms;
+        if (!after || before === after) continue;
         await centralDb.run(
-          `INSERT INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, updated_at)
+          `INSERT INTO restaurant_role_permissions (restaurant_id, role, tab_permissions, updated_at)
            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT (restaurant_id, role) DO UPDATE SET allowed_tabs = EXCLUDED.allowed_tabs, updated_at = CURRENT_TIMESTAMP`,
+           ON CONFLICT (restaurant_id, role) DO UPDATE SET tab_permissions = EXCLUDED.tab_permissions, updated_at = CURRENT_TIMESTAMP`,
           [targetId, r.role, after]
         );
         await centralDb.run(
@@ -5711,21 +5751,19 @@ async function startServer() {
     }
   });
 
-  // Owner/Manager: Get my tab permissions (null allowed_tabs = no restriction = all tabs)
+  // Returns the logged-in user's own tab permissions.
+  // Responds with both allowed_tabs (string[] for nav visibility) and
+  // tab_permissions (Record<tabId,level> for action-level checks in the UI).
   app.get("/api/restaurant/:id/my-permissions", authenticate, async (req: AuthRequest, res: Response) => {
     try {
       const userRole = req.user?.role;
-      const row = await centralDb.get(
-        "SELECT allowed_tabs FROM restaurant_role_permissions WHERE restaurant_id = ? AND role = ?",
-        [req.params.id, userRole]
-      );
-      if (!row) return res.json({ allowed_tabs: null });
-      try {
-        const parsed = JSON.parse(row.allowed_tabs || '[]');
-        res.json({ allowed_tabs: parsed.length > 0 ? parsed : null });
-      } catch {
-        res.json({ allowed_tabs: null });
-      }
+      const perms = await getTabPermissionsForRole(req.params.id, userRole || '');
+      if (perms === null) return res.json({ allowed_tabs: null, tab_permissions: null });
+      const allowed_tabs = Object.keys(perms).filter(k => (perms[k] ?? 0) >= 1);
+      res.json({
+        allowed_tabs: allowed_tabs.length > 0 ? allowed_tabs : null,
+        tab_permissions: perms,
+      });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch permissions" });
     }

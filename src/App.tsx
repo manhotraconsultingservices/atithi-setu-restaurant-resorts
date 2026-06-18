@@ -8890,9 +8890,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // UI-3 — Preview lightbox state. Holds the document row currently
   // being previewed (image rendered full-size, PDF iframe-embedded).
   const [docPreview, setDocPreview] = useState<any>(null);
-  // RBAC-1 — Tenant-scoped Staff Access matrix. role → allowed_tabs[].
-  // Empty array = no access. Missing role = no restriction (sees all).
-  const [staffAccess, setStaffAccess] = useState<Record<string, string[]>>({});
+  // RBAC-6 — Tenant-scoped Staff Access matrix. role → { tabId: level }.
+  // Levels: 0=None, 1=View, 2=Edit, 3=Full. Empty object = no restriction.
+  const [staffAccess, setStaffAccess] = useState<Record<string, Record<string, number>>>({});
+  // Current logged-in user's action-level permissions (from /my-permissions)
+  const [tabPermissions, setTabPermissions] = useState<Record<string, number>>({});
   const [staffAccessSaving, setStaffAccessSaving] = useState(false);
   const [staffAccessSaved, setStaffAccessSaved] = useState(false);
   // RBAC-5a — audit log (recent permission changes)
@@ -9580,15 +9582,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     price_tbd: false
   });
 
-  // Fetch role-based tab permissions
+  // Fetch role-based tab permissions (visibility + action levels)
   useEffect(() => {
     fetch(`/api/restaurant/${restaurantId}/my-permissions`, {
       headers: { 'Authorization': `Bearer ${token}` }
     })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        if (data && data.allowed_tabs && Array.isArray(data.allowed_tabs) && data.allowed_tabs.length > 0) {
+        if (data?.allowed_tabs && Array.isArray(data.allowed_tabs) && data.allowed_tabs.length > 0) {
           setAllowedTabs(data.allowed_tabs);
+        }
+        if (data?.tab_permissions && typeof data.tab_permissions === 'object') {
+          setTabPermissions(data.tab_permissions);
         }
       })
       .catch(() => {});
@@ -11285,14 +11290,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setStaffAccessSaving(false);
     }
   };
-  const toggleStaffTab = (role: string, tab: string) => {
-    setStaffAccess(prev => {
-      const cur = prev[role] || [];
-      const has = cur.includes(tab);
-      const next = has ? cur.filter(t => t !== tab) : [...cur, tab];
-      return { ...prev, [role]: next };
-    });
-  };
+  // RBAC-6: set a specific permission level for one role × tab cell
+  const setTabLevel = useCallback((role: string, tabId: string, level: number) => {
+    setStaffAccess(prev => ({
+      ...prev,
+      [role]: { ...(prev[role] || {}), [tabId]: level },
+    }));
+  }, []);
+
+  // Check if the current logged-in user has at least the given action on a tab.
+  // OWNER/SUPER_ADMIN/CTO always pass. If no restrictions are configured, passes.
+  const canDo = useCallback((tabId: string, action: 'READ' | 'CREATE' | 'UPDATE' | 'DELETE' = 'READ'): boolean => {
+    const r = (localStorage.getItem('role') || '').toUpperCase();
+    if (r === 'OWNER' || r === 'SUPER_ADMIN' || r === 'CTO') return true;
+    if (Object.keys(tabPermissions).length === 0) return true; // no restrictions
+    const minLevel = action === 'DELETE' ? 3 : action === 'READ' ? 1 : 2;
+    return ((tabPermissions[tabId] ?? 0) as number) >= minLevel;
+  }, [tabPermissions]);
 
   // RBAC-5a — audit log fetcher
   const fetchPermAuditLog = async () => {
@@ -12455,9 +12469,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // RBAC-5b: when previewRole is set, route visibility through the
         // previewed role's matrix entry instead of the user's own list.
         const effectiveAllowedTabs = previewRole
-          ? (staffAccess[previewRole] && staffAccess[previewRole].length > 0
-              ? staffAccess[previewRole]
-              : null)   // empty array means "no restriction" for that role
+          ? (() => {
+              const perms = staffAccess[previewRole];
+              if (!perms || Object.keys(perms).length === 0) return null; // no restriction
+              const readable = Object.keys(perms).filter(k => ((perms[k] ?? 0) as number) >= 1);
+              return readable.length > 0 ? readable : null;
+            })()
           : allowedTabs;
         // STAFF_ACCESS hard-gate: owners always see it (it's dropped from
         // the array for non-owners, so this short-circuit is owner-only).
@@ -21986,36 +22003,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               (!r.restaurantOnly || isRestaurantEnabled)
             );
 
-            // TRANSPOSE (founder request 7 Jun 2026): the original layout
-            // had roles as rows and tabs as columns with -12deg rotated
-            // labels — readable as a novelty, hard to scan in practice
-            // (the screenshot showed tab labels colliding into the
-            // PREVIEW AS dropdown). The new layout puts tabs as rows
-            // (one row = one menu item, horizontal text) and roles as
-            // columns (short labels, fit in 88 px). The shape inverts but
-            // the underlying state (Record<roleId, tabId[]>) and the
-            // toggleStaffTab(roleId, tabId) handler are unchanged, so the
-            // server contract is byte-identical to before.
+            // RBAC-6: level labels + colors
+            const LEVEL_LABEL: Record<number, string> = { 0: '—', 1: 'View', 2: 'Edit', 3: 'Full' };
+            const LEVEL_CLS: Record<number, string> = {
+              0: 'bg-gray-100 text-gray-400',
+              1: 'bg-blue-100 text-blue-700',
+              2: 'bg-amber-100 text-amber-700',
+              3: 'bg-emerald-100 text-emerald-700',
+            };
+
             const grantAllForTab = (tabId: string) => {
-              const everyRoleHasIt = MANAGED_ROLES.every(r => (staffAccess[r.id] || []).includes(tabId));
+              const everyRoleFull = MANAGED_ROLES.every(r => ((staffAccess[r.id]?.[tabId] ?? 0) as number) >= 3);
               setStaffAccess(prev => {
-                const next: Record<string, string[]> = { ...prev };
+                const next = { ...prev };
                 for (const r of MANAGED_ROLES) {
-                  const cur = next[r.id] || [];
-                  if (everyRoleHasIt) {
-                    next[r.id] = cur.filter(t => t !== tabId);
-                  } else if (!cur.includes(tabId)) {
-                    next[r.id] = [...cur, tabId];
-                  }
+                  next[r.id] = { ...(next[r.id] || {}), [tabId]: everyRoleFull ? 0 : 3 };
                 }
                 return next;
               });
             };
             const grantAllForRole = (roleId: string) => {
               setStaffAccess(prev => {
-                const cur = prev[roleId] || [];
-                const hasAll = visibleTabs.every(t => cur.includes(t.id));
-                return { ...prev, [roleId]: hasAll ? [] : visibleTabs.map(t => t.id) };
+                const cur = prev[roleId] || {};
+                const hasAll = visibleTabs.every(t => ((cur[t.id] ?? 0) as number) >= 3);
+                const next: Record<string, number> = {};
+                for (const t of visibleTabs) next[t.id] = hasAll ? 0 : 3;
+                return { ...prev, [roleId]: next };
               });
             };
 
@@ -22029,8 +22042,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <div>
                       <h3 className="text-2xl font-bold font-serif">Staff Access</h3>
                       <p className="text-xs text-[#6b5d52] mt-1 max-w-2xl">
-                        Each row is one menu item. Each column is one staff role. Tick a box → that role gets access to that menu. Leave a column entirely empty to give the role <strong>no restriction</strong> (sees everything).
-                        Owners + platform admins always see everything regardless of these settings.
+                        Each row is one section. Each column is one staff role. Set a level per cell — <strong className="text-blue-700">View</strong> (read-only), <strong className="text-amber-700">Edit</strong> (create + modify), <strong className="text-emerald-700">Full</strong> (including delete), or <strong className="text-gray-400">—</strong> (no access). Leave a column entirely empty to give the role <strong>no restriction</strong>.
+                        Owners + platform admins always have Full access regardless.
                       </p>
                     </div>
                   </div>
@@ -22113,28 +22126,29 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <span className="font-bold text-[10px] uppercase tracking-widest text-[#6b5d52]">Menu / Tab</span>
                         </th>
                         {MANAGED_ROLES.map(r => {
-                          const allowed = staffAccess[r.id] || [];
-                          const noRestriction = allowed.length === 0;
-                          const grantedCount = visibleTabs.filter(t => allowed.includes(t.id)).length;
+                          const perms = staffAccess[r.id] || {};
+                          const noRestriction = Object.keys(perms).length === 0;
+                          const grantedCount = visibleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 1).length;
+                          const fullCount = visibleTabs.filter(t => ((perms[t.id] ?? 0) as number) >= 3).length;
                           return (
                             <th
                               key={r.id}
-                              className="px-2 py-3 text-center align-bottom min-w-[88px]"
+                              className="px-2 py-3 text-center align-bottom min-w-[96px]"
                               title={r.hint}
                             >
                               <div className="flex flex-col items-center gap-1">
                                 <span className="font-bold text-[11px] text-[#1a1208] leading-tight">{r.label}</span>
                                 {noRestriction ? (
-                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 leading-none whitespace-nowrap">Sees all</span>
+                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 leading-none whitespace-nowrap">Unrestricted</span>
                                 ) : (
-                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 leading-none whitespace-nowrap">{grantedCount}/{visibleTabs.length}</span>
+                                  <span className="text-[8px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 leading-none whitespace-nowrap">{grantedCount} tabs · {fullCount} full</span>
                                 )}
                                 <button
                                   type="button"
                                   onClick={() => grantAllForRole(r.id)}
                                   className="text-[9px] font-bold text-[#cc5a16] hover:underline uppercase tracking-widest leading-none"
-                                  title={`Grant or clear every tab for ${r.label}`}
-                                >{noRestriction || grantedCount < visibleTabs.length ? 'Grant all' : 'Clear all'}</button>
+                                  title={`Set all tabs to Full or clear for ${r.label}`}
+                                >{noRestriction || fullCount < visibleTabs.length ? 'All Full' : 'Clear all'}</button>
                               </div>
                             </th>
                           );
@@ -22146,7 +22160,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </thead>
                     <tbody>
                       {visibleTabs.map((t, ti) => {
-                        const everyRoleHasIt = MANAGED_ROLES.every(r => (staffAccess[r.id] || []).includes(t.id));
+                        const everyRoleFull = MANAGED_ROLES.every(r => ((staffAccess[r.id]?.[t.id] ?? 0) as number) >= 3);
                         return (
                           <tr
                             key={t.id}
@@ -22163,17 +22177,23 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               >{t.description}</div>
                             </td>
                             {MANAGED_ROLES.map(r => {
-                              const allowed = staffAccess[r.id] || [];
-                              const checked = allowed.includes(t.id);
+                              const level = (staffAccess[r.id]?.[t.id] ?? 0) as number;
                               return (
-                                <td key={r.id} className="px-2 py-2 text-center align-middle">
-                                  <input
-                                    type="checkbox"
-                                    checked={checked}
-                                    onChange={() => toggleStaffTab(r.id, t.id)}
-                                    className="w-4 h-4 accent-[#cc5a16] cursor-pointer"
-                                    aria-label={`${r.label} can see ${t.label}`}
-                                  />
+                                <td key={r.id} className="px-1 py-2 text-center align-middle">
+                                  <select
+                                    value={level}
+                                    onChange={e => setTabLevel(r.id, t.id, Number(e.target.value))}
+                                    className={cn(
+                                      'text-[10px] font-bold rounded-lg px-1.5 py-1 border-none outline-none cursor-pointer w-full',
+                                      LEVEL_CLS[level] || LEVEL_CLS[0]
+                                    )}
+                                    aria-label={`${r.label} access to ${t.label}`}
+                                  >
+                                    <option value={0}>—</option>
+                                    <option value={1}>View</option>
+                                    <option value={2}>Edit</option>
+                                    <option value={3}>Full</option>
+                                  </select>
                                 </td>
                               );
                             })}
@@ -22182,8 +22202,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 type="button"
                                 onClick={() => grantAllForTab(t.id)}
                                 className="text-[10px] font-bold text-[#cc5a16] hover:underline whitespace-nowrap"
-                                title={`Grant or clear ${t.label} for every role`}
-                              >{everyRoleHasIt ? 'Clear' : 'All'}</button>
+                                title={`Set ${t.label} to Full for every role, or clear`}
+                              >{everyRoleFull ? 'Clear' : 'Full'}</button>
                             </td>
                           </tr>
                         );
@@ -22211,10 +22231,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <p className="text-[10px] text-[#9c8e85] mb-3">Last {permAuditLog.length} changes. Captured automatically every time someone clicks Save.</p>
                     <div className="space-y-1.5 max-h-72 overflow-y-auto">
                       {permAuditLog.slice(0, 20).map((entry: any) => {
-                        const before = Array.isArray(entry.allowed_tabs_before) ? entry.allowed_tabs_before : [];
-                        const after  = Array.isArray(entry.allowed_tabs_after)  ? entry.allowed_tabs_after  : [];
-                        const added   = after.filter((t: string) => !before.includes(t));
-                        const removed = before.filter((t: string) => !after.includes(t));
+                        const LVL = ['—', 'View', 'Edit', 'Full'];
+                        // Support both old array format and new object format
+                        const parsePerms = (raw: any): Record<string, number> | null => {
+                          if (!raw) return null;
+                          try {
+                            const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                            if (Array.isArray(p)) { const o: Record<string,number> = {}; for (const t of p) o[t] = 3; return o; }
+                            if (typeof p === 'object') return p;
+                          } catch { /* */ }
+                          return null;
+                        };
+                        const before = parsePerms(entry.allowed_tabs_before) || {};
+                        const after  = parsePerms(entry.allowed_tabs_after)  || {};
+                        const allKeys = Array.from(new Set([...Object.keys(before), ...Object.keys(after)]));
+                        const changes = allKeys.filter(k => (before[k] ?? 0) !== (after[k] ?? 0));
                         const actor = entry.changed_by_email || entry.changed_by_id || entry.changed_by_role || 'unknown';
                         return (
                           <div key={entry.id} className="text-[11px] bg-[#faf7f2] rounded-xl px-3 py-2">
@@ -22227,14 +22258,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <span className="text-[10px] text-[#9c8e85] font-mono">{new Date(entry.changed_at).toLocaleString('en-IN')}</span>
                             </div>
                             <div className="mt-1 flex flex-wrap gap-1.5">
-                              {added.map((t: string) => (
-                                <span key={'a' + t} className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800">+ {t}</span>
-                              ))}
-                              {removed.map((t: string) => (
-                                <span key={'r' + t} className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-100 text-rose-800">− {t}</span>
-                              ))}
-                              {added.length === 0 && removed.length === 0 && (
-                                <span className="text-[10px] italic text-[#9c8e85]">No-op (saved with no changes)</span>
+                              {changes.map((k: string) => {
+                                const bLvl = before[k] ?? 0;
+                                const aLvl = after[k]  ?? 0;
+                                const up = aLvl > bLvl;
+                                return (
+                                  <span key={k} className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded', up ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700')}>
+                                    {k}: {LVL[bLvl] ?? bLvl} → {LVL[aLvl] ?? aLvl}
+                                  </span>
+                                );
+                              })}
+                              {changes.length === 0 && (
+                                <span className="text-[9px] text-[#9c8e85] italic">no change</span>
                               )}
                             </div>
                           </div>
