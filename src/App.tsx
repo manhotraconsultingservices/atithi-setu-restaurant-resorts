@@ -42602,6 +42602,9 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [migTenants, setMigTenants] = useState<any[]>([]);
   const [migSelectedTenant, setMigSelectedTenant] = useState<string>('');
   const [migBookings, setMigBookings] = useState<any[]>([]);
+  const [migBookingsTotal, setMigBookingsTotal] = useState(0);
+  const [migBookingsPage, setMigBookingsPage] = useState(1);
+  const MIG_PAGE_SIZE = 250;
   const [migLoading, setMigLoading] = useState(false);
   const [migSelectedIds, setMigSelectedIds] = useState<Set<string>>(new Set());
   const [migCsvRows, setMigCsvRows] = useState<any[]>([]);
@@ -42639,17 +42642,22 @@ function SuperAdminDashboard({ token }: { token: string }) {
       if (res.ok) setMigTenants(await res.json());
     } catch {}
   };
-  const fetchMigBookings = async (tenantId: string) => {
+  const fetchMigBookings = async (tenantId: string, page = 1) => {
     if (!tenantId) return;
     setMigLoading(true);
     setMigSelectedIds(new Set());
     try {
-      const res = await fetch(`/api/admin/data-migration/bookings?tenantId=${encodeURIComponent(tenantId)}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-      if (res.ok) setMigBookings(await res.json());
-      else setMigBookings([]);
-    } catch { setMigBookings([]); }
+      const res = await fetch(
+        `/api/admin/data-migration/bookings?tenantId=${encodeURIComponent(tenantId)}&page=${page}&limit=${MIG_PAGE_SIZE}`,
+        { headers: { 'Authorization': `Bearer ${token}` } },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setMigBookings(data.rows ?? data);
+        setMigBookingsTotal(data.total ?? (data.rows ?? data).length);
+        setMigBookingsPage(data.page ?? page);
+      } else { setMigBookings([]); setMigBookingsTotal(0); }
+    } catch { setMigBookings([]); setMigBookingsTotal(0); }
     finally { setMigLoading(false); }
   };
   const deleteMigBookings = async () => {
@@ -44504,11 +44512,30 @@ function SuperAdminDashboard({ token }: { token: string }) {
               <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
                 <h3 className="text-lg font-bold flex items-center gap-2">
                   <Bed size={18} className="text-[#cc5a16]" /> Bookings
-                  {!migLoading && <span className="text-sm font-normal text-[#9c8e85]">({migBookings.length} total)</span>}
+                  {!migLoading && (
+                    <span className="text-sm font-normal text-[#9c8e85]">
+                      ({migBookings.length} of {migBookingsTotal} total)
+                    </span>
+                  )}
                 </h3>
                 <div className="flex items-center gap-2">
+                  {!migLoading && migBookingsTotal > MIG_PAGE_SIZE && (
+                    <div className="flex items-center gap-1 text-xs text-[#6b5d52]">
+                      <button
+                        onClick={() => fetchMigBookings(migSelectedTenant, migBookingsPage - 1)}
+                        disabled={migBookingsPage <= 1}
+                        className="px-2 py-1 rounded-lg bg-[#faf7f2] border border-[#e8dccf] font-bold disabled:opacity-30 hover:border-[#cc5a16]/50 transition-colors"
+                      >‹</button>
+                      <span className="px-1 tabular-nums">p.{migBookingsPage} / {Math.ceil(migBookingsTotal / MIG_PAGE_SIZE)}</span>
+                      <button
+                        onClick={() => fetchMigBookings(migSelectedTenant, migBookingsPage + 1)}
+                        disabled={migBookingsPage >= Math.ceil(migBookingsTotal / MIG_PAGE_SIZE)}
+                        className="px-2 py-1 rounded-lg bg-[#faf7f2] border border-[#e8dccf] font-bold disabled:opacity-30 hover:border-[#cc5a16]/50 transition-colors"
+                      >›</button>
+                    </div>
+                  )}
                   <button
-                    onClick={() => fetchMigBookings(migSelectedTenant)}
+                    onClick={() => fetchMigBookings(migSelectedTenant, migBookingsPage)}
                     disabled={migLoading}
                     className="px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#e8dccf] text-xs font-semibold text-[#6b5d52] hover:border-[#cc5a16]/50 transition-colors disabled:opacity-50"
                   >
@@ -44541,11 +44568,11 @@ function SuperAdminDashboard({ token }: { token: string }) {
                   <div className="mb-2 flex items-center gap-2 text-xs text-[#6b5d52]">
                     <input
                       type="checkbox"
-                      checked={migSelectedIds.size === migBookings.length}
+                      checked={migSelectedIds.size === migBookings.length && migBookings.length > 0}
                       onChange={e => setMigSelectedIds(e.target.checked ? new Set(migBookings.map((b: any) => b.id)) : new Set())}
                       className="rounded"
                     />
-                    <span>Select all {migBookings.length}</span>
+                    <span>Select all {migBookings.length} on this page</span>
                     {migSelectedIds.size > 0 && <span className="text-red-600 font-semibold">· {migSelectedIds.size} selected</span>}
                   </div>
                   <div className="overflow-x-auto rounded-2xl border border-[#e8dccf]">
