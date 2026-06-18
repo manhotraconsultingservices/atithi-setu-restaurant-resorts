@@ -536,6 +536,7 @@ export default function App() {
   const [ownerRestaurantName, setOwnerRestaurantName] = useState('');
   const [ownerCity, setOwnerCity] = useState('');
   const [ownerCuisine, setOwnerCuisine] = useState('');
+  const [ownerPropertyType, setOwnerPropertyType] = useState<'RESTAURANT' | 'HOTEL' | 'BOTH'>('RESTAURANT');
   const [ownerAuthError, setOwnerAuthError] = useState('');
   const [showOwnerPassword, setShowOwnerPassword] = useState(false);
   // Forgot / Reset password state
@@ -1158,7 +1159,8 @@ export default function App() {
           owner_name: ownerName.trim(),
           restaurant_name: ownerRestaurantName.trim(),
           location_city: ownerCity.trim(),
-          cuisine_type: ownerCuisine || undefined
+          cuisine_type: ownerCuisine || undefined,
+          property_type: ownerPropertyType
         })
       });
       const data = await res.json();
@@ -1837,7 +1839,9 @@ export default function App() {
                           className="text-[#9c8e85] text-xs hover:text-[#cc5a16] transition-colors mb-3 flex items-center gap-1 mx-auto">
                           <ChevronRight size={12} className="rotate-180" /> Back to Login
                         </button>
-                        <h2 className="text-2xl font-bold mb-1">Register Your Restaurant</h2>
+                        <h2 className="text-2xl font-bold mb-1">
+                          {ownerPropertyType === 'HOTEL' ? 'Register Your Hotel' : ownerPropertyType === 'BOTH' ? 'Register Your Property' : 'Register Your Restaurant'}
+                        </h2>
                         <p className="text-[#6b5d52] text-sm">Get started in under 2 minutes</p>
                       </div>
                       <div className="space-y-3">
@@ -1863,18 +1867,41 @@ export default function App() {
                         <input type="text" placeholder="Your Full Name *"
                           className="w-full bg-[#faf7f2] border-none rounded-2xl px-5 py-4 text-base focus:ring-2 ring-[#cc5a16]/30 outline-none font-sans"
                           value={ownerName} onChange={e => setOwnerName(e.target.value)} />
-                        <input type="text" placeholder="Restaurant Name *"
+                        <input type="text" placeholder={ownerPropertyType === 'HOTEL' ? 'Hotel / Property Name *' : ownerPropertyType === 'BOTH' ? 'Business Name *' : 'Restaurant Name *'}
                           className="w-full bg-[#faf7f2] border-none rounded-2xl px-5 py-4 text-base focus:ring-2 ring-[#cc5a16]/30 outline-none font-sans"
                           value={ownerRestaurantName} onChange={e => setOwnerRestaurantName(e.target.value)} />
+                        {/* Business type selector */}
+                        <div>
+                          <p className="text-xs text-[#6b5d52] mb-2 font-medium">Business Type *</p>
+                          <div className="grid grid-cols-3 gap-2">
+                            {(['RESTAURANT', 'HOTEL', 'BOTH'] as const).map(type => (
+                              <button
+                                key={type}
+                                type="button"
+                                onClick={() => setOwnerPropertyType(type)}
+                                className={cn(
+                                  "py-3 rounded-2xl text-sm font-bold transition-all border-2",
+                                  ownerPropertyType === type
+                                    ? "bg-[#cc5a16] text-white border-[#cc5a16]"
+                                    : "bg-[#faf7f2] text-[#6b5d52] border-transparent hover:border-[#cc5a16]/30"
+                                )}
+                              >
+                                {type === 'RESTAURANT' ? 'Restaurant' : type === 'HOTEL' ? 'Hotel' : 'Both'}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                         <input type="text" placeholder="City *"
                           className="w-full bg-[#faf7f2] border-none rounded-2xl px-5 py-4 text-base focus:ring-2 ring-[#cc5a16]/30 outline-none font-sans"
                           value={ownerCity} onChange={e => setOwnerCity(e.target.value)} />
-                        <select className="w-full bg-[#faf7f2] border-none rounded-2xl px-5 py-4 text-base focus:ring-2 ring-[#cc5a16]/30 outline-none appearance-none font-sans text-[#6b5d52]"
-                          value={ownerCuisine} onChange={e => setOwnerCuisine(e.target.value)}>
-                          <option value="">Cuisine Type (optional)</option>
-                          <option>North Indian</option><option>South Indian</option><option>Chinese</option>
-                          <option>Continental</option><option>Fast Food</option><option>Cafe</option><option>Other</option>
-                        </select>
+                        {ownerPropertyType !== 'HOTEL' && (
+                          <select className="w-full bg-[#faf7f2] border-none rounded-2xl px-5 py-4 text-base focus:ring-2 ring-[#cc5a16]/30 outline-none appearance-none font-sans text-[#6b5d52]"
+                            value={ownerCuisine} onChange={e => setOwnerCuisine(e.target.value)}>
+                            <option value="">Cuisine Type (optional)</option>
+                            <option>North Indian</option><option>South Indian</option><option>Chinese</option>
+                            <option>Continental</option><option>Fast Food</option><option>Cafe</option><option>Other</option>
+                          </select>
+                        )}
                         {ownerAuthError && (
                           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{ownerAuthError}</div>
                         )}
@@ -42042,56 +42069,63 @@ function SuperAdminDashboard({ token }: { token: string }) {
                     );
                   })()}
 
-                  {/* Property Type / Hotel module — billing-gated activation.
-                      The tenant Owner sees a read-only view + Contact Sales CTA;
-                      activation only happens here, after the billing team has
-                      confirmed the customer is on a Hotel-capable tier.        */}
+                  {/* Business Type selector — 3-way: RESTAURANT / HOTEL / BOTH.
+                      Activation after billing confirmation only.              */}
                   {(() => {
                     const pt = (r.property_type || 'RESTAURANT') as 'RESTAURANT' | 'HOTEL' | 'BOTH';
-                    const hotelOn = pt === 'HOTEL' || pt === 'BOTH';
-                    const nextEnabled = !hotelOn;
-                    const label = hotelOn
-                      ? `Hotel: ON (${pt})`
-                      : 'Hotel: OFF (Restaurant only)';
+                    const TYPE_CONFIG: { value: 'RESTAURANT' | 'HOTEL' | 'BOTH'; label: string; enabled: boolean; type?: 'HOTEL' | 'BOTH' }[] = [
+                      { value: 'RESTAURANT', label: 'Restaurant', enabled: false },
+                      { value: 'HOTEL',      label: 'Hotel Only', enabled: true, type: 'HOTEL' },
+                      { value: 'BOTH',       label: 'Both',       enabled: true, type: 'BOTH' },
+                    ];
                     return (
-                      <button
-                        onClick={async () => {
-                          const verb = nextEnabled ? 'ENABLE' : 'DISABLE';
-                          if (!confirm(
-                            `${verb} Hotel module for "${r.name}"?\n\n` +
-                            `Current: ${pt}\n` +
-                            `After:   ${nextEnabled ? 'BOTH' : 'RESTAURANT'}\n\n` +
-                            (nextEnabled
-                              ? 'This unlocks Rooms / In-room QR / Form-C / Folios. Confirm the customer is on a Hotel-tier subscription before proceeding.'
-                              : 'This hides the Hotel tabs from the owner. Data is preserved.')
-                          )) return;
-                          try {
-                            const res = await fetch(`/api/restaurant/${r.id}/hotel/enable`, {
-                              method: 'POST',
-                              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ enabled: nextEnabled }),
-                            });
-                            const data = await res.json();
-                            if (!res.ok) { alert(`❌ ${data.error || 'Failed'}`); return; }
-                            alert(`✅ ${data.message || 'Updated'}`);
-                            // Refresh the tenant list so the chip updates.
-                            window.location.reload();
-                          } catch {
-                            alert('Network error. Please try again.');
-                          }
-                        }}
-                        title={hotelOn
-                          ? "Click to disable the Hotel module for this tenant (data preserved)"
-                          : "Click to enable the Hotel module — only after billing tier is confirmed"}
-                        className={cn(
-                          "w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 border",
-                          hotelOn
-                            ? "text-[#b8860b] border-[#b8860b]/40 bg-[#b8860b]/10 hover:bg-[#b8860b]/15"
-                            : "text-[#6b5d52] border-[#cc5a16]/10 hover:bg-[#cc5a16]/5"
-                        )}
-                      >
-                        <Bed size={13} /> {label}
-                      </button>
+                      <div>
+                        <p className="text-[10px] text-[#9c8e85] font-semibold uppercase tracking-widest mb-1.5 flex items-center gap-1.5">
+                          <Bed size={11} /> Business Type
+                        </p>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {TYPE_CONFIG.map(tc => (
+                            <button
+                              key={tc.value}
+                              disabled={pt === tc.value}
+                              onClick={async () => {
+                                if (!confirm(
+                                  `Change "${r.name}" to ${tc.label}?\n\n` +
+                                  `Current: ${pt}\nAfter: ${tc.value}\n\n` +
+                                  (tc.value === 'RESTAURANT'
+                                    ? 'This hides Hotel tabs. Hotel data is preserved.'
+                                    : 'Confirm the customer is on a Hotel-tier subscription before proceeding.')
+                                )) return;
+                                try {
+                                  const body: Record<string, unknown> = { enabled: tc.enabled };
+                                  if (tc.type) body.type = tc.type;
+                                  const res = await fetch(`/api/restaurant/${r.id}/hotel/enable`, {
+                                    method: 'POST',
+                                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(body),
+                                  });
+                                  const data = await res.json();
+                                  if (!res.ok) { alert(`❌ ${data.error || 'Failed'}`); return; }
+                                  alert(`✅ ${data.message || 'Updated'}`);
+                                  window.location.reload();
+                                } catch {
+                                  alert('Network error. Please try again.');
+                                }
+                              }}
+                              className={cn(
+                                "py-2 rounded-xl text-[11px] font-bold transition-all border",
+                                pt === tc.value
+                                  ? tc.value === 'RESTAURANT'
+                                    ? "bg-blue-50 text-blue-700 border-blue-200 cursor-default"
+                                    : "bg-amber-50 text-amber-700 border-amber-200 cursor-default"
+                                  : "text-[#6b5d52] border-[#cc5a16]/15 hover:bg-[#cc5a16]/5"
+                              )}
+                            >
+                              {tc.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     );
                   })()}
                 </div>

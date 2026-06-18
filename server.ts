@@ -7272,7 +7272,9 @@ async function startServer() {
 
   // POST /api/auth/owner/register - New owner registers with email + password
   app.post("/api/auth/owner/register", async (req: Request, res: Response) => {
-    const { email, phone, password, owner_name, restaurant_name, location_city, cuisine_type } = req.body;
+    const { email, phone, password, owner_name, restaurant_name, location_city, cuisine_type, property_type: rawPropType } = req.body;
+    const propertyType: 'RESTAURANT' | 'HOTEL' | 'BOTH' =
+      rawPropType === 'HOTEL' ? 'HOTEL' : rawPropType === 'BOTH' ? 'BOTH' : 'RESTAURANT';
     try {
       if (!email || !password || !owner_name || !restaurant_name || !location_city) {
         return res.status(400).json({ error: "Required: email, password, owner name, restaurant name, city" });
@@ -7311,10 +7313,10 @@ async function startServer() {
 
       // Insert into legacy restaurants table — is_active=0 (pending admin approval)
       await centralDb.run(
-        `INSERT INTO restaurants (id, name, admin_id, state, city, is_active, registered_at, slug)
-         VALUES (?, ?, ?, ?, ?, 0, NOW(), ?)
+        `INSERT INTO restaurants (id, name, admin_id, state, city, is_active, registered_at, slug, property_type)
+         VALUES (?, ?, ?, ?, ?, 0, NOW(), ?, ?)
          ON CONFLICT (id) DO NOTHING`,
-        [restaurantId, restaurant_name.trim(), email.toLowerCase(), 'N/A', location_city.trim(), newSlug]
+        [restaurantId, restaurant_name.trim(), email.toLowerCase(), 'N/A', location_city.trim(), newSlug, propertyType]
       );
 
       // Phase 7: Auto-provision Cloudflare DNS + Tunnel Public Hostname
