@@ -15773,9 +15773,13 @@ ${data.tenant.name}`;
     }
   });
 
-  // Hard delete only allowed for DRAFT POs (no GRN linkage yet)
+  // Hard delete only allowed for DRAFT POs (no GRN linkage yet), OWNER/SUPER_ADMIN only
   app.delete("/api/inventory/purchase-orders/:id", authenticate, async (req: AuthRequest, res: Response) => {
     try {
+      const userRole = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'SUPER_ADMIN'].includes(userRole)) {
+        return res.status(403).json({ error: 'Only the business owner can delete purchase orders.' });
+      }
       const db = await getTenantDb(req.user!.restaurantId);
       const po: any = await db.get("SELECT status FROM purchase_orders WHERE id = ?", [req.params.id]);
       if (!po) return res.status(404).json({ error: "PO not found" });
@@ -22257,6 +22261,92 @@ ${data.tenant.name}`;
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to delete petty cash entry" });
+    }
+  });
+
+  // ── CUSTOM ROLES ─────────────────────────────────────────────────────────
+  const _ensureCustomRoles = async (db: any) => {
+    await db.run(`CREATE TABLE IF NOT EXISTS custom_roles (
+      id TEXT PRIMARY KEY,
+      restaurant_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      emoji TEXT NOT NULL DEFAULT '👤',
+      scope TEXT NOT NULL DEFAULT 'BOTH',
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+  };
+
+  app.get("/api/restaurant/:id/custom-roles", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await _ensureCustomRoles(db);
+      const rows = await db.query(
+        `SELECT id, name, emoji, scope FROM custom_roles WHERE restaurant_id = ? AND is_active = 1 ORDER BY name`,
+        [req.params.id]
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to list custom roles" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/custom-roles", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const callerRole = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'SUPER_ADMIN'].includes(callerRole)) {
+        return res.status(403).json({ error: 'Only the business owner can create custom roles.' });
+      }
+      const { name, emoji, scope } = req.body;
+      if (!name?.trim()) return res.status(400).json({ error: 'Role name is required.' });
+      const db = await getTenantDb(req.params.id);
+      await _ensureCustomRoles(db);
+      const slug = name.trim().toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      const id = `CUSTOM_${slug}_${Date.now().toString(36).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO custom_roles (id, restaurant_id, name, emoji, scope) VALUES (?, ?, ?, ?, ?)`,
+        [id, req.params.id, name.trim(), emoji || '👤', scope || 'BOTH']
+      );
+      res.json({ id, name: name.trim(), emoji: emoji || '👤', scope: scope || 'BOTH' });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to create custom role" });
+    }
+  });
+
+  app.patch("/api/restaurant/:id/custom-roles/:roleId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const callerRole = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'SUPER_ADMIN'].includes(callerRole)) {
+        return res.status(403).json({ error: 'Only the business owner can update custom roles.' });
+      }
+      const { name, emoji, scope } = req.body;
+      const db = await getTenantDb(req.params.id);
+      await _ensureCustomRoles(db);
+      await db.run(
+        `UPDATE custom_roles SET name = COALESCE(?, name), emoji = COALESCE(?, emoji), scope = COALESCE(?, scope) WHERE id = ? AND restaurant_id = ?`,
+        [name?.trim() || null, emoji || null, scope || null, req.params.roleId, req.params.id]
+      );
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to update custom role" });
+    }
+  });
+
+  app.delete("/api/restaurant/:id/custom-roles/:roleId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const callerRole = String(req.user?.role || '').toUpperCase();
+      if (!['OWNER', 'SUPER_ADMIN'].includes(callerRole)) {
+        return res.status(403).json({ error: 'Only the business owner can delete custom roles.' });
+      }
+      const db = await getTenantDb(req.params.id);
+      await _ensureCustomRoles(db);
+      await db.run(
+        `UPDATE custom_roles SET is_active = 0 WHERE id = ? AND restaurant_id = ?`,
+        [req.params.roleId, req.params.id]
+      );
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to delete custom role" });
     }
   });
 

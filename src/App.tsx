@@ -9541,6 +9541,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [ordersDateFrom, setOrdersDateFrom]   = useState('');
   const [ordersDateTo, setOrdersDateTo]       = useState('');
   const [invoicesPage, setInvoicesPage]       = useState(1);
+  const [customRoles, setCustomRoles]         = useState<Array<{id: string; name: string; emoji: string; scope: string}>>([]);
+  const [showCustomRoleForm, setShowCustomRoleForm] = useState(false);
+  const [customRoleForm, setCustomRoleForm]   = useState({ name: '', emoji: '👤', scope: 'BOTH' });
+  const [editingCustomRole, setEditingCustomRole] = useState<any | null>(null);
   const [staffSearch, setStaffSearch]         = useState('');
   const [staffRoleFilter, setStaffRoleFilter] = useState<string>('ALL');
   const [staffViewMode, setStaffViewMode]     = useState<'grid' | 'table'>('grid');
@@ -9566,17 +9570,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     { id: 'MAINTENANCE',  label: 'Maintenance',  emoji: '🔧',   scope: 'HOTEL',      chipBg: 'bg-slate-200',  chipText: 'text-slate-800',  cardBg: 'bg-slate-50' },
     { id: 'CONCIERGE',    label: 'Concierge',    emoji: '🎩',   scope: 'HOTEL',      chipBg: 'bg-rose-200',   chipText: 'text-rose-800',   cardBg: 'bg-rose-50' },
   ];
-  // Roles visible in this tenant — based on whether Hotel + Restaurant
-  // modules are active. BOTH roles always show. Other scopes show
-  // only when their module is active for this tenant.
-  const visibleStaffRoles = STAFF_ROLE_META.filter(r =>
-    r.scope === 'BOTH' ||
-    (r.scope === 'RESTAURANT' && isRestaurantEnabled) ||
-    (r.scope === 'HOTEL'      && isHotelEnabled)
-  );
-  const staffRoleMetaFor = (role: string) =>
-    STAFF_ROLE_META.find(r => r.id === role) ||
-    { id: role as UserRole, label: role, emoji: '👤', scope: 'BOTH' as const, chipBg: 'bg-zinc-200', chipText: 'text-zinc-700', cardBg: 'bg-zinc-50' };
+  // Roles visible in this tenant — built-ins filtered by active module,
+  // plus any owner-defined custom roles (also filtered by their scope).
+  const visibleStaffRoles = [
+    ...STAFF_ROLE_META.filter(r =>
+      r.scope === 'BOTH' ||
+      (r.scope === 'RESTAURANT' && isRestaurantEnabled) ||
+      (r.scope === 'HOTEL'      && isHotelEnabled)
+    ),
+    ...customRoles
+      .filter(r =>
+        r.scope === 'BOTH' ||
+        (r.scope === 'RESTAURANT' && isRestaurantEnabled) ||
+        (r.scope === 'HOTEL'      && isHotelEnabled)
+      )
+      .map(r => ({
+        id: r.id as UserRole,
+        label: r.name,
+        emoji: r.emoji,
+        scope: r.scope as 'BOTH' | 'RESTAURANT' | 'HOTEL',
+        chipBg: 'bg-indigo-200', chipText: 'text-indigo-800', cardBg: 'bg-indigo-50',
+      })),
+  ];
+  const staffRoleMetaFor = (role: string) => {
+    const builtin = STAFF_ROLE_META.find(r => r.id === role);
+    if (builtin) return builtin;
+    const custom = customRoles.find(r => r.id === role);
+    if (custom) return { id: role as UserRole, label: custom.name, emoji: custom.emoji, scope: custom.scope as any, chipBg: 'bg-indigo-200', chipText: 'text-indigo-800', cardBg: 'bg-indigo-50' };
+    return { id: role as UserRole, label: role, emoji: '👤', scope: 'BOTH' as const, chipBg: 'bg-zinc-200', chipText: 'text-zinc-700', cardBg: 'bg-zinc-50' };
+  };
   const [staffPage, setStaffPage]             = useState(1);
   const [editingStaff, setEditingStaff]       = useState<any | null>(null);
   // Phase B3 — cross-location staff transfer
@@ -9685,6 +9707,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     fetchRestaurant();
     fetchTables();
     fetchStaff();
+    fetchCustomRoles();
     fetchOrders();
     fetchOwnerProfile();
     if (activeTab === 'FEEDBACK') fetchFeedback();
@@ -9903,6 +9926,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } catch (err) {
       console.error("Failed to fetch staff", err);
     }
+  };
+
+  const fetchCustomRoles = async () => {
+    if (!restaurantId) return;
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/custom-roles`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) setCustomRoles(await res.json());
+    } catch { /* non-blocking */ }
   };
 
   const fetchNotificationSettings = async () => {
@@ -16088,6 +16121,120 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
 
+          {/* Custom Roles management — owner only */}
+          {isOwnerOrAdmin && (
+            <div className="bg-white rounded-2xl border border-[#cc5a16]/10 shadow-sm p-5">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-[#1a1208]">Custom Roles</h3>
+                  <p className="text-[11px] text-[#9c8e85] mt-0.5">Create roles specific to your property — they appear in Add Staff, filters, and the Role Access matrix.</p>
+                </div>
+                <button
+                  onClick={() => { setShowCustomRoleForm(f => !f); setEditingCustomRole(null); setCustomRoleForm({ name: '', emoji: '👤', scope: 'BOTH' }); }}
+                  className="flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white hover:bg-[#a84612] transition-colors shrink-0"
+                >
+                  <Plus size={13} /> Add Role
+                </button>
+              </div>
+              {customRoles.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {customRoles.map(cr => (
+                    <div key={cr.id} className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-800 text-[11px] font-bold">
+                      <span>{cr.emoji}</span>
+                      <span>{cr.name}</span>
+                      <span className="text-indigo-400 text-[10px]">({cr.scope})</span>
+                      <button
+                        onClick={() => { setEditingCustomRole(cr); setCustomRoleForm({ name: cr.name, emoji: cr.emoji, scope: cr.scope }); setShowCustomRoleForm(true); }}
+                        className="ml-1 text-indigo-500 hover:text-indigo-700"
+                        title="Edit"
+                      >✎</button>
+                      <button
+                        onClick={async () => {
+                          if (!confirm(`Delete role "${cr.name}"? Staff already assigned this role will keep it until reassigned.`)) return;
+                          await fetch(`/api/restaurant/${restaurantId}/custom-roles/${cr.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+                          fetchCustomRoles();
+                        }}
+                        className="text-red-400 hover:text-red-600"
+                        title="Delete"
+                      >×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {showCustomRoleForm && (
+                <form
+                  className="flex flex-wrap items-end gap-3 pt-3 border-t border-[#cc5a16]/10"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!customRoleForm.name.trim()) return;
+                    if (editingCustomRole) {
+                      await fetch(`/api/restaurant/${restaurantId}/custom-roles/${editingCustomRole.id}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                        body: JSON.stringify(customRoleForm),
+                      });
+                    } else {
+                      await fetch(`/api/restaurant/${restaurantId}/custom-roles`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                        body: JSON.stringify(customRoleForm),
+                      });
+                    }
+                    setShowCustomRoleForm(false);
+                    setEditingCustomRole(null);
+                    setCustomRoleForm({ name: '', emoji: '👤', scope: 'BOTH' });
+                    fetchCustomRoles();
+                  }}
+                >
+                  <div className="space-y-1 flex-1 min-w-[140px]">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Role Name</label>
+                    <input
+                      required
+                      type="text"
+                      placeholder="e.g. Supervisor"
+                      value={customRoleForm.name}
+                      onChange={e => setCustomRoleForm(f => ({ ...f, name: e.target.value }))}
+                      className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                  </div>
+                  <div className="space-y-1 w-20">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Emoji</label>
+                    <input
+                      type="text"
+                      maxLength={4}
+                      value={customRoleForm.emoji}
+                      onChange={e => setCustomRoleForm(f => ({ ...f, emoji: e.target.value }))}
+                      className="w-full bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm text-center outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Scope</label>
+                    <select
+                      value={customRoleForm.scope}
+                      onChange={e => setCustomRoleForm(f => ({ ...f, scope: e.target.value }))}
+                      className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+                    >
+                      <option value="BOTH">Both (Hotel + Restaurant)</option>
+                      <option value="HOTEL">Hotel only</option>
+                      <option value="RESTAURANT">Restaurant only</option>
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    <button type="submit" className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">
+                      {editingCustomRole ? 'Save' : 'Create'}
+                    </button>
+                    <button type="button" onClick={() => { setShowCustomRoleForm(false); setEditingCustomRole(null); }} className="px-4 py-2 rounded-xl border border-[#cc5a16]/20 text-sm font-bold text-[#6b5d52] hover:bg-[#faf7f2]">
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
+              {customRoles.length === 0 && !showCustomRoleForm && (
+                <p className="text-[11px] text-[#9c8e85] italic">No custom roles yet. Click "Add Role" to create one.</p>
+              )}
+            </div>
+          )}
+
           {/* Search + Role filter + View toggle */}
           <div className="flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">
@@ -22232,6 +22379,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'CHEF',         label: 'Chef / KDS',   hint: 'Kitchen display, recipes',                          restaurantOnly: true },
               { id: 'HOUSEKEEPING', label: 'Housekeep.',   hint: 'Service requests + room status',                    hotelOnly: true },
               { id: 'MAINTENANCE',  label: 'Maintenance',  hint: 'Service requests, room status',                     hotelOnly: true },
+              // Owner-defined custom roles — scope-filtered at render time
+              ...customRoles.map(cr => ({
+                id: cr.id,
+                label: `${cr.emoji} ${cr.name}`,
+                hint: 'Custom role',
+                hotelOnly: cr.scope === 'HOTEL' ? true : undefined,
+                restaurantOnly: cr.scope === 'RESTAURANT' ? true : undefined,
+              })),
             ];
             const MANAGED_ROLES = ALL_MANAGED_ROLES.filter(r =>
               (!r.hotelOnly      || isHotelEnabled) &&
@@ -26366,12 +26521,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 {status === 'CHECKED_IN' && (
                   <button
                     type="button"
+                    onClick={async () => {
+                      close();
+                      if (b.open_folio_id) {
+                        try { await loadFolio(b.open_folio_id); } catch { /* ignore */ }
+                        return;
+                      }
+                      try {
+                        const _fr = await fetch(`/api/restaurant/${restaurantId}/hotel/folios?booking_id=${b.id}`, { headers: { Authorization: `Bearer ${token}` } });
+                        const _fl = await _fr.json();
+                        if (Array.isArray(_fl) && _fl.length > 0) { await loadFolio(_fl[0].id); return; }
+                      } catch { /* ignore */ }
+                    }}
+                    className="px-3 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2] flex items-center justify-center gap-1"
+                  >
+                    📋 View Folio
+                  </button>
+                )}
+                {status === 'CHECKED_IN' && (
+                  <button
+                    type="button"
                     onClick={() => {
                       close();
                       setCheckoutBooking(b);
                       setShowCheckoutModal(true);
                     }}
-                    className="col-span-2 px-3 py-2.5 rounded-2xl bg-[#b8860b] text-white text-sm font-bold hover:bg-[#8f6608]"
+                    className="px-3 py-2.5 rounded-2xl bg-[#b8860b] text-white text-sm font-bold hover:bg-[#8f6608]"
                   >
                     Check out
                   </button>
