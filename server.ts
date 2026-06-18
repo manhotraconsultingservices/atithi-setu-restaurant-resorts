@@ -22700,19 +22700,21 @@ ${data.tenant.name}`;
         return res.status(409).json({ error: 'Target room is under maintenance / blocked.' });
       }
       const oldRoom: any = await tenantDb.get("SELECT id, name, room_number FROM rooms WHERE id = ?", [bk.room_id]).catch(() => null);
-      // Validate the target room is free for the remaining stay (today → checkout).
-      const today = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 10);
-      const checkOut = String(bk.check_out_date || '').slice(0, 10);
+      // Validate the target room is free for the original booking period.
+      // We use the booking's own dates (not "today → checkout") because using today
+      // as check-in would produce a 0-night range for same-day checkouts.
+      // skipPastDateCheck bypasses the past-date guard; excludeBookingId removes
+      // this booking from the conflict check so the current room is not counted.
       const v = await validateBookingRequest(req.params.id, {
         room_id: newRoomId,
-        check_in_date: today,
-        check_out_date: checkOut,
+        check_in_date: String(bk.check_in_date || '').slice(0, 10),
+        check_out_date: String(bk.check_out_date || '').slice(0, 10),
         booking_type: bk.booking_type,
         excludeBookingId: req.params.bookingId,
         skipPastDateCheck: true,
         skipCapacityCheck: true,
       });
-      if (!v.ok) return res.status(v.status).json({ error: `Target room is not available for these dates: ${v.error}` });
+      if (!v.ok) return res.status(v.status).json({ error: `Target room is not available: ${v.error}` });
       // Move the physical assignment — keep all monetary fields (room_rate, total_amount, etc.) unchanged.
       await tenantDb.run("UPDATE room_bookings SET room_id = ? WHERE id = ?", [newRoomId, req.params.bookingId]);
       await tenantDb.run("UPDATE rooms SET status = 'VACANT' WHERE id = ?", [bk.room_id]).catch(() => {});
