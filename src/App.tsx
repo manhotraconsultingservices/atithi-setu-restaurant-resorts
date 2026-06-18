@@ -72,6 +72,7 @@ import {
   Package,
   CalendarClock,
   AlertTriangle,
+  Database,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -42580,13 +42581,106 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'ACTIVE' | 'INACTIVE' | 'PENDING'>('PENDING');
-  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING'>('RESTAURANTS');
+  const [viewMode, setViewMode] = useState<'RESTAURANTS' | 'USERS' | 'LOCATIONS' | 'PERMISSIONS' | 'BILLING' | 'DATA_MIGRATION'>('RESTAURANTS');
 
   // Subscription billing state (admin Billing tab)
   const [billingRows, setBillingRows] = useState<any[]>([]);
   const [billingLoading, setBillingLoading] = useState(false);
   const [billingEdit, setBillingEdit] = useState<Record<string, any>>({});
   const [billingMsg, setBillingMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  // Data Migration Console state
+  const [migTenants, setMigTenants] = useState<any[]>([]);
+  const [migSelectedTenant, setMigSelectedTenant] = useState<string>('');
+  const [migBookings, setMigBookings] = useState<any[]>([]);
+  const [migLoading, setMigLoading] = useState(false);
+  const [migSelectedIds, setMigSelectedIds] = useState<Set<string>>(new Set());
+  const [migCsvRows, setMigCsvRows] = useState<any[]>([]);
+  const [migCsvError, setMigCsvError] = useState<string>('');
+  const [migImporting, setMigImporting] = useState(false);
+  const [migImportResult, setMigImportResult] = useState<any>(null);
+  const [migMsg, setMigMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  const fetchMigTenants = async () => {
+    try {
+      const res = await fetch('/api/admin/data-migration/tenants', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (res.ok) setMigTenants(await res.json());
+    } catch {}
+  };
+  const fetchMigBookings = async (tenantId: string) => {
+    if (!tenantId) return;
+    setMigLoading(true);
+    setMigSelectedIds(new Set());
+    try {
+      const res = await fetch(`/api/admin/data-migration/bookings?tenantId=${encodeURIComponent(tenantId)}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (res.ok) setMigBookings(await res.json());
+      else setMigBookings([]);
+    } catch { setMigBookings([]); }
+    finally { setMigLoading(false); }
+  };
+  const deleteMigBookings = async () => {
+    if (migSelectedIds.size === 0 || !migSelectedTenant) return;
+    if (!window.confirm(`Permanently hard-delete ${migSelectedIds.size} booking(s)? This bypasses the cancel flow and cannot be undone.`)) return;
+    try {
+      const res = await fetch('/api/admin/data-migration/bookings', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ tenantId: migSelectedTenant, bookingIds: Array.from(migSelectedIds) }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMigMsg({ type: 'ok', text: `Deleted ${data.deleted} booking(s).` });
+        setMigSelectedIds(new Set());
+        fetchMigBookings(migSelectedTenant);
+      } else {
+        setMigMsg({ type: 'err', text: data.error || 'Delete failed' });
+      }
+    } catch { setMigMsg({ type: 'err', text: 'Network error' }); }
+  };
+  const parseMigCsv = (text: string) => {
+    setMigCsvError('');
+    setMigCsvRows([]);
+    setMigImportResult(null);
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) { setMigCsvError('CSV must have a header row + at least 1 data row.'); return; }
+    const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, '').toLowerCase());
+    const required = ['guest_name', 'check_in_date', 'check_out_date'];
+    const missing = required.filter(r => !headers.includes(r));
+    if (missing.length) { setMigCsvError(`Missing required columns: ${missing.join(', ')}`); return; }
+    const rows: Record<string, string>[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const vals = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+      const row: Record<string, string> = {};
+      headers.forEach((h, idx) => { row[h] = vals[idx] ?? ''; });
+      rows.push(row);
+    }
+    setMigCsvRows(rows);
+  };
+  const importMigCsv = async () => {
+    if (!migSelectedTenant || migCsvRows.length === 0) return;
+    setMigImporting(true);
+    setMigImportResult(null);
+    try {
+      const res = await fetch('/api/admin/data-migration/bookings/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ tenantId: migSelectedTenant, rows: migCsvRows }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMigImportResult(data);
+        setMigMsg({ type: 'ok', text: `Import done: ${data.succeeded} succeeded, ${data.failed} failed.` });
+        setMigCsvRows([]);
+        fetchMigBookings(migSelectedTenant);
+      } else {
+        setMigMsg({ type: 'err', text: data.error || 'Import failed' });
+      }
+    } catch { setMigMsg({ type: 'err', text: 'Network error' }); }
+    finally { setMigImporting(false); }
+  };
+
   const fetchTenantBilling = async () => {
     setBillingLoading(true);
     try {
@@ -43259,6 +43353,15 @@ function SuperAdminDashboard({ token }: { token: string }) {
             )}
           >
             <Clock size={16} /> Billing
+          </button>
+          <button
+            onClick={() => { setViewMode('DATA_MIGRATION'); fetchMigTenants(); }}
+            className={cn(
+              "px-6 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              viewMode === 'DATA_MIGRATION' ? "bg-red-600 text-white shadow-md" : "text-[#1a1208] hover:bg-[#cc5a16]/5"
+            )}
+          >
+            <Database size={16} /> Data Migration
           </button>
         </div>
       </div>
@@ -44294,6 +44397,263 @@ function SuperAdminDashboard({ token }: { token: string }) {
               Tenant data is preserved during suspension and remains accessible after restoration.
             </div>
           </div>
+        </div>
+      ) : viewMode === 'DATA_MIGRATION' ? (
+        <div className="space-y-6">
+          {/* Warning Banner */}
+          <div className="bg-red-50 border border-red-300 rounded-2xl p-4 flex items-start gap-3">
+            <AlertTriangle size={18} className="text-red-600 mt-0.5 shrink-0" />
+            <div>
+              <p className="text-sm font-bold text-red-800">Super Admin Data Migration Console</p>
+              <p className="text-xs text-red-700 mt-1">All booking business rules are bypassed: past dates allowed, no availability or capacity checks, bulk hard-delete (no cancel flow). Use with extreme care.</p>
+            </div>
+          </div>
+
+          {/* Tenant Selector */}
+          <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6">
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Database size={18} className="text-red-600" /> Select Tenant</h3>
+            <select
+              value={migSelectedTenant}
+              onChange={e => { setMigSelectedTenant(e.target.value); fetchMigBookings(e.target.value); setMigMsg(null); }}
+              className="w-full max-w-sm bg-[#faf7f2] border border-[#e8dccf] rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20"
+            >
+              <option value="">— Select a tenant —</option>
+              {migTenants.map((t: any) => (
+                <option key={t.id} value={t.id}>{t.name} ({t.id})</option>
+              ))}
+            </select>
+            {migTenants.length === 0 && (
+              <p className="mt-2 text-xs text-[#9c8e85] italic">Loading tenants… (click Data Migration tab again if empty)</p>
+            )}
+          </div>
+
+          {/* Booking Manager */}
+          {migSelectedTenant && (
+            <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6">
+              <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+                <h3 className="text-lg font-bold flex items-center gap-2">
+                  <Bed size={18} className="text-[#cc5a16]" /> Bookings
+                  {!migLoading && <span className="text-sm font-normal text-[#9c8e85]">({migBookings.length} total)</span>}
+                </h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => fetchMigBookings(migSelectedTenant)}
+                    disabled={migLoading}
+                    className="px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#e8dccf] text-xs font-semibold text-[#6b5d52] hover:border-[#cc5a16]/50 transition-colors disabled:opacity-50"
+                  >
+                    {migLoading ? 'Loading…' : 'Refresh'}
+                  </button>
+                  {migSelectedIds.size > 0 && (
+                    <button
+                      onClick={deleteMigBookings}
+                      className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-red-600 text-white text-sm font-bold hover:bg-red-700 transition-colors"
+                    >
+                      <Trash2 size={14} /> Delete {migSelectedIds.size} selected
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {migMsg && (
+                <div className={cn("mb-4 px-4 py-2 rounded-xl text-sm flex items-center gap-2", migMsg.type === 'ok' ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-red-50 text-red-700 border border-red-200")}>
+                  <span className="flex-1">{migMsg.text}</span>
+                  <button onClick={() => setMigMsg(null)} className="opacity-60 hover:opacity-100 font-bold text-base leading-none">×</button>
+                </div>
+              )}
+
+              {migLoading ? (
+                <div className="flex justify-center py-12"><div className="w-8 h-8 border-2 border-[#cc5a16]/30 border-t-[#cc5a16] rounded-full animate-spin" /></div>
+              ) : migBookings.length === 0 ? (
+                <div className="py-12 text-center text-[#9c8e85] italic">No bookings found for this tenant.</div>
+              ) : (
+                <>
+                  <div className="mb-2 flex items-center gap-2 text-xs text-[#6b5d52]">
+                    <input
+                      type="checkbox"
+                      checked={migSelectedIds.size === migBookings.length}
+                      onChange={e => setMigSelectedIds(e.target.checked ? new Set(migBookings.map((b: any) => b.id)) : new Set())}
+                      className="rounded"
+                    />
+                    <span>Select all {migBookings.length}</span>
+                    {migSelectedIds.size > 0 && <span className="text-red-600 font-semibold">· {migSelectedIds.size} selected</span>}
+                  </div>
+                  <div className="overflow-x-auto rounded-2xl border border-[#e8dccf]">
+                    <table className="w-full text-sm border-collapse">
+                      <thead>
+                        <tr className="bg-[#faf7f2] border-b border-[#e8dccf]">
+                          <th className="px-3 py-2" />
+                          {['Booking ID','Guest','Room','Check In','Check Out','Status','Amount'].map(h => (
+                            <th key={h} className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#f5ece0]">
+                        {migBookings.map((b: any) => (
+                          <tr key={b.id} className={cn("hover:bg-[#faf7f2]/50 transition-colors", migSelectedIds.has(b.id) && "bg-red-50")}>
+                            <td className="px-3 py-2">
+                              <input
+                                type="checkbox"
+                                checked={migSelectedIds.has(b.id)}
+                                onChange={e => {
+                                  const next = new Set(migSelectedIds);
+                                  e.target.checked ? next.add(b.id) : next.delete(b.id);
+                                  setMigSelectedIds(next);
+                                }}
+                                className="rounded"
+                              />
+                            </td>
+                            <td className="px-3 py-2 font-mono text-[11px] text-[#6b5d52] whitespace-nowrap">{b.id}</td>
+                            <td className="px-3 py-2">
+                              <div className="font-semibold text-xs">{b.guest_name}</div>
+                              {b.guest_phone && <div className="text-[11px] text-[#9c8e85]">{b.guest_phone}</div>}
+                            </td>
+                            <td className="px-3 py-2 text-xs text-[#6b5d52]">{b.room_id || <span className="italic text-[#9c8e85]">Unassigned</span>}</td>
+                            <td className="px-3 py-2 text-xs whitespace-nowrap">{b.check_in_date}</td>
+                            <td className="px-3 py-2 text-xs whitespace-nowrap">{b.check_out_date}</td>
+                            <td className="px-3 py-2">
+                              <span className={cn(
+                                "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider whitespace-nowrap",
+                                b.status === 'BOOKED' && "bg-blue-100 text-blue-700",
+                                b.status === 'CHECKED_IN' && "bg-green-100 text-green-700",
+                                b.status === 'CHECKED_OUT' && "bg-[#faf7f2] text-[#6b5d52] border border-[#e8dccf]",
+                                b.status === 'CANCELLED' && "bg-red-100 text-red-700",
+                              )}>{b.status}</span>
+                            </td>
+                            <td className="px-3 py-2 text-right text-xs font-semibold whitespace-nowrap">
+                              {b.total_amount ? `₹${Number(b.total_amount).toLocaleString('en-IN')}` : <span className="text-[#9c8e85]">—</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* CSV Import */}
+          {migSelectedTenant && (
+            <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6">
+              <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+                <h3 className="text-lg font-bold flex items-center gap-2"><Upload size={18} className="text-[#cc5a16]" /> CSV Import</h3>
+                <button
+                  onClick={() => {
+                    const headers = 'guest_name,check_in_date,check_out_date,room_id,status,guest_phone,guest_email,num_guests,room_rate,total_amount,booking_source,booking_type,payment_status,special_requests';
+                    const example = 'John Smith,2024-01-15,2024-01-17,ROOM-101,CHECKED_OUT,9876543210,john@example.com,2,3500,7000,DIRECT,OVERNIGHT,PAID,';
+                    const blob = new Blob([headers + '\n' + example], { type: 'text/csv' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a'); a.href = url; a.download = 'booking-import-template.csv';
+                    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#e8dccf] text-xs font-semibold text-[#6b5d52] hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors"
+                >
+                  <Download size={13} /> Download template
+                </button>
+              </div>
+
+              <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-2xl text-xs text-blue-900 space-y-1">
+                <p><strong>Required columns:</strong> guest_name, check_in_date (YYYY-MM-DD), check_out_date (YYYY-MM-DD)</p>
+                <p><strong>Optional:</strong> room_id, status (BOOKED/CHECKED_IN/CHECKED_OUT/CANCELLED), guest_phone, guest_email, num_guests, room_rate, total_amount, booking_source, booking_type, payment_status, special_requests</p>
+                <p><strong>Defaults:</strong> status=CHECKED_OUT &nbsp;·&nbsp; booking_source=MIGRATION &nbsp;·&nbsp; booking_type=OVERNIGHT</p>
+              </div>
+
+              <label className="block w-full cursor-pointer">
+                <div className="border-2 border-dashed border-[#e8dccf] hover:border-[#cc5a16]/50 rounded-2xl p-8 text-center transition-colors">
+                  <Upload size={24} className="mx-auto mb-2 text-[#9c8e85]" />
+                  <p className="text-sm text-[#6b5d52] font-semibold">Click to upload CSV file</p>
+                  <p className="text-xs text-[#9c8e85] mt-1">Max 2,000 rows per import</p>
+                </div>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  className="hidden"
+                  onChange={e => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = ev => parseMigCsv(ev.target?.result as string ?? '');
+                    reader.readAsText(file);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+
+              {migCsvError && (
+                <div className="mt-3 px-4 py-2.5 rounded-xl bg-red-50 text-red-700 text-sm border border-red-200">{migCsvError}</div>
+              )}
+
+              {migCsvRows.length > 0 && (
+                <div className="mt-4">
+                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <p className="text-sm font-semibold text-[#1a1208]">{migCsvRows.length} rows parsed — preview (first 5):</p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { setMigCsvRows([]); setMigImportResult(null); setMigCsvError(''); }}
+                        className="px-3 py-1.5 rounded-xl text-xs text-[#6b5d52] border border-[#e8dccf] hover:bg-[#faf7f2] transition-colors"
+                      >
+                        Clear
+                      </button>
+                      <button
+                        onClick={importMigCsv}
+                        disabled={migImporting}
+                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-red-600 text-white text-sm font-bold hover:bg-red-700 transition-colors disabled:opacity-50"
+                      >
+                        {migImporting ? (
+                          <><div className="w-3 h-3 border border-white border-t-transparent rounded-full animate-spin" /> Importing…</>
+                        ) : (
+                          <><Upload size={13} /> Import {migCsvRows.length} rows</>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto rounded-xl border border-[#e8dccf]">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="bg-[#faf7f2] border-b border-[#e8dccf]">
+                          {Object.keys(migCsvRows[0] || {}).slice(0, 8).map(k => (
+                            <th key={k} className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap">{k}</th>
+                          ))}
+                          {Object.keys(migCsvRows[0] || {}).length > 8 && (
+                            <th className="px-3 py-2 text-[10px] text-[#9c8e85]">+{Object.keys(migCsvRows[0]).length - 8} more cols</th>
+                          )}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#f5ece0]">
+                        {migCsvRows.slice(0, 5).map((row, i) => (
+                          <tr key={i} className="hover:bg-[#faf7f2]/50">
+                            {Object.values(row).slice(0, 8).map((v: any, j) => (
+                              <td key={j} className="px-3 py-2 text-[#1a1208] whitespace-nowrap max-w-[140px] truncate">{v || <span className="text-[#9c8e85]">—</span>}</td>
+                            ))}
+                            {Object.values(row).length > 8 && <td className="px-3 py-2 text-[#9c8e85]">…</td>}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {migImportResult && (
+                <div className={cn(
+                  "mt-4 p-4 rounded-2xl border text-sm",
+                  migImportResult.failed === 0
+                    ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                    : "bg-amber-50 border-amber-200 text-amber-800"
+                )}>
+                  <p className="font-bold mb-1">Import complete</p>
+                  <p>{migImportResult.succeeded} imported successfully · {migImportResult.failed} failed out of {migImportResult.total} total rows.</p>
+                  {migImportResult.failed > 0 && (
+                    <div className="mt-2 space-y-0.5 max-h-32 overflow-y-auto">
+                      {(migImportResult.results || []).filter((r: any) => r.error).map((r: any) => (
+                        <p key={r.index} className="text-xs text-red-700">Row {r.index + 2}: {r.error}</p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       ) : null}
     </div>

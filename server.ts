@@ -35064,6 +35064,139 @@ ${data.tenant.name}`;
   });
 
   // ────────────────────────────────────────────────────────────────────
+  // SUPER ADMIN: Data Migration Console
+  // All booking business rules bypassed: past dates OK, no availability
+  // checks, no capacity checks, bulk hard-delete skips the cancel flow.
+  // Access: SUPER_ADMIN / CTO only (isAdmin middleware).
+  // ────────────────────────────────────────────────────────────────────
+
+  app.get("/api/admin/data-migration/tenants", authenticate, isAdmin, async (_req: AuthRequest, res: Response) => {
+    try {
+      const rows = await centralDb.query(
+        "SELECT id, name, slug, is_active FROM restaurants WHERE id <> 'SYSTEM' ORDER BY name ASC"
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error("Migration tenants error:", err);
+      res.status(500).json({ error: "Failed to list tenants" });
+    }
+  });
+
+  app.get("/api/admin/data-migration/bookings", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId || '');
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const tenantDb = await getTenantDb(tenantId);
+      const rows = await tenantDb.query(`
+        SELECT b.id, b.room_id,
+               b.guest_name, b.guest_phone, b.guest_email,
+               b.check_in_date, b.check_out_date,
+               b.status, b.booking_type, b.booking_source,
+               b.room_rate, b.total_amount,
+               b.num_guests, b.created_at, b.payment_status
+          FROM room_bookings b
+         ORDER BY b.created_at DESC
+      `);
+      res.json(rows);
+    } catch (err) {
+      console.error("Migration bookings list error:", err);
+      res.status(500).json({ error: "Failed to fetch bookings" });
+    }
+  });
+
+  app.delete("/api/admin/data-migration/bookings", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { tenantId, bookingIds } = req.body as { tenantId: string; bookingIds: string[] };
+      if (!tenantId || !Array.isArray(bookingIds) || bookingIds.length === 0) {
+        return res.status(400).json({ error: "tenantId and bookingIds[] required" });
+      }
+      if (bookingIds.length > 500) return res.status(400).json({ error: "Max 500 bookings per request" });
+      const tenantDb = await getTenantDb(tenantId);
+      const placeholders = bookingIds.map(() => '?').join(',');
+      await tenantDb.run(`DELETE FROM room_bookings WHERE id IN (${placeholders})`, bookingIds);
+      res.json({ success: true, deleted: bookingIds.length });
+    } catch (err) {
+      console.error("Migration delete error:", err);
+      res.status(500).json({ error: "Failed to delete bookings" });
+    }
+  });
+
+  app.post("/api/admin/data-migration/bookings/import", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+      const { tenantId, rows } = req.body as { tenantId: string; rows: any[] };
+      if (!tenantId || !Array.isArray(rows) || rows.length === 0) {
+        return res.status(400).json({ error: "tenantId and rows[] required" });
+      }
+      if (rows.length > 2000) return res.status(400).json({ error: "Max 2000 rows per import" });
+      const tenantDb = await getTenantDb(tenantId);
+      const results: Array<{ index: number; id?: string; error?: string }> = [];
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r.guest_name || !r.check_in_date || !r.check_out_date) {
+          results.push({ index: i, error: "Missing required: guest_name, check_in_date, check_out_date" });
+          continue;
+        }
+        const rnd = Math.random().toString(36).slice(2, 7);
+        const id = `BK-MIG-${Date.now()}-${rnd}-${i}`;
+        try {
+          await tenantDb.run(`
+            INSERT INTO room_bookings (
+              id, room_id, guest_name, guest_phone, guest_email,
+              guest_id_proof, guest_nationality, guest_state,
+              num_guests, num_adults,
+              check_in_date, check_out_date, status,
+              booking_source, room_rate, total_amount,
+              special_requests, booking_type,
+              payment_status, extra_adults,
+              extra_children_with_mattress, extra_children_no_mattress,
+              agent_id, commission_pct, commission_amount, net_amount,
+              room_locked, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          `, [
+            id,
+            r.room_id || null,
+            String(r.guest_name),
+            r.guest_phone || null,
+            r.guest_email || null,
+            r.guest_id_proof || null,
+            r.guest_nationality || null,
+            r.guest_state || null,
+            Number(r.num_guests) || 1,
+            r.num_adults ? Number(r.num_adults) : null,
+            String(r.check_in_date),
+            String(r.check_out_date),
+            r.status || 'CHECKED_OUT',
+            r.booking_source || 'MIGRATION',
+            r.room_rate ? Number(r.room_rate) : 0,
+            r.total_amount ? Number(r.total_amount) : 0,
+            r.special_requests || null,
+            r.booking_type || 'OVERNIGHT',
+            r.payment_status || 'UNINVOICED',
+            r.extra_adults ? Number(r.extra_adults) : 0,
+            r.extra_children_with_mattress ? Number(r.extra_children_with_mattress) : 0,
+            r.extra_children_no_mattress ? Number(r.extra_children_no_mattress) : 0,
+            r.agent_id || null,
+            r.commission_pct ? Number(r.commission_pct) : 0,
+            r.commission_amount ? Number(r.commission_amount) : 0,
+            r.net_amount ? Number(r.net_amount) : (r.total_amount ? Number(r.total_amount) : 0),
+            1,
+            r.created_at || new Date().toISOString(),
+          ]);
+          results.push({ index: i, id });
+        } catch (rowErr: any) {
+          results.push({ index: i, error: rowErr.message || 'Insert failed' });
+        }
+      }
+      const succeeded = results.filter(r => r.id).length;
+      const failed = results.filter(r => r.error).length;
+      res.json({ success: true, total: rows.length, succeeded, failed, results });
+    } catch (err) {
+      console.error("Migration import error:", err);
+      res.status(500).json({ error: "Failed to import bookings" });
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────────
   // BCG Demo Tariff Seed (client request 7 Jun 2026)
   // ────────────────────────────────────────────────────────────────────
   // One-click GUI alternative to the qa_seed_viveks_tariff.mts CLI
