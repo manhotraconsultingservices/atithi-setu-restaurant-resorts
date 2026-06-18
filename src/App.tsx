@@ -42600,6 +42600,29 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const [migImporting, setMigImporting] = useState(false);
   const [migImportResult, setMigImportResult] = useState<any>(null);
   const [migMsg, setMigMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [migImportStep, setMigImportStep] = useState<'idle' | 'review' | 'confirm' | 'done'>('idle');
+  const [migCsvPage, setMigCsvPage] = useState(1);
+  const [migEditCell, setMigEditCell] = useState<{ row: number; col: string; val: string } | null>(null);
+
+  const migValidateRow = (row: Record<string, string>): { errors: Record<string, string>; warnings: Record<string, string> } => {
+    const errors: Record<string, string> = {};
+    const warnings: Record<string, string> = {};
+    if (!row.guest_name?.trim()) errors.guest_name = 'Required';
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!row.check_in_date?.trim()) errors.check_in_date = 'Required';
+    else if (!dateRe.test(row.check_in_date.trim())) errors.check_in_date = 'Use YYYY-MM-DD';
+    if (!row.check_out_date?.trim()) errors.check_out_date = 'Required';
+    else if (!dateRe.test(row.check_out_date.trim())) errors.check_out_date = 'Use YYYY-MM-DD';
+    if (!errors.check_in_date && !errors.check_out_date &&
+        row.check_in_date?.trim() && row.check_out_date?.trim() &&
+        row.check_in_date >= row.check_out_date) {
+      errors.check_out_date = 'Must be after check-in';
+    }
+    if (!row.room_id?.trim()) warnings.room_id = 'No room (floating)';
+    if (row.status && !['BOOKED', 'CHECKED_IN', 'CHECKED_OUT', 'CANCELLED', ''].includes(row.status)) warnings.status = 'Unknown status';
+    if (row.booking_type && !['OVERNIGHT', 'DAY_USE', ''].includes(row.booking_type)) warnings.booking_type = 'Unknown type';
+    return { errors, warnings };
+  };
 
   const fetchMigTenants = async () => {
     try {
@@ -42643,36 +42666,51 @@ function SuperAdminDashboard({ token }: { token: string }) {
     setMigCsvError('');
     setMigCsvRows([]);
     setMigImportResult(null);
+    setMigImportStep('idle');
+    setMigCsvPage(1);
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
     if (lines.length < 2) { setMigCsvError('CSV must have a header row + at least 1 data row.'); return; }
     const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, '').toLowerCase());
     const required = ['guest_name', 'check_in_date', 'check_out_date'];
     const missing = required.filter(r => !headers.includes(r));
     if (missing.length) { setMigCsvError(`Missing required columns: ${missing.join(', ')}`); return; }
-    const rows: Record<string, string>[] = [];
+    const rows: any[] = [];
     for (let i = 1; i < lines.length; i++) {
       const vals = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''));
       const row: Record<string, string> = {};
       headers.forEach((h, idx) => { row[h] = vals[idx] ?? ''; });
-      rows.push(row);
+      const { errors, warnings } = migValidateRow(row);
+      rows.push({ ...row, _idx: i - 1, _errors: errors, _warnings: warnings });
     }
     setMigCsvRows(rows);
+    setMigImportStep('review');
+  };
+  const migUpdateCell = (rowIdx: number, col: string, val: string) => {
+    setMigCsvRows(prev => prev.map((r, i) => {
+      if (i !== rowIdx) return r;
+      const updated = { ...r, [col]: val };
+      const { errors, warnings } = migValidateRow(updated);
+      return { ...updated, _errors: errors, _warnings: warnings };
+    }));
   };
   const importMigCsv = async () => {
-    if (!migSelectedTenant || migCsvRows.length === 0) return;
+    const validRows = migCsvRows.filter(r => Object.keys(r._errors || {}).length === 0);
+    if (!migSelectedTenant || validRows.length === 0) return;
     setMigImporting(true);
     setMigImportResult(null);
     try {
+      const payload = validRows.map(({ _idx, _errors, _warnings, ...rest }: any) => rest);
       const res = await fetch('/api/admin/data-migration/bookings/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ tenantId: migSelectedTenant, rows: migCsvRows }),
+        body: JSON.stringify({ tenantId: migSelectedTenant, rows: payload }),
       });
       const data = await res.json();
       if (res.ok) {
         setMigImportResult(data);
         setMigMsg({ type: 'ok', text: `Import done: ${data.succeeded} succeeded, ${data.failed} failed.` });
         setMigCsvRows([]);
+        setMigImportStep('done');
         fetchMigBookings(migSelectedTenant);
       } else {
         setMigMsg({ type: 'err', text: data.error || 'Import failed' });
@@ -44532,124 +44570,314 @@ function SuperAdminDashboard({ token }: { token: string }) {
             </div>
           )}
 
-          {/* CSV Import */}
+          {/* CSV Import — 2-step: Review then Confirm */}
           {migSelectedTenant && (
             <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 shadow-sm p-6">
-              <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-                <h3 className="text-lg font-bold flex items-center gap-2"><Upload size={18} className="text-[#cc5a16]" /> CSV Import</h3>
-                <button
-                  onClick={() => {
-                    const headers = 'guest_name,check_in_date,check_out_date,room_id,status,guest_phone,guest_email,num_guests,room_rate,total_amount,booking_source,booking_type,payment_status,special_requests';
-                    const example = 'John Smith,2024-01-15,2024-01-17,ROOM-101,CHECKED_OUT,9876543210,john@example.com,2,3500,7000,DIRECT,OVERNIGHT,PAID,';
-                    const blob = new Blob([headers + '\n' + example], { type: 'text/csv' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a'); a.href = url; a.download = 'booking-import-template.csv';
-                    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#e8dccf] text-xs font-semibold text-[#6b5d52] hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors"
-                >
-                  <Download size={13} /> Download template
-                </button>
-              </div>
-
-              <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-2xl text-xs text-blue-900 space-y-1">
-                <p><strong>Required columns:</strong> guest_name, check_in_date (YYYY-MM-DD), check_out_date (YYYY-MM-DD)</p>
-                <p><strong>Optional:</strong> room_id, status (BOOKED/CHECKED_IN/CHECKED_OUT/CANCELLED), guest_phone, guest_email, num_guests, room_rate, total_amount, booking_source, booking_type, payment_status, special_requests</p>
-                <p><strong>Defaults:</strong> status=CHECKED_OUT &nbsp;·&nbsp; booking_source=MIGRATION &nbsp;·&nbsp; booking_type=OVERNIGHT</p>
-              </div>
-
-              <label className="block w-full cursor-pointer">
-                <div className="border-2 border-dashed border-[#e8dccf] hover:border-[#cc5a16]/50 rounded-2xl p-8 text-center transition-colors">
-                  <Upload size={24} className="mx-auto mb-2 text-[#9c8e85]" />
-                  <p className="text-sm text-[#6b5d52] font-semibold">Click to upload CSV file</p>
-                  <p className="text-xs text-[#9c8e85] mt-1">Max 2,000 rows per import</p>
+              {/* Header */}
+              <div className="flex items-center justify-between mb-5 gap-3 flex-wrap">
+                <h3 className="text-lg font-bold flex items-center gap-2">
+                  <Upload size={18} className="text-[#cc5a16]" /> CSV Import
+                  {migImportStep === 'review' && <span className="text-sm font-normal text-[#9c8e85]">— Step 1: Review &amp; fix</span>}
+                  {migImportStep === 'confirm' && <span className="text-sm font-normal text-[#9c8e85]">— Step 2: Confirm</span>}
+                  {migImportStep === 'done' && <span className="text-sm font-normal text-emerald-600">— Done</span>}
+                </h3>
+                <div className="flex items-center gap-2">
+                  {migImportStep === 'idle' && (
+                    <button
+                      onClick={() => {
+                        const headers = 'guest_name,check_in_date,check_out_date,room_id,status,guest_phone,guest_email,num_guests,room_rate,total_amount,booking_source,booking_type,payment_status,special_requests';
+                        const example = 'John Smith,2024-01-15,2024-01-17,ROOM-101,CHECKED_OUT,9876543210,john@example.com,2,3500,7000,DIRECT,OVERNIGHT,PAID,';
+                        const blob = new Blob([headers + '\n' + example], { type: 'text/csv' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a'); a.href = url; a.download = 'booking-import-template.csv';
+                        document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#faf7f2] border border-[#e8dccf] text-xs font-semibold text-[#6b5d52] hover:border-[#cc5a16]/50 hover:text-[#cc5a16] transition-colors"
+                    >
+                      <Download size={13} /> Template
+                    </button>
+                  )}
+                  {(migImportStep === 'review' || migImportStep === 'confirm') && (
+                    <button
+                      onClick={() => { setMigCsvRows([]); setMigImportResult(null); setMigCsvError(''); setMigImportStep('idle'); }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-[#6b5d52] border border-[#e8dccf] hover:bg-red-50 hover:border-red-200 hover:text-red-600 transition-colors"
+                    >
+                      <X size={13} /> Start over
+                    </button>
+                  )}
                 </div>
-                <input
-                  type="file"
-                  accept=".csv,text/csv"
-                  className="hidden"
-                  onChange={e => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = ev => parseMigCsv(ev.target?.result as string ?? '');
-                    reader.readAsText(file);
-                    e.target.value = '';
-                  }}
-                />
-              </label>
+              </div>
 
-              {migCsvError && (
-                <div className="mt-3 px-4 py-2.5 rounded-xl bg-red-50 text-red-700 text-sm border border-red-200">{migCsvError}</div>
+              {/* ── Step: idle — upload dropzone ── */}
+              {migImportStep === 'idle' && (
+                <>
+                  <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-2xl text-xs text-blue-900 space-y-1">
+                    <p><strong>Required columns:</strong> guest_name, check_in_date (YYYY-MM-DD), check_out_date (YYYY-MM-DD)</p>
+                    <p><strong>Optional:</strong> room_id, status (BOOKED/CHECKED_IN/CHECKED_OUT/CANCELLED), guest_phone, guest_email, num_guests, room_rate, total_amount, booking_source, booking_type, payment_status, special_requests</p>
+                    <p><strong>Defaults:</strong> status=CHECKED_OUT · booking_source=MIGRATION · booking_type=OVERNIGHT</p>
+                  </div>
+                  <label className="block w-full cursor-pointer">
+                    <div className="border-2 border-dashed border-[#e8dccf] hover:border-[#cc5a16]/50 rounded-2xl p-10 text-center transition-colors">
+                      <Upload size={28} className="mx-auto mb-3 text-[#9c8e85]" />
+                      <p className="text-sm font-semibold text-[#6b5d52]">Click to upload CSV file</p>
+                      <p className="text-xs text-[#9c8e85] mt-1">All rows appear in an editable table for review before you commit. Max 2,000 rows.</p>
+                    </div>
+                    <input type="file" accept=".csv,text/csv" className="hidden"
+                      onChange={e => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = ev => parseMigCsv(ev.target?.result as string ?? '');
+                        reader.readAsText(file);
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                  {migCsvError && (
+                    <div className="mt-3 px-4 py-2.5 rounded-xl bg-red-50 text-red-700 text-sm border border-red-200">{migCsvError}</div>
+                  )}
+                </>
               )}
 
-              {migCsvRows.length > 0 && (
-                <div className="mt-4">
-                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                    <p className="text-sm font-semibold text-[#1a1208]">{migCsvRows.length} rows parsed — preview (first 5):</p>
-                    <div className="flex gap-2">
+              {/* ── Step: review — full editable table with inline validation ── */}
+              {migImportStep === 'review' && (() => {
+                const errCount = migCsvRows.filter(r => Object.keys(r._errors || {}).length > 0).length;
+                const warnCount = migCsvRows.filter(r => Object.keys(r._errors || {}).length === 0 && Object.keys(r._warnings || {}).length > 0).length;
+                const validCount = migCsvRows.length - errCount;
+                const pageCount = Math.max(1, Math.ceil(migCsvRows.length / 50));
+                const pageRows = migCsvRows.slice((migCsvPage - 1) * 50, migCsvPage * 50);
+                const cols = Object.keys(migCsvRows[0] || {}).filter(k => !k.startsWith('_'));
+                const selectOpts: Record<string, string[]> = {
+                  status: ['', 'BOOKED', 'CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'],
+                  booking_type: ['', 'OVERNIGHT', 'DAY_USE'],
+                  payment_status: ['', 'UNINVOICED', 'PAID', 'PARTIAL'],
+                };
+                return (
+                  <>
+                    {/* Summary bar */}
+                    <div className={cn(
+                      "mb-4 p-3 rounded-2xl border text-sm flex flex-wrap items-center gap-x-5 gap-y-1",
+                      errCount > 0 ? "bg-red-50 border-red-200" : warnCount > 0 ? "bg-amber-50 border-amber-200" : "bg-emerald-50 border-emerald-200"
+                    )}>
+                      <span className="font-bold text-[#1a1208]">{migCsvRows.length} rows</span>
+                      <span className="text-emerald-700 font-semibold">✓ {validCount} ready</span>
+                      {warnCount > 0 && <span className="text-amber-700 font-semibold">⚠ {warnCount} warnings</span>}
+                      {errCount > 0 && <span className="text-red-700 font-semibold">✗ {errCount} errors (will skip)</span>}
+                      <span className="text-xs text-[#9c8e85] ml-auto hidden sm:inline">Click any cell to edit · Tab/Enter to confirm</span>
+                    </div>
+
+                    {/* Editable table */}
+                    <div className="overflow-x-auto rounded-2xl border border-[#e8dccf] mb-4">
+                      <table className="text-xs border-collapse" style={{ minWidth: `${cols.length * 130 + 72}px` }}>
+                        <thead>
+                          <tr className="bg-[#faf7f2] border-b border-[#e8dccf]">
+                            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap w-16">#</th>
+                            {cols.map(col => (
+                              <th key={col} className={cn(
+                                "px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest whitespace-nowrap",
+                                ['guest_name','check_in_date','check_out_date'].includes(col) ? "text-red-600" : "text-[#6b5d52]"
+                              )}>
+                                {col.replace(/_/g, ' ')}
+                                {['guest_name','check_in_date','check_out_date'].includes(col) && <span className="text-red-400"> *</span>}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#f5ece0]">
+                          {pageRows.map((row, pageRowIdx) => {
+                            const absIdx = (migCsvPage - 1) * 50 + pageRowIdx;
+                            const hasErr = Object.keys(row._errors || {}).length > 0;
+                            const hasWarn = !hasErr && Object.keys(row._warnings || {}).length > 0;
+                            return (
+                              <tr key={absIdx} className={cn(
+                                "transition-colors",
+                                hasErr ? "bg-red-50/70 hover:bg-red-100/60" : hasWarn ? "bg-amber-50/60 hover:bg-amber-100/50" : "hover:bg-[#faf7f2]/70"
+                              )}>
+                                <td className={cn(
+                                  "px-3 py-2 font-mono font-bold text-[11px] whitespace-nowrap",
+                                  hasErr ? "text-red-600" : hasWarn ? "text-amber-600" : "text-emerald-600"
+                                )}>
+                                  {hasErr ? '✗' : hasWarn ? '⚠' : '✓'} {absIdx + 1}
+                                </td>
+                                {cols.map(col => {
+                                  const isEditing = migEditCell?.row === absIdx && migEditCell?.col === col;
+                                  const cellErr = row._errors?.[col];
+                                  const cellWarn = row._warnings?.[col];
+                                  const isSelect = col in selectOpts;
+                                  return (
+                                    <td
+                                      key={col}
+                                      className={cn(
+                                        "px-2 py-1.5",
+                                        cellErr ? "bg-red-100/50" : cellWarn ? "bg-amber-50" : "",
+                                        !isEditing && "cursor-pointer"
+                                      )}
+                                      onClick={() => !isEditing && setMigEditCell({ row: absIdx, col, val: row[col] ?? '' })}
+                                    >
+                                      {isEditing ? (
+                                        isSelect ? (
+                                          <select
+                                            autoFocus
+                                            value={migEditCell!.val}
+                                            onChange={e => setMigEditCell({ ...migEditCell!, val: e.target.value })}
+                                            onBlur={() => { migUpdateCell(absIdx, col, migEditCell!.val); setMigEditCell(null); }}
+                                            className="w-full min-w-[100px] bg-white border border-[#cc5a16]/50 rounded px-1.5 py-0.5 text-xs outline-none ring-1 ring-[#cc5a16]/30"
+                                          >
+                                            {selectOpts[col].map(o => <option key={o} value={o}>{o || '—'}</option>)}
+                                          </select>
+                                        ) : (
+                                          <input
+                                            autoFocus
+                                            type="text"
+                                            value={migEditCell!.val}
+                                            onChange={e => setMigEditCell({ ...migEditCell!, val: e.target.value })}
+                                            onBlur={() => { migUpdateCell(absIdx, col, migEditCell!.val); setMigEditCell(null); }}
+                                            onKeyDown={e => {
+                                              if (e.key === 'Enter') { migUpdateCell(absIdx, col, migEditCell!.val); setMigEditCell(null); }
+                                              if (e.key === 'Escape') setMigEditCell(null);
+                                            }}
+                                            className="w-full min-w-[90px] bg-white border border-[#cc5a16]/50 rounded px-1.5 py-0.5 text-xs outline-none ring-1 ring-[#cc5a16]/30"
+                                          />
+                                        )
+                                      ) : (
+                                        <div>
+                                          <span className={cn(
+                                            "block truncate max-w-[160px] text-xs",
+                                            cellErr ? "text-red-700 font-semibold" : cellWarn ? "text-amber-800" : "text-[#1a1208]"
+                                          )}>
+                                            {row[col] || <span className="text-[#c4bdb8] italic text-[11px]">empty</span>}
+                                          </span>
+                                          {(cellErr || cellWarn) && (
+                                            <span className={cn("block text-[10px] leading-tight mt-0.5", cellErr ? "text-red-500" : "text-amber-500")}>
+                                              {cellErr || cellWarn}
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Pagination */}
+                    {pageCount > 1 && (
+                      <div className="flex items-center justify-between mb-4 text-xs text-[#6b5d52]">
+                        <span className="text-[#9c8e85]">{(migCsvPage - 1) * 50 + 1}–{Math.min(migCsvPage * 50, migCsvRows.length)} of {migCsvRows.length}</span>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => setMigCsvPage(p => Math.max(1, p - 1))} disabled={migCsvPage === 1}
+                            className="p-1 rounded hover:bg-[#e8dccf] disabled:opacity-40 transition-colors"><ChevronLeft size={14} /></button>
+                          <span className="px-2 font-semibold">{migCsvPage} / {pageCount}</span>
+                          <button onClick={() => setMigCsvPage(p => Math.min(pageCount, p + 1))} disabled={migCsvPage === pageCount}
+                            className="p-1 rounded hover:bg-[#e8dccf] disabled:opacity-40 transition-colors"><ChevronRight size={14} /></button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Proceed button */}
+                    <div className="flex items-center justify-end gap-3 flex-wrap">
+                      {errCount > 0 && (
+                        <p className="text-xs text-red-600 mr-auto">
+                          {errCount} row{errCount !== 1 ? 's' : ''} with errors will be skipped. Fix or proceed with {validCount} valid rows.
+                        </p>
+                      )}
                       <button
-                        onClick={() => { setMigCsvRows([]); setMigImportResult(null); setMigCsvError(''); }}
-                        className="px-3 py-1.5 rounded-xl text-xs text-[#6b5d52] border border-[#e8dccf] hover:bg-[#faf7f2] transition-colors"
+                        onClick={() => setMigImportStep('confirm')}
+                        disabled={validCount === 0}
+                        className="px-5 py-2 rounded-xl bg-red-600 text-white text-sm font-bold hover:bg-red-700 transition-colors disabled:opacity-40 flex items-center gap-2"
                       >
-                        Clear
+                        Proceed — import {validCount} rows →
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
+
+              {/* ── Step: confirm ── */}
+              {migImportStep === 'confirm' && (() => {
+                const validRows = migCsvRows.filter(r => Object.keys(r._errors || {}).length === 0);
+                const errRows = migCsvRows.filter(r => Object.keys(r._errors || {}).length > 0);
+                const tenantName = migTenants.find((t: any) => t.id === migSelectedTenant)?.name || migSelectedTenant;
+                return (
+                  <div className="space-y-5">
+                    <div className="p-5 bg-red-50 border border-red-200 rounded-2xl">
+                      <p className="font-bold text-red-800 text-base mb-2">Ready to import</p>
+                      <p className="text-sm text-red-700">
+                        <strong>{validRows.length} booking{validRows.length !== 1 ? 's' : ''}</strong> will be created in{' '}
+                        <strong>{tenantName}</strong>. This action cannot be undone.
+                      </p>
+                      {errRows.length > 0 && (
+                        <p className="text-sm text-amber-700 mt-2">
+                          {errRows.length} row{errRows.length !== 1 ? 's' : ''} with errors will be <strong>skipped</strong>.
+                        </p>
+                      )}
+                    </div>
+                    {errRows.length > 0 && (
+                      <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl">
+                        <p className="text-xs font-bold text-amber-800 mb-2">Rows being skipped ({errRows.length}):</p>
+                        <div className="space-y-0.5 max-h-36 overflow-y-auto">
+                          {errRows.map((r: any) => (
+                            <p key={r._idx} className="text-xs text-amber-900">
+                              Row {r._idx + 2}: {r.guest_name || '(no name)'} — {Object.values(r._errors || {}).join(', ')}
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between gap-3">
+                      <button
+                        onClick={() => setMigImportStep('review')}
+                        className="px-4 py-2 rounded-xl bg-[#faf7f2] border border-[#e8dccf] text-sm font-semibold text-[#6b5d52] hover:bg-[#f0ebe4] transition-colors"
+                      >
+                        ← Back to review
                       </button>
                       <button
                         onClick={importMigCsv}
                         disabled={migImporting}
-                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-red-600 text-white text-sm font-bold hover:bg-red-700 transition-colors disabled:opacity-50"
+                        className="px-6 py-2 rounded-xl bg-red-600 text-white text-sm font-bold hover:bg-red-700 transition-colors disabled:opacity-50 flex items-center gap-2"
                       >
-                        {migImporting ? (
-                          <><div className="w-3 h-3 border border-white border-t-transparent rounded-full animate-spin" /> Importing…</>
-                        ) : (
-                          <><Upload size={13} /> Import {migCsvRows.length} rows</>
-                        )}
+                        {migImporting
+                          ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Importing…</>
+                          : <>Confirm — import {validRows.length} rows</>
+                        }
                       </button>
                     </div>
                   </div>
-                  <div className="overflow-x-auto rounded-xl border border-[#e8dccf]">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="bg-[#faf7f2] border-b border-[#e8dccf]">
-                          {Object.keys(migCsvRows[0] || {}).slice(0, 8).map(k => (
-                            <th key={k} className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] whitespace-nowrap">{k}</th>
-                          ))}
-                          {Object.keys(migCsvRows[0] || {}).length > 8 && (
-                            <th className="px-3 py-2 text-[10px] text-[#9c8e85]">+{Object.keys(migCsvRows[0]).length - 8} more cols</th>
-                          )}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#f5ece0]">
-                        {migCsvRows.slice(0, 5).map((row, i) => (
-                          <tr key={i} className="hover:bg-[#faf7f2]/50">
-                            {Object.values(row).slice(0, 8).map((v: any, j) => (
-                              <td key={j} className="px-3 py-2 text-[#1a1208] whitespace-nowrap max-w-[140px] truncate">{v || <span className="text-[#9c8e85]">—</span>}</td>
-                            ))}
-                            {Object.values(row).length > 8 && <td className="px-3 py-2 text-[#9c8e85]">…</td>}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
+                );
+              })()}
 
-              {migImportResult && (
-                <div className={cn(
-                  "mt-4 p-4 rounded-2xl border text-sm",
-                  migImportResult.failed === 0
-                    ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                    : "bg-amber-50 border-amber-200 text-amber-800"
-                )}>
-                  <p className="font-bold mb-1">Import complete</p>
-                  <p>{migImportResult.succeeded} imported successfully · {migImportResult.failed} failed out of {migImportResult.total} total rows.</p>
-                  {migImportResult.failed > 0 && (
-                    <div className="mt-2 space-y-0.5 max-h-32 overflow-y-auto">
-                      {(migImportResult.results || []).filter((r: any) => r.error).map((r: any) => (
-                        <p key={r.index} className="text-xs text-red-700">Row {r.index + 2}: {r.error}</p>
-                      ))}
-                    </div>
-                  )}
+              {/* ── Step: done — results ── */}
+              {migImportStep === 'done' && migImportResult && (
+                <div className="space-y-4">
+                  <div className={cn(
+                    "p-5 rounded-2xl border",
+                    migImportResult.failed === 0 ? "bg-emerald-50 border-emerald-200" : "bg-amber-50 border-amber-200"
+                  )}>
+                    <p className={cn("font-bold text-base mb-1", migImportResult.failed === 0 ? "text-emerald-800" : "text-amber-800")}>
+                      Import complete
+                    </p>
+                    <p className={cn("text-sm", migImportResult.failed === 0 ? "text-emerald-700" : "text-amber-700")}>
+                      {migImportResult.succeeded} of {migImportResult.total} rows imported.
+                      {migImportResult.failed > 0 && ` ${migImportResult.failed} failed at the database level.`}
+                    </p>
+                    {migImportResult.failed > 0 && (
+                      <div className="mt-2 space-y-0.5 max-h-28 overflow-y-auto">
+                        {(migImportResult.results || []).filter((r: any) => r.error).map((r: any) => (
+                          <p key={r.index} className="text-xs text-red-700">Row {r.index + 1}: {r.error}</p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => { setMigImportResult(null); setMigImportStep('idle'); setMigCsvRows([]); setMigCsvError(''); }}
+                    className="px-4 py-2 rounded-xl bg-[#faf7f2] border border-[#e8dccf] text-sm font-semibold text-[#6b5d52] hover:bg-[#f0ebe4] transition-colors"
+                  >
+                    Import another CSV
+                  </button>
                 </div>
               )}
             </div>
