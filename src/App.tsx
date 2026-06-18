@@ -28686,7 +28686,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       meal-plan choice before saving. */}
                   {(() => {
                     if (!editingBooking.room_id || !editingBooking.check_in_date || !editingBooking.check_out_date) return null;
-                    const preview = previewMatrixPrice({
+                    const matrixPreview = previewMatrixPrice({
                       room_id: editingBooking.room_id,
                       check_in_date: editingBooking.check_in_date,
                       check_out_date: editingBooking.check_out_date,
@@ -28696,13 +28696,26 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       extra_children_with_mattress: editingBooking.extra_children_with_mattress,
                       extra_children_no_mattress: editingBooking.extra_children_no_mattress,
                     });
-                    if (!preview) return null;
+                    if (!matrixPreview) return null;
+                    // When a manual room_rate override is set, substitute it for
+                    // the matrix base rate so the preview reflects the actual
+                    // amount the server will charge (not the matrix tariff).
+                    // Extra-person charges from the matrix are still added on top.
+                    const manualRate = Number(editingBooking.room_rate || 0);
+                    const usingOverride = manualRate > 0;
+                    const preview = usingOverride ? (() => {
+                      const nights = matrixPreview.per_night.map(n => ({ ...n, base_rate: manualRate, source: 'MANUAL_OVERRIDE' }));
+                      const baseTotal = Math.round(manualRate * nights.length * 100) / 100;
+                      return { ...matrixPreview, per_night: nights, base_total: baseTotal, total: Math.round((baseTotal + matrixPreview.extras_total) * 100) / 100 };
+                    })() : matrixPreview;
                     const nightCount = preview.per_night.length;
-                    const seasonsInStay = Array.from(new Set(preview.per_night.map(n => n.season_id || 'no-season')));
+                    const seasonsInStay = Array.from(new Set(matrixPreview.per_night.map(n => n.season_id || 'no-season')));
                     return (
-                      <div className="bg-white rounded-xl border border-[#cc5a16]/20 p-3 space-y-2">
+                      <div className={cn("rounded-xl border p-3 space-y-2", usingOverride ? "bg-amber-50 border-amber-200" : "bg-white border-[#cc5a16]/20")}>
                         <div className="flex items-center justify-between text-[11px]">
-                          <span className="font-bold uppercase tracking-widest text-[#cc5a16]">Live Preview</span>
+                          <span className={cn("font-bold uppercase tracking-widest", usingOverride ? "text-amber-700" : "text-[#cc5a16]")}>
+                            Live Preview{usingOverride ? ' — Custom Rate' : ''}
+                          </span>
                           <span className="text-[10px] text-[#9c8e85]">{nightCount} night{nightCount === 1 ? '' : 's'} · {seasonsInStay.join(' + ')}</span>
                         </div>
                         {/* Per-night detail — collapsed to first 3 nights to avoid wall-of-text on long stays */}
@@ -28729,10 +28742,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               </div>
                             ))}
                             {preview.extra_lines.some(x => x.total === 0) && (() => {
-                              // Context-aware guidance. When a meal plan IS
-                              // selected, the old "Pick a meal plan to price
-                              // extras" line was contradictory — point staff to
-                              // the exact empty extra-person cell instead.
                               const mpCode = (tariffData.meal_plans || []).find((m: any) => m.id === editingBooking.meal_plan_id)?.code;
                               const seasonsLbl = seasonsInStay.filter(s => s !== 'no-season').join(' + ') || 'this season';
                               return (
@@ -28759,12 +28768,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <p className="font-mono font-bold text-[#cc5a16]">₹{preview.total.toLocaleString('en-IN')}</p>
                           </div>
                         </div>
-                        {!preview.matrix_used && (() => {
-                          // Name the EXACT empty cell so staff can see this is a
-                          // tariff-config gap (not a calculation bug) and fill it.
-                          // The per-night rate, the preview, and the folio all
-                          // read the matrix the same way — an empty cell falls
-                          // back to the room base rate by design.
+                        {usingOverride && (
+                          <p className="text-[9px] font-semibold text-amber-800">Custom rate ₹{manualRate.toLocaleString('en-IN')}/night · matrix tariff bypassed. Clear the rate field to revert to matrix.</p>
+                        )}
+                        {!usingOverride && !matrixPreview.matrix_used && (() => {
                           const rt = (tariffData.room_types || []).find((t: any) => t.id === (hotelRooms.find(r => r.id === editingBooking.room_id)?.type_id));
                           const mp = (tariffData.meal_plans || []).find((m: any) => m.id === editingBooking.meal_plan_id);
                           const seasonsLbl = seasonsInStay.filter(s => s !== 'no-season').join(' + ') || 'this season';
@@ -28777,9 +28784,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             </p>
                           );
                         })()}
-                        {Number(editingBooking.room_rate) > 0 && (
-                          <p className="text-[9px] italic text-amber-700">Manual room_rate is set ({editingBooking.room_rate}/night). The server will use THAT rate × nights and ignore this matrix preview. Clear the rate field to use the matrix.</p>
-                        )}
                       </div>
                     );
                   })()}
