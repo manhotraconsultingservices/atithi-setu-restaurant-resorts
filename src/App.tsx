@@ -23241,42 +23241,86 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           </div>
 
-          <div className="space-y-6">
-            <div className="p-6 rounded-3xl bg-[#faf7f2] flex justify-between items-center">
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Current Plan</p>
-                <p className="text-xl font-bold text-[#1a1208]">
-                  {(restaurant as any)?.subscription_type === 'ANNUALLY' ? 'Annual Professional' : 'Monthly Professional'}
-                </p>
-              </div>
-              <div className="text-right">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Status</p>
-                <span className="px-3 py-1 rounded-full bg-green-100 text-green-700 text-[11px] font-bold uppercase tracking-widest">Active</span>
-              </div>
-            </div>
+          {(() => {
+            const r = restaurant as any;
+            const PLAN_META: Record<string, { label: string; tier: string; tierColor: string }> = {
+              STARTER:          { label: 'Starter',          tier: 'Restaurant', tierColor: 'bg-blue-100 text-blue-700' },
+              PROFESSIONAL:     { label: 'Professional',     tier: 'Restaurant', tierColor: 'bg-blue-100 text-blue-700' },
+              MULTI_OUTLET:     { label: 'Multi-Outlet',     tier: 'Restaurant', tierColor: 'bg-blue-100 text-blue-700' },
+              BOUTIQUE:         { label: 'Boutique',         tier: 'Hotel',      tierColor: 'bg-amber-100 text-amber-700' },
+              RESORT:           { label: 'Resort',           tier: 'Hotel',      tierColor: 'bg-amber-100 text-amber-700' },
+              CHAIN:            { label: 'Chain',            tier: 'Hotel',      tierColor: 'bg-amber-100 text-amber-700' },
+              COMBINED_STARTER: { label: 'Combined Starter', tier: 'Combined',   tierColor: 'bg-purple-100 text-purple-700' },
+              COMBINED_PRO:     { label: 'Combined Pro',     tier: 'Combined',   tierColor: 'bg-purple-100 text-purple-700' },
+            };
+            const plan = r?.subscription_plan ? (PLAN_META[r.subscription_plan] ?? { label: r.subscription_plan, tier: 'Custom', tierColor: 'bg-gray-100 text-gray-700' }) : null;
+            const isRevoked = Number(r?.access_revoked) === 1;
+            const dueDate = r?.subscription_due_date ? new Date(r.subscription_due_date) : null;
+            const today = new Date(); today.setHours(0, 0, 0, 0);
+            const grace = Number(r?.grace_period_days ?? 7);
+            const isPastGrace = dueDate ? (today.getTime() - dueDate.getTime()) / 86400000 > grace : false;
+            const isInGrace  = dueDate ? (today > dueDate && !isPastGrace) : false;
+            const billingStatus = isRevoked ? 'SUSPENDED' : isPastGrace ? 'OVERDUE' : isInGrace ? 'GRACE' : 'ACTIVE';
+            const statusBadge = {
+              ACTIVE:    <span className="px-3 py-1 rounded-full bg-green-100 text-green-700 text-[11px] font-bold uppercase tracking-widest">Active</span>,
+              GRACE:     <span className="px-3 py-1 rounded-full bg-orange-100 text-orange-700 text-[11px] font-bold uppercase tracking-widest">Grace Period</span>,
+              OVERDUE:   <span className="px-3 py-1 rounded-full bg-red-100 text-red-700 text-[11px] font-bold uppercase tracking-widest">Overdue</span>,
+              SUSPENDED: <span className="px-3 py-1 rounded-full bg-red-200 text-red-800 text-[11px] font-bold uppercase tracking-widest">Suspended</span>,
+            }[billingStatus];
+            return (
+              <div className="space-y-6">
+                <div className="p-6 rounded-3xl bg-[#faf7f2] flex justify-between items-start gap-4">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Current Plan</p>
+                    {plan ? (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="text-xl font-bold text-[#1a1208]">{plan.label}</p>
+                        <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold", plan.tierColor)}>{plan.tier} Tier</span>
+                      </div>
+                    ) : (
+                      <p className="text-xl font-bold text-[#9c8e85]">Not assigned</p>
+                    )}
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Status</p>
+                    {statusBadge}
+                  </div>
+                </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="p-6 rounded-3xl border border-[#cc5a16]/10">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Registered On</p>
-                <p className="font-bold">
-                  {(restaurant as any)?.registered_at ? new Date((restaurant as any).registered_at).toLocaleDateString() : 'N/A'}
-                </p>
-              </div>
-              <div className="p-6 rounded-3xl border border-[#cc5a16]/10">
-                <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Renewal Due</p>
-                <p className="font-bold text-orange-600">
-                  {(restaurant as any)?.subscription_expires_at ? new Date((restaurant as any).subscription_expires_at).toLocaleDateString() : 'N/A'}
-                </p>
-              </div>
-            </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="p-6 rounded-3xl border border-[#cc5a16]/10">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Registered On</p>
+                    <p className="font-bold">
+                      {r?.registered_at ? new Date(r.registered_at).toLocaleDateString() : 'N/A'}
+                    </p>
+                  </div>
+                  <div className="p-6 rounded-3xl border border-[#cc5a16]/10">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Next Renewal</p>
+                    <p className={cn("font-bold", dueDate && isInGrace ? "text-orange-600" : dueDate && isPastGrace ? "text-red-600" : "")}>
+                      {dueDate ? dueDate.toLocaleDateString() : r?.subscription_expires_at ? new Date(r.subscription_expires_at).toLocaleDateString() : 'N/A'}
+                    </p>
+                  </div>
+                  <div className="p-6 rounded-3xl border border-[#cc5a16]/10">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Business Type</p>
+                    <p className="font-bold capitalize">{(r?.property_type || 'RESTAURANT').toLowerCase().replace('_', ' + ')}</p>
+                  </div>
+                  {r?.last_payment_date && (
+                    <div className="p-6 rounded-3xl border border-[#cc5a16]/10">
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Last Payment</p>
+                      <p className="font-bold">{new Date(r.last_payment_date).toLocaleDateString()}{r?.last_payment_amount ? ` — ₹${Number(r.last_payment_amount).toLocaleString('en-IN')}` : ''}</p>
+                    </div>
+                  )}
+                </div>
 
-            <div className="bg-blue-50 p-6 rounded-3xl border border-blue-100 flex gap-4">
-              <Info className="text-blue-500 shrink-0" size={20} />
-              <p className="text-xs text-blue-700 leading-relaxed">
-                Your subscription is managed by your assigned Sales Representative. For renewals or plan changes, please contact support or your representative.
-              </p>
-            </div>
-          </div>
+                <div className="bg-blue-50 p-6 rounded-3xl border border-blue-100 flex gap-4">
+                  <Info className="text-blue-500 shrink-0" size={20} />
+                  <p className="text-xs text-blue-700 leading-relaxed">
+                    Your subscription is managed by your assigned Sales Representative. For renewals or plan upgrades, please contact support or your representative.
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       ) : activeTab === 'MONITOR' ? (
         // Hotel-mode owners see the hotel Command & Control (rooms,
@@ -42723,12 +42767,20 @@ function SuperAdminDashboard({ token }: { token: string }) {
                               className="bg-[#faf7f2] rounded-lg px-2 py-1 text-xs font-semibold border-none outline-none"
                             >
                               <option value="">—</option>
-                              <option value="STARTER">Starter</option>
-                              <option value="PROFESSIONAL">Professional</option>
-                              <option value="MULTI_OUTLET">Multi-outlet</option>
-                              <option value="BOUTIQUE">Boutique (hotel)</option>
-                              <option value="RESORT">Resort (hotel)</option>
-                              <option value="CHAIN">Chain (hotel)</option>
+                              <optgroup label="Restaurant Tier">
+                                <option value="STARTER">Starter</option>
+                                <option value="PROFESSIONAL">Professional</option>
+                                <option value="MULTI_OUTLET">Multi-outlet</option>
+                              </optgroup>
+                              <optgroup label="Hotel Tier">
+                                <option value="BOUTIQUE">Boutique</option>
+                                <option value="RESORT">Resort</option>
+                                <option value="CHAIN">Chain</option>
+                              </optgroup>
+                              <optgroup label="Combined Tier">
+                                <option value="COMBINED_STARTER">Combined Starter</option>
+                                <option value="COMBINED_PRO">Combined Pro</option>
+                              </optgroup>
                             </select>
                           </td>
                           <td className="py-3 px-3">
@@ -43027,7 +43079,11 @@ function CTODashboard({ token }: { token: string }) {
   const [selectedSalesRep, setSelectedSalesRep] = useState<string | null>(null);
   const [salesRepRestaurants, setSalesRepRestaurants] = useState<any[]>([]);
   const [viewMode, setViewMode] = useState<'REPORTS' | 'USERS' | 'SUBSCRIPTIONS'>('REPORTS');
-  const [prices, setPrices] = useState({ monthly_price: '999', annual_price: '9999' });
+  const [prices, setPrices] = useState({
+    monthly_price: '999', annual_price: '9999',
+    monthly_price_hotel: '1999', annual_price_hotel: '19999',
+    monthly_price_combined: '2499', annual_price_combined: '24999',
+  });
   const [isSavingPrices, setIsSavingPrices] = useState(false);
 
   useEffect(() => {
@@ -43296,32 +43352,45 @@ function CTODashboard({ token }: { token: string }) {
           ))}
         </div>
       ) : (
-        <div className="bg-white p-10 rounded-[32px] border border-[#cc5a16]/10 shadow-sm max-w-2xl mx-auto">
+        <div className="bg-white p-10 rounded-[32px] border border-[#cc5a16]/10 shadow-sm max-w-3xl mx-auto">
           <h3 className="text-2xl font-bold font-serif mb-8 flex items-center gap-2">
-            <CreditCard size={28} /> Subscription Pricing
+            <CreditCard size={28} /> Subscription Pricing — by Tier
           </h3>
           <div className="space-y-6">
-            <div className="grid grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Monthly Price (₹)</label>
-                <input 
-                  type="number"
-                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-6 py-4 outline-none font-bold"
-                  value={prices.monthly_price}
-                  onChange={e => setPrices({...prices, monthly_price: e.target.value})}
-                />
+            {/* Per-tier pricing grid */}
+            {([
+              { tier: 'Restaurant', plans: 'Starter / Professional / Multi-Outlet', key: '' as const },
+              { tier: 'Hotel',      plans: 'Boutique / Resort / Chain',             key: '_hotel' as const },
+              { tier: 'Combined',   plans: 'Restaurant + Hotel together',           key: '_combined' as const },
+            ] as { tier: string; plans: string; key: '' | '_hotel' | '_combined' }[]).map(({ tier, plans, key }) => (
+              <div key={tier} className="bg-[#faf7f2] rounded-3xl p-6 space-y-4">
+                <div>
+                  <p className="font-bold text-sm">{tier} Tier</p>
+                  <p className="text-[11px] text-[#9c8e85]">{plans}</p>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] ml-1">Monthly (₹)</label>
+                    <input
+                      type="number"
+                      className="w-full bg-white border-none rounded-2xl px-4 py-3 outline-none font-bold text-sm"
+                      value={(prices as any)[`monthly_price${key}`]}
+                      onChange={e => setPrices({ ...prices, [`monthly_price${key}`]: e.target.value } as typeof prices)}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] ml-1">Annual (₹)</label>
+                    <input
+                      type="number"
+                      className="w-full bg-white border-none rounded-2xl px-4 py-3 outline-none font-bold text-sm"
+                      value={(prices as any)[`annual_price${key}`]}
+                      onChange={e => setPrices({ ...prices, [`annual_price${key}`]: e.target.value } as typeof prices)}
+                    />
+                  </div>
+                </div>
               </div>
-              <div className="space-y-2">
-                <label className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] ml-2">Annual Price (₹)</label>
-                <input 
-                  type="number"
-                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-6 py-4 outline-none font-bold"
-                  value={prices.annual_price}
-                  onChange={e => setPrices({...prices, annual_price: e.target.value})}
-                />
-              </div>
-            </div>
-            <button 
+            ))}
+            <button
               onClick={savePrices}
               disabled={isSavingPrices}
               className="w-full bg-[#cc5a16] text-white py-4 rounded-2xl font-bold hover:bg-[#a84612] transition-all disabled:opacity-50"
@@ -43331,7 +43400,7 @@ function CTODashboard({ token }: { token: string }) {
             <div className="bg-orange-50 p-6 rounded-3xl border border-orange-100 flex gap-4">
               <Info className="text-orange-500 shrink-0" size={20} />
               <p className="text-xs text-orange-700 leading-relaxed">
-                Only the CTO can modify global subscription pricing. These prices will be visible to all sales representatives and business owners.
+                Only the CTO can modify tier pricing. Prices are shown on the owner Subscription tab based on their assigned plan. Restaurant tier uses the default Monthly / Annual price.
               </p>
             </div>
           </div>

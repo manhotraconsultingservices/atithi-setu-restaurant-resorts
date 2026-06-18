@@ -34003,26 +34003,53 @@ ${data.tenant.name}`;
     }
   });
 
-  // Admin: Get Subscription Prices
+  // Admin: Get Subscription Prices (per-tier: restaurant / hotel / combined)
   app.get("/api/admin/subscription-prices", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const monthly = await centralDb.get("SELECT current_value FROM sequences WHERE name = 'price_monthly'");
-      const annual = await centralDb.get("SELECT current_value FROM sequences WHERE name = 'price_annual'");
+      const keys = ['price_monthly', 'price_annual', 'price_monthly_hotel', 'price_annual_hotel', 'price_monthly_combined', 'price_annual_combined'];
+      const defaults: Record<string, string> = {
+        price_monthly: '999', price_annual: '9999',
+        price_monthly_hotel: '1999', price_annual_hotel: '19999',
+        price_monthly_combined: '2499', price_annual_combined: '24999',
+      };
+      const rows: any[] = await centralDb.query(
+        `SELECT name, current_value FROM sequences WHERE name IN (${keys.map(() => '?').join(',')})`,
+        keys
+      );
+      const map: Record<string, string> = {};
+      for (const r of rows) map[r.name] = String(r.current_value);
       res.json({
-        monthly_price: monthly ? String(monthly.current_value) : '999',
-        annual_price: annual ? String(annual.current_value) : '9999'
+        monthly_price:            map['price_monthly']           ?? defaults['price_monthly'],
+        annual_price:             map['price_annual']            ?? defaults['price_annual'],
+        monthly_price_hotel:      map['price_monthly_hotel']     ?? defaults['price_monthly_hotel'],
+        annual_price_hotel:       map['price_annual_hotel']      ?? defaults['price_annual_hotel'],
+        monthly_price_combined:   map['price_monthly_combined']  ?? defaults['price_monthly_combined'],
+        annual_price_combined:    map['price_annual_combined']   ?? defaults['price_annual_combined'],
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch subscription prices" });
     }
   });
 
-  // Admin: Save Subscription Prices
+  // Admin: Save Subscription Prices (per-tier)
   app.post("/api/admin/subscription-prices", authenticate, isAdmin, async (req: AuthRequest, res: Response) => {
     try {
-      const { monthly_price, annual_price } = req.body;
-      await centralDb.run(`INSERT INTO sequences (name, current_value) VALUES ('price_monthly', ?) ON CONFLICT (name) DO UPDATE SET current_value = ?`, [monthly_price, monthly_price]);
-      await centralDb.run(`INSERT INTO sequences (name, current_value) VALUES ('price_annual', ?) ON CONFLICT (name) DO UPDATE SET current_value = ?`, [annual_price, annual_price]);
+      const fields: Record<string, string> = {
+        price_monthly:           req.body.monthly_price,
+        price_annual:            req.body.annual_price,
+        price_monthly_hotel:     req.body.monthly_price_hotel,
+        price_annual_hotel:      req.body.annual_price_hotel,
+        price_monthly_combined:  req.body.monthly_price_combined,
+        price_annual_combined:   req.body.annual_price_combined,
+      };
+      for (const [name, val] of Object.entries(fields)) {
+        if (val !== undefined && val !== null) {
+          await centralDb.run(
+            `INSERT INTO sequences (name, current_value) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET current_value = ?`,
+            [name, val, val]
+          );
+        }
+      }
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to save subscription prices" });
