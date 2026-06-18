@@ -19300,7 +19300,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             >{lcStyle.label}</span>
                           </td>
                         )}
-                        {colOn('total') && <td className="px-4 py-3 text-right font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>}
+                        {colOn('total') && (
+                          <td className="px-4 py-3 text-right">
+                            <div className="font-mono text-[#1a1208]">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</div>
+                            {Number(b.room_rate || 0) > 0 && (
+                              <div className="text-[9px] font-bold whitespace-nowrap mt-0.5">
+                                <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded">
+                                  ₹{Number(b.room_rate).toLocaleString('en-IN')}/night
+                                  {(b.status === 'CHECKED_IN' || b.status === 'CHECKED_OUT') ? ' 🔒' : ' (custom)'}
+                                </span>
+                              </div>
+                            )}
+                          </td>
+                        )}
                         {colOn('restaurant') && (
                           <td className="px-4 py-3 text-right whitespace-nowrap">
                             {Number(b.fnb_total || 0) > 0 ? (
@@ -28784,9 +28796,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     value={editingBooking.room_rate || ''}
                     placeholder="0 = use matrix tariff"
                     onChange={e => setEditingBooking({...editingBooking, room_rate: Number(e.target.value)||0})}
-                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                    className={cn("w-full border-none rounded-2xl px-4 py-3 focus:ring-2 outline-none",
+                      Number(editingBooking.room_rate || 0) > 0
+                        ? "bg-amber-50 ring-amber-300 text-amber-900 font-semibold"
+                        : "bg-[#faf7f2] ring-[#cc5a16]/20")}
                   />
-                  <p className="text-[9px] text-[#9c8e85] mt-1">Blank → matrix tariff is used. Type a value only to override.</p>
+                  {Number(editingBooking.room_rate || 0) > 0 ? (
+                    <p className="text-[9px] text-amber-700 mt-1 font-semibold">Custom/negotiated rate — matrix tariff bypassed. This rate locks permanently at check-in.</p>
+                  ) : (
+                    <p className="text-[9px] text-[#9c8e85] mt-1">Blank → matrix tariff is used. Type a value only to override (e.g. negotiated or discounted rate).</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
@@ -34510,9 +34529,15 @@ const CheckInWizardModal: React.FC<{
   };
   const openRoomPicker = () => { setRoomPickerOpen(true); if (availRooms == null) loadAvailableRooms(); };
   const pickRoom = (r: any) => {
-    // room_rate = 0 → server resolves the new room's per-night rate when the
-    // folio is created at check-in (handles upgrade / season / matrix pricing).
-    updateDraft({ room_id: r.id, room_rate: 0 });
+    // If the booking had a manually-negotiated rate AND the new room is the same
+    // category, keep the agreed rate (e.g. reassignment due to room issue — guest
+    // shouldn't reprice). For a genuine category change (upgrade/downgrade) reset
+    // to 0 so the server resolves the new room's matrix tariff at check-in.
+    const origRate = Number(booking.room_rate || 0);
+    const curRoom = (availRooms || []).find((ar: any) => ar.id === (draft.room_id ?? booking.room_id));
+    const sameCategory = curRoom?.type_id != null && r.type_id != null
+      && String(curRoom.type_id) === String(r.type_id);
+    updateDraft({ room_id: r.id, room_rate: (origRate > 0 && sameCategory) ? origRate : 0 });
     setRoomPickerOpen(false);
   };
   // Money picture for the wizard — used by the room picker (new-room cost) and
