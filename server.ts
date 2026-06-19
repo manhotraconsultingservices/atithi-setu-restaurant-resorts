@@ -21652,7 +21652,8 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       const profile = await db.get("SELECT * FROM spa_profile WHERE restaurant_id = ?", [req.params.id]);
-      res.json(profile || { restaurant_id: req.params.id, hero_image_url: null, tagline: null, offers: null });
+      const restRow: any = await centralDb.get("SELECT booking_slug FROM restaurants WHERE id = ?", [req.params.id]);
+      res.json({ ...(profile || { restaurant_id: req.params.id, hero_image_url: null, tagline: null, offers: null }), booking_slug: restRow?.booking_slug || null });
     } catch (err: any) { res.status(500).json({ error: "Failed to load spa profile" }); }
   });
 

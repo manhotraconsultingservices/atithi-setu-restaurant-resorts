@@ -730,7 +730,9 @@ function SpaSettings({ restaurantId, token }: Props) {
   });
   const removeOffer = (i: number) => setProfile((p: any) => ({ ...p, offers: (p.offers || []).filter((_: any, idx: number) => idx !== i) }));
 
-  const publicUrl = `${window.location.origin}/spa/${restaurantId}`;
+  const slug = profile.booking_slug || restaurantId;
+  const publicUrl = `${window.location.origin}/spa/${slug}`;
+  const qrImgUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(publicUrl)}&format=png`;
 
   return (
     <div className="space-y-6">
@@ -742,6 +744,18 @@ function SpaSettings({ restaurantId, token }: Props) {
         <div className="flex items-center gap-2">
           <a href={publicUrl} target="_blank" rel="noreferrer" className="flex-1 text-sm text-[#cc5a16] underline break-all">{publicUrl}</a>
           <button className={BTN_GHOST} onClick={() => navigator.clipboard.writeText(publicUrl)}>Copy</button>
+        </div>
+      </div>
+
+      {/* QR code */}
+      <div className={CARD}>
+        <p className="text-xs font-semibold text-[#6b5d52] mb-3">QR Code</p>
+        <div className="flex items-start gap-4">
+          <img src={qrImgUrl} alt="Booking QR Code" className="w-32 h-32 rounded-xl border border-[#e8dccf] flex-shrink-0" />
+          <div className="flex-1 space-y-2">
+            <p className="text-xs text-[#9d8b7e]">Guests scan this with any mobile camera to open your online booking page. Print it on menus, tent cards, reception desk, or social media.</p>
+            <a href={qrImgUrl} download="spa-booking-qr.png" className={BTN_GHOST} style={{ display: 'inline-flex' }}>Download QR</a>
+          </div>
         </div>
       </div>
 
@@ -873,7 +887,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
       let r = await fetch(`/api/public/restaurant/${encodeURIComponent(id)}/spa`);
       if (r.status === 404) {
         const r2 = await fetch(`/api/public/restaurant/by-slug/${encodeURIComponent(tenantId)}`);
-        if (r2.ok) { const j = await r2.json(); if (j.tenantId) { id = j.tenantId; r = await fetch(`/api/public/restaurant/${encodeURIComponent(id)}/spa`); } }
+        if (r2.ok) { const j = await r2.json(); if (j.id) { id = j.id; r = await fetch(`/api/public/restaurant/${encodeURIComponent(id)}/spa`); } }
       }
       if (r.ok) { setRestaurantId(id); setData(await r.json()); } else setData({ error: true });
     } catch { setData({ error: true }); }
