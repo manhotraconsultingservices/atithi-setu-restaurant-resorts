@@ -13094,6 +13094,34 @@ async function startServer() {
         return res.status(409).json({ error: `Run is ${fresh?.status} — must be DRAFT to approve`, run: fresh });
       }
       const run = await db.get("SELECT * FROM payroll_runs WHERE id = ?", [req.params.runId]);
+
+      // ── Post salary expense to accounts ledger (petty_cash) ──────────────
+      // This makes payroll visible in the Expense Journal once HR finalises.
+      try {
+        await _ensurePettyCash(db);
+        await db.exec("ALTER TABLE petty_cash ADD COLUMN IF NOT EXISTS reference_id TEXT").catch(() => {});
+        const refKey = `PAYROLL-${req.params.runId}`;
+        const alreadyPosted = await db.get("SELECT id FROM petty_cash WHERE reference_id = ?", [refKey]);
+        if (!alreadyPosted && run && Number(run.total_gross) > 0) {
+          const monthPad = String(run.month).padStart(2, '0');
+          const pcId = `PC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+          await db.run(
+            `INSERT INTO petty_cash (id, entry_date, direction, category, amount, notes, recorded_by, module, reference_id)
+             VALUES (?, ?, 'OUT', 'SALARY', ?, ?, ?, 'SHARED', ?)`,
+            [
+              pcId,
+              new Date().toISOString().slice(0, 10),
+              Math.round(Number(run.total_gross) * 100) / 100,
+              `Payroll ${run.year}-${monthPad}: ${run.employee_count || 0} employees | Net ${Math.round(Number(run.total_net))} | Deductions ${Math.round(Number(run.total_deductions))}`,
+              req.user?.email || req.user?.id || 'hr-system',
+              refKey,
+            ]
+          );
+        }
+      } catch (ledgerErr) {
+        console.error('payroll approve: ledger write failed (non-fatal):', ledgerErr);
+      }
+
       res.json({ run });
     } catch (err: any) {
       console.error('payroll/runs approve error:', err);

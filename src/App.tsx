@@ -53844,6 +53844,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [payslips, setPayslips] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
   const cur = useTenantFormatter(restaurant);
   const refresh = useCallback(() => {
     fetch(`/api/restaurant/${restaurantId}/payroll/runs`, { headers: { Authorization: `Bearer ${token}` } })
@@ -53861,24 +53862,32 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
     const now = new Date();
     const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
     const month = now.getMonth() === 0 ? 12 : now.getMonth();
-    setBusy(true);
-    await fetch(`/api/restaurant/${restaurantId}/payroll/runs`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ year, month }),
-    });
+    setBusy(true); setActionError('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/payroll/runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ year, month }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        setActionError(e.error || `Run ${year}-${String(month).padStart(2,'0')} already exists or creation failed`);
+      }
+    } catch { setActionError('Network error — could not create run'); }
     setBusy(false);
     refresh();
   }
   async function runAction(action: 'compute' | 'approve' | 'lock' | 'mark-paid') {
     if (!selectedRunId) return;
-    setBusy(true);
-    const res = await fetch(`/api/restaurant/${restaurantId}/payroll/runs/${selectedRunId}/${action}`, {
-      method: 'POST', headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      alert(err.error || `${action} failed`);
-    }
+    setBusy(true); setActionError('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/payroll/runs/${selectedRunId}/${action}`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setActionError(err.error || `${action} failed`);
+      }
+    } catch { setActionError(`Network error — ${action} failed`); }
     setBusy(false);
     refresh();
     if (selectedRunId) {
@@ -53940,15 +53949,17 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
             + Create prior-month draft
           </button>
         </div>
+        {actionError && <p className="text-xs text-red-600 bg-red-50 rounded-xl px-3 py-2 mb-2">{actionError}</p>}
         <div className="space-y-1 max-h-72 overflow-y-auto">
           {runs.length === 0 ? <p className="text-xs italic text-[#9c8e85]">No payroll runs yet.</p> :
             runs.map(r => (
-              <button key={r.id} onClick={() => setSelectedRunId(r.id)}
+              <button key={r.id} onClick={() => { setSelectedRunId(r.id); setActionError(''); }}
                 className={cn('w-full text-left p-3 rounded-xl border text-xs flex items-center justify-between',
                   selectedRunId === r.id ? 'bg-[#fff7e5] border-[#cc5a16]' : 'bg-white border-[#e8dccf]')}>
                 <span>
                   <b>{r.year}-{String(r.month).padStart(2, '0')}</b>
                   <span className="ml-3 text-[#9c8e85]">{r.period_start} – {r.period_end}</span>
+                  {r.employee_count > 0 && <span className="ml-2 text-[#9c8e85]">· {r.employee_count} emp</span>}
                 </span>
                 <span>
                   <span className={cn('px-2 py-0.5 rounded-full font-bold text-[10px]',
@@ -53981,6 +53992,12 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
             <div className="bg-[#faf7f2] rounded-xl p-2"><span className="text-[#9c8e85]">Deductions</span><br/><b>{cur(Number(run.total_deductions))}</b></div>
             <div className="bg-[#faf7f2] rounded-xl p-2"><span className="text-[#9c8e85]">Net pay</span><br/><b className="text-[#cc5a16]">{cur(Number(run.total_net))}</b></div>
           </div>
+          {['APPROVED','LOCKED','PAID'].includes(run.status) && (
+            <div className="text-[10px] text-green-700 bg-green-50 rounded-xl px-3 py-1.5 mb-3 flex items-center gap-1.5">
+              <span>✓</span>
+              <span>Salary expense of {cur(Number(run.total_gross))} posted to accounts ledger on approval</span>
+            </div>
+          )}
           {payslips.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
@@ -53993,7 +54010,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
                     <th className="py-1 pr-2">PT</th>
                     <th className="py-1 pr-2">TDS</th>
                     <th className="py-1 pr-2">Net</th>
-                    <th className="py-1 pr-2"></th>
+                    <th className="py-1 pr-2" colSpan={2}></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -54008,6 +54025,15 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
                       <td className="py-1.5 pr-2 font-bold">{cur(Number(p.net_pay))}</td>
                       <td className="py-1.5">
                         <button onClick={() => openPayslipPdf(p.id)} className="text-[10px] text-[#cc5a16] hover:underline">PDF</button>
+                      </td>
+                      <td className="py-1.5 pl-1">
+                        {['APPROVED','LOCKED','PAID'].includes(run.status) && (
+                          <button onClick={async () => {
+                            const r = await fetch(`/api/restaurant/${restaurantId}/payroll/payslips/${p.id}/email`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+                            if (!r.ok) setActionError('Email send failed');
+                            else setActionError('');
+                          }} className="text-[10px] text-blue-600 hover:underline">Email</button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -54027,6 +54053,9 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
 function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
   const [claims, setClaims] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>('SUBMITTED');
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [actError, setActError] = useState('');
   const cur = useTenantFormatter(restaurant);
   const refresh = useCallback(() => {
     const u = new URL(`/api/restaurant/${restaurantId}/hr/expenses`, window.location.origin);
@@ -54036,14 +54065,23 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
       .catch(() => setClaims([]));
   }, [restaurantId, token, statusFilter]);
   useEffect(() => { refresh(); }, [refresh]);
-  async function actOn(id: string, action: 'submit' | 'approve' | 'reject') {
-    const body: any = {};
-    if (action === 'reject') body.reason = prompt('Rejection reason:') || 'Rejected';
-    await fetch(`/api/restaurant/${restaurantId}/hr/expenses/${id}/${action}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-    });
-    refresh();
+  async function actOn(id: string, action: 'submit' | 'approve' | 'reject', reason?: string) {
+    setActError('');
+    try {
+      const body: any = {};
+      if (action === 'reject') body.reason = reason || 'Rejected';
+      const res = await fetch(`/api/restaurant/${restaurantId}/hr/expenses/${id}/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        setActError(e.error || `${action} failed`);
+        return;
+      }
+      setRejectingId(null); setRejectReason('');
+      refresh();
+    } catch { setActError('Network error — action failed'); }
   }
   return (
     <div className="space-y-3">
@@ -54053,6 +54091,7 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
             statusFilter === s ? 'bg-[#cc5a16] text-white' : 'border border-[#e8dccf] text-[#6b5d52]')}>{s}</button>
         ))}
       </div>
+      {actError && <p className="text-xs text-red-600 bg-red-50 rounded-xl px-3 py-2">{actError}</p>}
       <div className="bg-white rounded-3xl border border-[#e8dccf]">
         {claims.length === 0 ? <p className="p-6 text-xs italic text-[#9c8e85] text-center">No claims with this status.</p> :
           <table className="w-full text-xs">
@@ -54061,23 +54100,51 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
             </tr></thead>
             <tbody>
               {claims.map(c => (
-                <tr key={c.id} className="border-b border-[#f1ece3]">
-                  <td className="p-3 font-mono">{c.claim_number}</td>
-                  <td className="p-3">{c.staff_name}<div className="text-[10px] text-[#9c8e85]">{c.designation}</div></td>
-                  <td className="p-3">{c.claim_date}</td>
-                  <td className="p-3 font-bold">{cur(Number(c.total_amount))}</td>
-                  <td className="p-3">{c.status}</td>
-                  <td className="p-3 space-x-1">
-                    {c.status === 'SUBMITTED' && <>
-                      <button onClick={() => actOn(c.id, 'approve')} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Mgr OK</button>
-                      <button onClick={() => actOn(c.id, 'reject')} className="px-2 py-1 rounded bg-red-600 text-white text-[10px]">Reject</button>
-                    </>}
-                    {c.status === 'MANAGER_APPROVED' && <>
-                      <button onClick={() => actOn(c.id, 'approve')} className="px-2 py-1 rounded bg-green-600 text-white text-[10px]">HR OK</button>
-                      <button onClick={() => actOn(c.id, 'reject')} className="px-2 py-1 rounded bg-red-600 text-white text-[10px]">Reject</button>
-                    </>}
-                  </td>
-                </tr>
+                <React.Fragment key={c.id}>
+                  <tr className="border-b border-[#f1ece3]">
+                    <td className="p-3 font-mono">{c.claim_number}</td>
+                    <td className="p-3">{c.staff_name || '—'}<div className="text-[10px] text-[#9c8e85]">{c.designation || ''}</div></td>
+                    <td className="p-3">{c.claim_date}</td>
+                    <td className="p-3 font-bold">{cur(Number(c.total_amount))}</td>
+                    <td className="p-3">
+                      <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold',
+                        c.status === 'SUBMITTED' && 'bg-yellow-100 text-yellow-700',
+                        c.status === 'MANAGER_APPROVED' && 'bg-blue-100 text-blue-700',
+                        c.status === 'HR_APPROVED' && 'bg-purple-100 text-purple-700',
+                        c.status === 'REIMBURSED' && 'bg-green-100 text-green-700',
+                        c.status === 'REJECTED' && 'bg-red-100 text-red-700',
+                      )}>{c.status}</span>
+                    </td>
+                    <td className="p-3 space-x-1">
+                      {c.status === 'SUBMITTED' && <>
+                        <button onClick={() => actOn(c.id, 'approve')} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Mgr OK</button>
+                        <button onClick={() => { setRejectingId(c.id); setRejectReason(''); }} className="px-2 py-1 rounded bg-red-600 text-white text-[10px]">Reject</button>
+                      </>}
+                      {c.status === 'MANAGER_APPROVED' && <>
+                        <button onClick={() => actOn(c.id, 'approve')} className="px-2 py-1 rounded bg-green-600 text-white text-[10px]">HR OK</button>
+                        <button onClick={() => { setRejectingId(c.id); setRejectReason(''); }} className="px-2 py-1 rounded bg-red-600 text-white text-[10px]">Reject</button>
+                      </>}
+                      {c.status === 'HR_APPROVED' && <span className="text-[10px] text-[#9c8e85]">Awaiting payroll</span>}
+                      {c.status === 'REIMBURSED' && <span className="text-[10px] text-green-600">✓ Reimbursed</span>}
+                      {c.status === 'REJECTED' && <span className="text-[10px] text-red-500">Rejected</span>}
+                    </td>
+                  </tr>
+                  {rejectingId === c.id && (
+                    <tr className="bg-red-50">
+                      <td colSpan={6} className="px-4 py-3">
+                        <div className="flex gap-2 items-center">
+                          <input value={rejectReason} onChange={e => setRejectReason(e.target.value)}
+                            placeholder="Rejection reason (required)"
+                            className="flex-1 border border-red-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-red-400" />
+                          <button onClick={() => actOn(c.id, 'reject', rejectReason || 'Rejected by HR')}
+                            className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-bold">Confirm reject</button>
+                          <button onClick={() => { setRejectingId(null); setRejectReason(''); }}
+                            className="px-3 py-1.5 rounded-lg border border-[#e8dccf] text-xs">Cancel</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>
@@ -54200,23 +54267,27 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
 }
 
 // ─── Statutory Config Settings ─────────────────────────────────────
+const STATUTORY_DEFAULTS = { pf_enabled: 1, esi_enabled: 1, pt_state: 'MH', tds_regime_default: 'NEW', pf_wage_ceiling: 15000, esi_wage_ceiling: 21000, pan_employer: '', tan_employer: '', pf_estab_code: '', esi_employer_code: '' };
 function StatutoryConfigEditor({ restaurantId, token }: { restaurantId: string; token: string }) {
   const [cfg, setCfg] = useState<any>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState('');
   useEffect(() => {
     fetch(`/api/restaurant/${restaurantId}/hr/statutory-config`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json()).then(d => setCfg(d.config))
-      .catch(() => setCfg({}));
+      .then(r => r.json()).then(d => setCfg(d.config || STATUTORY_DEFAULTS))
+      .catch(() => setCfg(STATUTORY_DEFAULTS));
   }, [restaurantId, token]);
   async function save() {
-    setSaving(true);
-    const res = await fetch(`/api/restaurant/${restaurantId}/hr/statutory-config`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(cfg),
-    });
-    if (res.ok) { setSaved(true); setTimeout(() => setSaved(false), 2000); }
-    else { const e = await res.json(); alert(e.error || 'Save failed'); }
+    setSaving(true); setSaveError('');
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hr/statutory-config`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(cfg),
+      });
+      if (res.ok) { setSaved(true); setTimeout(() => setSaved(false), 3000); }
+      else { const e = await res.json().catch(() => ({})); setSaveError(e.error || 'Save failed'); }
+    } catch { setSaveError('Network error — save failed'); }
     setSaving(false);
   }
   if (!cfg) return <p className="text-xs italic text-[#9c8e85]">Loading…</p>;
@@ -54256,9 +54327,10 @@ function StatutoryConfigEditor({ restaurantId, token }: { restaurantId: string; 
           <input value={cfg.esi_employer_code || ''} onChange={e => setCfg({ ...cfg, esi_employer_code: e.target.value })} className="w-full mt-1 px-2 py-1.5 rounded-lg border border-[#e8dccf]" />
         </label>
       </div>
+      {saveError && <p className="text-xs text-red-600 bg-red-50 rounded-xl px-3 py-2">{saveError}</p>}
       <div className="flex justify-end items-center gap-2 pt-3 border-t border-[#e8dccf]">
-        {saved && <span className="text-xs text-green-700">✓ Saved</span>}
-        <button onClick={save} disabled={saving} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">{saving ? 'Saving…' : 'Save'}</button>
+        {saved && <span className="text-xs text-green-700 font-semibold">✓ Saved</span>}
+        <button onClick={save} disabled={saving} className="px-3 py-1.5 rounded-xl bg-[#cc5a16] text-white text-xs font-bold">{saving ? 'Saving…' : 'Save settings'}</button>
       </div>
     </div>
   );
