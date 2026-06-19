@@ -1006,9 +1006,9 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
       )}
 
       {/* ── Main content ── */}
-      <div className="max-w-2xl mx-auto px-4 pb-12" style={{ marginTop: offers.length > 0 ? 8 : -24 }}>
+      <div className="max-w-2xl mx-auto px-4 pb-12" style={{ marginTop: offers.length > 0 ? 12 : 24 }}>
         {/* Step indicator */}
-        <div className="flex items-center justify-center gap-1 mb-6">
+        <div className="bg-white rounded-2xl shadow-md px-5 py-4 mb-6 flex items-center justify-center gap-1">
           {['Treatment', 'Date & Time', 'Your Details'].map((label, i) => {
             const n = i + 1;
             const active = step === n;
