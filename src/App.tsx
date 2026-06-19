@@ -52295,6 +52295,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   const [supForm, setSupForm] = useState({ ...EMPTY_SUP });
   const [supSaving, setSupSaving] = useState(false);
   const [supSearch, setSupSearch] = useState('');
+  const [supView, setSupView] = useState<'CARD' | 'TABLE'>('CARD');
 
   // ── PO sub-tab ────────────────────────────────────────────────────────────
   const [purchaseOrders, setPurchaseOrders] = useState<any[]>([]);
@@ -52623,13 +52624,60 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                 className="pl-8 bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none w-56 focus:ring-2 ring-[#cc5a16]/20" />
             </div>
             <div className="flex-1" />
+            {/* View toggle */}
+            <div className="flex rounded-xl overflow-hidden border border-[#cc5a16]/20">
+              <button onClick={() => setSupView('CARD')} title="Card view"
+                className={cn("p-2 transition-colors", supView === 'CARD' ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10')}>
+                <LayoutGrid size={15} />
+              </button>
+              <button onClick={() => setSupView('TABLE')} title="Table view"
+                className={cn("p-2 transition-colors", supView === 'TABLE' ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] text-[#6b5d52] hover:bg-[#cc5a16]/10')}>
+                <List size={15} />
+              </button>
+            </div>
             <button onClick={openNewSupplier}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">
               <Plus size={14} /> New Supplier
             </button>
           </div>
 
-          {filteredSuppliers.length === 0 ? (
+          {supView === 'TABLE' ? (
+            <DataTable
+              data={filteredSuppliers}
+              rowKey={(s: any) => s.id}
+              searchPlaceholder="Search name, contact, email…"
+              exportFilename="suppliers"
+              emptyMessage={supSearch ? 'No suppliers match your search.' : 'No suppliers yet.'}
+              compact
+              columns={[
+                { key: 'name', label: 'Supplier', sortable: true, render: (s: any) => (
+                  <div>
+                    <p className="font-semibold text-[#1a1208]">{s.name}</p>
+                    {s.supplier_type && s.supplier_type !== 'GENERAL' && (
+                      <span className="text-[10px] font-bold bg-[#faf7f2] text-[#9c8e85] px-1.5 py-0.5 rounded-full">{s.supplier_type}</span>
+                    )}
+                  </div>
+                )},
+                { key: 'contact_name', label: 'Contact', sortable: true, render: (s: any) => <span className="text-sm">{s.contact_name || '—'}</span> },
+                { key: 'phone', label: 'Phone', render: (s: any) => <span className="text-xs font-mono text-[#6b5d52]">{s.phone || '—'}</span> },
+                { key: 'email', label: 'Email', render: (s: any) => <span className="text-xs text-[#6b5d52] truncate max-w-[160px] block">{s.email || '—'}</span> },
+                { key: 'ap_outstanding', label: 'Outstanding', sortable: true, align: 'right', getValue: (s: any) => Number(s.ap_outstanding),
+                  render: (s: any) => <span className={cn("font-bold text-sm", Number(s.ap_outstanding) > 0 ? 'text-rose-700' : 'text-emerald-700')}>{fmtAmt(s.ap_outstanding)}</span> },
+                { key: 'credit_days', label: 'Credit', sortable: true, align: 'right', getValue: (s: any) => Number(s.credit_days),
+                  render: (s: any) => Number(s.credit_days) > 0 ? <span className="text-sm font-semibold text-[#3d3128]">{s.credit_days}d</span> : <span className="text-[#9c8e85]">—</span> },
+                { key: 'actions', label: '', searchable: false, exportValue: () => '', render: (s: any) => (
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => openEditSupplier(s)} title="Edit" className="p-1.5 rounded-lg hover:bg-[#faf7f2] text-[#9c8e85]"><Edit3 size={13} /></button>
+                    <button onClick={() => deactivateSupplier(s.id, s.name)} title="Deactivate" className="p-1.5 rounded-lg hover:bg-red-50 text-[#9c8e85] hover:text-red-600"><Trash2 size={13} /></button>
+                    <button onClick={() => { setSupplier360(s); setScorecard360(null); loadLedger360(s.id); loadScorecard360(s.id); }}
+                      className="px-2 py-1 rounded-lg text-[10px] font-bold bg-[#faf7f2] border border-[#cc5a16]/20 text-[#cc5a16] hover:bg-[#cc5a16]/5">
+                      360°
+                    </button>
+                  </div>
+                )},
+              ]}
+            />
+          ) : filteredSuppliers.length === 0 ? (
             <div className="text-center py-16 text-[#9c8e85]">
               <Building2 size={40} className="mx-auto mb-3 opacity-30" />
               <p className="font-bold text-sm">{supSearch ? 'No suppliers match your search' : 'No suppliers yet'}</p>
