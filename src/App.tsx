@@ -12588,6 +12588,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // Room Setup is owner-only (room CRUD + types + tariff). Mirror the
           // STAFF_ACCESS gate: owners always see it; everyone else never does.
           if (id === 'ROOM_SETUP') return isOwnerOrAdmin;
+          // Finance tabs (PROCUREMENT, EXPENSE_JOURNAL) were introduced after
+          // the V3 permission marker was rolled out. Owners always see them so
+          // they are never locked out by a stale permission save. Staff
+          // visibility still flows through isTabVisible (V3 fix handles it).
+          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL') && isOwnerOrAdmin) return true;
           return isTabVisible(id, effectiveAllowedTabs);
         };
         // A page shows when RBAC allows it AND the tenant has the relevant
