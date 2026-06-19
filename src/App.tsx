@@ -12510,6 +12510,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FOLIOS',               label: 'Folios & Settlement' },
               { id: 'COMPLIANCE',           label: 'Guest Compliance' },
               { id: 'CONCIERGE_FAQ',        label: 'Concierge' },
+              { id: 'PROCUREMENT',          label: 'Procurement' },
             ],
           },
           {
@@ -12521,9 +12522,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'MENU',      label: 'Menu' },
               { id: 'QR',        label: 'QR & Tables' },
               { id: 'BOOKINGS',  label: 'Table Bookings' },
-              { id: 'INVENTORY', label: 'Kitchen Inventory' },
-              { id: 'DELIVERY',  label: 'Delivery Partners' },
-              { id: 'RESTAURANT_REPORTS', label: 'Restaurant Reports' },
+              { id: 'INVENTORY',          label: 'Kitchen Inventory' },
+              { id: 'DELIVERY',            label: 'Delivery Partners' },
+              { id: 'RESTAURANT_REPORTS',  label: 'Restaurant Reports' },
+              { id: 'PROCUREMENT',          label: 'Procurement' },
             ],
           },
           {
