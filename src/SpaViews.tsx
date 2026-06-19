@@ -899,7 +899,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
       let r = await fetch(`/api/public/restaurant/${encodeURIComponent(id)}/spa`);
       if (r.status === 404) {
         const r2 = await fetch(`/api/public/restaurant/by-slug/${encodeURIComponent(tenantId)}`);
-        if (r2.ok) { const j = await r2.json(); if (j.id) { id = j.id; r = await fetch(`/api/public/restaurant/${encodeURIComponent(id)}/spa`); } }
+        if (r2.ok) { const j = await r2.json(); const resolved = j.tenantId || j.id; if (resolved) { id = resolved; r = await fetch(`/api/public/restaurant/${encodeURIComponent(id)}/spa`); } }
       }
       if (r.ok) { setRestaurantId(id); setData(await r.json()); } else setData({ error: true });
     } catch { setData({ error: true }); }
@@ -927,19 +927,33 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
     } catch { setError('Network error. Please check your connection.'); } finally { setBusy(false); }
   };
 
+  // ── Palette & helpers ─────────────────────────────────────────────────────
+  const SPA_DARK  = '#0d1f18';
+  const SPA_GOLD  = '#c9a96e';
+  const SPA_CREAM = '#f9f5ef';
+  const SPA_BRAND = '#cc5a16';
+  const SERIF: React.CSSProperties = { fontFamily: "'Playfair Display', Georgia, serif" };
+  const fmtDate = (iso: string) => new Date(iso).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+  const fmtTime = (iso: string) => iso.slice(11, 16);
+  const today = new Date().toISOString().slice(0, 10);
+  const addDays = (iso: string, n: number) => { const d = new Date(iso); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+
+  // ── Loading ──────────────────────────────────────────────────────────────
   if (!data) return (
-    <div className="min-h-screen flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #2d1b0e 0%, #5c3317 100%)' }}>
-      <div className="text-center text-white">
-        <div className="text-4xl mb-3 animate-pulse">🌿</div>
-        <p className="text-sm opacity-75">Preparing your experience…</p>
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0d1f18' }}>
+      <div style={{ textAlign: 'center', color: '#fff' }}>
+        <div style={{ width: 48, height: 48, borderRadius: '50%', border: '2px solid rgba(201,169,110,0.2)', borderTop: '2px solid #c9a96e', animation: 'spin 1.2s linear infinite', margin: '0 auto 16px' }} />
+        <p style={{ fontSize: 11, letterSpacing: 3, textTransform: 'uppercase', opacity: 0.5 }}>Preparing your experience</p>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       </div>
     </div>
   );
   if (data.error) return (
-    <div className="min-h-screen flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #2d1b0e 0%, #5c3317 100%)' }}>
-      <div className="text-center text-white">
-        <div className="text-4xl mb-3">🌿</div>
-        <p className="opacity-75">Spa booking is not available at this time.</p>
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0d1f18', padding: '0 24px' }}>
+      <div style={{ textAlign: 'center', color: '#fff', maxWidth: 320 }}>
+        <div style={{ fontSize: 48, marginBottom: 16 }}>🌿</div>
+        <h2 style={{ ...SERIF, fontSize: 22, fontWeight: 700, marginBottom: 8 }}>Not Available</h2>
+        <p style={{ fontSize: 13, opacity: 0.55, lineHeight: 1.6 }}>Online booking is not available at this time. Please contact the spa directly.</p>
       </div>
     </div>
   );
@@ -947,284 +961,340 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   const cur = data.property?.currency_symbol || '₹';
   const profile = data.profile || {};
   const offers: any[] = Array.isArray(profile.offers) ? profile.offers : [];
-  const categories: string[] = ['ALL', ...Array.from(new Set<string>((data.services || []).map((s: any): string => String(s.category))))];
+  const allCats: string[] = Array.from(new Set<string>((data.services || []).map((s: any): string => String(s.category))));
+  const categories: string[] = ['ALL', ...allCats];
   const filteredServices = categoryFilter === 'ALL' ? (data.services || []) : (data.services || []).filter((s: any) => s.category === categoryFilter);
 
   const heroStyle: React.CSSProperties = profile.hero_image_url
-    ? { backgroundImage: `linear-gradient(to bottom, rgba(20,10,4,0.45) 0%, rgba(20,10,4,0.75) 100%), url(${profile.hero_image_url})`, backgroundSize: 'cover', backgroundPosition: 'center' }
-    : { background: 'linear-gradient(135deg, #2d1b0e 0%, #7c3c15 50%, #cc5a16 100%)' };
+    ? { backgroundImage: `linear-gradient(to bottom, rgba(13,31,24,0.5) 0%, rgba(13,31,24,0.88) 100%), url(${profile.hero_image_url})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+    : { background: `linear-gradient(145deg, ${SPA_DARK} 0%, #1a3828 50%, #0d2318 100%)` };
 
-  // Confirmation screen
+  const resetFlow = () => { setDone(null); setStep(1); setService(null); setSlot(null); setSlots([]); setGuest({ client_name: '', client_phone: '', client_email: '' }); setError(''); };
+
+  // ── Confirmation screen ──────────────────────────────────────────────────
   if (done) return (
-    <div className="min-h-screen" style={{ background: 'linear-gradient(135deg, #faf7f2 0%, #f0e4d0 100%)' }}>
-      <div style={heroStyle} className="py-14 px-4 text-center text-white">
-        {data.property?.logo_url && <img src={data.property.logo_url} alt="" className="h-12 mx-auto mb-4 rounded-lg shadow-lg" />}
-        <h1 className="text-2xl font-bold" style={{ fontFamily: 'Georgia, serif' }}>{data.property?.name}</h1>
+    <div style={{ minHeight: '100vh', background: SPA_CREAM, fontFamily: "'Inter', system-ui, sans-serif" }}>
+      <div style={{ ...heroStyle, paddingTop: 56, paddingBottom: 72, textAlign: 'center', color: '#fff' }}>
+        <div style={{ position: 'relative', height: 4, background: `linear-gradient(90deg, transparent, ${SPA_GOLD}, transparent)`, marginBottom: 0 }} />
+        {data.property?.logo_url && <img src={data.property.logo_url} alt="" style={{ height: 48, margin: '0 auto 14px', borderRadius: 12, objectFit: 'contain', filter: 'brightness(0) invert(1)', opacity: 0.9 }} />}
+        <h1 style={{ ...SERIF, fontSize: 26, fontWeight: 700, letterSpacing: -0.3 }}>{data.property?.name}</h1>
+        <p style={{ color: SPA_GOLD, fontSize: 10, letterSpacing: 3, textTransform: 'uppercase', marginTop: 8, fontWeight: 600 }}>Spa & Wellness</p>
       </div>
-      <div className="max-w-lg mx-auto px-4 -mt-8">
-        <div className="bg-white rounded-3xl shadow-xl p-8 text-center">
-          <div className="w-20 h-20 rounded-full bg-emerald-50 flex items-center justify-center mx-auto mb-4 border-4 border-emerald-100">
-            <Check size={36} className="text-emerald-500" />
+      <div style={{ maxWidth: 440, margin: '-52px auto 0', padding: '0 16px 48px' }}>
+        <div style={{ background: '#fff', borderRadius: 28, boxShadow: '0 20px 60px rgba(0,0,0,0.15)', overflow: 'hidden' }}>
+          <div style={{ height: 4, background: `linear-gradient(90deg, ${SPA_GOLD}, #e8c07a, ${SPA_GOLD})` }} />
+          <div style={{ padding: '32px 28px', textAlign: 'center' }}>
+            <div style={{ width: 72, height: 72, borderRadius: '50%', background: '#f0faf5', border: '3px solid #d1f0e0', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
+              <Check size={32} style={{ color: '#22a05a' }} />
+            </div>
+            <h2 style={{ ...SERIF, fontSize: 24, fontWeight: 700, color: '#0d1a14', marginBottom: 6 }}>Booking Confirmed!</h2>
+            <p style={{ color: '#6b5d52', fontSize: 13 }}>Your appointment has been received.</p>
+            <div style={{ marginTop: 24, borderRadius: 18, padding: 20, textAlign: 'left', background: '#f9f5ef', border: '1px solid #ede5d8' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                <div>
+                  <p style={{ fontWeight: 600, fontSize: 14, color: '#0d1a14' }}>{service?.name}</p>
+                  <p style={{ fontSize: 12, color: '#9d8b7e', marginTop: 2 }}>{service?.duration_min} min · {service?.category}</p>
+                </div>
+                <p style={{ fontWeight: 700, fontSize: 14, color: SPA_BRAND }}>{cur}{Number(service?.price).toLocaleString('en-IN')}</p>
+              </div>
+              <div style={{ height: 1, background: '#ede5d8', marginBottom: 12 }} />
+              <p style={{ fontSize: 11, fontWeight: 700, color: '#9d8b7e', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 4 }}>Date & Time</p>
+              <p style={{ fontSize: 13, fontWeight: 600, color: '#0d1a14' }}>{fmtDate(done.start_at?.slice(0, 10) || today)} · {done.start_at ? fmtTime(done.start_at) : ''}</p>
+              <div style={{ height: 1, background: '#ede5d8', margin: '12px 0' }} />
+              <p style={{ fontSize: 11, fontWeight: 700, color: '#9d8b7e', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 4 }}>Guest</p>
+              <p style={{ fontSize: 13, fontWeight: 600, color: '#0d1a14' }}>{guest.client_name}</p>
+              <p style={{ fontSize: 12, color: '#9d8b7e' }}>{guest.client_phone}</p>
+            </div>
+            <p style={{ fontSize: 11, color: '#9d8b7e', marginTop: 16, lineHeight: 1.6 }}>Our team will call to confirm your appointment. Please arrive 10 minutes early.</p>
+            {data.property?.phone && (
+              <a href={`tel:${data.property.phone}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 16, padding: '12px 20px', borderRadius: 18, background: '#f0faf5', color: '#1a7a45', border: '1px solid #d1f0e0', fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>
+                📞 Call {data.property.name}
+              </a>
+            )}
+            <button onClick={resetFlow} style={{ marginTop: 12, fontSize: 12, color: SPA_BRAND, textDecoration: 'underline', background: 'none', border: 'none', cursor: 'pointer', width: '100%', padding: '8px 0' }}>
+              Book another treatment
+            </button>
           </div>
-          <h2 className="text-2xl font-bold mb-2" style={{ fontFamily: 'Georgia, serif' }}>Booking Confirmed!</h2>
-          <p className="text-[#6b5d52] mb-1">{service.name}</p>
-          <p className="text-sm text-[#6b5d52]">{done.start_at?.slice(0, 16).replace('T', ' at ')}</p>
-          <div className="mt-5 p-4 rounded-2xl bg-[#faf7f2] text-sm text-[#4a3728]">
-            <p className="font-semibold">{guest.client_name}</p>
-            {guest.client_phone && <p className="text-xs mt-0.5 text-[#6b5d52]">{guest.client_phone}</p>}
-          </div>
-          <p className="text-xs text-[#9d8b7e] mt-4">The spa team will confirm your appointment shortly.</p>
-          <button onClick={() => { setDone(null); setStep(1); setService(null); setSlot(null); setGuest({ client_name: '', client_phone: '', client_email: '' }); }}
-            className="mt-5 text-xs text-[#cc5a16] underline">Book another treatment</button>
         </div>
+        <p style={{ textAlign: 'center', fontSize: 10, opacity: 0.3, marginTop: 20, color: '#5a4535' }}>Powered by Atithi-Setu</p>
       </div>
     </div>
   );
 
+  // ── Step progress bar ────────────────────────────────────────────────────
+  const StepBar = () => (
+    <div style={{ display: 'flex', alignItems: 'center', padding: '14px 20px', background: '#fff', borderBottom: '1px solid #f0e9df' }}>
+      {['Treatment', 'Date & Time', 'Your Details'].map((label, i) => {
+        const n = i + 1; const active = step === n; const past = step > n;
+        return (
+          <React.Fragment key={n}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+              <div style={{ width: 28, height: 28, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, background: past ? '#22a05a' : active ? SPA_DARK : '#f0e9df', color: past || active ? '#fff' : '#9d8b7e', transition: 'all 0.2s' }}>
+                {past ? <Check size={13} /> : n}
+              </div>
+              <span style={{ marginTop: 4, fontSize: 9, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: active ? SPA_DARK : '#b0a090' }}>{label}</span>
+            </div>
+            {i < 2 && <div style={{ flex: 1, height: 1, margin: '0 8px 14px', background: step > n ? '#22a05a' : '#e8dccf', transition: 'background 0.2s' }} />}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+
+  // ── Main layout ──────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen" style={{ background: '#faf7f2' }}>
+    <div style={{ minHeight: '100vh', background: SPA_CREAM, fontFamily: "'Inter', system-ui, sans-serif" }}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}} @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=Inter:wght@300;400;500;600&display=swap');`}</style>
+
       {/* ── Hero ── */}
-      <div style={heroStyle} className="relative pt-16 pb-20 px-4 text-center text-white overflow-hidden">
-        <div className="relative z-10">
-          {data.property?.logo_url && (
-            <img src={data.property.logo_url} alt="" className="h-14 mx-auto mb-4 rounded-xl shadow-lg object-contain" style={{ background: 'rgba(255,255,255,0.15)', padding: '6px' }} />
+      <div style={{ ...heroStyle, position: 'relative', minHeight: step === 1 ? 260 : 120, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', paddingBottom: 28 }}>
+        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg, transparent, ${SPA_GOLD}, transparent)` }} />
+        <div style={{ textAlign: 'center', color: '#fff', padding: '0 16px' }}>
+          {step === 1 && data.property?.logo_url && (
+            <img src={data.property.logo_url} alt="" style={{ height: 50, margin: '40px auto 12px', borderRadius: 10, objectFit: 'contain', filter: 'brightness(0) invert(1)', opacity: 0.9 }} />
           )}
-          <h1 className="text-3xl font-bold tracking-wide" style={{ fontFamily: 'Georgia, serif', textShadow: '0 2px 8px rgba(0,0,0,0.4)' }}>
-            {data.property?.name}
-          </h1>
-          <p className="mt-2 text-sm font-light tracking-widest uppercase opacity-80">
-            {profile.tagline || 'Spa & Wellness'}
-          </p>
-          <p className="mt-3 text-xs opacity-60">{data.property?.city}{data.property?.state ? `, ${data.property.state}` : ''}</p>
+          {step === 1 ? (
+            <>
+              <h1 style={{ ...SERIF, fontSize: 28, fontWeight: 700, letterSpacing: -0.5, textShadow: '0 2px 12px rgba(0,0,0,0.5)', marginTop: data.property?.logo_url ? 0 : 40 }}>{data.property?.name}</h1>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginTop: 10 }}>
+                <div style={{ height: 1, width: 36, background: 'rgba(201,169,110,0.5)' }} />
+                <p style={{ color: SPA_GOLD, fontSize: 10, letterSpacing: 4, textTransform: 'uppercase', fontWeight: 600 }}>{profile.tagline || 'Spa & Wellness'}</p>
+                <div style={{ height: 1, width: 36, background: 'rgba(201,169,110,0.5)' }} />
+              </div>
+              {data.property?.city && <p style={{ fontSize: 11, opacity: 0.45, marginTop: 6, letterSpacing: 1 }}>{data.property.city}{data.property.state ? `, ${data.property.state}` : ''}</p>}
+            </>
+          ) : (
+            <p style={{ fontSize: 10, opacity: 0.5, letterSpacing: 3, textTransform: 'uppercase', paddingTop: 16 }}>{data.property?.name} · {profile.tagline || 'Spa & Wellness'}</p>
+          )}
         </div>
       </div>
 
-      {/* ── Offers strip ── */}
-      {offers.length > 0 && (
-        <div className="px-4 -mt-4 mb-2 overflow-x-auto">
-          <div className="flex gap-3 pb-1" style={{ minWidth: 'max-content' }}>
+      {/* ── Offers strip (step 1 only) ── */}
+      {step === 1 && offers.length > 0 && (
+        <div style={{ background: SPA_DARK, overflowX: 'auto', padding: '14px 16px' }}>
+          <div style={{ display: 'flex', gap: 12, minWidth: 'max-content' }}>
             {offers.map((o: any, i: number) => (
-              <div key={i} className="flex-shrink-0 rounded-2xl overflow-hidden shadow-md" style={{ background: 'linear-gradient(135deg, #cc5a16, #8b3a0f)', minWidth: 200, maxWidth: 240 }}>
-                <div className="px-4 py-3 text-white">
-                  {o.badge && <span className="text-[10px] font-bold bg-white text-[#cc5a16] rounded-full px-2 py-0.5 uppercase tracking-wider">{o.badge}</span>}
-                  <p className="font-bold mt-1 text-sm leading-tight">{o.title}</p>
-                  {o.description && <p className="text-xs mt-0.5 opacity-80 leading-snug">{o.description}</p>}
-                  {o.valid_until && <p className="text-[10px] mt-1.5 opacity-60">Valid till {o.valid_until}</p>}
-                </div>
+              <div key={i} style={{ flexShrink: 0, borderRadius: 16, border: `1px solid rgba(201,169,110,0.25)`, background: 'rgba(255,255,255,0.06)', minWidth: 200, maxWidth: 250, padding: '12px 16px', color: '#fff' }}>
+                {o.badge && <span style={{ fontSize: 9, fontWeight: 700, background: SPA_GOLD, color: SPA_DARK, borderRadius: 20, padding: '2px 10px', letterSpacing: 1.5, textTransform: 'uppercase' }}>{o.badge}</span>}
+                <p style={{ fontWeight: 600, fontSize: 13, marginTop: 8, lineHeight: 1.35 }}>{o.title}</p>
+                {o.description && <p style={{ fontSize: 11, marginTop: 4, opacity: 0.6, lineHeight: 1.5 }}>{o.description}</p>}
+                {o.valid_until && <p style={{ fontSize: 10, marginTop: 8, color: SPA_GOLD, opacity: 0.8 }}>Valid till {o.valid_until}</p>}
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* ── Main content ── */}
-      <div className="max-w-2xl mx-auto px-4 pb-12" style={{ marginTop: offers.length > 0 ? 12 : 24 }}>
-        {/* Step indicator */}
-        <div className="bg-white rounded-2xl shadow-md px-5 py-4 mb-6 flex items-center justify-center gap-1">
-          {['Treatment', 'Date & Time', 'Your Details'].map((label, i) => {
-            const n = i + 1;
-            const active = step === n;
-            const done_ = step > n;
-            return (
-              <React.Fragment key={n}>
-                <div className="flex flex-col items-center">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold transition-all ${done_ ? 'bg-emerald-500 text-white' : active ? 'bg-[#cc5a16] text-white' : 'bg-[#e8dccf] text-[#9d8b7e]'}`}>
-                    {done_ ? <Check size={14} /> : n}
-                  </div>
-                  <span className={`text-[10px] mt-1 font-medium ${active ? 'text-[#cc5a16]' : 'text-[#9d8b7e]'}`}>{label}</span>
-                </div>
-                {i < 2 && <div className={`h-px flex-1 mb-4 mx-1 transition-all ${step > n ? 'bg-emerald-400' : 'bg-[#e8dccf]'}`} />}
-              </React.Fragment>
-            );
-          })}
-        </div>
+      <StepBar />
 
-        {/* ── Step 1: Choose treatment ── */}
+      {/* ── Content ── */}
+      <div style={{ maxWidth: 580, margin: '0 auto', padding: '24px 16px 96px' }}>
+
+        {/* ════ Step 1: Choose treatment ════ */}
         {step === 1 && (
           <div>
-            <h2 className="text-xl font-bold mb-1" style={{ fontFamily: 'Georgia, serif', color: '#14110c' }}>Choose a Treatment</h2>
-            <p className="text-sm text-[#6b5d52] mb-4">Select from our curated wellness menu</p>
+            <h2 style={{ ...SERIF, fontSize: 22, fontWeight: 700, color: '#0d1a14', marginBottom: 4 }}>Choose a Treatment</h2>
+            <p style={{ fontSize: 13, color: '#8a7060', marginBottom: 20 }}>Select from our curated wellness menu</p>
 
-            {/* Category filter */}
-            {categories.length > 2 && (
-              <div className="flex gap-2 mb-4 overflow-x-auto pb-1">
-                {categories.map(cat => (
-                  <button key={cat} onClick={() => setCategoryFilter(cat)}
-                    className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${categoryFilter === cat ? 'text-white shadow-sm' : 'bg-white border border-[#e8dccf] text-[#6b5d52] hover:border-[#cc5a16]'}`}
-                    style={categoryFilter === cat ? { background: CATEGORY_COLOR[cat] || '#cc5a16' } : {}}>
-                    {CATEGORY_ICON[cat] || '🌸'} {cat === 'ALL' ? 'All Services' : cat.charAt(0) + cat.slice(1).toLowerCase()}
-                  </button>
-                ))}
+            {allCats.length > 1 && (
+              <div style={{ display: 'flex', gap: 8, marginBottom: 20, overflowX: 'auto', paddingBottom: 4, scrollbarWidth: 'none' }}>
+                {categories.map(cat => {
+                  const active = categoryFilter === cat;
+                  return (
+                    <button key={cat} onClick={() => setCategoryFilter(cat)} style={{ flexShrink: 0, padding: '6px 16px', borderRadius: 24, fontSize: 12, fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s', background: active ? SPA_DARK : '#fff', color: active ? SPA_GOLD : '#6b5d52', border: `1px solid ${active ? SPA_DARK : '#e8dccf'}` }}>
+                      {CATEGORY_ICON[cat] || '🌸'} {cat === 'ALL' ? 'All' : cat.charAt(0) + cat.slice(1).toLowerCase()}
+                    </button>
+                  );
+                })}
               </div>
             )}
 
-            <div className="space-y-3">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
               {filteredServices.map((s: any) => (
                 <button key={s.id} onClick={() => { setService(s); setStep(2); }}
-                  className="w-full text-left rounded-2xl border border-[#e8dccf] bg-white overflow-hidden hover:border-[#cc5a16] hover:shadow-md transition-all group">
-                  <div className="flex">
-                    {s.image_url ? (
-                      <img src={s.image_url} alt={s.name} className="w-24 h-24 object-cover flex-shrink-0" />
-                    ) : (
-                      <div className="w-24 h-24 flex-shrink-0 flex items-center justify-center text-3xl" style={{ background: 'linear-gradient(135deg, #faf7f2, #f0e4d0)' }}>
-                        {CATEGORY_ICON[s.category] || '🌸'}
+                  style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid #ede5d8', borderRadius: 20, overflow: 'hidden', cursor: 'pointer', boxShadow: '0 2px 12px rgba(0,0,0,0.04)', transition: 'all 0.2s' }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 8px 28px rgba(0,0,0,0.1)'; (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 2px 12px rgba(0,0,0,0.04)'; (e.currentTarget as HTMLElement).style.transform = 'none'; }}>
+                  {s.image_url && (
+                    <div style={{ position: 'relative', height: 150, overflow: 'hidden' }}>
+                      <img src={s.image_url} alt={s.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top, rgba(13,31,24,0.75) 0%, transparent 55%)' }} />
+                      <div style={{ position: 'absolute', bottom: 12, left: 16, right: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+                        <span style={{ fontSize: 10, background: `${CATEGORY_COLOR[s.category] || SPA_BRAND}dd`, color: '#fff', borderRadius: 20, padding: '2px 10px', fontWeight: 600 }}>{s.category}</span>
+                        <span style={{ ...SERIF, fontWeight: 700, fontSize: 18, color: '#fff', textShadow: '0 1px 4px rgba(0,0,0,0.5)' }}>{cur}{Number(s.price).toLocaleString('en-IN')}</span>
                       </div>
-                    )}
-                    <div className="flex-1 p-3 flex flex-col justify-between">
-                      <div>
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="font-semibold text-[#14110c] group-hover:text-[#cc5a16] transition-colors leading-tight">{s.name}</div>
-                          <div className="font-bold text-[#cc5a16] text-sm whitespace-nowrap">{cur}{Number(s.price).toLocaleString('en-IN')}</div>
-                        </div>
-                        {s.description && <p className="text-xs text-[#9d8b7e] mt-1 leading-snug line-clamp-2">{s.description}</p>}
+                    </div>
+                  )}
+                  <div style={{ padding: '14px 16px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                      <div style={{ flex: 1 }}>
+                        {!s.image_url && (
+                          <span style={{ fontSize: 10, background: `${CATEGORY_COLOR[s.category] || SPA_BRAND}18`, color: CATEGORY_COLOR[s.category] || SPA_BRAND, borderRadius: 20, padding: '2px 10px', fontWeight: 600, display: 'inline-block', marginBottom: 6 }}>{s.category}</span>
+                        )}
+                        <p style={{ ...SERIF, fontWeight: 600, fontSize: 16, color: '#0d1a14', lineHeight: 1.3, marginBottom: 4 }}>{s.name}</p>
+                        {s.description && <p style={{ fontSize: 12, color: '#8a7060', lineHeight: 1.5 }}>{s.description}</p>}
                       </div>
-                      <div className="flex items-center gap-2 mt-2">
-                        <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: `${CATEGORY_COLOR[s.category] || '#cc5a16'}18`, color: CATEGORY_COLOR[s.category] || '#cc5a16' }}>
-                          {s.category}
-                        </span>
-                        <span className="text-xs text-[#9d8b7e] flex items-center gap-1"><Clock size={11} /> {s.duration_min} min</span>
-                      </div>
+                      {!s.image_url && <p style={{ ...SERIF, fontWeight: 700, fontSize: 17, color: SPA_BRAND, flexShrink: 0 }}>{cur}{Number(s.price).toLocaleString('en-IN')}</p>}
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
+                      <span style={{ fontSize: 12, color: '#8a7060', display: 'flex', alignItems: 'center', gap: 4 }}><Clock size={12} /> {s.duration_min} min</span>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: SPA_DARK, background: `rgba(201,169,110,0.15)`, border: `1px solid rgba(201,169,110,0.3)`, padding: '4px 14px', borderRadius: 20 }}>Select →</span>
                     </div>
                   </div>
                 </button>
               ))}
             </div>
+
             {filteredServices.length === 0 && (
-              <div className="text-center py-10 text-[#9d8b7e] text-sm">No services in this category.</div>
+              <div style={{ textAlign: 'center', padding: '48px 0', borderRadius: 18, border: '1px dashed #ede5d8', background: '#fff', color: '#9d8b7e', fontSize: 13 }}>No services in this category.</div>
             )}
+
+            <div style={{ marginTop: 32, borderRadius: 18, padding: '20px 24px', background: SPA_DARK, textAlign: 'center' }}>
+              <p style={{ color: SPA_GOLD, fontSize: 10, letterSpacing: 2.5, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Prefer to call?</p>
+              {data.property?.phone
+                ? <a href={`tel:${data.property.phone}`} style={{ color: '#fff', fontSize: 15, fontWeight: 600, textDecoration: 'none' }}>📞 {data.property.phone}</a>
+                : <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12 }}>Contact the spa reception directly.</p>}
+            </div>
           </div>
         )}
 
-        {/* ── Step 2: Pick date & time ── */}
+        {/* ════ Step 2: Date & Time ════ */}
         {step === 2 && (
           <div>
-            <button onClick={() => { setStep(1); setSlots([]); setSlot(null); }} className="flex items-center gap-1 text-xs text-[#cc5a16] mb-4 hover:opacity-75">
+            <button onClick={() => { setStep(1); setSlots([]); setSlot(null); }} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: SPA_BRAND, background: 'none', border: 'none', cursor: 'pointer', marginBottom: 20, padding: 0 }}>
               ← Back to treatments
             </button>
-            <div className="bg-white rounded-2xl border border-[#e8dccf] p-5 mb-4">
-              <div className="flex gap-3">
-                {service.image_url ? (
-                  <img src={service.image_url} alt={service.name} className="w-14 h-14 rounded-xl object-cover flex-shrink-0" />
-                ) : (
-                  <div className="w-14 h-14 rounded-xl flex-shrink-0 flex items-center justify-center text-2xl" style={{ background: 'linear-gradient(135deg, #faf7f2, #f0e4d0)' }}>
-                    {CATEGORY_ICON[service.category] || '🌸'}
-                  </div>
-                )}
+
+            <div style={{ background: '#fff', border: '1px solid #ede5d8', borderRadius: 18, marginBottom: 20, overflow: 'hidden' }}>
+              <div style={{ background: SPA_DARK, padding: '10px 18px' }}>
+                <p style={{ color: SPA_GOLD, fontSize: 9, letterSpacing: 3, textTransform: 'uppercase', fontWeight: 700 }}>Selected Treatment</p>
+              </div>
+              <div style={{ display: 'flex', gap: 14, padding: 16 }}>
+                {service.image_url
+                  ? <img src={service.image_url} alt={service.name} style={{ width: 56, height: 56, borderRadius: 12, objectFit: 'cover', flexShrink: 0 }} />
+                  : <div style={{ width: 56, height: 56, borderRadius: 12, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, background: 'linear-gradient(135deg, #f9f5ef, #ede5d8)' }}>{CATEGORY_ICON[service.category] || '🌸'}</div>}
                 <div>
-                  <p className="font-bold text-[#14110c]">{service.name}</p>
-                  <p className="text-xs text-[#6b5d52]">{service.duration_min} min · {cur}{Number(service.price).toLocaleString('en-IN')}</p>
-                  {service.description && <p className="text-xs text-[#9d8b7e] mt-0.5 leading-snug">{service.description}</p>}
+                  <p style={{ ...SERIF, fontWeight: 600, fontSize: 15, color: '#0d1a14' }}>{service.name}</p>
+                  <p style={{ fontSize: 12, color: '#8a7060', marginTop: 3 }}>{service.duration_min} min · <strong style={{ color: SPA_BRAND }}>{cur}{Number(service.price).toLocaleString('en-IN')}</strong></p>
                 </div>
               </div>
             </div>
 
-            <h2 className="text-xl font-bold mb-1" style={{ fontFamily: 'Georgia, serif', color: '#14110c' }}>Pick a Date & Time</h2>
-            <p className="text-sm text-[#6b5d52] mb-4">Available slots load automatically</p>
+            <h2 style={{ ...SERIF, fontSize: 22, fontWeight: 700, color: '#0d1a14', marginBottom: 4 }}>Choose Date & Time</h2>
+            <p style={{ fontSize: 13, color: '#8a7060', marginBottom: 18 }}>Select a date to see available slots</p>
 
-            <input type="date" value={date} min={new Date().toISOString().slice(0, 10)}
-              onChange={e => { setDate(e.target.value); setSlot(null); }}
-              className="w-full px-4 py-3 rounded-2xl border border-[#e8dccf] bg-white text-sm mb-4 focus:outline-none focus:border-[#cc5a16]" />
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <button onClick={() => { const d = addDays(date, -1); if (d >= today) { setDate(d); setSlot(null); } }} disabled={date <= today}
+                style={{ width: 40, height: 42, borderRadius: 12, border: '1px solid #ede5d8', background: '#fff', fontSize: 18, cursor: date <= today ? 'not-allowed' : 'pointer', opacity: date <= today ? 0.3 : 1, flexShrink: 0, color: '#4a3728' }}>‹</button>
+              <input type="date" value={date} min={today} onChange={e => { setDate(e.target.value); setSlot(null); }}
+                style={{ flex: 1, padding: '11px 14px', borderRadius: 12, border: '1.5px solid #ede5d8', background: '#fff', fontSize: 13, fontWeight: 600, textAlign: 'center', color: '#0d1a14', outline: 'none' }} />
+              <button onClick={() => { setDate(addDays(date, 1)); setSlot(null); }}
+                style={{ width: 40, height: 42, borderRadius: 12, border: '1px solid #ede5d8', background: '#fff', fontSize: 18, cursor: 'pointer', flexShrink: 0, color: '#4a3728' }}>›</button>
+            </div>
+            <p style={{ fontSize: 12, textAlign: 'center', color: '#9d8b7e', marginBottom: 20 }}>{fmtDate(date)}</p>
 
             {slotsLoading ? (
-              <div className="text-center py-8 text-[#9d8b7e]">
-                <div className="text-2xl mb-2 animate-pulse">🌿</div>
-                <p className="text-xs">Finding available slots…</p>
+              <div style={{ textAlign: 'center', padding: '48px 0' }}>
+                <div style={{ width: 36, height: 36, borderRadius: '50%', border: '2px solid rgba(201,169,110,0.25)', borderTop: '2px solid #c9a96e', animation: 'spin 1.2s linear infinite', margin: '0 auto 12px' }} />
+                <p style={{ fontSize: 12, color: '#9d8b7e' }}>Finding available slots…</p>
               </div>
             ) : slots.length > 0 ? (
-              <>
-                <p className="text-xs text-[#6b5d52] mb-2 font-medium">{slots.length} slot{slots.length !== 1 ? 's' : ''} available</p>
-                <div className="grid grid-cols-3 gap-2 max-h-56 overflow-y-auto pr-1">
-                  {slots.map((s, i) => (
-                    <button key={i} onClick={() => setSlot(s)}
-                      className={`py-3 rounded-xl text-xs font-semibold border transition-all ${slot === s ? 'border-[#cc5a16] text-white shadow-sm' : 'border-[#e8dccf] text-[#4a3728] bg-white hover:border-[#cc5a16]'}`}
-                      style={slot === s ? { background: '#cc5a16' } : {}}>
-                      {s.start_at.slice(11, 16)}
-                      {s.therapist_name && <span className="block text-[9px] mt-0.5 opacity-70 truncate px-1">{s.therapist_name.split(' ')[0]}</span>}
-                    </button>
-                  ))}
+              <div>
+                <p style={{ fontSize: 12, fontWeight: 600, color: '#6b5d52', marginBottom: 12 }}>{slots.length} time{slots.length !== 1 ? 's' : ''} available</p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+                  {slots.map((s, i) => {
+                    const sel = slot === s;
+                    return (
+                      <button key={i} onClick={() => setSlot(s)} style={{ padding: '12px 4px', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', transition: 'all 0.15s', background: sel ? SPA_DARK : '#fff', border: `1px solid ${sel ? SPA_DARK : '#ede5d8'}`, boxShadow: sel ? '0 4px 14px rgba(13,31,24,0.2)' : 'none' }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: sel ? SPA_GOLD : '#0d1a14' }}>{fmtTime(s.start_at)}</span>
+                        {s.therapist_name && <span style={{ fontSize: 9, color: sel ? 'rgba(201,169,110,0.7)' : '#9d8b7e', marginTop: 3, maxWidth: '90%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.therapist_name.split(' ')[0]}</span>}
+                      </button>
+                    );
+                  })}
                 </div>
                 {slot && (
-                  <button onClick={() => setStep(3)}
-                    className="w-full mt-5 py-3.5 rounded-2xl text-white font-bold text-sm shadow-md transition-all hover:opacity-90"
-                    style={{ background: 'linear-gradient(135deg, #cc5a16, #a84810)' }}>
-                    Continue with {slot.start_at.slice(11, 16)} →
+                  <button onClick={() => setStep(3)} style={{ width: '100%', marginTop: 20, padding: '15px 0', borderRadius: 18, color: SPA_GOLD, fontWeight: 700, fontSize: 14, background: `linear-gradient(135deg, ${SPA_DARK} 0%, #1a3828 100%)`, border: 'none', cursor: 'pointer', boxShadow: '0 4px 16px rgba(13,31,24,0.3)', letterSpacing: 0.3 }}>
+                    Continue with {fmtTime(slot.start_at)} →
                   </button>
                 )}
-              </>
+              </div>
             ) : (
-              <div className="text-center py-8 rounded-2xl border border-dashed border-[#e8dccf] text-[#9d8b7e]">
-                <p className="text-sm">No available slots for this date.</p>
-                <p className="text-xs mt-1">Try selecting another date.</p>
+              <div style={{ textAlign: 'center', padding: '40px 20px', borderRadius: 18, border: '1px dashed #ede5d8', background: '#fff' }}>
+                <p style={{ fontSize: 24, marginBottom: 12 }}>🌿</p>
+                <p style={{ fontWeight: 600, fontSize: 14, color: '#4a3728', marginBottom: 6 }}>No slots available for this date</p>
+                <p style={{ fontSize: 12, color: '#9d8b7e', marginBottom: 16 }}>Try another date, or contact us directly.</p>
+                {data.property?.phone && (
+                  <a href={`tel:${data.property.phone}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '10px 20px', borderRadius: 14, background: SPA_DARK, color: SPA_GOLD, fontSize: 12, fontWeight: 600, textDecoration: 'none' }}>📞 Call to Book</a>
+                )}
               </div>
             )}
           </div>
         )}
 
-        {/* ── Step 3: Guest details ── */}
+        {/* ════ Step 3: Guest details ════ */}
         {step === 3 && (
           <div>
-            <button onClick={() => setStep(2)} className="flex items-center gap-1 text-xs text-[#cc5a16] mb-4 hover:opacity-75">
+            <button onClick={() => setStep(2)} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: SPA_BRAND, background: 'none', border: 'none', cursor: 'pointer', marginBottom: 20, padding: 0 }}>
               ← Change time
             </button>
 
-            {/* Summary card */}
-            <div className="bg-white rounded-2xl border border-[#e8dccf] p-4 mb-5">
-              <p className="text-xs text-[#9d8b7e] font-semibold uppercase tracking-wider mb-2">Your Booking</p>
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl" style={{ background: 'linear-gradient(135deg, #faf7f2, #f0e4d0)' }}>
-                  {CATEGORY_ICON[service.category] || '🌸'}
+            <div style={{ background: SPA_DARK, borderRadius: 18, marginBottom: 24, overflow: 'hidden' }}>
+              <div style={{ padding: '10px 18px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+                <p style={{ color: SPA_GOLD, fontSize: 9, letterSpacing: 3, textTransform: 'uppercase', fontWeight: 700 }}>Your Appointment</p>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: 16 }}>
+                <div style={{ width: 48, height: 48, borderRadius: 12, background: 'rgba(201,169,110,0.12)', border: `1px solid rgba(201,169,110,0.25)`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0 }}>{CATEGORY_ICON[service.category] || '🌸'}</div>
+                <div style={{ flex: 1 }}>
+                  <p style={{ ...SERIF, fontWeight: 600, fontSize: 15, color: '#fff' }}>{service.name}</p>
+                  <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', marginTop: 3 }}>{fmtDate(date)} · {slot && fmtTime(slot.start_at)}</p>
+                  {slot?.therapist_name && <p style={{ fontSize: 11, color: SPA_GOLD, marginTop: 2 }}>with {slot.therapist_name}</p>}
                 </div>
-                <div className="flex-1">
-                  <p className="font-semibold text-[#14110c]">{service.name}</p>
-                  <p className="text-xs text-[#6b5d52]">{slot?.start_at?.slice(0, 10)} at {slot?.start_at?.slice(11, 16)} · {slot?.therapist_name}</p>
-                </div>
-                <div className="text-right">
-                  <p className="font-bold text-[#cc5a16]">{cur}{Number(service.price).toLocaleString('en-IN')}</p>
-                  <p className="text-[10px] text-[#9d8b7e]">+ GST</p>
+                <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                  <p style={{ ...SERIF, fontWeight: 700, fontSize: 16, color: SPA_GOLD }}>{cur}{Number(service.price).toLocaleString('en-IN')}</p>
+                  <p style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', marginTop: 2 }}>+ GST</p>
                 </div>
               </div>
             </div>
 
-            <h2 className="text-xl font-bold mb-1" style={{ fontFamily: 'Georgia, serif', color: '#14110c' }}>Your Details</h2>
-            <p className="text-sm text-[#6b5d52] mb-4">We'll use these to confirm your appointment</p>
+            <h2 style={{ ...SERIF, fontSize: 22, fontWeight: 700, color: '#0d1a14', marginBottom: 4 }}>Your Details</h2>
+            <p style={{ fontSize: 13, color: '#8a7060', marginBottom: 22 }}>We'll use these to confirm your appointment</p>
 
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Full Name *</label>
-                <input className="w-full px-4 py-3 rounded-2xl border border-[#e8dccf] bg-white text-sm focus:outline-none focus:border-[#cc5a16]"
-                  placeholder="e.g. Priya Sharma" value={guest.client_name} onChange={e => setGuest({ ...guest, client_name: e.target.value })} />
+            {[
+              { label: 'Full Name', key: 'client_name', type: 'text', placeholder: 'e.g. Priya Sharma', req: true },
+              { label: 'Phone Number', key: 'client_phone', type: 'tel', placeholder: '+91 98765 43210', req: true },
+              { label: 'Email Address', key: 'client_email', type: 'email', placeholder: 'your@email.com', req: false },
+            ].map(({ label, key, type, placeholder, req }) => (
+              <div key={key} style={{ marginBottom: 16 }}>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#5a4535', marginBottom: 6 }}>
+                  {label} {req ? <span style={{ color: SPA_BRAND }}>*</span> : <span style={{ fontWeight: 400, color: '#b0a090' }}>(optional)</span>}
+                </label>
+                <input type={type} placeholder={placeholder} value={(guest as any)[key]} onChange={e => setGuest({ ...guest, [key]: e.target.value })}
+                  style={{ width: '100%', padding: '12px 16px', borderRadius: 14, border: '1.5px solid #ede5d8', background: '#fff', fontSize: 13, color: '#0d1a14', outline: 'none', boxSizing: 'border-box', transition: 'border-color 0.15s' }}
+                  onFocus={e => e.target.style.borderColor = SPA_DARK} onBlur={e => e.target.style.borderColor = '#ede5d8'} />
               </div>
-              <div>
-                <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Phone Number *</label>
-                <input className="w-full px-4 py-3 rounded-2xl border border-[#e8dccf] bg-white text-sm focus:outline-none focus:border-[#cc5a16]"
-                  placeholder="+91 98765 43210" type="tel" value={guest.client_phone} onChange={e => setGuest({ ...guest, client_phone: e.target.value })} />
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Email Address <span className="font-normal text-[#9d8b7e]">(optional)</span></label>
-                <input className="w-full px-4 py-3 rounded-2xl border border-[#e8dccf] bg-white text-sm focus:outline-none focus:border-[#cc5a16]"
-                  placeholder="your@email.com" type="email" value={guest.client_email} onChange={e => setGuest({ ...guest, client_email: e.target.value })} />
-              </div>
-            </div>
+            ))}
 
-            {error && (
-              <div className="mt-3 p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700">{error}</div>
-            )}
+            {error && <div style={{ padding: '12px 16px', borderRadius: 12, background: '#fff5f5', border: '1px solid #fecaca', color: '#c0392b', fontSize: 12, marginBottom: 16 }}>{error}</div>}
 
             <button onClick={submit} disabled={busy || !guest.client_name || !guest.client_phone}
-              className="w-full mt-5 py-4 rounded-2xl text-white font-bold text-sm shadow-md transition-all hover:opacity-90 disabled:opacity-50"
-              style={{ background: busy || !guest.client_name || !guest.client_phone ? '#d6c9be' : 'linear-gradient(135deg, #cc5a16, #a84810)' }}>
-              {busy ? 'Booking your appointment…' : 'Confirm Booking'}
+              style={{ width: '100%', marginTop: 8, padding: '15px 0', borderRadius: 18, fontWeight: 700, fontSize: 14, border: 'none', cursor: busy || !guest.client_name || !guest.client_phone ? 'not-allowed' : 'pointer', transition: 'all 0.2s', background: busy || !guest.client_name || !guest.client_phone ? '#d6c9be' : `linear-gradient(135deg, ${SPA_DARK} 0%, #1a3828 100%)`, color: busy || !guest.client_name || !guest.client_phone ? '#a09080' : SPA_GOLD, boxShadow: busy || !guest.client_name || !guest.client_phone ? 'none' : '0 4px 16px rgba(13,31,24,0.28)', letterSpacing: 0.3 }}>
+              {busy ? 'Booking your appointment…' : '✦ Confirm Booking'}
             </button>
-
-            <p className="text-[10px] text-center text-[#9d8b7e] mt-3">By booking you agree to our cancellation policy. No charge today.</p>
+            <p style={{ textAlign: 'center', fontSize: 11, color: '#b0a090', marginTop: 12 }}>No payment required today. Cancellation policy applies.</p>
           </div>
         )}
       </div>
 
       {/* ── Footer ── */}
-      <div className="text-center py-6 text-[10px] text-[#9d8b7e]">
-        {data.property?.phone && <p>📞 {data.property.phone}</p>}
-        <p className="mt-1">{data.property?.name} · {data.property?.city}</p>
+      <div style={{ background: SPA_DARK, borderTop: '1px solid rgba(255,255,255,0.06)', padding: '28px 16px', textAlign: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginBottom: 8 }}>
+          <div style={{ height: 1, width: 28, background: 'rgba(201,169,110,0.35)' }} />
+          <p style={{ ...SERIF, color: SPA_GOLD, fontSize: 13, fontWeight: 600 }}>{data.property?.name}</p>
+          <div style={{ height: 1, width: 28, background: 'rgba(201,169,110,0.35)' }} />
+        </div>
+        {data.property?.phone && <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>📞 {data.property.phone}</p>}
+        {data.property?.city && <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', marginTop: 4 }}>{data.property.city}{data.property.state ? `, ${data.property.state}` : ''}</p>}
+        <p style={{ fontSize: 9, color: 'rgba(255,255,255,0.15)', marginTop: 14, letterSpacing: 2 }}>POWERED BY ATITHI-SETU</p>
       </div>
     </div>
   );
