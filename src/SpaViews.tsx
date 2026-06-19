@@ -877,6 +877,40 @@ const CATEGORY_COLOR: Record<string, string> = {
   MASSAGE: '#b45309', FACIAL: '#7c3aed', BODY: '#047857', SAUNA: '#dc2626', SALON: '#db2777', WELLNESS: '#0284c7', DEFAULT: '#cc5a16',
 };
 
+// Repeating mandala/lotus SVG pattern — overlaid on hero at 8% opacity
+function SpaHeroPattern() {
+  return (
+    <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0.08, pointerEvents: 'none' }}
+      viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice">
+      <defs>
+        <pattern id="spa-mp" x="0" y="0" width="120" height="120" patternUnits="userSpaceOnUse">
+          <g transform="translate(60,60)">
+            <ellipse rx="7" ry="24" fill="none" stroke="#c9a96e" strokeWidth="0.7" />
+            <ellipse rx="7" ry="24" fill="none" stroke="#c9a96e" strokeWidth="0.7" transform="rotate(45)" />
+            <ellipse rx="7" ry="24" fill="none" stroke="#c9a96e" strokeWidth="0.7" transform="rotate(90)" />
+            <ellipse rx="7" ry="24" fill="none" stroke="#c9a96e" strokeWidth="0.7" transform="rotate(135)" />
+            <ellipse rx="7" ry="24" fill="none" stroke="#c9a96e" strokeWidth="0.7" transform="rotate(180)" />
+            <ellipse rx="7" ry="24" fill="none" stroke="#c9a96e" strokeWidth="0.7" transform="rotate(225)" />
+            <ellipse rx="7" ry="24" fill="none" stroke="#c9a96e" strokeWidth="0.7" transform="rotate(270)" />
+            <ellipse rx="7" ry="24" fill="none" stroke="#c9a96e" strokeWidth="0.7" transform="rotate(315)" />
+            <circle r="6" fill="none" stroke="#c9a96e" strokeWidth="0.7" />
+            <circle r="2" fill="#c9a96e" opacity="0.6" />
+            <circle cx="42" cy="0" r="2" fill="#c9a96e" opacity="0.5" />
+            <circle cx="-42" cy="0" r="2" fill="#c9a96e" opacity="0.5" />
+            <circle cx="0" cy="42" r="2" fill="#c9a96e" opacity="0.5" />
+            <circle cx="0" cy="-42" r="2" fill="#c9a96e" opacity="0.5" />
+            <circle cx="30" cy="30" r="1.2" fill="#c9a96e" opacity="0.35" />
+            <circle cx="-30" cy="30" r="1.2" fill="#c9a96e" opacity="0.35" />
+            <circle cx="30" cy="-30" r="1.2" fill="#c9a96e" opacity="0.35" />
+            <circle cx="-30" cy="-30" r="1.2" fill="#c9a96e" opacity="0.35" />
+          </g>
+        </pattern>
+      </defs>
+      <rect width="400" height="300" fill="url(#spa-mp)" />
+    </svg>
+  );
+}
+
 export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   const [data, setData] = useState<any>(null);
   const [restaurantId, setRestaurantId] = useState<string>(tenantId);
@@ -1047,24 +1081,38 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
       <style>{`@keyframes spin{to{transform:rotate(360deg)}} @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=Inter:wght@300;400;500;600&display=swap');`}</style>
 
       {/* ── Hero ── */}
-      <div style={{ ...heroStyle, position: 'relative', minHeight: step === 1 ? 260 : 120, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', paddingBottom: 28 }}>
+      <div style={{ ...heroStyle, position: 'relative', minHeight: step === 1 ? 360 : 120, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', paddingBottom: 36, overflow: 'hidden' }}>
         <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg, transparent, ${SPA_GOLD}, transparent)` }} />
-        <div style={{ textAlign: 'center', color: '#fff', padding: '0 16px' }}>
+        <SpaHeroPattern />
+        <div style={{ position: 'relative', zIndex: 1, textAlign: 'center', color: '#fff', padding: '0 20px' }}>
           {step === 1 && data.property?.logo_url && (
-            <img src={data.property.logo_url} alt="" style={{ height: 50, margin: '40px auto 12px', borderRadius: 10, objectFit: 'contain', filter: 'brightness(0) invert(1)', opacity: 0.9 }} />
+            <img src={data.property.logo_url} alt="" style={{ height: 58, margin: '56px auto 16px', borderRadius: 12, objectFit: 'contain', filter: 'brightness(0) invert(1)', opacity: 0.92 }} />
           )}
           {step === 1 ? (
             <>
-              <h1 style={{ ...SERIF, fontSize: 28, fontWeight: 700, letterSpacing: -0.5, textShadow: '0 2px 12px rgba(0,0,0,0.5)', marginTop: data.property?.logo_url ? 0 : 40 }}>{data.property?.name}</h1>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginTop: 10 }}>
-                <div style={{ height: 1, width: 36, background: 'rgba(201,169,110,0.5)' }} />
-                <p style={{ color: SPA_GOLD, fontSize: 10, letterSpacing: 4, textTransform: 'uppercase', fontWeight: 600 }}>{profile.tagline || 'Spa & Wellness'}</p>
-                <div style={{ height: 1, width: 36, background: 'rgba(201,169,110,0.5)' }} />
+              <h1 style={{ ...SERIF, fontSize: 36, fontWeight: 700, letterSpacing: -0.5, textShadow: '0 2px 20px rgba(0,0,0,0.65)', marginTop: data.property?.logo_url ? 0 : 56, lineHeight: 1.12 }}>{data.property?.name}</h1>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 14 }}>
+                <div style={{ height: 1, width: 48, background: 'rgba(201,169,110,0.55)' }} />
+                <span style={{ color: SPA_GOLD, fontSize: 13, lineHeight: 1 }}>✦</span>
+                <p style={{ color: SPA_GOLD, fontSize: 10, letterSpacing: 4.5, textTransform: 'uppercase', fontWeight: 700, margin: 0 }}>{profile.tagline || 'Spa & Wellness'}</p>
+                <span style={{ color: SPA_GOLD, fontSize: 13, lineHeight: 1 }}>✦</span>
+                <div style={{ height: 1, width: 48, background: 'rgba(201,169,110,0.55)' }} />
               </div>
-              {data.property?.city && <p style={{ fontSize: 11, opacity: 0.45, marginTop: 6, letterSpacing: 1 }}>{data.property.city}{data.property.state ? `, ${data.property.state}` : ''}</p>}
+              {data.property?.city && <p style={{ fontSize: 11, opacity: 0.38, marginTop: 10, letterSpacing: 2, textTransform: 'uppercase' }}>{data.property.city}{data.property.state ? ` · ${data.property.state}` : ''}</p>}
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 20, flexWrap: 'wrap' }}>
+                {(profile.features?.length ? profile.features : ['Expert Therapists', 'Premium Products', 'Private Cabins']).slice(0, 3).map((f: string) => (
+                  <span key={f} style={{ fontSize: 10, padding: '5px 16px', borderRadius: 20, border: '1px solid rgba(201,169,110,0.3)', color: 'rgba(255,255,255,0.72)', letterSpacing: 0.5, background: 'rgba(0,0,0,0.2)' }}>{f}</span>
+                ))}
+              </div>
+              {(data.services?.length || 0) > 0 && (
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginTop: 18, padding: '6px 18px', borderRadius: 24, background: 'rgba(201,169,110,0.1)', border: '1px solid rgba(201,169,110,0.22)' }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', display: 'inline-block', flexShrink: 0 }} />
+                  <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.72)', letterSpacing: 0.4 }}>{data.services.length} treatment{data.services.length !== 1 ? 's' : ''} · Online booking open</span>
+                </div>
+              )}
             </>
           ) : (
-            <p style={{ fontSize: 10, opacity: 0.5, letterSpacing: 3, textTransform: 'uppercase', paddingTop: 16 }}>{data.property?.name} · {profile.tagline || 'Spa & Wellness'}</p>
+            <p style={{ fontSize: 10, opacity: 0.42, letterSpacing: 3, textTransform: 'uppercase', paddingTop: 16 }}>{data.property?.name} · {profile.tagline || 'Spa & Wellness'}</p>
           )}
         </div>
       </div>
@@ -1115,27 +1163,29 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
                   style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid #ede5d8', borderRadius: 20, overflow: 'hidden', cursor: 'pointer', boxShadow: '0 2px 12px rgba(0,0,0,0.04)', transition: 'all 0.2s' }}
                   onMouseEnter={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 8px 28px rgba(0,0,0,0.1)'; (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; }}
                   onMouseLeave={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 2px 12px rgba(0,0,0,0.04)'; (e.currentTarget as HTMLElement).style.transform = 'none'; }}>
-                  {s.image_url && (
-                    <div style={{ position: 'relative', height: 150, overflow: 'hidden' }}>
+                  {s.image_url ? (
+                    <div style={{ position: 'relative', height: 160, overflow: 'hidden' }}>
                       <img src={s.image_url} alt={s.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                      <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top, rgba(13,31,24,0.75) 0%, transparent 55%)' }} />
+                      <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top, rgba(13,31,24,0.82) 0%, transparent 55%)' }} />
                       <div style={{ position: 'absolute', bottom: 12, left: 16, right: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
                         <span style={{ fontSize: 10, background: `${CATEGORY_COLOR[s.category] || SPA_BRAND}dd`, color: '#fff', borderRadius: 20, padding: '2px 10px', fontWeight: 600 }}>{s.category}</span>
                         <span style={{ ...SERIF, fontWeight: 700, fontSize: 18, color: '#fff', textShadow: '0 1px 4px rgba(0,0,0,0.5)' }}>{cur}{Number(s.price).toLocaleString('en-IN')}</span>
                       </div>
                     </div>
+                  ) : (
+                    <div style={{ position: 'relative', height: 120, overflow: 'hidden', borderBottom: `1px solid ${CATEGORY_COLOR[s.category] || SPA_BRAND}18`, background: `linear-gradient(135deg, ${CATEGORY_COLOR[s.category] || SPA_BRAND}1e 0%, ${CATEGORY_COLOR[s.category] || SPA_BRAND}07 60%, rgba(249,245,239,0.4) 100%)` }}>
+                      <div style={{ position: 'absolute', right: -36, top: -36, width: 140, height: 140, borderRadius: '50%', border: `1px solid ${CATEGORY_COLOR[s.category] || SPA_BRAND}18` }} />
+                      <div style={{ position: 'absolute', right: 22, bottom: -24, width: 90, height: 90, borderRadius: '50%', border: `1px solid ${CATEGORY_COLOR[s.category] || SPA_BRAND}10` }} />
+                      <span style={{ position: 'absolute', left: 16, bottom: 8, fontSize: 54, lineHeight: 1, filter: 'drop-shadow(0 3px 8px rgba(0,0,0,0.08))' }}>{CATEGORY_ICON[s.category] || '🌸'}</span>
+                      <div style={{ position: 'absolute', top: 12, right: 12, background: '#fff', borderRadius: 22, padding: '5px 14px', boxShadow: '0 2px 12px rgba(0,0,0,0.09)' }}>
+                        <span style={{ ...SERIF, fontWeight: 700, fontSize: 15, color: SPA_BRAND }}>{cur}{Number(s.price).toLocaleString('en-IN')}</span>
+                      </div>
+                      <span style={{ position: 'absolute', top: 14, left: 12, fontSize: 10, background: `${CATEGORY_COLOR[s.category] || SPA_BRAND}20`, color: CATEGORY_COLOR[s.category] || SPA_BRAND, borderRadius: 20, padding: '3px 10px', fontWeight: 700 }}>{s.category}</span>
+                    </div>
                   )}
                   <div style={{ padding: '14px 16px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                      <div style={{ flex: 1 }}>
-                        {!s.image_url && (
-                          <span style={{ fontSize: 10, background: `${CATEGORY_COLOR[s.category] || SPA_BRAND}18`, color: CATEGORY_COLOR[s.category] || SPA_BRAND, borderRadius: 20, padding: '2px 10px', fontWeight: 600, display: 'inline-block', marginBottom: 6 }}>{s.category}</span>
-                        )}
-                        <p style={{ ...SERIF, fontWeight: 600, fontSize: 16, color: '#0d1a14', lineHeight: 1.3, marginBottom: 4 }}>{s.name}</p>
-                        {s.description && <p style={{ fontSize: 12, color: '#8a7060', lineHeight: 1.5 }}>{s.description}</p>}
-                      </div>
-                      {!s.image_url && <p style={{ ...SERIF, fontWeight: 700, fontSize: 17, color: SPA_BRAND, flexShrink: 0 }}>{cur}{Number(s.price).toLocaleString('en-IN')}</p>}
-                    </div>
+                    <p style={{ ...SERIF, fontWeight: 600, fontSize: 16, color: '#0d1a14', lineHeight: 1.3, marginBottom: 4 }}>{s.name}</p>
+                    {s.description && <p style={{ fontSize: 12, color: '#8a7060', lineHeight: 1.5 }}>{s.description}</p>}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
                       <span style={{ fontSize: 12, color: '#8a7060', display: 'flex', alignItems: 'center', gap: 4 }}><Clock size={12} /> {s.duration_min} min</span>
                       <span style={{ fontSize: 11, fontWeight: 600, color: SPA_DARK, background: `rgba(201,169,110,0.15)`, border: `1px solid rgba(201,169,110,0.3)`, padding: '4px 14px', borderRadius: 20 }}>Select →</span>
