@@ -19076,6 +19076,24 @@ ${data.tenant.name}`;
     }
   });
 
+  // GET /api/restaurant/:id/procurement/supplier-invoices/:invoiceId — single invoice with payments
+  app.get("/api/restaurant/:id/procurement/supplier-invoices/:invoiceId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT si.*, s.name AS supplier_name
+         FROM supplier_invoices si
+         LEFT JOIN suppliers s ON s.id = si.supplier_id
+         WHERE si.id = ?`,
+        [req.params.invoiceId]
+      );
+      if (!rows.length) return res.status(404).json({ error: "Invoice not found" });
+      res.json(rows[0]);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch invoice" });
+    }
+  });
+
   // Create supplier invoice
   app.post("/api/restaurant/:id/procurement/supplier-invoices", authenticate, async (req: AuthRequest, res: Response) => {
     const role = (req as any).user?.role;
@@ -19392,6 +19410,28 @@ ${data.tenant.name}`;
     }
   });
 
+  // GET /api/restaurant/:id/procurement/suppliers/:supplierId — single supplier with AP summary
+  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(`
+        SELECT s.*,
+          COALESCE(SUM(CASE WHEN si.status NOT IN ('PAID') THEN si.outstanding_amount ELSE 0 END), 0) AS ap_outstanding,
+          COALESCE(SUM(si.total_amount), 0) AS ap_total_billed,
+          COALESCE(SUM(si.paid_amount), 0) AS ap_total_paid,
+          COUNT(DISTINCT CASE WHEN si.status NOT IN ('PAID') AND si.outstanding_amount > 0 THEN si.id END) AS open_invoices
+        FROM suppliers s
+        LEFT JOIN supplier_invoices si ON si.supplier_id = s.id
+        WHERE s.id = ?
+        GROUP BY s.id
+      `, [req.params.supplierId]);
+      if (!rows.length) return res.status(404).json({ error: "Supplier not found" });
+      res.json(rows[0]);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch supplier" });
+    }
+  });
+
   // POST /api/restaurant/:id/procurement/suppliers — create supplier (no INVENTORY gate)
   app.post("/api/restaurant/:id/procurement/suppliers", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
     try {
@@ -19491,11 +19531,11 @@ ${data.tenant.name}`;
       const [otRow] = await db.query(`
         SELECT
           COUNT(*) AS total_deliveries,
-          COUNT(CASE WHEN date(gr.received_at) <= po.expected_delivery_date THEN 1 END) AS on_time_count
+          COUNT(CASE WHEN gr.received_at::date <= po.expected_delivery_date THEN 1 END) AS on_time_count
         FROM goods_receipts gr
         JOIN purchase_orders po ON po.id = gr.po_id
         WHERE gr.supplier_id = ? AND po.expected_delivery_date IS NOT NULL
-          AND gr.received_at >= date('now', '-90 days')
+          AND gr.received_at >= NOW() - INTERVAL '90 days'
       `, [sid]);
 
       const [frRow] = await db.query(`
@@ -19504,15 +19544,15 @@ ${data.tenant.name}`;
           COALESCE(SUM(poi.qty_received), 0) AS total_received
         FROM purchase_orders po
         JOIN purchase_order_items poi ON poi.po_id = po.id
-        WHERE po.supplier_id = ? AND po.raised_at >= date('now', '-90 days')
+        WHERE po.supplier_id = ? AND po.raised_at >= NOW() - INTERVAL '90 days'
       `, [sid]);
 
       const [pvRow] = await db.query(`
-        SELECT ROUND(AVG((gri.unit_price - poi.unit_price) / NULLIF(poi.unit_price, 0) * 100), 1) AS price_variance_pct
+        SELECT ROUND(AVG((gri.unit_price - poi.unit_price) / NULLIF(poi.unit_price, 0) * 100)::numeric, 1) AS price_variance_pct
         FROM goods_receipt_items gri
         JOIN goods_receipts gr ON gr.id = gri.grn_id
         JOIN purchase_order_items poi ON poi.po_id = gr.po_id AND poi.ingredient_id = gri.ingredient_id
-        WHERE gr.supplier_id = ? AND gr.received_at >= date('now', '-90 days') AND gr.po_id IS NOT NULL
+        WHERE gr.supplier_id = ? AND gr.received_at >= NOW() - INTERVAL '90 days' AND gr.po_id IS NOT NULL
       `, [sid]);
 
       const [qlRow] = await db.query(`
@@ -19521,7 +19561,7 @@ ${data.tenant.name}`;
           COUNT(CASE WHEN gri.condition = 'GOOD' THEN 1 END) AS good_items
         FROM goods_receipt_items gri
         JOIN goods_receipts gr ON gr.id = gri.grn_id
-        WHERE gr.supplier_id = ? AND gr.received_at >= date('now', '-90 days')
+        WHERE gr.supplier_id = ? AND gr.received_at >= NOW() - INTERVAL '90 days'
       `, [sid]);
 
       const on_time_pct = otRow.total_deliveries > 0
