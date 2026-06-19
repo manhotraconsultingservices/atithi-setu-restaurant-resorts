@@ -117,7 +117,13 @@ const PERMS_V3_MARKER = '__perm_v3__';
 // themselves about these tabs (because they hadn't been built yet) — so
 // we grandfather them visible. Once the admin re-saves through the V3 UI,
 // the V3 marker is appended and any exclusion sticks.
-const TABS_INTRODUCED_AFTER_V2 = new Set<string>(['LOYALTY', 'ROSTER', 'TIMESHEET', 'HR_PAYROLL', 'RESTAURANT_REPORTS']);
+const TABS_INTRODUCED_AFTER_V2 = new Set<string>(['LOYALTY', 'ROSTER', 'TIMESHEET', 'HR_PAYROLL', 'RESTAURANT_REPORTS', 'PROCUREMENT', 'EXPENSE_JOURNAL']);
+
+// Tabs introduced after V3 was shipped. V3-era permission saves pre-date
+// these tabs, so even a fully-informed V3 list won't include them — we
+// grandfather them visible until the admin re-saves through a future UI
+// generation that knows about these tabs.
+const TABS_INTRODUCED_AFTER_V3 = new Set<string>(['PROCUREMENT', 'EXPENSE_JOURNAL']);
 
 // Decide whether a dashboard tab should be visible for a tenant, given the
 // tenant's saved allowedTabs list.
@@ -137,8 +143,9 @@ function isTabVisible(id: string, allowedTabs: string[] | null | undefined): boo
   if (!allowedTabs || allowedTabs.length === 0) return true;
   if (allowedTabs.includes(id)) return true;
   if (allowedTabs.includes(PERMS_V3_MARKER)) {
-    // Fully-informed exclusion as of the current UI generation
-    return false;
+    // Fully-informed exclusion as of V3 UI generation — but grandfather
+    // any tab introduced after V3 was shipped (admin couldn't have seen it).
+    return TABS_INTRODUCED_AFTER_V3.has(id);
   }
   if (allowedTabs.includes(PERMS_V2_MARKER)) {
     // V2-era save — admin couldn't have informed themselves about
