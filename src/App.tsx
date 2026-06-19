@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { DataTable, exportToCsv } from './components/DataTable';
+import { SpaModule, SpaBookingPage } from './SpaViews';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Utensils, 
@@ -512,6 +513,9 @@ export default function App() {
     if (segs[0] === 'book' && segs[1]) {
       return { kind: 'book' as const, tenantId: segs[1] };
     }
+    if (segs[0] === 'spa' && segs[1]) {
+      return { kind: 'spa' as const, tenantId: segs[1] };
+    }
     return null;
   })();
   if (publicGuestPath?.kind === 'checkin') {
@@ -519,6 +523,9 @@ export default function App() {
   }
   if (publicGuestPath?.kind === 'book') {
     return <PublicBookingPage tenantId={publicGuestPath.tenantId} />;
+  }
+  if (publicGuestPath?.kind === 'spa') {
+    return <SpaBookingPage tenantId={publicGuestPath.tenantId} />;
   }
 
   const [role, setRole] = useState<UserRole | null>(localStorage.getItem('role') as UserRole);
@@ -8460,6 +8467,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     (restaurant as any).property_type === 'RESTAURANT' ||
     (restaurant as any).property_type === 'BOTH'
   );
+  // Spa & Wellness is gated by a dedicated flag (orthogonal to property_type).
+  // Default 0 on every existing tenant → the SPA nav module never renders.
+  const isSpaEnabled = !!restaurant && Number((restaurant as any).spa_enabled) === 1;
   // ── Dashboard mode ─────────────────────────────────────────────────────
   // For BOTH-mode tenants (Restaurant + Hotel on the same tenant), the
   // owner can pick which "side" of the business to see in the nav. The
@@ -12419,6 +12429,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
             HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
+            SPA_CALENDAR: 'Appointment Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages & Memberships', SPA_REPORTS: 'Spa Reports', SPA_INVENTORY: 'Spa Inventory',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
             SETTINGS: 'Brand & Settings', STAFF_ACCESS: 'Staff Access', NOTIFICATIONS: 'Notifications', SUBSCRIPTION: 'Subscription'
           } as Record<string, string>)[activeTab]}
@@ -12454,7 +12465,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // now group every destination into SIX left-sidebar modules by
         // operator job-to-be-done. The activeTab state machine and all
         // ~30 view components are untouched — only the nav chrome changed.
-        type NavTab = { id: string; label: string; mode?: 'RESTAURANT' | 'HOTEL'; requires?: 'hotel' | 'restaurant' };
+        type NavTab = { id: string; label: string; mode?: 'RESTAURANT' | 'HOTEL'; requires?: 'hotel' | 'restaurant' | 'spa' };
         type NavModule = {
           id: string;
           label: string;
@@ -12525,6 +12536,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ],
           },
           {
+            id: 'SPA', label: 'Spa & Wellness', icon: <Sparkles size={16} />,
+            visible: isSpaEnabled,
+            tabs: [
+              { id: 'SPA_CALENDAR',     label: 'Appointment Calendar' },
+              { id: 'SPA_APPOINTMENTS', label: 'Appointments' },
+              { id: 'SPA_CATALOG',      label: 'Service Menu' },
+              { id: 'SPA_RESOURCES',    label: 'Therapists & Cabins' },
+              { id: 'SPA_CLIENTS',      label: 'Clients' },
+              { id: 'SPA_PACKAGES',     label: 'Packages & Memberships' },
+              { id: 'SPA_REPORTS',      label: 'Spa Reports' },
+            ],
+          },
+          {
             id: 'SUPPLY_CHAIN', label: 'Supply Chain', icon: <Package size={16} />,
             visible: true,
             tabs: [
@@ -12532,6 +12556,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'EXPENSE_JOURNAL', label: 'Expense Journal' },
               { id: 'HOTEL_INVENTORY', label: 'Hotel Inventory',   requires: 'hotel' },
               { id: 'INVENTORY',       label: 'Kitchen Inventory', requires: 'restaurant' },
+              { id: 'SPA_INVENTORY',   label: 'Spa Inventory',     requires: 'spa' },
             ],
           },
           {
@@ -12602,6 +12627,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const pageVisible = (t: NavTab) => {
           if (t.requires === 'hotel' && !isHotelEnabled) return false;
           if (t.requires === 'restaurant' && !isRestaurantEnabled) return false;
+          if (t.requires === 'spa' && !isSpaEnabled) return false;
           return isVisible(t.id);
         };
         // A mode-stamped trio entry is "active" only when BOTH the tab and
@@ -13257,6 +13283,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
         </div>
+      ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_INVENTORY') && isSpaEnabled ? (
+        <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
       ) : activeTab === 'HOTEL_INVENTORY' ? (
         <HotelInventoryView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'INVENTORY' ? (
@@ -44479,6 +44507,43 @@ function SuperAdminDashboard({ token }: { token: string }) {
                             </button>
                           ))}
                         </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Spa & Wellness module toggle — orthogonal to Business Type.
+                      Default off; activation is a billing-tier decision (admin only). */}
+                  {(() => {
+                    const spaOn = Number((r as any).spa_enabled) === 1;
+                    return (
+                      <div>
+                        <p className="text-[10px] text-[#9c8e85] font-semibold uppercase tracking-widest mb-1.5 flex items-center gap-1.5">
+                          <Sparkles size={11} /> Spa &amp; Wellness
+                        </p>
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`${spaOn ? 'Disable' : 'Enable'} the Spa module for "${r.name}"?\n\n${spaOn ? 'This hides Spa tabs. Spa data is preserved.' : 'Confirm the customer is on a Spa-tier subscription before proceeding.'}`)) return;
+                            try {
+                              const res = await fetch(`/api/restaurant/${r.id}/spa/enable`, {
+                                method: 'POST',
+                                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ enabled: !spaOn }),
+                              });
+                              const data = await res.json();
+                              if (!res.ok) { alert(`❌ ${data.error || 'Failed'}`); return; }
+                              alert(`✅ ${data.message || 'Updated'}`);
+                              window.location.reload();
+                            } catch { alert('Network error. Please try again.'); }
+                          }}
+                          className={cn(
+                            "w-full py-2 rounded-xl text-[11px] font-bold transition-all border",
+                            spaOn
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : "text-[#6b5d52] border-[#cc5a16]/15 hover:bg-[#cc5a16]/5"
+                          )}
+                        >
+                          {spaOn ? 'Spa: ON — click to disable' : 'Spa: OFF — click to enable'}
+                        </button>
                       </div>
                     );
                   })()}

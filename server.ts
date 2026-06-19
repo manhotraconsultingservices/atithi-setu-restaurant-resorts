@@ -17,6 +17,11 @@ import { getChannelAdapter, ChannelCredentials } from "./channelAdapters.ts";
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
 import { generatePOPdf, buildPOEmailBody, type POPdfData } from "./poService.ts";
+import {
+  createSpaTables, seedSpaDefaults,
+  findAvailableSlots, serviceWindowMinutes, therapistConflict, resourceConflict, blockConflict,
+  tsFromDateMinutes, hhmmToMinutes, minutesToHHMM,
+} from "./spaService.ts";
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
 import {
   computePayslip as computeStatutoryPayslip,
@@ -1195,6 +1200,12 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- renders without tax. Default 0 = normal taxable invoice (unchanged).
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS gst_exempt INTEGER DEFAULT 0;
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS gst_exempt_reason TEXT;
+    -- Spa & Wellness module (Jun 2026) — spa appointments bill onto the same
+    -- folio ledger. folio_kind discriminates HOTEL (default, legacy rows) vs
+    -- SPA; appointment_id links a SPA folio to its spa_appointments row. Hotel
+    -- folios keep folio_kind='HOTEL' + appointment_id NULL → identical behaviour.
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS folio_kind TEXT DEFAULT 'HOTEL';
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS appointment_id TEXT;
 
     CREATE TABLE IF NOT EXISTS folio_entries (
       id         TEXT PRIMARY KEY,
@@ -4482,7 +4493,14 @@ async function startServer() {
     // Audible + visual alert toggle for unacknowledged waiter-calls / service-requests
     await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS alerts_enabled INT DEFAULT 1`);
     await centralDb.run(`UPDATE restaurants SET alerts_enabled = 1 WHERE alerts_enabled IS NULL`);
-    console.log("[hospitality-migration] property_type + logo_url + menu_display_mode + alerts_enabled ensured");
+    // ====== Spa & Wellness module gate (separate, orthogonal to property_type) ======
+    // A dedicated boolean — NOT a new property_type value — so spa is independent
+    // of the RESTAURANT/HOTEL/BOTH enum. DEFAULT 0 = every existing tenant keeps
+    // spa hidden (nav) and gets 403 on /spa/* routes. Zero impact. Activated per
+    // tenant via POST /api/restaurant/:id/spa/enable (SUPER_ADMIN/CTO only).
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS spa_enabled INT DEFAULT 0`);
+    await centralDb.run(`UPDATE restaurants SET spa_enabled = 0 WHERE spa_enabled IS NULL`);
+    console.log("[hospitality-migration] property_type + logo_url + menu_display_mode + alerts_enabled + spa_enabled ensured");
   } catch (err) {
     console.error("[hospitality-migration] Warning:", err);
   }
@@ -4597,6 +4615,27 @@ async function startServer() {
     if (hotelTenants.length > 0) console.log(`[hotel-tenant-migration] Ran for ${hotelTenants.length} hotel tenant(s)`);
   } catch (err) {
     console.error("[hotel-tenant-migration] error:", err);
+  }
+
+  // ====== Per-tenant spa schema migrations ======
+  // Re-run createSpaTables() at boot for spa-enabled tenants so ALTER … ADD
+  // COLUMN IF NOT EXISTS changes land without a module toggle. Guarded on
+  // spa_enabled=1 so non-spa tenants (the vast majority) are never touched.
+  try {
+    const spaTenants: any[] = await centralDb.query(
+      "SELECT id FROM restaurants WHERE spa_enabled = 1"
+    );
+    for (const t of spaTenants) {
+      try {
+        const tenantDb = await getTenantDb(t.id);
+        await createSpaTables(tenantDb);
+      } catch (err) {
+        console.error(`[spa-tenant-migration] tenant ${t.id}:`, err);
+      }
+    }
+    if (spaTenants.length > 0) console.log(`[spa-tenant-migration] Ran for ${spaTenants.length} spa tenant(s)`);
+  } catch (err) {
+    console.error("[spa-tenant-migration] error:", err);
   }
 
   // ───────────────────────────────────────────────────────────────────────
@@ -20391,6 +20430,1272 @@ ${data.tenant.name}`;
       console.error("/hotel/enable error:", err);
       res.status(500).json({ error: "Failed to toggle hotel module" });
     }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SPA & WELLNESS MODULE — /api/restaurant/:id/spa/*
+  // Gated by restaurants.spa_enabled (default 0). Mirrors the Hotel module
+  // pattern (ensure-guard → routes), reuses the folio ledger for billing and
+  // the ingredients/procurement chain for supply. Zero impact on tenants that
+  // don't have spa_enabled=1 (they 403 here and never see the nav module).
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const ensureSpaEnabled = async (restaurantId: string): Promise<{ ok: boolean; restaurant: any; status: number; error: string }> => {
+    const r: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [restaurantId]);
+    if (!r) return { ok: false, restaurant: null, status: 404, error: "Restaurant not found" };
+    if (Number(r.spa_enabled) !== 1) {
+      return { ok: false, restaurant: null, status: 403, error: "Spa module not enabled for this property" };
+    }
+    return { ok: true, restaurant: r, status: 200, error: '' };
+  };
+
+  const mkSpaId = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  const round2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
+
+  // ─── Enable / disable the spa module (SUPER_ADMIN / CTO only) ──────────────
+  app.post("/api/restaurant/:id/spa/enable", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const restaurantId = req.params.id;
+      if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+        return res.status(403).json({ error: "This action is restricted to platform administrators. Contact sales to add the Spa module to your subscription." });
+      }
+      const enabled: boolean = req.body?.enabled !== false; // default true
+      const current: any = await centralDb.get("SELECT spa_enabled FROM restaurants WHERE id = ?", [restaurantId]);
+      if (!current) return res.status(404).json({ error: "Restaurant not found" });
+      await centralDb.run("UPDATE restaurants SET spa_enabled = ? WHERE id = ?", [enabled ? 1 : 0, restaurantId]);
+      // Reuse the property_type_audit trail for spa toggles too.
+      try {
+        await centralDb.run(
+          `INSERT INTO property_type_audit (restaurant_id, changed_by_email, changed_by_role, from_type, to_type, ip, changed_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [restaurantId, req.user?.email || 'unknown', req.user?.role || 'unknown',
+           `spa:${Number(current.spa_enabled) === 1 ? 'ON' : 'OFF'}`, `spa:${enabled ? 'ON' : 'OFF'}`,
+           String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim()]
+        );
+      } catch (auditErr: any) { console.error("[spa/enable] audit write failed:", auditErr?.message); }
+
+      let seeded = 0;
+      if (enabled) {
+        const tenantDb = await getTenantDb(restaurantId);
+        await createSpaTables(tenantDb);
+        seeded = await seedSpaDefaults(tenantDb);
+      }
+      res.json({
+        success: true,
+        spa_enabled: enabled ? 1 : 0,
+        services_seeded: seeded,
+        message: enabled ? `Spa module enabled${seeded > 0 ? ` · ${seeded} default services added` : ''}` : "Spa module disabled (data preserved)",
+      });
+    } catch (err: any) {
+      console.error("/spa/enable error:", err);
+      res.status(500).json({ error: "Failed to toggle spa module" });
+    }
+  });
+
+  // ─── CATALOG: services ─────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/spa/services", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM spa_services ORDER BY display_order, name");
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch services" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/services", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.name) return res.status(400).json({ error: "name is required" });
+      const id = mkSpaId('SPASVC');
+      await db.run(
+        `INSERT INTO spa_services (id, name, category, description, duration_min, buffer_before_min, buffer_after_min, price, gst_percent, requires_room, requires_therapist, commission_pct, image_url, display_order, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, b.name, b.category || 'MASSAGE', b.description || null,
+         Number(b.duration_min || 60), Number(b.buffer_before_min || 0), Number(b.buffer_after_min || 10),
+         Number(b.price || 0), Number(b.gst_percent ?? 18),
+         b.requires_room === false ? 0 : 1, b.requires_therapist === false ? 0 : 1,
+         Number(b.commission_pct || 0), b.image_url || null, Number(b.display_order || 0)]
+      );
+      const row = await db.get("SELECT * FROM spa_services WHERE id = ?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to create service" }); }
+  });
+
+  app.patch("/api/restaurant/:id/spa/services/:sid", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      const allow = ['name','category','description','duration_min','buffer_before_min','buffer_after_min','price','gst_percent','requires_room','requires_therapist','commission_pct','image_url','display_order','is_active'];
+      for (const k of allow) {
+        if (b[k] !== undefined) {
+          fields.push(`${k} = ?`);
+          vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]);
+        }
+      }
+      if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      vals.push(req.params.sid);
+      await db.run(`UPDATE spa_services SET ${fields.join(', ')} WHERE id = ?`, vals);
+      const row = await db.get("SELECT * FROM spa_services WHERE id = ?", [req.params.sid]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update service" }); }
+  });
+
+  app.delete("/api/restaurant/:id/spa/services/:sid", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE spa_services SET is_active = 0 WHERE id = ?", [req.params.sid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete service" }); }
+  });
+
+  // service add-ons
+  app.get("/api/restaurant/:id/spa/services/:sid/addons", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM spa_service_addons WHERE service_id = ? AND is_active = 1 ORDER BY name", [req.params.sid]);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch add-ons" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/services/:sid/addons", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.name) return res.status(400).json({ error: "name is required" });
+      const id = mkSpaId('SPAADD');
+      await db.run(
+        `INSERT INTO spa_service_addons (id, service_id, name, extra_duration_min, extra_price, gst_percent, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        [id, req.params.sid, b.name, Number(b.extra_duration_min || 0), Number(b.extra_price || 0), Number(b.gst_percent ?? 18)]
+      );
+      res.status(201).json(await db.get("SELECT * FROM spa_service_addons WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create add-on" }); }
+  });
+
+  // service consumables (supply-chain bridge → ingredient_id)
+  app.get("/api/restaurant/:id/spa/services/:sid/consumables", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT c.*, i.name AS ingredient_name, i.unit AS ingredient_unit, i.current_stock_qty
+           FROM spa_service_consumables c LEFT JOIN ingredients i ON i.id = c.ingredient_id
+          WHERE c.service_id = ?`, [req.params.sid]);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch consumables" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/services/:sid/consumables", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.ingredient_id) return res.status(400).json({ error: "ingredient_id is required" });
+      const id = mkSpaId('SPACON');
+      await db.run(
+        `INSERT INTO spa_service_consumables (id, service_id, ingredient_id, qty_per_service, unit) VALUES (?, ?, ?, ?, ?)`,
+        [id, req.params.sid, b.ingredient_id, Number(b.qty_per_service || 0), b.unit || null]
+      );
+      res.status(201).json(await db.get("SELECT * FROM spa_service_consumables WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to add consumable" }); }
+  });
+
+  app.delete("/api/restaurant/:id/spa/consumables/:cid", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("DELETE FROM spa_service_consumables WHERE id = ?", [req.params.cid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to remove consumable" }); }
+  });
+
+  // ─── RESOURCES (cabins) + blocks ───────────────────────────────────────────
+  app.get("/api/restaurant/:id/spa/resources", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query("SELECT * FROM spa_resources ORDER BY name"));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch resources" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/resources", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.name) return res.status(400).json({ error: "name is required" });
+      const id = mkSpaId('SPARES');
+      await db.run(
+        `INSERT INTO spa_resources (id, name, resource_type, capacity, notes, is_active) VALUES (?, ?, ?, ?, ?, 1)`,
+        [id, b.name, b.resource_type || 'CABIN', Number(b.capacity || 1), b.notes || null]
+      );
+      res.status(201).json(await db.get("SELECT * FROM spa_resources WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create resource" }); }
+  });
+
+  app.patch("/api/restaurant/:id/spa/resources/:rid", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      for (const k of ['name','resource_type','capacity','notes','is_active']) {
+        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
+      }
+      if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      vals.push(req.params.rid);
+      await db.run(`UPDATE spa_resources SET ${fields.join(', ')} WHERE id = ?`, vals);
+      res.json(await db.get("SELECT * FROM spa_resources WHERE id = ?", [req.params.rid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to update resource" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/resource-blocks", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query("SELECT * FROM spa_resource_blocks ORDER BY start_at DESC LIMIT 500"));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch blocks" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/resource-blocks", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.scope || !b.scope_id || !b.start_at || !b.end_at) return res.status(400).json({ error: "scope, scope_id, start_at, end_at required" });
+      const id = mkSpaId('SPABLK');
+      await db.run(
+        `INSERT INTO spa_resource_blocks (id, scope, scope_id, start_at, end_at, reason) VALUES (?, ?, ?, ?, ?, ?)`,
+        [id, b.scope, b.scope_id, b.start_at, b.end_at, b.reason || null]
+      );
+      res.status(201).json(await db.get("SELECT * FROM spa_resource_blocks WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create block" }); }
+  });
+
+  app.delete("/api/restaurant/:id/spa/resource-blocks/:bid", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("DELETE FROM spa_resource_blocks WHERE id = ?", [req.params.bid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete block" }); }
+  });
+
+  // ─── THERAPISTS + skills + schedules ───────────────────────────────────────
+  app.get("/api/restaurant/:id/spa/therapists", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query("SELECT * FROM spa_therapists ORDER BY display_name"));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch therapists" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/therapists", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.display_name) return res.status(400).json({ error: "display_name is required" });
+      const id = mkSpaId('SPATHR');
+      await db.run(
+        `INSERT INTO spa_therapists (id, staff_id, display_name, bio, commission_pct_override, is_active) VALUES (?, ?, ?, ?, ?, 1)`,
+        [id, b.staff_id || null, b.display_name, b.bio || null, b.commission_pct_override ?? null]
+      );
+      res.status(201).json(await db.get("SELECT * FROM spa_therapists WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create therapist" }); }
+  });
+
+  app.patch("/api/restaurant/:id/spa/therapists/:tid", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      for (const k of ['staff_id','display_name','bio','commission_pct_override','is_active']) {
+        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
+      }
+      if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      vals.push(req.params.tid);
+      await db.run(`UPDATE spa_therapists SET ${fields.join(', ')} WHERE id = ?`, vals);
+      res.json(await db.get("SELECT * FROM spa_therapists WHERE id = ?", [req.params.tid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to update therapist" }); }
+  });
+
+  // skill matrix
+  app.get("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query("SELECT service_id FROM spa_therapist_services WHERE therapist_id = ?", [req.params.tid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch skills" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const serviceIds: string[] = Array.isArray(req.body?.service_ids) ? req.body.service_ids : [];
+      // Replace the therapist's skill set
+      await db.run("DELETE FROM spa_therapist_services WHERE therapist_id = ?", [req.params.tid]);
+      for (const sid of serviceIds) {
+        await db.run("INSERT INTO spa_therapist_services (id, therapist_id, service_id) VALUES (?, ?, ?) ON CONFLICT (therapist_id, service_id) DO NOTHING",
+          [mkSpaId('SPATS'), req.params.tid, sid]);
+      }
+      res.json({ success: true, count: serviceIds.length });
+    } catch (err: any) { res.status(500).json({ error: "Failed to set skills" }); }
+  });
+
+  // schedules
+  app.get("/api/restaurant/:id/spa/therapists/:tid/schedules", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query("SELECT * FROM spa_therapist_schedules WHERE therapist_id = ? ORDER BY weekday, start_time", [req.params.tid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch schedules" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/therapists/:tid/schedules", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (b.weekday === undefined || !b.start_time || !b.end_time) return res.status(400).json({ error: "weekday, start_time, end_time required" });
+      const id = mkSpaId('SPASCH');
+      await db.run(
+        `INSERT INTO spa_therapist_schedules (id, therapist_id, weekday, start_time, end_time, effective_from, effective_to) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, req.params.tid, Number(b.weekday), b.start_time, b.end_time, b.effective_from || null, b.effective_to || null]
+      );
+      res.status(201).json(await db.get("SELECT * FROM spa_therapist_schedules WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create schedule" }); }
+  });
+
+  app.delete("/api/restaurant/:id/spa/schedules/:schedId", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("DELETE FROM spa_therapist_schedules WHERE id = ?", [req.params.schedId]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete schedule" }); }
+  });
+
+  // ─── SPA INVENTORY (ingredients tagged SPA_PRODUCT / SPA_RETAIL) ───────────
+  app.get("/api/restaurant/:id/spa/inventory", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await db.query("SELECT * FROM ingredients WHERE item_type IN ('SPA_PRODUCT','SPA_RETAIL') AND is_active = 1 ORDER BY name"));
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch spa inventory" }); }
+  });
+
+  // ─── AVAILABILITY (dual-resource slot engine) ──────────────────────────────
+  app.get("/api/restaurant/:id/spa/availability", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const serviceId = String(req.query.service_id || '');
+      const date = String(req.query.date || '');
+      if (!serviceId || !date) return res.status(400).json({ error: "service_id and date are required" });
+      const slots = await findAvailableSlots(db, {
+        serviceId, date,
+        therapistId: req.query.therapist_id ? String(req.query.therapist_id) : undefined,
+      });
+      res.json({ date, service_id: serviceId, slots });
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to compute availability" }); }
+  });
+
+  // ─── APPOINTMENTS ───────────────────────────────────────────────────────────
+  // Helper: normalise a start_at string + service window → {startAt, endAt, date}.
+  const spaApptWindow = (startRaw: string, windowMin: number): { startAt: string; endAt: string; date: string } | null => {
+    const m = String(startRaw).match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/);
+    if (!m) return null;
+    const date = m[1];
+    const startMin = Number(m[2]) * 60 + Number(m[3]);
+    const endMin = startMin + windowMin;
+    return { startAt: tsFromDateMinutes(date, startMin), endAt: tsFromDateMinutes(date, endMin), date };
+  };
+
+  app.get("/api/restaurant/:id/spa/appointments", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const clauses: string[] = []; const params: any[] = [];
+      if (req.query.from) { clauses.push("a.start_at >= ?"); params.push(req.query.from); }
+      if (req.query.to) { clauses.push("a.start_at <= ?"); params.push(req.query.to); }
+      if (req.query.status) { clauses.push("a.status = ?"); params.push(req.query.status); }
+      if (req.query.therapist_id) { clauses.push("a.therapist_id = ?"); params.push(req.query.therapist_id); }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const rows = await db.query(
+        `SELECT a.*, s.name AS service_name_full, t.display_name AS therapist_name, r.name AS resource_name
+           FROM spa_appointments a
+           LEFT JOIN spa_services s ON s.id = a.service_id
+           LEFT JOIN spa_therapists t ON t.id = a.therapist_id
+           LEFT JOIN spa_resources r ON r.id = a.resource_id
+           ${where}
+          ORDER BY a.start_at DESC LIMIT 1000`, params);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch appointments" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/appointments/:aid", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const row = await db.get(
+        `SELECT a.*, s.name AS service_name_full, t.display_name AS therapist_name, r.name AS resource_name
+           FROM spa_appointments a
+           LEFT JOIN spa_services s ON s.id = a.service_id
+           LEFT JOIN spa_therapists t ON t.id = a.therapist_id
+           LEFT JOIN spa_resources r ON r.id = a.resource_id
+          WHERE a.id = ?`, [req.params.aid]);
+      if (!row) return res.status(404).json({ error: "Appointment not found" });
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch appointment" }); }
+  });
+
+  // Book — dual-resource conflict guard (therapist + cabin) → 409 on overlap.
+  app.post("/api/restaurant/:id/spa/appointments", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.service_id || !b.start_at) return res.status(400).json({ error: "service_id and start_at are required" });
+      const service: any = await db.get("SELECT * FROM spa_services WHERE id = ? AND is_active = 1", [b.service_id]);
+      if (!service) return res.status(404).json({ error: "Service not found" });
+
+      // resolve add-ons + window
+      const addonIds: string[] = Array.isArray(b.addon_ids) ? b.addon_ids : [];
+      let addons: any[] = [];
+      if (addonIds.length) {
+        const ph = addonIds.map(() => '?').join(',');
+        addons = await db.query(`SELECT * FROM spa_service_addons WHERE id IN (${ph})`, addonIds);
+      }
+      const windowMin = serviceWindowMinutes(service, addons);
+      const win = spaApptWindow(b.start_at, windowMin);
+      if (!win) return res.status(400).json({ error: "Invalid start_at (expected 'YYYY-MM-DD HH:MM')" });
+
+      const needTherapist = Number(service.requires_therapist ?? 1) === 1;
+      const needRoom = Number(service.requires_room ?? 1) === 1;
+      if (needTherapist && !b.therapist_id) return res.status(400).json({ error: "therapist_id is required for this service" });
+      if (needRoom && !b.resource_id) return res.status(400).json({ error: "resource_id (cabin) is required for this service" });
+
+      // Dual-resource conflict guard (check-then-insert, matching hotel booking convention)
+      if (b.therapist_id) {
+        const tc = await therapistConflict(db, b.therapist_id, win.startAt, win.endAt);
+        if (tc) return res.status(409).json({ error: "Therapist is already booked for an overlapping slot", conflict: tc });
+        if (await blockConflict(db, 'THERAPIST', b.therapist_id, win.startAt, win.endAt)) {
+          return res.status(409).json({ error: "Therapist is blocked for this slot" });
+        }
+      }
+      if (b.resource_id) {
+        const rc = await resourceConflict(db, b.resource_id, win.startAt, win.endAt);
+        if (rc) return res.status(409).json({ error: "Cabin is already booked for an overlapping slot", conflict: rc });
+        if (await blockConflict(db, 'RESOURCE', b.resource_id, win.startAt, win.endAt)) {
+          return res.status(409).json({ error: "Cabin is blocked for this slot" });
+        }
+      }
+
+      // price snapshot = service price + add-on prices
+      const addonPrice = addons.reduce((s, a) => s + Number(a.extra_price || 0), 0);
+      const price = round2(Number(service.price || 0) + addonPrice);
+      const gstPct = Number(service.gst_percent ?? 18);
+
+      // resolve / upsert client by phone if provided without id
+      let clientId = b.client_id || null;
+      if (!clientId && b.client_phone) {
+        const existing: any = await db.get("SELECT id FROM spa_clients WHERE phone = ? LIMIT 1", [b.client_phone]);
+        if (existing) clientId = existing.id;
+        else {
+          clientId = mkSpaId('SPACLI');
+          await db.run("INSERT INTO spa_clients (id, name, phone) VALUES (?, ?, ?)", [clientId, b.client_name || 'Guest', b.client_phone]);
+        }
+      }
+
+      const id = mkSpaId('SPAAPT');
+      await db.run(
+        `INSERT INTO spa_appointments
+           (id, client_id, client_name, client_phone, service_id, service_name, addon_ids, therapist_id, resource_id,
+            start_at, end_at, status, price_snapshot, gst_percent_snapshot, deposit_amount, booking_source, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?)`,
+        [id, clientId, b.client_name || null, b.client_phone || null, service.id, service.name,
+         JSON.stringify(addonIds), b.therapist_id || null, b.resource_id || null,
+         win.startAt, win.endAt, price, gstPct, Number(b.deposit_amount || 0),
+         b.booking_source || 'STAFF', b.notes || null]
+      );
+      res.status(201).json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [id]));
+    } catch (err: any) { console.error("spa book error:", err); res.status(500).json({ error: err?.message || "Failed to book appointment" }); }
+  });
+
+  // Reschedule — re-runs the dual-resource guard for the new window/resources.
+  app.put("/api/restaurant/:id/spa/appointments/:aid", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
+      if (!appt) return res.status(404).json({ error: "Appointment not found" });
+      if (['COMPLETED','CANCELLED','NO_SHOW'].includes(appt.status)) return res.status(409).json({ error: `Cannot reschedule a ${appt.status} appointment` });
+      const b = req.body || {};
+      const therapistId = b.therapist_id ?? appt.therapist_id;
+      const resourceId = b.resource_id ?? appt.resource_id;
+      const service: any = await db.get("SELECT * FROM spa_services WHERE id = ?", [appt.service_id]);
+      const windowMin = serviceWindowMinutes(service, []);
+      const win = b.start_at ? spaApptWindow(b.start_at, windowMin) : { startAt: appt.start_at, endAt: appt.end_at, date: '' };
+      if (!win) return res.status(400).json({ error: "Invalid start_at" });
+      if (therapistId) {
+        const tc = await therapistConflict(db, therapistId, win.startAt, win.endAt, appt.id);
+        if (tc) return res.status(409).json({ error: "Therapist is already booked for an overlapping slot" });
+      }
+      if (resourceId) {
+        const rc = await resourceConflict(db, resourceId, win.startAt, win.endAt, appt.id);
+        if (rc) return res.status(409).json({ error: "Cabin is already booked for an overlapping slot" });
+      }
+      await db.run(
+        "UPDATE spa_appointments SET therapist_id = ?, resource_id = ?, start_at = ?, end_at = ? WHERE id = ?",
+        [therapistId || null, resourceId || null, win.startAt, win.endAt, appt.id]
+      );
+      res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to reschedule" }); }
+  });
+
+  // Lifecycle transitions
+  const spaSetStatus = async (req: AuthRequest, res: Response, target: string, extraSet: string = '') => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const db = await getTenantDb(req.params.id);
+    const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
+    if (!appt) return res.status(404).json({ error: "Appointment not found" });
+    await db.run(`UPDATE spa_appointments SET status = ?${extraSet ? ', ' + extraSet : ''} WHERE id = ?`, [target, appt.id]);
+    return db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]);
+  };
+
+  app.post("/api/restaurant/:id/spa/appointments/:aid/confirm", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    try { const row = await spaSetStatus(req, res, 'CONFIRMED'); if (row) res.json(row); }
+    catch (err: any) { res.status(500).json({ error: "Failed to confirm" }); }
+  });
+  app.post("/api/restaurant/:id/spa/appointments/:aid/check-in", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    try { const row = await spaSetStatus(req, res, 'CHECKED_IN'); if (row) res.json(row); }
+    catch (err: any) { res.status(500).json({ error: "Failed to check in" }); }
+  });
+  app.post("/api/restaurant/:id/spa/appointments/:aid/cancel", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const check = await ensureSpaEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE spa_appointments SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancellation_reason = ? WHERE id = ?",
+        [req.body?.reason || null, req.params.aid]);
+      res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to cancel" }); }
+  });
+  app.post("/api/restaurant/:id/spa/appointments/:aid/no-show", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    try {
+      const check = await ensureSpaEnabled(req.params.id);
+      if (!check.ok) return res.status(check.status).json({ error: check.error });
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE spa_appointments SET status = 'NO_SHOW', no_show_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.aid]);
+      res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to mark no-show" }); }
+  });
+
+  // Complete — deducts service consumables from inventory (stock_movements).
+  app.post("/api/restaurant/:id/spa/appointments/:aid/complete", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
+      if (!appt) return res.status(404).json({ error: "Appointment not found" });
+      if (appt.status === 'COMPLETED') return res.json(appt); // idempotent
+      // Deduct consumables
+      const cons: any[] = await db.query(
+        `SELECT c.*, i.unit AS ing_unit, i.default_unit_price FROM spa_service_consumables c
+           JOIN ingredients i ON i.id = c.ingredient_id WHERE c.service_id = ?`, [appt.service_id]);
+      for (const c of cons) {
+        const qty = Number(c.qty_per_service || 0);
+        if (qty <= 0) continue;
+        const upd: any[] = await db.query(
+          "UPDATE ingredients SET current_stock_qty = current_stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? RETURNING current_stock_qty",
+          [qty, c.ingredient_id]);
+        const bal = Number(upd[0]?.current_stock_qty ?? 0);
+        await db.run(
+          `INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
+           VALUES (?, ?, ?, ?, 'SPA_CONSUMPTION', 'spa_appointment', ?, ?, ?, ?, ?)`,
+          [mkSpaId('MOV'), c.ingredient_id, -qty, c.unit || c.ing_unit || 'unit', appt.id, bal, c.default_unit_price || null, req.user?.id || null, 'Spa service consumption']
+        ).catch(() => {});
+      }
+      await db.run("UPDATE spa_appointments SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP WHERE id = ?", [appt.id]);
+      res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]));
+    } catch (err: any) { console.error("spa complete error:", err); res.status(500).json({ error: "Failed to complete appointment" }); }
+  });
+
+  // ─── CHECKOUT → folio → invoice ─────────────────────────────────────────────
+  // Builds a SPA folio (reusing the hotel folio ledger), posts the service line
+  // (or a package redemption), tip, applies a membership discount, and assigns
+  // a SPA-<year>-NNNNN invoice number. Payment is a separate step (/payments).
+  app.post("/api/restaurant/:id/spa/appointments/:aid/checkout", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const tenant = check.restaurant;
+      const appt: any = await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]);
+      if (!appt) return res.status(404).json({ error: "Appointment not found" });
+      if (appt.folio_id) {
+        const existing = await getFolioOutstanding(db, appt.folio_id);
+        return res.json({ folio: existing?.folio, outstanding: existing?.outstanding, invoice_number: existing?.folio?.invoice_number, reused: true });
+      }
+      if (appt.status !== 'COMPLETED') return res.status(409).json({ error: "Appointment must be COMPLETED before checkout" });
+
+      const b = req.body || {};
+      const folioId = mkSpaId('SPAFOL');
+      await db.run(
+        `INSERT INTO folios (id, folio_kind, appointment_id, status, currency_snapshot, tax_label_snapshot, doc_type)
+         VALUES (?, 'SPA', ?, 'open', ?, 'GST', 'INVOICE')`,
+        [folioId, appt.id, tenant.currency_code || 'INR']
+      );
+
+      const price = round2(appt.price_snapshot || 0);
+      const gstPct = Number(appt.gst_percent_snapshot ?? 18);
+
+      // Package redemption (auto-deduct) OR charge the service line.
+      let redeemed = false;
+      if (b.use_package) {
+        let cp: any = null;
+        if (b.client_package_id) {
+          cp = await db.get("SELECT * FROM spa_client_packages WHERE id = ? AND status = 'ACTIVE' AND sessions_remaining > 0", [b.client_package_id]);
+        } else if (appt.client_id) {
+          cp = await db.get(
+            `SELECT * FROM spa_client_packages
+              WHERE client_id = ? AND status = 'ACTIVE' AND sessions_remaining > 0
+                AND (service_id IS NULL OR service_id = ?)
+              ORDER BY expires_at NULLS LAST LIMIT 1`, [appt.client_id, appt.service_id]);
+        }
+        if (cp) {
+          const redemptionId = mkSpaId('SPARED');
+          await db.run("INSERT INTO spa_package_redemptions (id, client_package_id, appointment_id, sessions_drawn) VALUES (?, ?, ?, 1)", [redemptionId, cp.id, appt.id]);
+          const remaining = Number(cp.sessions_remaining) - 1;
+          await db.run("UPDATE spa_client_packages SET sessions_remaining = ?, status = ? WHERE id = ?",
+            [remaining, remaining <= 0 ? 'EXHAUSTED' : 'ACTIVE', cp.id]);
+          await db.run("UPDATE spa_appointments SET package_redemption_id = ? WHERE id = ?", [redemptionId, appt.id]);
+          await db.run(
+            `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, source_id)
+             VALUES (?, ?, 'PACKAGE_REDEMPTION', ?, 1, 0, 0, 0, 0, ?)`,
+            [mkSpaId('FE'), folioId, `${appt.service_name} (package session, ${remaining} left)`, cp.id]);
+          redeemed = true;
+        }
+      }
+      let serviceAmount = 0;
+      if (!redeemed) {
+        serviceAmount = price;
+        const gstAmt = round2(price * gstPct / 100);
+        await db.run(
+          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, source_id)
+           VALUES (?, ?, 'SPA_SERVICE', ?, 1, ?, ?, ?, ?, ?)`,
+          [mkSpaId('FE'), folioId, appt.service_name, price, price, gstPct, gstAmt, appt.service_id]);
+      }
+
+      // Tip (untaxed)
+      const tip = round2(b.tip_amount || 0);
+      if (tip > 0) {
+        await db.run(
+          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+           VALUES (?, ?, 'TIP', 'Gratuity', 1, ?, ?, 0, 0)`, [mkSpaId('FE'), folioId, tip, tip]);
+      }
+
+      // Membership discount (auto-applied) on the service amount
+      let discount = round2(b.discount || 0);
+      if (b.apply_membership && appt.client_id && serviceAmount > 0) {
+        const mem: any = await db.get("SELECT * FROM spa_client_memberships WHERE client_id = ? AND status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1", [appt.client_id]);
+        if (mem) {
+          let benefits: any = {};
+          try { benefits = JSON.parse(mem.benefits_snapshot || '{}'); } catch { benefits = {}; }
+          const pct = Number(benefits.discount_pct || 0);
+          if (pct > 0) discount = round2(discount + serviceAmount * pct / 100);
+        }
+      }
+      if (discount > 0) await db.run("UPDATE folios SET discount = ? WHERE id = ?", [discount, folioId]);
+
+      await recomputeFolioTotals(db, folioId);
+
+      // Invoice number
+      const year = new Date().getFullYear();
+      const seq = await getNextTenantSequence(db, `spa-invoice-${year}`);
+      const invNum = `SPA-${year}-${String(seq).padStart(5, '0')}`;
+      await db.run("UPDATE folios SET invoice_number = ? WHERE id = ?", [invNum, folioId]);
+      await db.run("UPDATE spa_appointments SET folio_id = ? WHERE id = ?", [folioId, appt.id]);
+
+      const out = await getFolioOutstanding(db, folioId);
+      res.status(201).json({ folio: out?.folio, outstanding: out?.outstanding, invoice_number: invNum });
+    } catch (err: any) { console.error("spa checkout error:", err); res.status(500).json({ error: err?.message || "Failed to checkout" }); }
+  });
+
+  // List spa folios
+  app.get("/api/restaurant/:id/spa/folios", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT f.*, a.client_name, a.service_name, a.start_at AS appt_start
+           FROM folios f LEFT JOIN spa_appointments a ON a.id = f.appointment_id
+          WHERE f.folio_kind = 'SPA' ORDER BY f.created_at DESC LIMIT 500`);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch folios" }); }
+  });
+
+  // Get one spa folio with entries + payment ledger
+  app.get("/api/restaurant/:id/spa/folios/:fid", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const out = await getFolioOutstanding(db, req.params.fid);
+      if (!out) return res.status(404).json({ error: "Folio not found" });
+      res.json(out);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch folio" }); }
+  });
+
+  // Record a payment on a spa folio (FINAL by default). Closes folio when paid.
+  app.post("/api/restaurant/:id/spa/folios/:fid/payments", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const out0 = await getFolioOutstanding(db, req.params.fid);
+      if (!out0) return res.status(404).json({ error: "Folio not found" });
+      const b = req.body || {};
+      const amount = round2(b.amount);
+      if (!amount || amount <= 0) return res.status(400).json({ error: "amount must be > 0" });
+      if (amount > out0.outstanding + 0.01 && (b.payment_type || 'FINAL') !== 'REFUND') {
+        return res.status(400).json({ error: `Payment ₹${amount} exceeds outstanding ₹${out0.outstanding}` });
+      }
+      await recordFolioPayment(db, {
+        folioId: req.params.fid, amount, method: b.payment_method || 'CASH',
+        type: (b.payment_type || 'FINAL'), reference: b.reference || null,
+        recordedBy: req.user?.email || req.user?.id || null, notes: b.notes || null,
+      });
+      const out = await getFolioOutstanding(db, req.params.fid);
+      if (out && out.is_fully_paid) {
+        await db.run("UPDATE folios SET status = 'closed', settled_at = CURRENT_TIMESTAMP, payment_method = ? WHERE id = ?",
+          [b.payment_method || 'CASH', req.params.fid]);
+      }
+      res.status(201).json({ success: true, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid });
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to record payment" }); }
+  });
+
+  // Void a spa folio payment (reopens the folio)
+  app.post("/api/restaurant/:id/spa/folios/:fid/payments/:pid/void", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const pay: any = await db.get("SELECT * FROM folio_payments WHERE id = ? AND folio_id = ?", [req.params.pid, req.params.fid]);
+      if (!pay) return res.status(404).json({ error: "Payment not found" });
+      await db.run("UPDATE folio_payments SET is_voided = 1, voided_at = CURRENT_TIMESTAMP, voided_by = ?, voided_reason = ? WHERE id = ?",
+        [req.user?.email || req.user?.id || null, req.body?.reason || null, req.params.pid]);
+      const out = await getFolioOutstanding(db, req.params.fid);
+      if (out && !out.is_fully_paid) {
+        await db.run("UPDATE folios SET status = 'open', settled_at = NULL WHERE id = ?", [req.params.fid]);
+      }
+      res.json({ success: true, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid });
+    } catch (err: any) { res.status(500).json({ error: "Failed to void payment" }); }
+  });
+
+  // Spa invoice PDF — reuses the module-agnostic generateInvoicePdf renderer.
+  app.get("/api/restaurant/:id/spa/folios/:fid/invoice.pdf", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const folio: any = await db.get(
+        `SELECT f.*, a.client_name, a.client_phone, a.service_name, a.start_at AS appt_start, a.end_at AS appt_end,
+                c.email AS client_email, c.gender, c.linked_guest_phone
+           FROM folios f
+           LEFT JOIN spa_appointments a ON a.id = f.appointment_id
+           LEFT JOIN spa_clients c ON c.id = a.client_id
+          WHERE f.id = ? AND f.folio_kind = 'SPA'`, [req.params.fid]);
+      if (!folio) return res.status(404).json({ error: "Spa folio not found" });
+      const entries: any[] = await db.query("SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC", [req.params.fid]);
+      const hotel = check.restaurant;
+      const out = await getFolioOutstanding(db, folio.id).catch(() => null);
+      const invNum = folio.invoice_number || `SPA-${new Date().getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
+      const pdf = await generateInvoicePdf({
+        hotel: {
+          name: hotel.name, city: hotel.city, state: hotel.state, gstin: hotel.gst_number,
+          phone: hotel.phone, email: hotel.admin_id, logoPath: hotel.logo_url || undefined,
+          fssai: hotel.fssai_license_number || null, fssaiValidUntil: hotel.fssai_license_valid_until || null,
+        },
+        guest: {
+          name: folio.client_name || 'Guest', phone: folio.client_phone, email: folio.client_email,
+          nationality: null, state: hotel.state, gstin: null,
+        },
+        stay: {
+          roomName: folio.service_name || 'Spa Service', bookingId: folio.appointment_id,
+          checkInDate: folio.appt_start, checkOutDate: folio.appt_end,
+          actualCheckInAt: folio.appt_start, actualCheckOutAt: folio.appt_end, numGuests: 1,
+        },
+        folio: {
+          id: folio.id, invoiceNumber: invNum, invoiceDate: folio.settled_at || folio.created_at,
+          subtotal: Number(folio.subtotal || 0), discount: Number(folio.discount || 0),
+          gstAmount: Number(folio.gst_amount || 0), grandTotal: Number(folio.grand_total || 0),
+          paymentMethod: folio.payment_method, settledAt: folio.settled_at, status: folio.status,
+          amountPaid: out ? out.total_paid : 0, amountRefunded: out ? out.total_refunded : 0,
+          balanceDue: out ? out.outstanding : Math.max(0, Number(folio.grand_total || 0)),
+          payments: out ? out.payments : [],
+        },
+        entries: entries.map(e => ({
+          description: e.description, entryType: e.entry_type, quantity: Number(e.quantity || 1),
+          unitPrice: Number(e.unit_price || 0), amount: Number(e.amount || 0),
+          gstRate: Number(e.gst_rate || 0), gstAmount: Number(e.gst_amount || 0),
+        })),
+        placeOfSupply: hotel.state,
+        isCreditNote: false,
+        bilingual: true,
+        tenant: {
+          country: hotel.country || 'IN', currency_code: hotel.currency_code || 'INR',
+          currency_symbol: hotel.currency_symbol || '₹', locale: hotel.locale || 'en-IN',
+          invoice_template: (hotel.invoice_template === 'BOUTIQUE' ? 'BOUTIQUE' : 'CLASSIC') as 'CLASSIC' | 'BOUTIQUE',
+        },
+        roundToRupee: Number(hotel.round_invoice_to_rupee || 0) === 1,
+      });
+      const safeName = String(folio.client_name || 'guest').replace(/[^a-z0-9_-]+/gi, '-');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${invNum}-${safeName}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) { console.error("Spa invoice PDF error:", err); res.status(500).json({ error: "Failed to generate invoice PDF" }); }
+  });
+
+  // Small helper: open a standalone SPA folio, post one taxable line, take a
+  // FINAL payment, close it, and return {folioId, invoice_number}. Used by
+  // package purchase, membership subscription, and retail sale.
+  const spaQuickSaleFolio = async (
+    db: DbInterface, entryType: string, description: string, amount: number, gstPct: number,
+    paymentMethod: string, recordedBy: string | null, sourceId?: string | null
+  ): Promise<{ folioId: string; invoiceNumber: string; grandTotal: number }> => {
+    const folioId = mkSpaId('SPAFOL');
+    const tenantRow: any = await centralDb.get("SELECT currency_code FROM restaurants WHERE id = (SELECT current_database())").catch(() => null);
+    await db.run(
+      `INSERT INTO folios (id, folio_kind, status, tax_label_snapshot, doc_type, currency_snapshot)
+       VALUES (?, 'SPA', 'open', 'GST', 'INVOICE', ?)`, [folioId, tenantRow?.currency_code || 'INR']);
+    const amt = round2(amount);
+    const gstAmt = round2(amt * gstPct / 100);
+    await db.run(
+      `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, source_id)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+      [mkSpaId('FE'), folioId, entryType, description, amt, amt, gstPct, gstAmt, sourceId || null]);
+    await recomputeFolioTotals(db, folioId);
+    const year = new Date().getFullYear();
+    const seq = await getNextTenantSequence(db, `spa-invoice-${year}`);
+    const invNum = `SPA-${year}-${String(seq).padStart(5, '0')}`;
+    const out = await getFolioOutstanding(db, folioId);
+    await recordFolioPayment(db, { folioId, amount: out?.outstanding || amt + gstAmt, method: paymentMethod || 'CASH', type: 'FINAL', recordedBy });
+    await db.run("UPDATE folios SET invoice_number = ?, status = 'closed', settled_at = CURRENT_TIMESTAMP, payment_method = ? WHERE id = ?",
+      [invNum, paymentMethod || 'CASH', folioId]);
+    return { folioId, invoiceNumber: invNum, grandTotal: round2(amt + gstAmt) };
+  };
+
+  // ─── PACKAGES (prepaid series) ──────────────────────────────────────────────
+  app.get("/api/restaurant/:id/spa/packages", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_packages WHERE is_active = 1 ORDER BY name")); }
+    catch (err: any) { res.status(500).json({ error: "Failed to fetch packages" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/packages", authenticate, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.name || !b.total_sessions) return res.status(400).json({ error: "name and total_sessions are required" });
+      const id = mkSpaId('SPAPKG');
+      await db.run(
+        `INSERT INTO spa_packages (id, name, service_id, total_sessions, price, gst_percent, validity_days, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, b.name, b.service_id || null, Number(b.total_sessions), Number(b.price || 0), Number(b.gst_percent ?? 18), Number(b.validity_days || 365)]);
+      res.status(201).json(await db.get("SELECT * FROM spa_packages WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create package" }); }
+  });
+
+  // Purchase a package for a client → client package + paid folio/invoice.
+  app.post("/api/restaurant/:id/spa/clients/:cid/packages", authenticate, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const pkg: any = await db.get("SELECT * FROM spa_packages WHERE id = ?", [b.package_id]);
+      if (!pkg) return res.status(404).json({ error: "Package not found" });
+      const sale = await spaQuickSaleFolio(db, 'PACKAGE_PURCHASE', `Package: ${pkg.name}`, Number(pkg.price || 0), Number(pkg.gst_percent ?? 18), b.payment_method || 'CASH', req.user?.email || req.user?.id || null, pkg.id);
+      const cpId = mkSpaId('SPACP');
+      const expiresAt = new Date(Date.now() + Number(pkg.validity_days || 365) * 86400000).toISOString();
+      await db.run(
+        `INSERT INTO spa_client_packages (id, client_id, package_id, package_name, service_id, sessions_total, sessions_remaining, price_paid, expires_at, folio_id, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')`,
+        [cpId, req.params.cid, pkg.id, pkg.name, pkg.service_id || null, Number(pkg.total_sessions), Number(pkg.total_sessions), Number(pkg.price || 0), expiresAt, sale.folioId]);
+      res.status(201).json({ client_package: await db.get("SELECT * FROM spa_client_packages WHERE id = ?", [cpId]), invoice_number: sale.invoiceNumber });
+    } catch (err: any) { console.error("spa package purchase error:", err); res.status(500).json({ error: "Failed to purchase package" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/clients/:cid/packages", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_client_packages WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid])); }
+    catch (err: any) { res.status(500).json({ error: "Failed to fetch client packages" }); }
+  });
+
+  // ─── MEMBERSHIPS ─────────────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/spa/memberships", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_membership_plans WHERE is_active = 1 ORDER BY monthly_fee")); }
+    catch (err: any) { res.status(500).json({ error: "Failed to fetch membership plans" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/memberships", authenticate, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.name) return res.status(400).json({ error: "name is required" });
+      const id = mkSpaId('SPAMEM');
+      await db.run(
+        `INSERT INTO spa_membership_plans (id, name, tier, monthly_fee, gst_percent, benefits, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        [id, b.name, b.tier || null, Number(b.monthly_fee || 0), Number(b.gst_percent ?? 18), JSON.stringify(b.benefits || { discount_pct: 0 })]);
+      res.status(201).json(await db.get("SELECT * FROM spa_membership_plans WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create membership plan" }); }
+  });
+
+  // Subscribe a client → client membership + paid folio/invoice (first month).
+  app.post("/api/restaurant/:id/spa/clients/:cid/memberships", authenticate, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const plan: any = await db.get("SELECT * FROM spa_membership_plans WHERE id = ?", [req.body?.plan_id]);
+      if (!plan) return res.status(404).json({ error: "Membership plan not found" });
+      const sale = await spaQuickSaleFolio(db, 'MEMBERSHIP_FEE', `Membership: ${plan.name}`, Number(plan.monthly_fee || 0), Number(plan.gst_percent ?? 18), req.body?.payment_method || 'CASH', req.user?.email || req.user?.id || null, plan.id);
+      const id = mkSpaId('SPACM');
+      const start = new Date(); const end = new Date(Date.now() + 30 * 86400000);
+      await db.run(
+        `INSERT INTO spa_client_memberships (id, client_id, plan_id, plan_name, benefits_snapshot, current_period_start, current_period_end, benefits_used_this_period, status, folio_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, '{}', 'ACTIVE', ?)`,
+        [id, req.params.cid, plan.id, plan.name, plan.benefits || '{}', start.toISOString().slice(0,10), end.toISOString().slice(0,10), sale.folioId]);
+      res.status(201).json({ client_membership: await db.get("SELECT * FROM spa_client_memberships WHERE id = ?", [id]), invoice_number: sale.invoiceNumber });
+    } catch (err: any) { console.error("spa membership subscribe error:", err); res.status(500).json({ error: "Failed to subscribe membership" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/clients/:cid/memberships", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_client_memberships WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid])); }
+    catch (err: any) { res.status(500).json({ error: "Failed to fetch client memberships" }); }
+  });
+
+  // ─── RETAIL SALE (sell a SPA_RETAIL product, deduct stock, invoice) ──────────
+  app.post("/api/restaurant/:id/spa/retail-sale", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const qty = Number(b.qty || 0);
+      if (!b.ingredient_id || qty <= 0) return res.status(400).json({ error: "ingredient_id and qty (>0) are required" });
+      const item: any = await db.get("SELECT * FROM ingredients WHERE id = ?", [b.ingredient_id]);
+      if (!item) return res.status(404).json({ error: "Item not found" });
+      const unitPrice = Number(b.unit_price ?? item.default_unit_price ?? 0);
+      const gstPct = Number(item.gst_percent ?? 18);
+      const lineAmount = round2(unitPrice * qty);
+      // deduct stock
+      const upd: any[] = await db.query(
+        "UPDATE ingredients SET current_stock_qty = current_stock_qty - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? RETURNING current_stock_qty",
+        [qty, b.ingredient_id]);
+      const bal = Number(upd[0]?.current_stock_qty ?? 0);
+      await db.run(
+        `INSERT INTO stock_movements (id, ingredient_id, qty_delta, unit, movement_type, reference_type, reference_id, balance_after, unit_cost, recorded_by_user_id, notes)
+         VALUES (?, ?, ?, ?, 'SPA_RETAIL_SALE', 'spa_retail', NULL, ?, ?, ?, 'Spa retail sale')`,
+        [mkSpaId('MOV'), b.ingredient_id, -qty, item.unit || 'unit', bal, item.default_unit_price || null, req.user?.id || null]).catch(() => {});
+      const sale = await spaQuickSaleFolio(db, 'SPA_PRODUCT', `${item.name} × ${qty}`, lineAmount, gstPct, b.payment_method || 'CASH', req.user?.email || req.user?.id || null, item.id);
+      res.status(201).json({ success: true, invoice_number: sale.invoiceNumber, grand_total: sale.grandTotal, stock_remaining: bal });
+    } catch (err: any) { console.error("spa retail sale error:", err); res.status(500).json({ error: "Failed to record retail sale" }); }
+  });
+
+  // ─── CLIENTS / CRM + forms ───────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/spa/clients", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const search = String(req.query.search || '').trim();
+      let rows;
+      if (search) {
+        rows = await db.query(
+          "SELECT * FROM spa_clients WHERE phone ILIKE ? OR name ILIKE ? OR email ILIKE ? ORDER BY name LIMIT 200",
+          [`%${search}%`, `%${search}%`, `%${search}%`]);
+      } else {
+        rows = await db.query("SELECT * FROM spa_clients ORDER BY created_at DESC LIMIT 200");
+      }
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch clients" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/clients", authenticate, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.name) return res.status(400).json({ error: "name is required" });
+      const id = mkSpaId('SPACLI');
+      await db.run(
+        `INSERT INTO spa_clients (id, name, phone, email, gender, dob, preferences, tags, marketing_opt_in, linked_guest_phone, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, b.name, b.phone || null, b.email || null, b.gender || null, b.dob || null,
+         b.preferences || null, b.tags || null, b.marketing_opt_in ? 1 : 0, b.linked_guest_phone || null, b.notes || null]);
+      res.status(201).json(await db.get("SELECT * FROM spa_clients WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to create client" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/clients/:cid", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const client = await db.get("SELECT * FROM spa_clients WHERE id = ?", [req.params.cid]);
+      if (!client) return res.status(404).json({ error: "Client not found" });
+      const history = await db.query("SELECT * FROM spa_appointments WHERE client_id = ? ORDER BY start_at DESC LIMIT 100", [req.params.cid]);
+      const packages = await db.query("SELECT * FROM spa_client_packages WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid]);
+      const memberships = await db.query("SELECT * FROM spa_client_memberships WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid]);
+      const forms = await db.query("SELECT * FROM spa_client_intake_forms WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid]);
+      res.json({ client, history, packages, memberships, forms });
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch client" }); }
+  });
+
+  app.patch("/api/restaurant/:id/spa/clients/:cid", authenticate, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      for (const k of ['name','phone','email','gender','dob','preferences','tags','marketing_opt_in','linked_guest_phone','notes']) {
+        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(k === 'marketing_opt_in' ? (b[k] ? 1 : 0) : b[k]); }
+      }
+      if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      fields.push("updated_at = CURRENT_TIMESTAMP");
+      vals.push(req.params.cid);
+      await db.run(`UPDATE spa_clients SET ${fields.join(', ')} WHERE id = ?`, vals);
+      res.json(await db.get("SELECT * FROM spa_clients WHERE id = ?", [req.params.cid]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to update client" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/clients/:cid/forms", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try { const db = await getTenantDb(req.params.id); res.json(await db.query("SELECT * FROM spa_client_intake_forms WHERE client_id = ? ORDER BY created_at DESC", [req.params.cid])); }
+    catch (err: any) { res.status(500).json({ error: "Failed to fetch forms" }); }
+  });
+
+  app.post("/api/restaurant/:id/spa/clients/:cid/forms", authenticate, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const id = mkSpaId('SPAFRM');
+      await db.run(
+        `INSERT INTO spa_client_intake_forms (id, client_id, appointment_id, form_type, responses, signature_url, signed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [id, req.params.cid, b.appointment_id || null, b.form_type || 'INTAKE',
+         typeof b.responses === 'string' ? b.responses : JSON.stringify(b.responses || {}),
+         b.signature_url || null, b.signed_at || null]);
+      res.status(201).json(await db.get("SELECT * FROM spa_client_intake_forms WHERE id = ?", [id]));
+    } catch (err: any) { res.status(500).json({ error: "Failed to save form" }); }
+  });
+
+  // ─── REPORTS ─────────────────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/spa/reports/utilization", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT t.id AS therapist_id, t.display_name,
+                COUNT(a.id) FILTER (WHERE a.status NOT IN ('CANCELLED','NO_SHOW')) AS appointments,
+                COALESCE(SUM(EXTRACT(EPOCH FROM (a.end_at - a.start_at))/60) FILTER (WHERE a.status NOT IN ('CANCELLED','NO_SHOW')), 0)::int AS booked_minutes
+           FROM spa_therapists t
+           LEFT JOIN spa_appointments a ON a.therapist_id = t.id
+             AND a.start_at >= NOW() - INTERVAL '30 days'
+          GROUP BY t.id, t.display_name
+          ORDER BY booked_minutes DESC`);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to compute utilization" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/reports/revenue-per-treatment", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT a.service_id, a.service_name,
+                COUNT(*) AS times_sold,
+                COALESCE(SUM(e.amount), 0) AS revenue,
+                COALESCE(SUM(e.gst_amount), 0) AS gst
+           FROM folio_entries e
+           JOIN folios f ON f.id = e.folio_id AND f.folio_kind = 'SPA'
+           LEFT JOIN spa_appointments a ON a.id = f.appointment_id
+          WHERE e.entry_type = 'SPA_SERVICE'
+          GROUP BY a.service_id, a.service_name
+          ORDER BY revenue DESC`);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to compute revenue" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/reports/therapist-productivity", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT t.id AS therapist_id, t.display_name,
+                COUNT(a.id) FILTER (WHERE a.status = 'COMPLETED') AS completed,
+                COUNT(a.id) FILTER (WHERE a.status = 'NO_SHOW') AS no_shows,
+                COALESCE(SUM(a.price_snapshot) FILTER (WHERE a.status = 'COMPLETED'), 0) AS service_value
+           FROM spa_therapists t
+           LEFT JOIN spa_appointments a ON a.therapist_id = t.id AND a.start_at >= NOW() - INTERVAL '30 days'
+          GROUP BY t.id, t.display_name
+          ORDER BY service_value DESC`);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to compute productivity" }); }
+  });
+
+  app.get("/api/restaurant/:id/spa/reports/rebooking-rate", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const row: any = await db.get(
+        `WITH per_client AS (
+           SELECT client_id, COUNT(*) AS visits FROM spa_appointments
+            WHERE status = 'COMPLETED' AND client_id IS NOT NULL GROUP BY client_id)
+         SELECT COUNT(*) AS clients,
+                COUNT(*) FILTER (WHERE visits > 1) AS returning_clients,
+                CASE WHEN COUNT(*) > 0 THEN ROUND((COUNT(*) FILTER (WHERE visits > 1))::numeric * 100 / COUNT(*), 1) ELSE 0 END AS rebooking_pct
+           FROM per_client`);
+      res.json(row || { clients: 0, returning_clients: 0, rebooking_pct: 0 });
+    } catch (err: any) { res.status(500).json({ error: err?.message || "Failed to compute rebooking rate" }); }
+  });
+
+  // ─── PUBLIC (unauthenticated) spa booking site routes ────────────────────────
+  const publicSpaGate = async (restaurantId: string): Promise<{ ok: boolean; restaurant: any }> => {
+    const r: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [restaurantId]);
+    if (!r || Number(r.spa_enabled) !== 1) return { ok: false, restaurant: null };
+    return { ok: true, restaurant: r };
+  };
+
+  app.get("/api/public/restaurant/:id/spa", async (req: Request, res: Response) => {
+    try {
+      const gate = await publicSpaGate(req.params.id);
+      if (!gate.ok) return res.status(404).json({ error: "Spa not available" });
+      const db = await getTenantDb(req.params.id);
+      const services = await db.query("SELECT id, name, category, description, duration_min, price, gst_percent, image_url FROM spa_services WHERE is_active = 1 ORDER BY display_order, name");
+      const r = gate.restaurant;
+      res.json({
+        property: { name: r.name, city: r.city, state: r.state, phone: r.phone, logo_url: r.logo_url, currency_symbol: r.currency_symbol || '₹' },
+        services,
+      });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load spa" }); }
+  });
+
+  app.get("/api/public/restaurant/:id/spa/availability", async (req: Request, res: Response) => {
+    try {
+      const gate = await publicSpaGate(req.params.id);
+      if (!gate.ok) return res.status(404).json({ error: "Spa not available" });
+      const db = await getTenantDb(req.params.id);
+      const serviceId = String(req.query.service_id || '');
+      const date = String(req.query.date || '');
+      if (!serviceId || !date) return res.status(400).json({ error: "service_id and date are required" });
+      const slots = await findAvailableSlots(db, { serviceId, date });
+      res.json({ date, service_id: serviceId, slots });
+    } catch (err: any) { res.status(500).json({ error: "Failed to compute availability" }); }
+  });
+
+  app.post("/api/public/restaurant/:id/spa/booking", async (req: Request, res: Response) => {
+    try {
+      const gate = await publicSpaGate(req.params.id);
+      if (!gate.ok) return res.status(404).json({ error: "Spa not available" });
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.service_id || !b.start_at || !b.client_name || !b.client_phone) {
+        return res.status(400).json({ error: "service_id, start_at, client_name, client_phone are required" });
+      }
+      const service: any = await db.get("SELECT * FROM spa_services WHERE id = ? AND is_active = 1", [b.service_id]);
+      if (!service) return res.status(404).json({ error: "Service not found" });
+      const windowMin = serviceWindowMinutes(service, []);
+      const m = String(b.start_at).match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})/);
+      if (!m) return res.status(400).json({ error: "Invalid start_at" });
+      const startMin = Number(m[2]) * 60 + Number(m[3]);
+      const startAt = tsFromDateMinutes(m[1], startMin);
+      const endAt = tsFromDateMinutes(m[1], startMin + windowMin);
+      // Use the requested therapist/resource, else first available from the engine.
+      let therapistId = b.therapist_id, resourceId = b.resource_id;
+      if (!therapistId || !resourceId) {
+        const slots = await findAvailableSlots(db, { serviceId: b.service_id, date: m[1], maxSlots: 200 });
+        const match = slots.find(s => s.start_at === startAt) || slots[0];
+        if (!match) return res.status(409).json({ error: "No availability for the selected time" });
+        therapistId = therapistId || match.therapist_id;
+        resourceId = resourceId || match.resource_id;
+      }
+      if (therapistId && await therapistConflict(db, therapistId, startAt, endAt)) return res.status(409).json({ error: "Selected time is no longer available" });
+      if (resourceId && await resourceConflict(db, resourceId, startAt, endAt)) return res.status(409).json({ error: "Selected time is no longer available" });
+      // upsert client by phone
+      let clientId: string;
+      const existing: any = await db.get("SELECT id FROM spa_clients WHERE phone = ? LIMIT 1", [b.client_phone]);
+      if (existing) clientId = existing.id;
+      else { clientId = mkSpaId('SPACLI'); await db.run("INSERT INTO spa_clients (id, name, phone, email, marketing_opt_in) VALUES (?, ?, ?, ?, ?)", [clientId, b.client_name, b.client_phone, b.client_email || null, b.marketing_opt_in ? 1 : 0]); }
+      const id = mkSpaId('SPAAPT');
+      await db.run(
+        `INSERT INTO spa_appointments (id, client_id, client_name, client_phone, service_id, service_name, addon_ids, therapist_id, resource_id, start_at, end_at, status, price_snapshot, gst_percent_snapshot, booking_source)
+         VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, 'BOOKED', ?, ?, 'ONLINE')`,
+        [id, clientId, b.client_name, b.client_phone, service.id, service.name, therapistId || null, resourceId || null, startAt, endAt, round2(service.price || 0), Number(service.gst_percent ?? 18)]);
+      res.status(201).json({ success: true, appointment_id: id, start_at: startAt, end_at: endAt });
+    } catch (err: any) { console.error("public spa booking error:", err); res.status(500).json({ error: "Failed to book" }); }
   });
 
   // ─── ROOMS CRUD ───────────────────────────────────────────────────────────
