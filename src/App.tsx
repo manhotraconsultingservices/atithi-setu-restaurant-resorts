@@ -52499,7 +52499,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   };
 
   const saveInvoice = async () => {
-    if (!invForm.supplier_id || !invForm.total_amount) return;
+    if (!invForm.supplier_id || !(Number(invForm.total_amount) > 0)) return;
     setInvSaving(true);
     try {
       const body = { ...invForm, subtotal: Number(invForm.subtotal || invForm.total_amount), gst_amount: Number(invForm.gst_amount || 0), total_amount: Number(invForm.total_amount) };
@@ -52572,7 +52572,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
     PARTIAL: 'bg-amber-100 text-amber-800', RECEIVED: 'bg-emerald-100 text-emerald-800',
     CANCELLED: 'bg-red-100 text-red-800',
   };
-  const fmtAmt = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const fmtAmt = (n: any) => `₹${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const modColor: Record<string, string> = { RESTAURANT: 'bg-orange-100 text-orange-800', HOTEL: 'bg-blue-100 text-blue-800', SHARED: 'bg-purple-100 text-purple-800' };
 
   const filteredSuppliers = supplierList.filter(s =>
@@ -52826,7 +52826,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                   </button>
                   {bulkSelected.size > 0 && (
                     <button
-                      onClick={() => { setBulkPayForm(f => ({ ...f, payment_date: new Date().toISOString().slice(0, 10) })); setBulkPayModal(true); }}
+                      onClick={() => { setBulkPayForm(f => ({ ...f, payment_date: new Date().toISOString().slice(0, 10), reference_number: '', notes: '' })); setBulkPayModal(true); }}
                       className="text-xs px-3 py-1.5 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 whitespace-nowrap"
                     >
                       Pay {bulkSelected.size} invoice{bulkSelected.size !== 1 ? 's' : ''} · {fmtAmt(bulkTotal)}
@@ -53528,6 +53528,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                 <select value={invForm.supplier_id} onChange={e => setInvForm(f => ({ ...f, supplier_id: e.target.value }))}
                   className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
                   <option value="">— Select supplier —</option>
+                  {suppliers.length === 0 && <option disabled value="">No suppliers found — add one in the Suppliers tab first</option>}
                   {suppliers.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>

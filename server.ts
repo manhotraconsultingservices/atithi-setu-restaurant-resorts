@@ -15580,7 +15580,8 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const status = String(req.query.status || '').toUpperCase();
       const allowedStatuses = new Set(['DRAFT', 'SENT', 'PARTIAL', 'RECEIVED', 'CANCELLED']);
-      const filterSql = allowedStatuses.has(status) ? `WHERE po.status = '${status}'` : '';
+      const filterSql = allowedStatuses.has(status) ? `WHERE po.status = ?` : '';
+      const filterParams = allowedStatuses.has(status) ? [status] : [];
 
       const rows = await db.query(
         `SELECT po.*, s.name AS supplier_name, s.phone AS supplier_phone,
@@ -15592,7 +15593,8 @@ ${data.tenant.name}`;
            LEFT JOIN purchase_order_items poi ON poi.po_id = po.id
            ${filterSql}
           GROUP BY po.id, s.name, s.phone
-          ORDER BY po.raised_at DESC`
+          ORDER BY po.raised_at DESC`,
+        filterParams
       );
       res.json(rows);
     } catch (err) {
@@ -19365,7 +19367,8 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
       if (!inv) return res.status(404).json({ error: 'Invoice not found' });
-      if (inv.paid_amount > 0) return res.status(409).json({ error: 'Cannot delete invoice with recorded payments' });
+      const payCount: any = await db.get("SELECT COUNT(*) AS cnt FROM supplier_payments WHERE invoice_id = ?", [inv.id]);
+      if (payCount.cnt > 0) return res.status(409).json({ error: 'Cannot delete invoice with recorded payments' });
       await db.run("DELETE FROM supplier_invoices WHERE id = ?", [req.params.invoiceId]);
       res.json({ ok: true });
     } catch (err: any) {
@@ -19396,7 +19399,9 @@ ${data.tenant.name}`;
          payAmt, payment_method || 'CASH', reference_number || null, notes || null,
          (req as any).user?.email || (req as any).user?.id]
       );
-      const newPaid = inv.paid_amount + payAmt;
+      // Recompute from authoritative source (same as DELETE-reversal path) to prevent drift
+      const paidSumRow: any = await db.get("SELECT COALESCE(SUM(amount),0) AS total FROM supplier_payments WHERE invoice_id = ?", [inv.id]);
+      const newPaid = Number(paidSumRow.total);
       const newOutstanding = Math.max(0, inv.total_amount - newPaid);
       const newStatus = newOutstanding <= 0 ? 'PAID' : 'PARTIAL';
       await db.run(
@@ -19484,7 +19489,7 @@ ${data.tenant.name}`;
         params
       );
       const payments: any[] = await db.query(
-        `SELECT * FROM supplier_payments WHERE supplier_id = ? ORDER BY payment_date DESC LIMIT 200`,
+        `SELECT * FROM supplier_payments WHERE supplier_id = ? ORDER BY payment_date DESC`,
         [req.params.supplierId]
       );
       const today = new Date().toISOString().slice(0,10);
@@ -19499,8 +19504,9 @@ ${data.tenant.name}`;
         else if (inv.outstanding_amount > 0) acc.aging_current += inv.outstanding_amount;
         return acc;
       }, { total_billed: 0, total_outstanding: 0, aging_current: 0, aging_0_30: 0, aging_31_60: 0, aging_60plus: 0 });
-      // total_paid from the authoritative payments table (not the denormalized invoice column)
-      summary.total_paid = payments.reduce((s: number, p: any) => s + Number(p.amount), 0);
+      // Use DB SUM so total_paid is always authoritative, independent of any list limit
+      const totalPaidRow: any = await db.get("SELECT COALESCE(SUM(amount),0) AS total FROM supplier_payments WHERE supplier_id = ?", [req.params.supplierId]);
+      summary.total_paid = Number(totalPaidRow.total);
       res.json({ supplier, invoices, payments, summary });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to fetch ledger" });
