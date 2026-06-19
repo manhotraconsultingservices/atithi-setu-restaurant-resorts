@@ -16013,11 +16013,11 @@ ${data.tenant.name}`;
       // If linked to PO, recompute PO status
       if (po_id) {
         const poItems: any[] = await db.query(
-          "SELECT is_fully_received FROM purchase_order_items WHERE po_id = ?",
+          "SELECT is_fully_received, qty_received FROM purchase_order_items WHERE po_id = ?",
           [po_id]
         );
         const allReceived = poItems.length > 0 && poItems.every((r: any) => r.is_fully_received === 1);
-        const anyReceived = poItems.some((r: any) => r.is_fully_received === 1);
+        const anyReceived = poItems.some((r: any) => Number(r.qty_received) > 0);
         const newStatus = allReceived ? 'RECEIVED' : (anyReceived ? 'PARTIAL' : po.status);
         if (newStatus !== po.status) {
           await db.run("UPDATE purchase_orders SET status = ? WHERE id = ?", [newStatus, po_id]);
@@ -19116,8 +19116,9 @@ ${data.tenant.name}`;
       if (!inv) return res.status(404).json({ error: 'Invoice not found' });
       const { invoice_number, invoice_date, due_date, subtotal, gst_amount, total_amount, status, notes, module } = req.body;
       const newTotal = total_amount !== undefined ? Number(total_amount) : inv.total_amount;
+      if (newTotal < inv.paid_amount - 0.01) return res.status(400).json({ error: `Cannot reduce total to ₹${newTotal} — already paid ₹${inv.paid_amount}` });
       const newOutstanding = Math.max(0, newTotal - inv.paid_amount);
-      const newStatus = newOutstanding <= 0 ? 'PAID' : (status || inv.status);
+      const newStatus = newOutstanding <= 0 ? 'PAID' : (newOutstanding < newTotal ? 'PARTIAL' : (status || inv.status));
       await db.run(
         `UPDATE supplier_invoices SET
           invoice_number = COALESCE(?, invoice_number),
@@ -19174,6 +19175,7 @@ ${data.tenant.name}`;
       const { amount, payment_method, payment_date, reference_number, notes } = req.body;
       if (!amount || Number(amount) <= 0) return res.status(400).json({ error: 'amount must be > 0' });
       const payAmt = Number(amount);
+      if (payAmt > inv.outstanding_amount + 0.01) return res.status(400).json({ error: `Payment ₹${payAmt} exceeds outstanding ₹${inv.outstanding_amount}` });
       const pid = `SP-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
       await db.run(
         `INSERT INTO supplier_payments (id, supplier_id, invoice_id, payment_date, amount, payment_method, reference_number, notes, recorded_by)
@@ -19236,9 +19238,11 @@ ${data.tenant.name}`;
       if (pay.invoice_id) {
         const inv: any = await db.get("SELECT * FROM supplier_invoices WHERE id = ?", [pay.invoice_id]);
         if (inv) {
-          const newPaid = Math.max(0, inv.paid_amount - pay.amount);
+          // Recompute from authoritative source — prevents drift from any prior corruption
+          const sumRow: any = await db.get("SELECT COALESCE(SUM(amount),0) AS total FROM supplier_payments WHERE invoice_id = ?", [pay.invoice_id]);
+          const newPaid = Number(sumRow.total);
           const newOutstanding = Math.max(0, inv.total_amount - newPaid);
-          const newStatus = newPaid <= 0 ? 'UNPAID' : 'PARTIAL';
+          const newStatus = newPaid <= 0 ? 'UNPAID' : (newOutstanding <= 0 ? 'PAID' : 'PARTIAL');
           await db.run(
             "UPDATE supplier_invoices SET paid_amount = ?, outstanding_amount = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             [newPaid, newOutstanding, newStatus, inv.id]
@@ -19260,8 +19264,8 @@ ${data.tenant.name}`;
       const { from, to } = req.query as Record<string, string>;
       const params: any[] = [req.params.supplierId];
       let dateFilter = '';
-      if (from) { dateFilter += ` AND invoice_date >= '${from}'`; }
-      if (to)   { dateFilter += ` AND invoice_date <= '${to}'`; }
+      if (from && /^\d{4}-\d{2}-\d{2}$/.test(String(from))) { dateFilter += ' AND invoice_date >= ?'; params.push(from); }
+      if (to   && /^\d{4}-\d{2}-\d{2}$/.test(String(to)))   { dateFilter += ' AND invoice_date <= ?'; params.push(to); }
       const supplier: any = await db.get("SELECT * FROM suppliers WHERE id = ?", [req.params.supplierId]);
       if (!supplier) return res.status(404).json({ error: 'Supplier not found' });
       const invoices: any[] = await db.query(
@@ -19275,15 +19279,17 @@ ${data.tenant.name}`;
       const today = new Date().toISOString().slice(0,10);
       const summary = invoices.reduce((acc: any, inv: any) => {
         acc.total_billed += inv.total_amount;
-        acc.total_paid += inv.paid_amount;
         acc.total_outstanding += inv.outstanding_amount;
         const daysOverdue = inv.due_date && inv.due_date < today && inv.outstanding_amount > 0
           ? Math.floor((Date.now() - new Date(inv.due_date).getTime()) / 86400000) : 0;
-        if (daysOverdue > 60) acc.aging_60plus += inv.outstanding_amount;
-        else if (daysOverdue > 30) acc.aging_31_60 += inv.outstanding_amount;
-        else if (daysOverdue > 0) acc.aging_0_30 += inv.outstanding_amount;
+        if (daysOverdue > 60)        acc.aging_60plus += inv.outstanding_amount;
+        else if (daysOverdue > 30)   acc.aging_31_60 += inv.outstanding_amount;
+        else if (daysOverdue > 0)    acc.aging_0_30 += inv.outstanding_amount;
+        else if (inv.outstanding_amount > 0) acc.aging_current += inv.outstanding_amount;
         return acc;
-      }, { total_billed: 0, total_paid: 0, total_outstanding: 0, aging_0_30: 0, aging_31_60: 0, aging_60plus: 0 });
+      }, { total_billed: 0, total_outstanding: 0, aging_current: 0, aging_0_30: 0, aging_31_60: 0, aging_60plus: 0 });
+      // total_paid from the authoritative payments table (not the denormalized invoice column)
+      summary.total_paid = payments.reduce((s: number, p: any) => s + Number(p.amount), 0);
       res.json({ supplier, invoices, payments, summary });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to fetch ledger" });
@@ -19485,7 +19491,7 @@ ${data.tenant.name}`;
       const [otRow] = await db.query(`
         SELECT
           COUNT(*) AS total_deliveries,
-          COUNT(CASE WHEN gr.received_at <= po.expected_delivery_date THEN 1 END) AS on_time_count
+          COUNT(CASE WHEN date(gr.received_at) <= po.expected_delivery_date THEN 1 END) AS on_time_count
         FROM goods_receipts gr
         JOIN purchase_orders po ON po.id = gr.po_id
         WHERE gr.supplier_id = ? AND po.expected_delivery_date IS NOT NULL
@@ -19521,7 +19527,7 @@ ${data.tenant.name}`;
       const on_time_pct = otRow.total_deliveries > 0
         ? Math.round(100 * otRow.on_time_count / otRow.total_deliveries * 10) / 10 : null;
       const fill_rate_pct = frRow.total_ordered > 0
-        ? Math.round(frRow.total_received / frRow.total_ordered * 1000) / 10 : null;
+        ? Math.min(100, Math.round(frRow.total_received / frRow.total_ordered * 1000) / 10) : null;
       const price_variance_pct = pvRow.price_variance_pct ?? null;
       const price_stability_pct = price_variance_pct !== null
         ? Math.max(0, Math.round((100 - Math.abs(price_variance_pct)) * 10) / 10) : null;
@@ -19603,7 +19609,7 @@ ${data.tenant.name}`;
         cumulative += val;
         const cumPct = total > 0 ? (cumulative / total) * 100 : 0;
         const pct = total > 0 ? (val / total) * 100 : 0;
-        const abc = prevCumPct < 70 ? 'A' : prevCumPct < 90 ? 'B' : 'C';
+        const abc = total === 0 ? 'C' : (prevCumPct < 70 ? 'A' : prevCumPct < 90 ? 'B' : 'C');
         return { ...r, rank: idx + 1, pct: Math.round(pct * 100) / 100, cumulative_pct: Math.round(cumPct * 100) / 100, abc };
       });
       res.json({ total, items });
@@ -19623,6 +19629,7 @@ ${data.tenant.name}`;
          FROM stock_batches sb
          JOIN ingredients i ON i.id = sb.ingredient_id
          WHERE sb.expiry_date IS NOT NULL
+           AND sb.expiry_date >= date('now')
            AND sb.expiry_date <= date('now', '+' || ? || ' days')
            AND sb.remaining_qty > 0
          ORDER BY sb.expiry_date ASC`,
