@@ -7793,7 +7793,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   >('HOME');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
   const [inventorySubTab, setInventorySubTab] = useState<
-    'DASHBOARD' | 'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS' | 'INSIGHTS' | 'SETTINGS'
+    'DASHBOARD' | 'INGREDIENTS' | 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'GOODS_RECEIPTS' | 'WASTAGE' | 'PHYSICAL_COUNTS' | 'ANALYTICS' | 'INSIGHTS' | 'SETTINGS'
   >('DASHBOARD');
   // Delivery integration — sub-navigation
   const [deliverySubTab, setDeliverySubTab] = useState<
@@ -13314,6 +13314,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               ['GOODS_RECEIPTS', 'Goods Receipts', inventoryGRNs.length],
               ['WASTAGE', 'Wastage', inventoryWastage.length],
               ['PHYSICAL_COUNTS', 'Physical Counts', inventoryCounts.length],
+              ['ANALYTICS', 'Analytics', 0],
               ['SETTINGS', 'Settings', 0],
             ] as [typeof inventorySubTab, string, number][]).map(([id, label, count]) => (
               <button
@@ -15447,6 +15448,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </div>
               )}
             </div>
+          )}
+
+          {/* ── ANALYTICS sub-tab — ABC analysis · Expiry alert · Dead stock ── */}
+          {inventorySubTab === 'ANALYTICS' && (
+            <InventoryAnalyticsView restaurantId={restaurantId} token={token!} />
           )}
 
           {/* ── SETTINGS sub-tab — Seasonality · Notification Templates · Hotel Inventory · Storage Locations ── */}
@@ -20626,6 +20632,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
               <summary className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden">🎯 OTA 360° &amp; Receivables — channel performance, margins &amp; aging <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand)</span></summary>
               <div className="p-4"><Ota360Report restaurantId={restaurantId} token={token!} /></div>
+            </details>
+          )}
+          {reportAudience === 'OWNER' && (
+            <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
+              <summary className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden">📅 Booking Lead-Time Distribution — how far in advance guests book <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand · last 12 months)</span></summary>
+              <div className="p-4"><BookingLeadTimeReport restaurantId={restaurantId} token={token!} /></div>
             </details>
           )}
         </div>
@@ -38872,6 +38884,212 @@ function ChannelPnlReport({ restaurantId, token }: { restaurantId: string; token
 }
 
 // ─── Restaurant Reports (separate line from Hotel — BCG review 11 Jun 2026) ──
+// ── Inventory Analytics (ABC · Expiry · Dead Stock) — used in Kitchen Inventory ANALYTICS sub-tab ──
+function InventoryAnalyticsView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [abcData, setAbcData] = useState<any>(null);
+  const [expiringData, setExpiringData] = useState<any>(null);
+  const [deadStockData, setDeadStockData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const api = async (path: string) => {
+    const r = await fetch(`/api/restaurant/${restaurantId}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!r.ok) throw new Error('Failed');
+    return r.json();
+  };
+  useEffect(() => {
+    setLoading(true);
+    Promise.all([api('/inventory/abc-analysis'), api('/inventory/expiring?days=7'), api('/inventory/dead-stock?days=30')])
+      .then(([abc, exp, dead]) => { setAbcData(abc); setExpiringData(exp); setDeadStockData(dead); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restaurantId]);
+
+  if (loading) return <div className="text-center py-16"><RefreshCw size={28} className="mx-auto animate-spin text-[#9c8e85]" /></div>;
+
+  return (
+    <div className="space-y-5">
+      {expiringData && expiringData.count > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
+          <h3 className="text-sm font-bold text-amber-800 mb-3 flex items-center gap-2">
+            <AlertTriangle size={15} className="shrink-0" />
+            {expiringData.count} batch{expiringData.count !== 1 ? 'es' : ''} expiring within 7 days
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead><tr className="border-b border-amber-200">
+                {['Item', 'Batch', 'Qty', 'Expiry Date', 'Days Left'].map(h => (
+                  <th key={h} className="text-left px-2 py-1.5 text-[10px] font-bold uppercase tracking-widest text-amber-700">{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {(expiringData.items as any[]).map((it: any, i: number) => (
+                  <tr key={i} className="border-b border-amber-100">
+                    <td className="px-2 py-1.5 font-medium text-amber-900">{it.item_name}</td>
+                    <td className="px-2 py-1.5 text-amber-700">{it.batch_number || '—'}</td>
+                    <td className="px-2 py-1.5 font-mono text-amber-800">{Number(it.remaining_qty).toFixed(2)} {it.unit}</td>
+                    <td className="px-2 py-1.5 font-mono text-amber-800">{it.expiry_date}</td>
+                    <td className={`px-2 py-1.5 font-bold font-mono ${Number(it.days_until_expiry) <= 0 ? 'text-red-600' : Number(it.days_until_expiry) <= 2 ? 'text-orange-600' : 'text-amber-700'}`}>
+                      {Number(it.days_until_expiry) <= 0 ? 'EXPIRED' : `${it.days_until_expiry}d`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      {expiringData && expiringData.count === 0 && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl px-4 py-3 text-sm text-emerald-700 font-medium flex items-center gap-2">
+          <span className="text-emerald-500">✓</span> No items expiring in the next 7 days.
+        </div>
+      )}
+
+      {abcData && (
+        <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
+          <div className="mb-4">
+            <h3 className="text-lg font-bold font-serif">ABC Analysis</h3>
+            <p className="text-xs text-[#6b5d52]">Items ranked by consumption value (last 90 days). Class A = top 70% of spend, B = next 20%, C = tail.</p>
+          </div>
+          <div className="grid grid-cols-3 gap-3 mb-4">
+            {(['A', 'B', 'C'] as const).map(cls => {
+              const clsItems = (abcData.items as any[]).filter((i: any) => i.abc === cls);
+              const val = clsItems.reduce((s: number, i: any) => s + Number(i.consumed_value), 0);
+              const pct = abcData.total > 0 ? Math.round((val / abcData.total) * 100) : 0;
+              return (
+                <div key={cls} className={`rounded-xl p-3 text-center ${cls === 'A' ? 'bg-emerald-50 border border-emerald-200' : cls === 'B' ? 'bg-amber-50 border border-amber-200' : 'bg-[#faf7f2] border border-[#e8dccf]'}`}>
+                  <div className={`text-3xl font-bold ${cls === 'A' ? 'text-emerald-700' : cls === 'B' ? 'text-amber-700' : 'text-[#6b5d52]'}`}>{clsItems.length}</div>
+                  <div className={`text-[10px] font-bold uppercase tracking-widest mt-0.5 ${cls === 'A' ? 'text-emerald-600' : cls === 'B' ? 'text-amber-600' : 'text-[#9c8e85]'}`}>Class {cls}</div>
+                  <div className={`text-xs mt-0.5 ${cls === 'A' ? 'text-emerald-600' : cls === 'B' ? 'text-amber-600' : 'text-[#9c8e85]'}`}>{pct}% of spend</div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-[#faf7f2] border-b border-[#cc5a16]/10">
+                <tr>
+                  {['#', 'Item', 'Category', 'Consumed (90d)', 'Value', '% Spend', 'Cum %', 'Class'].map(h => (
+                    <th key={h} className={`px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] ${['#', 'Item', 'Category', 'Class'].includes(h) ? 'text-left' : 'text-right'}`}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(abcData.items as any[]).slice(0, 60).map((it: any) => (
+                  <tr key={it.id} className="border-b border-[#f1ece3] hover:bg-[#faf7f2]">
+                    <td className="px-3 py-1.5 font-mono text-[#9c8e85]">{it.rank}</td>
+                    <td className="px-3 py-1.5 font-medium text-[#1a1208]">{it.name}</td>
+                    <td className="px-3 py-1.5 text-[#6b5d52]">{it.category || '—'}</td>
+                    <td className="px-3 py-1.5 text-right font-mono">{Number(it.consumed_qty).toFixed(2)} {it.unit}</td>
+                    <td className="px-3 py-1.5 text-right font-bold font-mono">₹{Math.round(Number(it.consumed_value)).toLocaleString('en-IN')}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-[#6b5d52]">{it.pct}%</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-[#6b5d52]">{it.cumulative_pct}%</td>
+                    <td className="px-3 py-1.5">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${it.abc === 'A' ? 'bg-emerald-100 text-emerald-700' : it.abc === 'B' ? 'bg-amber-100 text-amber-700' : 'bg-[#faf7f2] text-[#6b5d52]'}`}>{it.abc}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {deadStockData && (
+        <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5 shadow-sm">
+          <div className="mb-4">
+            <h3 className="text-lg font-bold font-serif">Dead Stock</h3>
+            <p className="text-xs text-[#6b5d52]">Items with current stock but no movement in the last 30 days — working capital tied up in slow-moving items.</p>
+          </div>
+          {deadStockData.count === 0 ? (
+            <p className="text-sm text-[#9c8e85] text-center py-6">No dead stock. Great job on rotation!</p>
+          ) : (
+            <>
+              <div className="mb-3 px-3 py-2 bg-red-50 border border-red-100 rounded-xl text-xs text-red-700">
+                <span className="font-bold">{deadStockData.count} items</span> idle for 30+ days · total idle value:{' '}
+                <span className="font-bold font-mono">₹{Math.round((deadStockData.items as any[]).reduce((s: number, i: any) => s + Number(i.stock_value), 0)).toLocaleString('en-IN')}</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-[#faf7f2] border-b border-[#cc5a16]/10">
+                    <tr>
+                      {['Item', 'Category', 'Stock Qty', 'Idle Value', 'Last Movement', 'Days Idle'].map(h => (
+                        <th key={h} className={`px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] ${['Item', 'Category'].includes(h) ? 'text-left' : 'text-right'}`}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(deadStockData.items as any[]).map((it: any, i: number) => (
+                      <tr key={i} className="border-b border-[#f1ece3] hover:bg-[#faf7f2]">
+                        <td className="px-3 py-1.5 font-medium text-[#1a1208]">{it.name}</td>
+                        <td className="px-3 py-1.5 text-[#6b5d52]">{it.category || '—'}</td>
+                        <td className="px-3 py-1.5 text-right font-mono">{Number(it.stock_qty).toFixed(2)} {it.unit}</td>
+                        <td className="px-3 py-1.5 text-right font-bold font-mono text-red-700">₹{Math.round(Number(it.stock_value)).toLocaleString('en-IN')}</td>
+                        <td className="px-3 py-1.5 text-right text-[#6b5d52]">{it.last_movement ? String(it.last_movement).slice(0, 10) : 'Never moved'}</td>
+                        <td className="px-3 py-1.5 text-right font-bold font-mono text-red-600">{it.days_idle !== null ? `${it.days_idle}d` : '∞'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Booking Lead-Time Distribution — used in Hotel Reports (Owner view) ──
+function BookingLeadTimeReport({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    setLoading(true);
+    fetch(`/api/restaurant/${restaurantId}/hotel/reports/booking-lead-time`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(setData).catch(() => {}).finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restaurantId]);
+
+  if (loading) return <div className="text-center py-8"><RefreshCw size={20} className="mx-auto animate-spin text-[#9c8e85]" /></div>;
+  if (!data || !data.buckets?.length) return <p className="text-xs text-[#9c8e85] py-4 text-center">No booking data available yet.</p>;
+
+  const maxCount = Math.max(...(data.buckets as any[]).map((b: any) => Number(b.count)), 1);
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-[#faf7f2] rounded-xl px-4 py-3 border border-[#e8dccf]">
+          <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Bookings analysed</p>
+          <p className="text-2xl font-bold font-mono text-[#1a1208] mt-1">{Number(data.total).toLocaleString('en-IN')}</p>
+          <p className="text-[10px] text-[#9c8e85]">last 12 months, non-cancelled</p>
+        </div>
+        <div className="bg-[#faf7f2] rounded-xl px-4 py-3 border border-[#e8dccf]">
+          <p className="text-[10px] uppercase tracking-widest text-[#9c8e85]">Average lead time</p>
+          <p className="text-2xl font-bold font-mono text-[#cc5a16] mt-1">{data.avg_lead_days} days</p>
+          <p className="text-[10px] text-[#9c8e85]">from booking to check-in</p>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {(data.buckets as any[]).map((b: any, i: number) => {
+          const pct = Math.round((Number(b.count) / (data.total || 1)) * 100);
+          const barPct = (Number(b.count) / maxCount) * 100;
+          return (
+            <div key={i} className="flex items-center gap-3 text-xs">
+              <div className="w-24 text-right text-[#6b5d52] font-medium shrink-0 text-[11px]">{b.bucket}</div>
+              <div className="flex-1 bg-[#faf7f2] rounded-lg h-7 relative overflow-hidden">
+                <div className="absolute inset-y-0 left-0 bg-[#cc5a16] rounded-lg transition-all" style={{ width: `${barPct}%` }} />
+                <div className="absolute inset-0 flex items-center px-2.5 font-mono font-bold text-[11px]" style={{ color: barPct > 30 ? 'white' : '#1a1208' }}>
+                  {Number(b.count).toLocaleString('en-IN')} ({pct}%)
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-[11px] text-[#9c8e85]">Days between booking creation date and check-in date. Longer lead times indicate planned stays; same-day / 1–3 day bookings are typically walk-ins or last-minute OTA.</p>
+    </div>
+  );
+}
+
 // Restaurant is a distinct product line, so it gets its own reporting home
 // (parallel to the Hotel Reports hub). Reuses the rich /reports endpoint —
 // one call powers daily sales, product-wise, category, payment methods, peak

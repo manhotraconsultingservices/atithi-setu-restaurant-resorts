@@ -19472,6 +19472,87 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── Inventory Analytics (ABC analysis · expiring batches · dead stock) ─────
+
+  app.get("/api/restaurant/:id/inventory/abc-analysis", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(`
+        SELECT i.id, i.name, i.category, i.unit,
+          COALESCE(SUM(CASE WHEN sm.qty_delta < 0 THEN ABS(sm.qty_delta) * COALESCE(sm.unit_cost, i.default_unit_price, 0) ELSE 0 END), 0) AS consumed_value,
+          COALESCE(SUM(CASE WHEN sm.qty_delta < 0 THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS consumed_qty
+        FROM ingredients i
+        LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id AND sm.recorded_at >= date('now', '-90 days')
+        WHERE i.is_active = 1
+        GROUP BY i.id
+        ORDER BY consumed_value DESC
+      `);
+      const total = rows.reduce((s: number, r: any) => s + Number(r.consumed_value), 0);
+      let cumulative = 0;
+      const items = rows.map((r: any, idx: number) => {
+        const val = Number(r.consumed_value);
+        const prevCumPct = total > 0 ? (cumulative / total) * 100 : 0;
+        cumulative += val;
+        const cumPct = total > 0 ? (cumulative / total) * 100 : 0;
+        const pct = total > 0 ? (val / total) * 100 : 0;
+        const abc = prevCumPct < 70 ? 'A' : prevCumPct < 90 ? 'B' : 'C';
+        return { ...r, rank: idx + 1, pct: Math.round(pct * 100) / 100, cumulative_pct: Math.round(cumPct * 100) / 100, abc };
+      });
+      res.json({ total, items });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to compute ABC analysis" });
+    }
+  });
+
+  app.get("/api/restaurant/:id/inventory/expiring", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+      const items: any[] = await db.query(
+        `SELECT sb.id, sb.batch_number, sb.expiry_date, sb.remaining_qty, sb.unit, sb.unit_cost,
+                i.name AS item_name, i.category,
+                CAST(julianday(sb.expiry_date) - julianday('now') AS INTEGER) AS days_until_expiry
+         FROM stock_batches sb
+         JOIN ingredients i ON i.id = sb.ingredient_id
+         WHERE sb.expiry_date IS NOT NULL
+           AND sb.expiry_date <= date('now', '+' || ? || ' days')
+           AND sb.remaining_qty > 0
+         ORDER BY sb.expiry_date ASC`,
+        [days]
+      );
+      res.json({ days, count: items.length, items });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch expiring items" });
+    }
+  });
+
+  app.get("/api/restaurant/:id/inventory/dead-stock", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const days = Math.min(180, Math.max(7, Number(req.query.days) || 30));
+      const items: any[] = await db.query(
+        `SELECT i.id, i.name, i.category, i.unit,
+                i.current_stock_qty AS stock_qty,
+                COALESCE(i.default_unit_price, 0) AS unit_price,
+                i.current_stock_qty * COALESCE(i.default_unit_price, 0) AS stock_value,
+                MAX(sm.recorded_at) AS last_movement,
+                CASE WHEN MAX(sm.recorded_at) IS NULL THEN NULL
+                     ELSE CAST(julianday('now') - julianday(MAX(sm.recorded_at)) AS INTEGER)
+                END AS days_idle
+         FROM ingredients i
+         LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id
+         WHERE i.is_active = 1 AND i.current_stock_qty > 0
+         GROUP BY i.id
+         HAVING last_movement IS NULL OR days_idle >= ?
+         ORDER BY stock_value DESC`,
+        [days]
+      );
+      res.json({ days, count: items.length, items });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch dead stock" });
+    }
+  });
+
   // ─── Storage Locations CRUD (multi-location stock) ──────────────────────
   app.get("/api/restaurant/:id/storage-locations", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -26497,6 +26578,42 @@ ${data.tenant.name}`;
     } catch (err) {
       console.error("pickup pace error:", err);
       res.status(500).json({ error: "Failed to compute pickup pace" });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/booking-lead-time", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const buckets: any[] = await db.query(`
+        SELECT
+          CASE
+            WHEN lead_days = 0 THEN '0 – same day'
+            WHEN lead_days BETWEEN 1 AND 3 THEN '1–3 days'
+            WHEN lead_days BETWEEN 4 AND 7 THEN '4–7 days'
+            WHEN lead_days BETWEEN 8 AND 14 THEN '8–14 days'
+            WHEN lead_days BETWEEN 15 AND 30 THEN '15–30 days'
+            WHEN lead_days BETWEEN 31 AND 60 THEN '31–60 days'
+            ELSE '60+ days'
+          END AS bucket,
+          COUNT(*) AS count,
+          ROUND(AVG(lead_days), 1) AS avg_lead
+        FROM (
+          SELECT MAX(0, CAST(julianday(check_in_date) - julianday(created_at) AS INTEGER)) AS lead_days
+          FROM room_bookings
+          WHERE status <> 'CANCELLED'
+            AND created_at >= date('now', '-365 days')
+        ) t
+        GROUP BY bucket
+        ORDER BY MIN(lead_days)
+      `);
+      const total = buckets.reduce((s: number, r: any) => s + Number(r.count), 0);
+      const avgRow: any[] = await db.query(`
+        SELECT ROUND(AVG(MAX(0, CAST(julianday(check_in_date) - julianday(created_at) AS INTEGER))), 1) AS avg_days
+        FROM room_bookings WHERE status <> 'CANCELLED' AND created_at >= date('now', '-365 days')
+      `);
+      res.json({ total, avg_lead_days: avgRow[0]?.avg_days ?? 0, buckets });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to compute booking lead time" });
     }
   });
 
