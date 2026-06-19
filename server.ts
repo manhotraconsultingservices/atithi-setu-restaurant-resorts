@@ -19362,6 +19362,116 @@ ${data.tenant.name}`;
     }
   });
 
+  // GET /api/restaurant/:id/procurement/suppliers — supplier directory with AP summary
+  app.get("/api/restaurant/:id/procurement/suppliers", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(`
+        SELECT s.*,
+          COALESCE(SUM(CASE WHEN si.status NOT IN ('PAID') THEN si.outstanding_amount ELSE 0 END), 0) AS ap_outstanding,
+          COALESCE(SUM(si.total_amount), 0) AS ap_total_billed,
+          COALESCE(SUM(si.paid_amount), 0) AS ap_total_paid,
+          COUNT(DISTINCT CASE WHEN si.status NOT IN ('PAID') AND si.outstanding_amount > 0 THEN si.id END) AS open_invoices,
+          COUNT(DISTINCT CASE WHEN po.status NOT IN ('RECEIVED', 'CANCELLED') THEN po.id END) AS open_pos
+        FROM suppliers s
+        LEFT JOIN supplier_invoices si ON si.supplier_id = s.id
+        LEFT JOIN purchase_orders po ON po.supplier_id = s.id
+        WHERE s.is_active = 1
+        GROUP BY s.id
+        ORDER BY s.name
+      `);
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to fetch supplier directory" });
+    }
+  });
+
+  // POST /api/restaurant/:id/procurement/suppliers — create supplier (no INVENTORY gate)
+  app.post("/api/restaurant/:id/procurement/suppliers", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const {
+        name, contact_name, phone, email, address, gst_number,
+        lead_time_days, payment_terms, credit_days, supplier_type,
+        bank_account_number, bank_name, ifsc_code, notes,
+      } = req.body;
+      if (!name) return res.status(400).json({ error: "name is required" });
+      const db = await getTenantDb(req.params.id);
+      const id = `SUP-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO suppliers (id, name, contact_name, phone, email, address, gst_number,
+           lead_time_days, payment_terms, credit_days, supplier_type,
+           bank_account_number, bank_name, ifsc_code, notes, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, name, contact_name || null, phone || null, email || null, address || null,
+         gst_number || null, lead_time_days || 0, payment_terms || null,
+         credit_days || 0, supplier_type || 'GENERAL',
+         bank_account_number || null, bank_name || null, ifsc_code || null, notes || null]
+      );
+      const created = await db.query("SELECT * FROM suppliers WHERE id = ?", [id]);
+      res.status(201).json(created[0]);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to create supplier" });
+    }
+  });
+
+  // PATCH /api/restaurant/:id/procurement/suppliers/:supplierId — update supplier (includes bank + credit_days)
+  app.patch("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const ALLOWED = [
+        'name', 'contact_name', 'phone', 'email', 'address', 'gst_number',
+        'lead_time_days', 'payment_terms', 'credit_days', 'supplier_type',
+        'bank_account_number', 'bank_name', 'ifsc_code', 'notes', 'is_active',
+      ];
+      const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => ALLOWED.includes(k)));
+      if (Object.keys(updates).length === 0) return res.status(400).json({ error: "No valid fields to update" });
+      const db = await getTenantDb(req.params.id);
+      const sets = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+      await db.run(`UPDATE suppliers SET ${sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND is_active = 1`,
+        [...Object.values(updates), req.params.supplierId]);
+      const updated = await db.query("SELECT * FROM suppliers WHERE id = ?", [req.params.supplierId]);
+      if (!updated.length) return res.status(404).json({ error: "Supplier not found" });
+      res.json(updated[0]);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to update supplier" });
+    }
+  });
+
+  // DELETE /api/restaurant/:id/procurement/suppliers/:supplierId — soft delete
+  app.delete("/api/restaurant/:id/procurement/suppliers/:supplierId", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE suppliers SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [req.params.supplierId]);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to deactivate supplier" });
+    }
+  });
+
+  // GET /api/restaurant/:id/procurement/reports/po-stats — PO status breakdown + recent activity
+  app.get("/api/restaurant/:id/procurement/reports/po-stats", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const byStatus: any[] = await db.query(`
+        SELECT status, COUNT(*) AS count,
+          COALESCE(SUM(grand_total), 0) AS total_value
+        FROM purchase_orders
+        GROUP BY status
+        ORDER BY CASE status WHEN 'SENT' THEN 1 WHEN 'PARTIAL' THEN 2 WHEN 'DRAFT' THEN 3 WHEN 'RECEIVED' THEN 4 ELSE 5 END
+      `);
+      const recent: any[] = await db.query(`
+        SELECT po.*, s.name AS supplier_name
+        FROM purchase_orders po
+        LEFT JOIN suppliers s ON s.id = po.supplier_id
+        WHERE po.raised_at >= date('now', '-90 days')
+        ORDER BY po.raised_at DESC
+        LIMIT 20
+      `);
+      res.json({ by_status: byStatus, recent });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to fetch PO stats" });
+    }
+  });
+
   // ─── Storage Locations CRUD (multi-location stock) ──────────────────────
   app.get("/api/restaurant/:id/storage-locations", authenticate, async (req: AuthRequest, res: Response) => {
     try {
