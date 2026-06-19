@@ -26,6 +26,12 @@
 
 import { createHmac, timingSafeEqual } from 'crypto';
 
+// ── MMT OAuth 2.0 token cache (in-process, per-credential-key) ───────────
+// MMT GoConnect issues Bearer tokens with ~1hr TTL via client_credentials
+// grant. Caching here avoids a token round-trip on every ARI push while
+// staying within the TTL. Eviction is lazy: we re-fetch when <60 s remain.
+const mmtOAuthCache = new Map<string, { token: string; expiresAt: number }>();
+
 export interface ChannelCredentials {
   channel: string;
   api_key: string | null;       // plaintext (often a public identifier)
@@ -343,15 +349,118 @@ class MakeMyTripAdapter implements ChannelAdapter {
   isReady(c: ChannelCredentials) {
     return !!(c.is_enabled && c.api_key && c.api_secret && c.property_id);
   }
+
+  /** Fetch (or return cached) OAuth Bearer token for the GoConnect API.
+   *  MMT issues client_credentials tokens via POST /oauth/token.
+   *  The token TTL is ~1 hr; we refresh when <60 s remain.
+   *  The api_key is the Client ID and api_secret is the Client Secret —
+   *  both obtained from InGo-MMT Partner Portal → Settings → API Credentials
+   *  (NOT the same as the web-dashboard login that requires OTP). */
+  private async getOAuthToken(creds: ChannelCredentials): Promise<string | null> {
+    if (!creds.api_key || !creds.api_secret) return null;
+    const cacheKey = `${this.channel}:${creds.api_key}`;
+    const cached = mmtOAuthCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt - 60_000) return cached.token;
+    try {
+      const params = new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: creds.api_key,
+        client_secret: creds.api_secret,
+      });
+      const res = await fetch('https://connect-api.makemytrip.com/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString(),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        console.warn(`[channel-${this.channel.toLowerCase()}] OAuth token failed ${res.status}: ${txt.slice(0, 200)}`);
+        return null;
+      }
+      const data: any = await res.json();
+      const token = String(data.access_token || '');
+      const expiresIn = Number(data.expires_in || 3600);
+      if (!token) return null;
+      mmtOAuthCache.set(cacheKey, { token, expiresAt: Date.now() + expiresIn * 1000 });
+      return token;
+    } catch (e: any) {
+      console.warn(`[channel-${this.channel.toLowerCase()}] OAuth error:`, e?.message);
+      return null;
+    }
+  }
+
   async pushBooking(creds: ChannelCredentials, payload: AdapterBookingPayload): Promise<AdapterResult> {
     if (!this.isReady(creds)) return { ok: false, message: `${this.channel} credentials not configured.` };
     console.log(`[channel-${this.channel.toLowerCase()}:stub] would push booking ${payload.bookingId} for hotel ${creds.property_id}`);
     return { ok: true, message: `${this.channel.toLowerCase()}-stub: payload validated; awaiting partner approval` };
   }
+
+  /** Push Availability + Rate Inventory (ARI) to MMT GoConnect.
+   *  Groups payloads by roomName (external room type code) and sends one
+   *  JSON body per room type. Uses OAuth 2.0 Bearer token (no OTP required —
+   *  the OTP only protects the web-dashboard login, not the API). */
   async pushAvailability(creds: ChannelCredentials, payloads: AdapterAvailabilityPayload[]): Promise<AdapterResult> {
     if (!this.isReady(creds)) return { ok: false, message: `${this.channel} credentials not configured.` };
-    console.log(`[channel-${this.channel.toLowerCase()}:stub] would push ${payloads.length} availability rows`);
-    return { ok: true, message: `${this.channel.toLowerCase()}-stub: availability validated` };
+    if (payloads.length === 0) return { ok: true, message: 'no payloads to push' };
+
+    const token = await this.getOAuthToken(creds);
+    if (!token) {
+      return {
+        ok: false,
+        message: `${this.channel}: OAuth token fetch failed — verify Client ID + Client Secret in Channel Manager (use API credentials from InGo-MMT Partner Portal → Settings → API Credentials, NOT the web login password)`,
+      };
+    }
+
+    // Group by external room code (stored as roomName when called from triggerAriPush)
+    const byRoom = new Map<string, AdapterAvailabilityPayload[]>();
+    for (const p of payloads) {
+      const key = p.roomName || p.roomId;
+      if (!byRoom.has(key)) byRoom.set(key, []);
+      byRoom.get(key)!.push(p);
+    }
+
+    const errors: string[] = [];
+    let pushed = 0;
+    for (const [roomCode, rows] of byRoom) {
+      const body = {
+        hotel_id: creds.property_id,
+        room_type_code: roomCode,
+        inventory: rows.map(r => ({
+          date: r.date,
+          available_rooms: r.available ? 1 : 0,
+          rate: r.rate,
+          currency: 'INR',
+        })),
+      };
+      try {
+        const res = await fetch('https://connect-api.makemytrip.com/api/v1/hotel/inventory', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!res.ok) {
+          const txt = await res.text().catch(() => '');
+          errors.push(`room ${roomCode}: ${res.status} ${txt.slice(0, 150)}`);
+        } else {
+          pushed += rows.length;
+        }
+      } catch (e: any) {
+        errors.push(`room ${roomCode}: ${e?.message}`);
+      }
+    }
+
+    if (errors.length > 0 && pushed === 0) {
+      return { ok: false, message: `${this.channel} ARI push failed: ${errors.join('; ')}` };
+    }
+    if (errors.length > 0) {
+      return { ok: true, message: `${this.channel} ARI partial: ${pushed} rows pushed, errors: ${errors.join('; ')}` };
+    }
+    return { ok: true, message: `${this.channel} ARI pushed ${pushed} rows for hotel ${creds.property_id}` };
   }
   validateWebhook(creds: ChannelCredentials, headers: any, rawBody: string, _body: any): ValidateResult {
     const secret = creds.webhook_signing_secret || creds.api_secret;
@@ -586,6 +695,56 @@ class AirbnbAdapter implements ChannelAdapter {
   }
 }
 
+/**
+ * Google Hotel Ads / Google Free Booking Links adapter.
+ *
+ * Google does NOT deliver inbound webhooks or booking pushes. Bookings
+ * arrive via the public direct-booking page (guests click the "Book" link
+ * from Google Hotel Search). This adapter only surfaces:
+ *
+ *   pushAvailability() — Phase 2 stub; after receiving Google Travel Partner
+ *     API access (8–14 week approval), this will push OTA XML to
+ *     https://www.google.com:443/travel/hotels/uploads/ota/ via a Google
+ *     service account.
+ *
+ *   A separate public endpoint GET /api/public/restaurant/:id/hotel/google-ari
+ *   in server.ts returns an OTA_HotelRateAmountNotifRQ XML document that Google
+ *   can pull when configuring Free Booking Links in Hotel Center.
+ *
+ * To get on Google Hotel Search:
+ *   1. Verify property in Google Business Profile.
+ *   2. Link to Google Hotel Center (free).
+ *   3. Add your direct booking URL as the "official booking link".
+ *   4. Optionally submit the /google-ari XML feed so Google shows prices.
+ *   Step 5 (paid Google Hotel Ads): apply for Travel Partner API access
+ *   and implement the pushAvailability() below.
+ */
+class GoogleHotelsAdapter implements ChannelAdapter {
+  channel = 'GOOGLE_HOTELS';
+  isReady(_c: ChannelCredentials) { return false; }  // Phase 2: set true when Travel Partner API approved
+  async pushBooking(): Promise<AdapterResult> {
+    return { ok: false, message: 'Google Hotels does not accept outbound booking pushes. Guests book via your public booking URL shown in Google Hotel Search.' };
+  }
+  async pushAvailability(creds: ChannelCredentials, payloads: AdapterAvailabilityPayload[]): Promise<AdapterResult> {
+    if (!creds.property_id) return { ok: false, message: 'Google Hotel Center property_id not configured in Channel Manager.' };
+    // Phase 2 — push OTA XML via Google Travel Partner API (requires partner approval):
+    // POST https://www.google.com:443/travel/hotels/uploads/ota/
+    // Auth: Google service account OAuth2, scope: https://www.googleapis.com/auth/travel-partner
+    // Body: OTA_HotelRateAmountNotifRQ XML built from payloads
+    console.log(`[channel-google-hotels:stub] would push ${payloads.length} ARI rows for hotel ${creds.property_id}. After Google Travel Partner API approval, this will push OTA XML directly.`);
+    return { ok: true, message: `google-hotels-stub: ${payloads.length} ARI rows queued. Currently served via /google-ari XML feed endpoint for Hotel Center pull-based integration.` };
+  }
+  validateWebhook(): ValidateResult {
+    return { ok: false, reason: 'Google Hotels does not deliver webhooks. Bookings arrive via your public direct-booking URL redirect.' };
+  }
+  parseInbound() {
+    return { ok: false, reason: 'Google Hotels bookings are handled via the public booking page, not inbound webhooks.' };
+  }
+  async pullBookings(): Promise<AdapterPullResult> {
+    return { ok: true, bookings: [], stub: true, note: 'Google Hotels: bookings handled via direct booking page redirect — no API pull needed.' };
+  }
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────
 const adapters: Record<string, ChannelAdapter> = {
   BOOKING: new BookingComAdapter(),
@@ -594,6 +753,7 @@ const adapters: Record<string, ChannelAdapter> = {
   AGODA: new AgodaAdapter(),
   EXPEDIA: new ExpediaAdapter(),
   AIRBNB: new AirbnbAdapter(),
+  GOOGLE_HOTELS: new GoogleHotelsAdapter(),
   MOCK: new MockAdapter(),
 };
 

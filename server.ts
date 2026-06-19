@@ -13,7 +13,7 @@ import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { centralDb, getTenantDb, initDb, seedLocations, getNextSequence, getNextTenantSequence, DbInterface } from "./db.ts";
 import { sendEmail, sendSMS, sendWhatsApp, sendTelegram, buildNotificationContent } from "./notificationService.ts";
-import { getChannelAdapter, ChannelCredentials } from "./channelAdapters.ts";
+import { getChannelAdapter, ChannelCredentials, AdapterAvailabilityPayload, AdapterResult } from "./channelAdapters.ts";
 import { generateFormCPdf } from "./formCService.ts";
 import { generateInvoicePdf } from "./invoiceService.ts";
 import { generatePOPdf, buildPOEmailBody, type POPdfData } from "./poService.ts";
@@ -3589,6 +3589,105 @@ async function logChannelSync(
     }
   } catch (e) {
     console.warn('[channel-sync] log failed:', e);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  triggerAriPush — fire-and-forget ARI (Availability Rate Inventory) push
+//
+//  Called after hotel booking creation or cancellation. For each enabled
+//  OTA channel with credentials, computes day-by-day room availability
+//  for the booking date range and calls adapter.pushAvailability().
+//
+//  Never throws — failures are logged to channel_sync_log.
+// ════════════════════════════════════════════════════════════════════════
+async function triggerAriPush(
+  restaurantId: string,
+  booking: { id: string; room_id: string; check_in_date: string; check_out_date: string; booking_source?: string | null },
+): Promise<void> {
+  try {
+    const db = await getTenantDb(restaurantId);
+    const enabledOtas: any[] = await db.query(
+      "SELECT channel, api_key, api_secret, property_id, is_enabled FROM channel_credentials WHERE is_enabled = 1"
+    ).catch(() => []);
+    if (enabledOtas.length === 0) return;
+
+    const room: any = await db.get("SELECT id, name, base_price FROM rooms WHERE id = ?", [booking.room_id]).catch(() => null);
+    if (!room) return;
+
+    // Build list of dates in [check_in, check_out) — the nights occupied.
+    const dates: string[] = [];
+    const d = new Date(booking.check_in_date + 'T00:00:00Z');
+    const end = new Date(booking.check_out_date + 'T00:00:00Z');
+    while (d < end) {
+      dates.push(d.toISOString().slice(0, 10));
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    if (dates.length === 0) return;
+
+    const sourceChannel = String(booking.booking_source || 'DIRECT').toUpperCase();
+
+    for (const credRow of enabledOtas) {
+      const channelKey = String(credRow.channel || '').toUpperCase();
+      // Skip pushing back to the OTA that originated this booking.
+      if (channelKey === sourceChannel) continue;
+
+      const adapter = getChannelAdapter(channelKey);
+      // getChannelAdapter falls back to MOCK for unknown channels; skip stubs
+      if (!adapter.isReady(credRow)) continue;
+
+      // Get external room code from channel_room_mappings (needed by the OTA).
+      const mapping: any = await db.get(
+        "SELECT external_room_code FROM channel_room_mappings WHERE channel = ? AND local_room_id = ?",
+        [channelKey, booking.room_id]
+      ).catch(() => null);
+      const extRoomCode = mapping?.external_room_code || room.name;
+
+      // Per-date availability: 0 active bookings on that date = room available.
+      const payloads: import('./channelAdapters.ts').AdapterAvailabilityPayload[] = [];
+      for (const date of dates) {
+        const agg: any = await db.get(
+          `SELECT COUNT(*) AS c FROM room_bookings
+            WHERE room_id = ?
+              AND status NOT IN ('CANCELLED', 'CHECKED_OUT')
+              AND check_in_date <= ? AND check_out_date > ?`,
+          [booking.room_id, date, date]
+        ).catch(() => ({ c: 1 }));
+        payloads.push({
+          roomId: booking.room_id,
+          roomName: extRoomCode,   // adapter uses this as the external room code
+          date,
+          available: Number(agg?.c || 0) === 0,
+          rate: Number(room.base_price || 0),
+          rateLabel: 'BAR',
+        });
+      }
+
+      if (payloads.length === 0) continue;
+
+      // Fire-and-forget: don't await, don't let errors surface to the booking request.
+      adapter.pushAvailability(credRow, payloads)
+        .then((result: import('./channelAdapters.ts').AdapterResult) => {
+          db.run(
+            `INSERT INTO channel_sync_log (booking_id, channel, event_type, status, payload, error)
+             VALUES (?, ?, 'AVAILABILITY_PUSH', ?, ?, ?)`,
+            [booking.id, channelKey, result.ok ? 'sent' : 'failed',
+             JSON.stringify({ room_id: booking.room_id, dates: dates.length }),
+             result.ok ? null : (result.message || null)]
+          ).catch(() => {});
+        })
+        .catch((e: any) => {
+          db.run(
+            `INSERT INTO channel_sync_log (booking_id, channel, event_type, status, payload, error)
+             VALUES (?, ?, 'AVAILABILITY_PUSH', 'failed', ?, ?)`,
+            [booking.id, channelKey,
+             JSON.stringify({ room_id: booking.room_id, dates: dates.length }),
+             String(e?.message || e).slice(0, 500)]
+          ).catch(() => {});
+        });
+    }
+  } catch (e: any) {
+    console.warn('[ari-push] error:', e?.message);
   }
 }
 
@@ -24417,6 +24516,8 @@ ${data.tenant.name}`;
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
       // Phase H1 — log to channel sync queue (no-op for direct bookings).
       await logChannelSync(req.params.id, row, 'BOOKING_CREATED');
+      // ARI push: fire-and-forget update to all enabled OTA channels.
+      triggerAriPush(req.params.id, { id: bid, room_id: resolvedRoomId, check_in_date, check_out_date, booking_source: booking_source || 'DIRECT' }).catch(() => {});
       res.status(201).json(row);
     } catch (err: any) {
       console.error("Create booking error:", err);
@@ -27589,6 +27690,111 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── Google Hotel Center — OTA ARI price feed ────────────────────────────
+  // GET /api/public/restaurant/:id/hotel/google-ari
+  //
+  // Returns an OTA_HotelRateAmountNotifRQ XML document for the next 90 days.
+  // Google Hotel Center can pull this URL to display live rates in search
+  // results alongside your direct booking link (Google Free Booking Links).
+  //
+  // Setup steps (one-time, done outside this system):
+  //   1. Verify the hotel in Google Business Profile.
+  //   2. Link to Google Hotel Center (free at hotel.google.com).
+  //   3. Add your public booking page URL as the "official booking link".
+  //   4. In Hotel Center → Rates, configure this endpoint URL as a price feed.
+  //
+  // Authentication: none (public). Rate data is not sensitive — it's the
+  // same rate the guest sees on the booking page.
+  app.get("/api/public/restaurant/:id/hotel/google-ari", async (req: Request, res: Response) => {
+    try {
+      const restaurantId = req.params.id;
+      const db = await getTenantDb(restaurantId).catch(() => null);
+      if (!db) return res.status(404).send('<?xml version="1.0"?><error>Not found</error>');
+
+      // Determine the Google Hotel Center property code (from channel_credentials if set,
+      // otherwise fall back to the restaurant ID so the feed is still useful).
+      const gcred: any = await db.get(
+        "SELECT property_id FROM channel_credentials WHERE channel = 'GOOGLE_HOTELS' AND is_enabled = 1"
+      ).catch(() => null);
+      const hotelCode = gcred?.property_id || restaurantId;
+
+      // Gather rate plans + active rooms for rate data.
+      const ratePlans: any[] = await db.query(
+        "SELECT id, code, name, discount_pct FROM rate_plans WHERE is_active = 1 ORDER BY display_order, code LIMIT 4"
+      ).catch(() => []);
+      const rooms: any[] = await db.query(
+        "SELECT id, name, base_price, room_category_id FROM rooms WHERE is_active = 1 ORDER BY created_at LIMIT 20"
+      ).catch(() => []);
+      const categories: any[] = await db.query(
+        "SELECT id, name, base_price FROM room_categories ORDER BY created_at LIMIT 10"
+      ).catch(() => []);
+
+      if (rooms.length === 0 && categories.length === 0) {
+        res.contentType('application/xml').send(
+          '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<OTA_HotelRateAmountNotifRQ xmlns="http://www.opentravel.org/OTA/2003/05"/>'
+        );
+        return;
+      }
+
+      const today = new Date();
+      const end90 = new Date(today);
+      end90.setDate(end90.getDate() + 90);
+      const startStr = today.toISOString().slice(0, 10);
+      const endStr = end90.toISOString().slice(0, 10);
+      const ts = today.toISOString();
+
+      // Build one RateAmountMessage per rate plan × room type combination.
+      // If no rate plans are set up, fall back to a single BAR entry.
+      const ratePlanList = ratePlans.length > 0 ? ratePlans : [{ code: 'BAR', name: 'Best Available Rate', discount_pct: 0 }];
+
+      // Determine base prices per room type (use category base_price if available).
+      const catById = new Map(categories.map((c: any) => [String(c.id), Number(c.base_price || 0)]));
+      const roomTypes = rooms.length > 0 ? rooms : categories.map((c: any) => ({
+        id: c.id, name: c.name, base_price: c.base_price, room_category_id: null
+      }));
+
+      let rateMessages = '';
+      for (const rt of roomTypes) {
+        const catBase = rt.room_category_id ? (catById.get(String(rt.room_category_id)) || 0) : 0;
+        const basePrice = Number(rt.base_price || 0) || catBase || 3000;
+        const roomCode = String(rt.name || rt.id).replace(/[^\w-]/g, '_').toUpperCase().slice(0, 30);
+        for (const rp of ratePlanList) {
+          const discPct = Number(rp.discount_pct || 0);
+          const rate = Math.round(basePrice * (1 - discPct / 100) * 100) / 100;
+          rateMessages += `
+    <RateAmountMessage>
+      <StatusApplicationControl Start="${startStr}" End="${endStr}" RatePlanCode="${rp.code}" InvTypeCode="${roomCode}" />
+      <Rates>
+        <Rate>
+          <BaseByGuestAmts>
+            <BaseByGuestAmt AmountBeforeTax="${rate.toFixed(2)}" CurrencyCode="INR" NumberOfGuests="2" />
+          </BaseByGuestAmts>
+        </Rate>
+      </Rates>
+    </RateAmountMessage>`;
+        }
+      }
+
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<OTA_HotelRateAmountNotifRQ xmlns="http://www.opentravel.org/OTA/2003/05"
+    EchoToken="gari-${Date.now()}"
+    TimeStamp="${ts}"
+    Version="1.0"
+    ResResponseType="Confirmation">
+  <RateAmountMessages HotelCode="${hotelCode}">${rateMessages}
+  </RateAmountMessages>
+</OTA_HotelRateAmountNotifRQ>`;
+
+      res.contentType('application/xml').send(xml);
+    } catch (err: any) {
+      console.error('[google-ari]', err?.message);
+      res.status(500).contentType('application/xml').send(
+        '<?xml version="1.0" encoding="UTF-8"?><error>Internal server error</error>'
+      );
+    }
+  });
+
   // Public booking creation. Anyone can hit this — basic rate-limit-
   // friendly fields-only; status starts BOOKED, booking_source set to
   // 'DIRECT_WEB' so reports can attribute revenue.
@@ -29939,7 +30145,7 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const b: any = await tenantDb.get(
-        'SELECT id, status, check_in_date, total_amount FROM room_bookings WHERE id = ?',
+        'SELECT id, status, room_id, check_in_date, check_out_date, total_amount, booking_source FROM room_bookings WHERE id = ?',
         [req.params.bookingId]
       );
       if (!b) return res.status(404).json({ error: 'Booking not found.' });
@@ -29989,6 +30195,8 @@ ${data.tenant.name}`;
         refund_amount: refund.refund_amount,
         reason,
       });
+      // ARI push: cancellation frees this room — update all OTA channels.
+      triggerAriPush(req.params.id, { id: b.id, room_id: b.room_id, check_in_date: b.check_in_date, check_out_date: b.check_out_date, booking_source: b.booking_source }).catch(() => {});
       res.json({
         success: true,
         refund_pct: refund.refund_pct,

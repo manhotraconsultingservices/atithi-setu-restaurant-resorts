@@ -27456,10 +27456,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <select required value={d.channel || 'BOOKING'} onChange={e => set({ channel: e.target.value })}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
                     <option value="BOOKING">Booking.com</option>
-                    <option value="MMT">MakeMyTrip / Goibibo</option>
+                    <option value="MMT">MakeMyTrip / Goibibo (GoConnect)</option>
                     <option value="AGODA">Agoda</option>
                     <option value="EXPEDIA">Expedia</option>
                     <option value="AIRBNB">Airbnb</option>
+                    <option value="GOOGLE_HOTELS">Google Hotels (Free Booking Links)</option>
                     <option value="OTHER">Other</option>
                   </select>
                 </div>
@@ -27469,12 +27470,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     placeholder="Leave blank to keep existing" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">API Secret</label>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    {d.channel === 'MMT' ? 'API Secret (Client Secret)' : 'API Secret'}
+                  </label>
                   <input type="password" autoComplete="new-password" value={d.api_secret || ''} onChange={e => set({ api_secret: e.target.value })}
                     placeholder="Leave blank to keep existing" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
+                  {d.channel === 'MMT' && (
+                    <p className="text-[10px] text-[#6b5d52] bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mt-1.5">
+                      Use the <strong>API Client Secret</strong> from InGo-MMT Partner Portal → Settings → API Credentials.
+                      This is <strong>different</strong> from your web dashboard password (which requires OTP). The API key has no OTP requirement.
+                    </p>
+                  )}
+                  {d.channel === 'GOOGLE_HOTELS' && (
+                    <p className="text-[10px] text-[#6b5d52] bg-blue-50 border border-blue-200 rounded-xl px-3 py-2 mt-1.5">
+                      Google Hotels uses Free Booking Links (no API key needed for basic setup). Leave API fields blank and just enter your Google Hotel Center Property ID below. Guests click your Google listing → land on your direct booking page. For the ARI price feed URL, share: <code className="font-mono">/api/public/restaurant/&lt;id&gt;/hotel/google-ari</code>
+                    </p>
+                  )}
                 </div>
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Property ID on OTA</label>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    {d.channel === 'MMT' ? 'MMT Hotel ID (Property ID)' : d.channel === 'GOOGLE_HOTELS' ? 'Google Hotel Center Property ID' : 'Property ID on OTA'}
+                  </label>
                   <input value={d.property_id || ''} onChange={e => set({ property_id: e.target.value })}
                     placeholder="e.g. 12345678" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
                 </div>
@@ -57590,6 +57606,24 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     })();
     return () => { cancelled = true; };
   }, [tenantId]);
+
+  // Inject JSON-LD structured data so Google can index this as a LodgingBusiness
+  useEffect(() => {
+    if (!hotelInfo) return;
+    const script = document.createElement('script');
+    script.type = 'application/ld+json';
+    script.id = 'atithi-ld-json';
+    script.text = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'LodgingBusiness',
+      name: hotelInfo.name || '',
+      url: window.location.origin + window.location.pathname,
+      address: { '@type': 'PostalAddress', addressCountry: 'IN' },
+    });
+    document.getElementById('atithi-ld-json')?.remove();
+    document.head.appendChild(script);
+    return () => { document.getElementById('atithi-ld-json')?.remove(); };
+  }, [hotelInfo]);
 
   // ── Reset to LANDING + scroll to top ────────────────────────────
   // When the booking flow finishes (DONE step) or the guest taps
