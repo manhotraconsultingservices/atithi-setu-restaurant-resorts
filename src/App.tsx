@@ -52749,7 +52749,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
             <input type="date" value={invFilter.to} onChange={e => setInvFilter(f => ({ ...f, to: e.target.value }))}
               className="bg-[#faf7f2] border-none rounded-xl px-3 py-2 text-sm outline-none" title="To date" />
             <div className="flex-1" />
-            <button onClick={openCreateInvoice}
+            <button onClick={() => openCreateInvoice()}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">
               <Plus size={14} /> New Invoice
             </button>
@@ -52762,7 +52762,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
               <Package size={40} className="mx-auto mb-3 opacity-30" />
               <p className="font-bold text-sm">No invoices yet</p>
               <p className="text-xs mt-1">Record supplier invoices when you receive goods or services.</p>
-              <button onClick={openCreateInvoice} className="mt-4 px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold">+ New Invoice</button>
+              <button onClick={() => openCreateInvoice()} className="mt-4 px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold">+ New Invoice</button>
             </div>
           ) : (
             <DataTable
