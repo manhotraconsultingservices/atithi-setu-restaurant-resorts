@@ -19393,6 +19393,9 @@ ${data.tenant.name}`;
         name, contact_name, phone, email, address, gst_number,
         lead_time_days, payment_terms, credit_days, supplier_type,
         bank_account_number, bank_name, ifsc_code, notes,
+        pan_number, msme_registered, vendor_category, credit_limit, tds_category,
+        contract_start_date, contract_end_date, preferred_status,
+        pan_doc_url, msme_doc_url, gst_doc_url,
       } = req.body;
       if (!name) return res.status(400).json({ error: "name is required" });
       const db = await getTenantDb(req.params.id);
@@ -19400,12 +19403,19 @@ ${data.tenant.name}`;
       await db.run(
         `INSERT INTO suppliers (id, name, contact_name, phone, email, address, gst_number,
            lead_time_days, payment_terms, credit_days, supplier_type,
-           bank_account_number, bank_name, ifsc_code, notes, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+           bank_account_number, bank_name, ifsc_code, notes,
+           pan_number, msme_registered, vendor_category, credit_limit, tds_category,
+           contract_start_date, contract_end_date, preferred_status,
+           pan_doc_url, msme_doc_url, gst_doc_url, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [id, name, contact_name || null, phone || null, email || null, address || null,
          gst_number || null, lead_time_days || 0, payment_terms || null,
          credit_days || 0, supplier_type || 'GENERAL',
-         bank_account_number || null, bank_name || null, ifsc_code || null, notes || null]
+         bank_account_number || null, bank_name || null, ifsc_code || null, notes || null,
+         pan_number || null, msme_registered ? 1 : 0, vendor_category || null,
+         credit_limit || null, tds_category || 'NIL',
+         contract_start_date || null, contract_end_date || null, preferred_status || 'PREFERRED',
+         pan_doc_url || null, msme_doc_url || null, gst_doc_url || null]
       );
       const created = await db.query("SELECT * FROM suppliers WHERE id = ?", [id]);
       res.status(201).json(created[0]);
@@ -19421,6 +19431,9 @@ ${data.tenant.name}`;
         'name', 'contact_name', 'phone', 'email', 'address', 'gst_number',
         'lead_time_days', 'payment_terms', 'credit_days', 'supplier_type',
         'bank_account_number', 'bank_name', 'ifsc_code', 'notes', 'is_active',
+        'pan_number', 'msme_registered', 'vendor_category', 'credit_limit', 'tds_category',
+        'contract_start_date', 'contract_end_date', 'preferred_status',
+        'pan_doc_url', 'msme_doc_url', 'gst_doc_url',
       ];
       const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => ALLOWED.includes(k)));
       if (Object.keys(updates).length === 0) return res.status(400).json({ error: "No valid fields to update" });
@@ -19444,6 +19457,101 @@ ${data.tenant.name}`;
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to deactivate supplier" });
+    }
+  });
+
+  // POST /api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc — compliance doc upload
+  app.post("/api/restaurant/:id/procurement/suppliers/:supplierId/upload-doc", authenticate, restaurantStaff, upload.single('file'), async (req: AuthRequest, res: Response) => {
+    try {
+      const docType = String(req.query.type || '').toUpperCase();
+      if (!['PAN', 'MSME', 'GST'].includes(docType)) return res.status(400).json({ error: "type must be PAN, MSME or GST" });
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+      const col = docType === 'PAN' ? 'pan_doc_url' : docType === 'MSME' ? 'msme_doc_url' : 'gst_doc_url';
+      const url = `/uploads/${req.file.filename}`;
+      const db = await getTenantDb(req.params.id);
+      await db.run(`UPDATE suppliers SET ${col} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [url, req.params.supplierId]);
+      res.json({ url });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to upload document" });
+    }
+  });
+
+  // GET /api/restaurant/:id/procurement/suppliers/:supplierId/scorecard — performance metrics (last 90d)
+  app.get("/api/restaurant/:id/procurement/suppliers/:supplierId/scorecard", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const sid = req.params.supplierId;
+
+      const [otRow] = await db.query(`
+        SELECT
+          COUNT(*) AS total_deliveries,
+          COUNT(CASE WHEN gr.received_at <= po.expected_delivery_date THEN 1 END) AS on_time_count
+        FROM goods_receipts gr
+        JOIN purchase_orders po ON po.id = gr.po_id
+        WHERE gr.supplier_id = ? AND po.expected_delivery_date IS NOT NULL
+          AND gr.received_at >= date('now', '-90 days')
+      `, [sid]);
+
+      const [frRow] = await db.query(`
+        SELECT
+          COALESCE(SUM(poi.qty_ordered), 0) AS total_ordered,
+          COALESCE(SUM(poi.qty_received), 0) AS total_received
+        FROM purchase_orders po
+        JOIN purchase_order_items poi ON poi.po_id = po.id
+        WHERE po.supplier_id = ? AND po.raised_at >= date('now', '-90 days')
+      `, [sid]);
+
+      const [pvRow] = await db.query(`
+        SELECT ROUND(AVG((gri.unit_price - poi.unit_price) / NULLIF(poi.unit_price, 0) * 100), 1) AS price_variance_pct
+        FROM goods_receipt_items gri
+        JOIN goods_receipts gr ON gr.id = gri.grn_id
+        JOIN purchase_order_items poi ON poi.po_id = gr.po_id AND poi.ingredient_id = gri.ingredient_id
+        WHERE gr.supplier_id = ? AND gr.received_at >= date('now', '-90 days') AND gr.po_id IS NOT NULL
+      `, [sid]);
+
+      const [qlRow] = await db.query(`
+        SELECT
+          COUNT(*) AS total_items,
+          COUNT(CASE WHEN gri.condition = 'GOOD' THEN 1 END) AS good_items
+        FROM goods_receipt_items gri
+        JOIN goods_receipts gr ON gr.id = gri.grn_id
+        WHERE gr.supplier_id = ? AND gr.received_at >= date('now', '-90 days')
+      `, [sid]);
+
+      const on_time_pct = otRow.total_deliveries > 0
+        ? Math.round(100 * otRow.on_time_count / otRow.total_deliveries * 10) / 10 : null;
+      const fill_rate_pct = frRow.total_ordered > 0
+        ? Math.round(frRow.total_received / frRow.total_ordered * 1000) / 10 : null;
+      const price_variance_pct = pvRow.price_variance_pct ?? null;
+      const price_stability_pct = price_variance_pct !== null
+        ? Math.max(0, Math.round((100 - Math.abs(price_variance_pct)) * 10) / 10) : null;
+      const quality_pct = qlRow.total_items > 0
+        ? Math.round(qlRow.good_items / qlRow.total_items * 1000) / 10 : null;
+
+      const parts: number[] = [];
+      let weightSum = 0;
+      if (on_time_pct !== null)       { parts.push(on_time_pct * 0.35);      weightSum += 0.35; }
+      if (fill_rate_pct !== null)      { parts.push(fill_rate_pct * 0.25);    weightSum += 0.25; }
+      if (price_stability_pct !== null){ parts.push(price_stability_pct * 0.25); weightSum += 0.25; }
+      if (quality_pct !== null)        { parts.push(quality_pct * 0.15);      weightSum += 0.15; }
+      const health_score = weightSum > 0
+        ? Math.round(parts.reduce((a, b) => a + b, 0) / weightSum * 10) / 10 : null;
+
+      res.json({
+        period_days: 90,
+        on_time_pct,
+        total_deliveries: otRow.total_deliveries,
+        fill_rate_pct,
+        total_ordered: frRow.total_ordered,
+        total_received: frRow.total_received,
+        price_variance_pct,
+        price_stability_pct,
+        quality_pct,
+        total_quality_items: qlRow.total_items,
+        health_score,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to compute scorecard" });
     }
   });
 

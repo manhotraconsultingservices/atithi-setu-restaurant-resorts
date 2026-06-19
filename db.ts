@@ -1693,6 +1693,18 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS display_order INTEGER").catch(() => {});
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_ingredients_display_order ON ingredients (display_order)`).catch(() => {});
+  // Supplier Master — identity, compliance & relationship fields (Part 1A)
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS pan_number TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS msme_registered INT DEFAULT 0").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS vendor_category TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS credit_limit DOUBLE PRECISION").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS tds_category TEXT DEFAULT 'NIL'").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS contract_start_date DATE").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS contract_end_date DATE").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS preferred_status TEXT DEFAULT 'PREFERRED'").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS pan_doc_url TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS msme_doc_url TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS gst_doc_url TEXT").catch(() => {});
 
   // ───────────────────────────────────────────────────────────────────────
   // Multi-platform delivery integration (Swiggy / Zomato / Dunzo / Magicpin

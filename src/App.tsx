@@ -52197,9 +52197,19 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   const [supplierList, setSupplierList] = useState<any[]>([]); // full list with AP summary
   const [supplier360, setSupplier360] = useState<any>(null);
   const [ledger360, setLedger360] = useState<any>(null);
+  const [scorecard360, setScorecard360] = useState<any>(null);
   const [showSupForm, setShowSupForm] = useState(false);
   const [editSup, setEditSup] = useState<any>(null);
-  const EMPTY_SUP = { name: '', contact_name: '', phone: '', email: '', address: '', gst_number: '', credit_days: '0', payment_terms: '', supplier_type: 'GENERAL', bank_account_number: '', bank_name: '', ifsc_code: '', notes: '' };
+  const EMPTY_SUP = {
+    name: '', contact_name: '', phone: '', email: '', address: '',
+    gst_number: '', credit_days: '0', payment_terms: '', supplier_type: 'GENERAL',
+    bank_account_number: '', bank_name: '', ifsc_code: '', notes: '',
+    pan_number: '', msme_registered: false as boolean, vendor_category: '',
+    credit_limit: '', tds_category: 'NIL',
+    contract_start_date: '', contract_end_date: '',
+    preferred_status: 'PREFERRED',
+    pan_doc_url: '', msme_doc_url: '', gst_doc_url: '',
+  };
   const [supForm, setSupForm] = useState({ ...EMPTY_SUP });
   const [supSaving, setSupSaving] = useState(false);
   const [supSearch, setSupSearch] = useState('');
@@ -52291,6 +52301,12 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
     catch { setLedger360(null); }
   };
 
+  const loadScorecard360 = async (sid: string) => {
+    if (!sid) return;
+    try { setScorecard360(await api(`/procurement/suppliers/${sid}/scorecard`)); }
+    catch { setScorecard360(null); }
+  };
+
   const loadPOs = async () => {
     setPoLoading(true);
     try {
@@ -52323,6 +52339,14 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
       supplier_type: s.supplier_type || 'GENERAL',
       bank_account_number: s.bank_account_number || '', bank_name: s.bank_name || '',
       ifsc_code: s.ifsc_code || '', notes: s.notes || '',
+      pan_number: s.pan_number || '', msme_registered: Boolean(s.msme_registered),
+      vendor_category: s.vendor_category || '', credit_limit: String(s.credit_limit || ''),
+      tds_category: s.tds_category || 'NIL',
+      contract_start_date: String(s.contract_start_date || '').slice(0, 10),
+      contract_end_date: String(s.contract_end_date || '').slice(0, 10),
+      preferred_status: s.preferred_status || 'PREFERRED',
+      pan_doc_url: s.pan_doc_url || '', msme_doc_url: s.msme_doc_url || '',
+      gst_doc_url: s.gst_doc_url || '',
     });
     setShowSupForm(true);
   };
@@ -52330,7 +52354,12 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
     if (!supForm.name.trim()) return;
     setSupSaving(true);
     try {
-      const body = { ...supForm, credit_days: parseInt(supForm.credit_days || '0') };
+      const body = {
+        ...supForm,
+        credit_days: parseInt(supForm.credit_days || '0'),
+        msme_registered: supForm.msme_registered ? 1 : 0,
+        credit_limit: supForm.credit_limit ? parseFloat(supForm.credit_limit) : null,
+      };
       if (editSup) await api(`/procurement/suppliers/${editSup.id}`, { method: 'PATCH', body: JSON.stringify(body) });
       else await api('/procurement/suppliers', { method: 'POST', body: JSON.stringify(body) });
       setShowSupForm(false);
@@ -52531,7 +52560,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                         <p className="text-sm font-semibold text-[#3d3128]">{s.credit_days}d</p>
                       </div>
                     )}
-                    <button onClick={() => { setSupplier360(s); loadLedger360(s.id); }}
+                    <button onClick={() => { setSupplier360(s); setScorecard360(null); loadLedger360(s.id); loadScorecard360(s.id); }}
                       className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-[#faf7f2] border border-[#cc5a16]/20 text-[#cc5a16] hover:bg-[#cc5a16]/5">
                       360°
                     </button>
@@ -52979,16 +53008,41 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
 
       {/* ── Supplier 360° Panel ── */}
       {supplier360 && (
-        <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center p-0 md:p-4 bg-black/60 backdrop-blur-sm" onClick={() => { setSupplier360(null); setLedger360(null); }}>
+        <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center p-0 md:p-4 bg-black/60 backdrop-blur-sm" onClick={() => { setSupplier360(null); setLedger360(null); setScorecard360(null); }}>
           <div className="bg-white rounded-t-3xl md:rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="sticky top-0 bg-white rounded-t-3xl px-6 pt-5 pb-3 border-b border-[#f0ebe4] flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-bold font-serif text-[#1a1208]">{supplier360.name}</h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-lg font-bold font-serif text-[#1a1208]">{supplier360.name}</h3>
+                  {supplier360.preferred_status === 'BLACKLISTED' && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700">BLACKLISTED</span>
+                  )}
+                  {supplier360.preferred_status === 'BACKUP' && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">BACKUP</span>
+                  )}
+                  {(!supplier360.preferred_status || supplier360.preferred_status === 'PREFERRED') && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">PREFERRED</span>
+                  )}
+                </div>
                 <p className="text-xs text-[#9c8e85]">Supplier 360° View</p>
               </div>
-              <button onClick={() => { setSupplier360(null); setLedger360(null); }} className="p-2 hover:bg-[#faf7f2] rounded-xl"><X size={18} /></button>
+              <button onClick={() => { setSupplier360(null); setLedger360(null); setScorecard360(null); }} className="p-2 hover:bg-[#faf7f2] rounded-xl"><X size={18} /></button>
             </div>
             <div className="p-6 space-y-5">
+              {/* Contract expiry alert */}
+              {supplier360.contract_end_date && (() => {
+                const daysLeft = Math.ceil((new Date(supplier360.contract_end_date).getTime() - Date.now()) / 86400000);
+                if (daysLeft <= 30) return (
+                  <div className={cn("rounded-2xl px-4 py-3 text-sm font-semibold flex items-center gap-2",
+                    daysLeft < 0 ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700")}>
+                    <span>{daysLeft < 0 ? "Contract expired" : `Contract expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`}</span>
+                    <span className="text-xs font-normal opacity-70">({supplier360.contract_end_date})</span>
+                  </div>
+                );
+                return null;
+              })()}
+
+              {/* Contact info */}
               <div className="grid grid-cols-2 gap-3 text-sm">
                 {supplier360.contact_name && <div><p className="text-[10px] font-bold text-[#9c8e85] uppercase">Contact</p><p className="font-semibold">{supplier360.contact_name}</p></div>}
                 {supplier360.phone && <div><p className="text-[10px] font-bold text-[#9c8e85] uppercase">Phone</p><p className="font-semibold">{supplier360.phone}</p></div>}
@@ -52997,6 +53051,30 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                 {supplier360.payment_terms && <div><p className="text-[10px] font-bold text-[#9c8e85] uppercase">Payment Terms</p><p className="font-semibold">{supplier360.payment_terms}</p></div>}
                 {supplier360.credit_days > 0 && <div><p className="text-[10px] font-bold text-[#9c8e85] uppercase">Credit Days</p><p className="font-semibold">{supplier360.credit_days} days</p></div>}
               </div>
+
+              {/* Identity & compliance */}
+              {(supplier360.pan_number || supplier360.msme_registered || supplier360.tds_category || supplier360.credit_limit) && (
+                <div className="bg-[#faf7f2] rounded-2xl px-4 py-3">
+                  <p className="text-[10px] font-bold text-[#9c8e85] uppercase mb-2">Identity & Compliance</p>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    {supplier360.pan_number && <div><span className="text-[#9c8e85]">PAN: </span><span className="font-mono font-semibold">{supplier360.pan_number}</span></div>}
+                    <div><span className="text-[#9c8e85]">MSME: </span><span className={supplier360.msme_registered ? "text-emerald-700 font-bold" : "text-[#9c8e85]"}>{supplier360.msme_registered ? 'Registered' : 'No'}</span></div>
+                    {supplier360.tds_category && supplier360.tds_category !== 'NIL' && <div><span className="text-[#9c8e85]">TDS: </span><span className="font-semibold">{supplier360.tds_category === '1PCT' ? '1%' : supplier360.tds_category === '2PCT' ? '2%' : supplier360.tds_category}</span></div>}
+                    {supplier360.credit_limit > 0 && <div><span className="text-[#9c8e85]">Credit Limit: </span><span className="font-semibold">{fmtAmt(supplier360.credit_limit)}</span></div>}
+                    {supplier360.vendor_category && <div><span className="text-[#9c8e85]">Category: </span><span className="font-semibold">{supplier360.vendor_category}</span></div>}
+                    {supplier360.contract_start_date && <div><span className="text-[#9c8e85]">Contract: </span><span className="font-semibold">{supplier360.contract_start_date} – {supplier360.contract_end_date || '∞'}</span></div>}
+                  </div>
+                  {(supplier360.pan_doc_url || supplier360.msme_doc_url || supplier360.gst_doc_url) && (
+                    <div className="flex gap-2 mt-2 flex-wrap">
+                      {supplier360.pan_doc_url && <a href={supplier360.pan_doc_url} target="_blank" rel="noreferrer" className="text-[10px] font-bold text-[#cc5a16] underline">PAN cert</a>}
+                      {supplier360.msme_doc_url && <a href={supplier360.msme_doc_url} target="_blank" rel="noreferrer" className="text-[10px] font-bold text-[#cc5a16] underline">MSME cert</a>}
+                      {supplier360.gst_doc_url && <a href={supplier360.gst_doc_url} target="_blank" rel="noreferrer" className="text-[10px] font-bold text-[#cc5a16] underline">GST cert</a>}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Bank details */}
               {(supplier360.bank_account_number || supplier360.bank_name) && (
                 <div className="bg-[#faf7f2] rounded-2xl px-4 py-3">
                   <p className="text-[10px] font-bold text-[#9c8e85] uppercase mb-2">Bank Details</p>
@@ -53007,6 +53085,42 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                   </div>
                 </div>
               )}
+
+              {/* Performance Scorecard */}
+              {scorecard360 && (
+                <div className="bg-[#faf7f2] rounded-2xl px-4 py-3">
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-[10px] font-bold text-[#9c8e85] uppercase">Performance Scorecard (last 90 days)</p>
+                    {scorecard360.health_score !== null && (
+                      <div className={cn("text-sm font-bold px-3 py-1 rounded-xl",
+                        scorecard360.health_score >= 80 ? "bg-emerald-100 text-emerald-800" :
+                        scorecard360.health_score >= 60 ? "bg-amber-100 text-amber-800" : "bg-red-100 text-red-700")}>
+                        {scorecard360.health_score}% Health
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    {[
+                      { label: 'On-time Delivery', val: scorecard360.on_time_pct, suffix: `(${scorecard360.total_deliveries} deliveries)`, weight: '35%' },
+                      { label: 'Fill Rate', val: scorecard360.fill_rate_pct, suffix: `(${fmtAmt(scorecard360.total_received)}/${fmtAmt(scorecard360.total_ordered)})`, weight: '25%' },
+                      { label: 'Price Stability', val: scorecard360.price_stability_pct, suffix: scorecard360.price_variance_pct !== null ? `(${scorecard360.price_variance_pct > 0 ? '+' : ''}${scorecard360.price_variance_pct}% vs PO)` : '', weight: '25%' },
+                      { label: 'Quality', val: scorecard360.quality_pct, suffix: `(${scorecard360.total_quality_items} items)`, weight: '15%' },
+                    ].map(m => (
+                      <div key={m.label}>
+                        <div className="flex items-center justify-between text-xs mb-0.5">
+                          <span className="font-semibold text-[#3d3128]">{m.label}</span>
+                          <span className="text-[#9c8e85]">{m.val !== null ? `${m.val}%` : 'No data'} {m.suffix}</span>
+                        </div>
+                        <div className="h-1.5 bg-[#e8dccf] rounded-full overflow-hidden">
+                          <div className={cn("h-full rounded-full", m.val === null ? "w-0" : m.val >= 80 ? "bg-emerald-500" : m.val >= 60 ? "bg-amber-400" : "bg-red-400")}
+                            style={{ width: m.val !== null ? `${m.val}%` : '0%' }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {ledger360 && (
                 <>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -53055,11 +53169,11 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                 </>
               )}
               <div className="flex gap-2 pt-2">
-                <button onClick={() => { const s = supplier360; setSupplier360(null); setLedger360(null); openCreateInvoice({ supplier_id: s.id }); setSubTab('INVOICES'); }}
+                <button onClick={() => { const s = supplier360; setSupplier360(null); setLedger360(null); setScorecard360(null); openCreateInvoice({ supplier_id: s.id }); setSubTab('INVOICES'); }}
                   className="flex-1 px-3 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">+ Invoice</button>
-                <button onClick={() => { const s = supplier360; setSupplier360(null); setLedger360(null); setLedgerSupplierId(s.id); loadLedger(s.id); setSubTab('LEDGER'); }}
+                <button onClick={() => { const s = supplier360; setSupplier360(null); setLedger360(null); setScorecard360(null); setLedgerSupplierId(s.id); loadLedger(s.id); setSubTab('LEDGER'); }}
                   className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/20 text-[#cc5a16] text-sm font-bold">Full Ledger</button>
-                <button onClick={() => { const s = supplier360; setSupplier360(null); setLedger360(null); openEditSupplier(s); }}
+                <button onClick={() => { const s = supplier360; setSupplier360(null); setLedger360(null); setScorecard360(null); openEditSupplier(s); }}
                   className="flex-1 px-3 py-2 rounded-xl bg-[#faf7f2] border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold">Edit</button>
               </div>
             </div>
@@ -53153,6 +53267,104 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
                 <input value={supForm.notes} onChange={e => setSupForm(f => ({ ...f, notes: e.target.value }))}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+              </div>
+
+              {/* Identity & Compliance */}
+              <div className="col-span-2 pt-1 border-t border-[#f0ebe4]">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] pt-2">Identity & Compliance</p>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">PAN Number</label>
+                <input value={supForm.pan_number} onChange={e => setSupForm(f => ({ ...f, pan_number: e.target.value.toUpperCase() }))}
+                  placeholder="ABCDE1234F" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm font-mono outline-none" />
+              </div>
+              <div className="flex items-center gap-3 pt-4">
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" checked={supForm.msme_registered} onChange={e => setSupForm(f => ({ ...f, msme_registered: e.target.checked }))} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-[#e8dccf] rounded-full peer peer-checked:bg-[#cc5a16] after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4" />
+                </label>
+                <span className="text-sm font-semibold text-[#3d3128]">MSME Registered</span>
+              </div>
+              {editSup && (
+                <div className="col-span-2">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Compliance Documents</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['PAN', 'MSME', 'GST'] as const).map(dtype => {
+                      const urlKey = `${dtype.toLowerCase()}_doc_url` as keyof typeof supForm;
+                      return (
+                        <div key={dtype} className="relative">
+                          <label className="flex flex-col items-center justify-center gap-1 bg-[#faf7f2] rounded-2xl px-3 py-2.5 cursor-pointer hover:bg-[#f0ebe4] transition-colors">
+                            <span className="text-[10px] font-bold text-[#9c8e85]">{dtype} Cert</span>
+                            {supForm[urlKey] ? (
+                              <a href={String(supForm[urlKey])} target="_blank" rel="noreferrer" className="text-[10px] text-[#cc5a16] underline" onClick={e => e.stopPropagation()}>View</a>
+                            ) : (
+                              <span className="text-[10px] text-[#cc5a16]">Upload</span>
+                            )}
+                            <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png"
+                              onChange={async e => {
+                                const file = e.target.files?.[0]; if (!file || !editSup) return;
+                                const fd = new FormData(); fd.append('file', file);
+                                try {
+                                  const result = await fetch(`/api/restaurant/${restaurantId}/procurement/suppliers/${editSup.id}/upload-doc?type=${dtype}`, {
+                                    method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
+                                  }).then(r => r.json());
+                                  setSupForm(f => ({ ...f, [urlKey]: result.url }));
+                                } catch { alert('Upload failed'); }
+                              }} />
+                          </label>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Financial Terms */}
+              <div className="col-span-2 pt-1 border-t border-[#f0ebe4]">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] pt-2">Financial Terms</p>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Credit Limit (₹)</label>
+                <input type="number" min="0" value={supForm.credit_limit} onChange={e => setSupForm(f => ({ ...f, credit_limit: e.target.value }))}
+                  placeholder="0" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">TDS Category</label>
+                <select value={supForm.tds_category} onChange={e => setSupForm(f => ({ ...f, tds_category: e.target.value }))}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
+                  <option value="NIL">NIL (no TDS)</option>
+                  <option value="1PCT">1% TDS</option>
+                  <option value="2PCT">2% TDS</option>
+                </select>
+              </div>
+
+              {/* Vendor Relationship */}
+              <div className="col-span-2 pt-1 border-t border-[#f0ebe4]">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] pt-2">Vendor Relationship</p>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Status</label>
+                <select value={supForm.preferred_status} onChange={e => setSupForm(f => ({ ...f, preferred_status: e.target.value }))}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
+                  <option value="PREFERRED">Preferred</option>
+                  <option value="BACKUP">Backup</option>
+                  <option value="BLACKLISTED">Blacklisted</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Vendor Category</label>
+                <input value={supForm.vendor_category} onChange={e => setSupForm(f => ({ ...f, vendor_category: e.target.value }))}
+                  placeholder="e.g. Strategic, Spot, Spot-buy" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Contract Start</label>
+                <input type="date" value={supForm.contract_start_date} onChange={e => setSupForm(f => ({ ...f, contract_start_date: e.target.value }))}
+                  className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Contract End</label>
+                <input type="date" value={supForm.contract_end_date} onChange={e => setSupForm(f => ({ ...f, contract_end_date: e.target.value }))}
                   className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
               </div>
             </div>
