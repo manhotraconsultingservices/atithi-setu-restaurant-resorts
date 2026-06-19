@@ -19616,7 +19616,7 @@ ${data.tenant.name}`;
         SELECT po.*, s.name AS supplier_name
         FROM purchase_orders po
         LEFT JOIN suppliers s ON s.id = po.supplier_id
-        WHERE po.raised_at >= date('now', '-90 days')
+        WHERE po.raised_at >= NOW() - INTERVAL '90 days'
         ORDER BY po.raised_at DESC
         LIMIT 20
       `);
@@ -19636,7 +19636,7 @@ ${data.tenant.name}`;
           COALESCE(SUM(CASE WHEN sm.qty_delta < 0 THEN ABS(sm.qty_delta) * COALESCE(sm.unit_cost, i.default_unit_price, 0) ELSE 0 END), 0) AS consumed_value,
           COALESCE(SUM(CASE WHEN sm.qty_delta < 0 THEN ABS(sm.qty_delta) ELSE 0 END), 0) AS consumed_qty
         FROM ingredients i
-        LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id AND sm.recorded_at >= date('now', '-90 days')
+        LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id AND sm.recorded_at >= NOW() - INTERVAL '90 days'
         WHERE i.is_active = 1
         GROUP BY i.id
         ORDER BY consumed_value DESC
@@ -19665,12 +19665,12 @@ ${data.tenant.name}`;
       const items: any[] = await db.query(
         `SELECT sb.id, sb.batch_number, sb.expiry_date, sb.remaining_qty, sb.unit, sb.unit_cost,
                 i.name AS item_name, i.category,
-                CAST(julianday(sb.expiry_date) - julianday('now') AS INTEGER) AS days_until_expiry
+                EXTRACT(DAY FROM (sb.expiry_date::date - CURRENT_DATE))::integer AS days_until_expiry
          FROM stock_batches sb
          JOIN ingredients i ON i.id = sb.ingredient_id
          WHERE sb.expiry_date IS NOT NULL
-           AND sb.expiry_date >= date('now')
-           AND sb.expiry_date <= date('now', '+' || ? || ' days')
+           AND sb.expiry_date::date >= CURRENT_DATE
+           AND sb.expiry_date::date <= CURRENT_DATE + (? * INTERVAL '1 day')
            AND sb.remaining_qty > 0
          ORDER BY sb.expiry_date ASC`,
         [days]
@@ -19692,13 +19692,13 @@ ${data.tenant.name}`;
                 i.current_stock_qty * COALESCE(i.default_unit_price, 0) AS stock_value,
                 MAX(sm.recorded_at) AS last_movement,
                 CASE WHEN MAX(sm.recorded_at) IS NULL THEN NULL
-                     ELSE CAST(julianday('now') - julianday(MAX(sm.recorded_at)) AS INTEGER)
+                     ELSE EXTRACT(DAY FROM (NOW() - MAX(sm.recorded_at)))::integer
                 END AS days_idle
          FROM ingredients i
          LEFT JOIN stock_movements sm ON sm.ingredient_id = i.id
          WHERE i.is_active = 1 AND i.current_stock_qty > 0
          GROUP BY i.id
-         HAVING last_movement IS NULL OR days_idle >= ?
+         HAVING MAX(sm.recorded_at) IS NULL OR EXTRACT(DAY FROM (NOW() - MAX(sm.recorded_at)))::integer >= ?
          ORDER BY stock_value DESC`,
         [days]
       );
@@ -26753,18 +26753,18 @@ ${data.tenant.name}`;
           COUNT(*) AS count,
           ROUND(AVG(lead_days), 1) AS avg_lead
         FROM (
-          SELECT MAX(0, CAST(julianday(check_in_date) - julianday(created_at) AS INTEGER)) AS lead_days
+          SELECT GREATEST(0, EXTRACT(DAY FROM (check_in_date::date - created_at::date))::integer) AS lead_days
           FROM room_bookings
           WHERE status <> 'CANCELLED'
-            AND created_at >= date('now', '-365 days')
+            AND created_at >= NOW() - INTERVAL '365 days'
         ) t
         GROUP BY bucket
         ORDER BY MIN(lead_days)
       `);
       const total = buckets.reduce((s: number, r: any) => s + Number(r.count), 0);
       const avgRow: any[] = await db.query(`
-        SELECT ROUND(AVG(MAX(0, CAST(julianday(check_in_date) - julianday(created_at) AS INTEGER))), 1) AS avg_days
-        FROM room_bookings WHERE status <> 'CANCELLED' AND created_at >= date('now', '-365 days')
+        SELECT ROUND(AVG(GREATEST(0, EXTRACT(DAY FROM (check_in_date::date - created_at::date))::integer))::numeric, 1) AS avg_days
+        FROM room_bookings WHERE status <> 'CANCELLED' AND created_at >= NOW() - INTERVAL '365 days'
       `);
       res.json({ total, avg_lead_days: avgRow[0]?.avg_days ?? 0, buckets });
     } catch (err: any) {

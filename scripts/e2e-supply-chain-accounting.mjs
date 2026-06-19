@@ -152,12 +152,19 @@ async function run() {
   console.log('PHASE 2 — Purchase Order ₹5,000');
   console.log('══════════════════════════════════════════');
 
+  // Fetch an existing ingredient to use as line item (PO endpoint requires ingredient_id FK)
+  const ingListR = await call('GET', '/inventory/ingredients', null);
+  assert('GET ingredients → 200', ingListR.status === 200, ingListR.status, 200);
+  const ingredients = Array.isArray(ingListR.body) ? ingListR.body : (ingListR.body?.ingredients || []);
+  assert('At least 1 ingredient exists in tenant', ingredients.length > 0, ingredients.length, '>0');
+  const testIngredient = ingredients[0];
+  assert('ingredient.id present', !!testIngredient?.id, testIngredient?.id, '<id>');
+
   const poR = await call('POST', '/inventory/purchase-orders', {
     supplier_id: supplierId,
-    order_date: today,
     expected_delivery_date: delivery,
     notes: 'E2E accounting test',
-    items: [{ item_name: 'Tomatoes', unit: 'kg', quantity: 100, unit_price: 50 }],
+    items: [{ ingredient_id: testIngredient.id, qty_ordered: 100, unit_price: 50 }],
   });
   assert('POST purchase-order → 201', poR.status === 201, poR.status, 201);
   const poId = poR.body?.id;
@@ -167,7 +174,7 @@ async function run() {
   const poGet = await gall('GET', `/api/inventory/purchase-orders/${poId}`, null);
   assert('GET PO → 200', poGet.status === 200, poGet.status, 200);
   assertClose('PO.total_amount = 5000', Number(poGet.body?.total_amount), 5000);
-  assert('PO.status = PENDING', poGet.body?.status === 'PENDING', poGet.body?.status, 'PENDING');
+  assert('PO.status = DRAFT', poGet.body?.status === 'DRAFT', poGet.body?.status, 'DRAFT');
 
   const poItems = poGet.body?.items || [];
   assert('PO has 1 item', poItems.length === 1, poItems.length, 1);
