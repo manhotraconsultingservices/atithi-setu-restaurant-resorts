@@ -560,6 +560,17 @@ export async function createSpaTables(tenantDb: DbInterface): Promise<void> {
       created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // ── Public-facing spa profile (hero image, tagline, offers bulletin) ─────────
+  await tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS spa_profile (
+      restaurant_id  TEXT PRIMARY KEY,
+      hero_image_url TEXT,
+      tagline        TEXT,
+      offers         TEXT,
+      updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
 }
 
 // ════════════════════════════════════════════════════════════════════════

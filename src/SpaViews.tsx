@@ -6,7 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { DataTable } from './components/DataTable';
 import {
-  Sparkles, Calendar, Clock, Plus, Trash2, Check, X, User, Package, Award,
+  Calendar, Clock, Plus, Trash2, Check, X, User, Package, Award,
   TrendingUp, RefreshCw, FileText, Scissors, DoorOpen,
 } from 'lucide-react';
 
@@ -713,19 +713,30 @@ export function SpaModule({ restaurantId, token, tab }: Props & { tab: string })
 // ════════════════════════════════════════════════════════════════════════
 // PUBLIC booking page (unauthenticated) — /spa/:slug resolves restaurantId first
 // ════════════════════════════════════════════════════════════════════════
+
+const CATEGORY_ICON: Record<string, string> = {
+  MASSAGE: '💆', FACIAL: '✨', BODY: '🌿', SAUNA: '🔥', SALON: '💅', WELLNESS: '🧘', DEFAULT: '🌸',
+};
+const CATEGORY_COLOR: Record<string, string> = {
+  MASSAGE: '#b45309', FACIAL: '#7c3aed', BODY: '#047857', SAUNA: '#dc2626', SALON: '#db2777', WELLNESS: '#0284c7', DEFAULT: '#cc5a16',
+};
+
 export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   const [data, setData] = useState<any>(null);
   const [restaurantId, setRestaurantId] = useState<string>(tenantId);
   const [step, setStep] = useState(1);
   const [service, setService] = useState<any>(null);
+  const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [slots, setSlots] = useState<any[]>([]);
   const [slot, setSlot] = useState<any>(null);
+  const [slotsLoading, setSlotsLoading] = useState(false);
   const [guest, setGuest] = useState({ client_name: '', client_phone: '', client_email: '' });
   const [done, setDone] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
-  // Resolve a friendly slug → real tenant id (same pattern as the hotel page).
+  // Resolve slug → real tenant id
   useEffect(() => { (async () => {
     try {
       let id = tenantId;
@@ -738,99 +749,326 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
     } catch { setData({ error: true }); }
   })(); }, [tenantId]);
 
-  const findSlots = async () => {
-    setBusy(true); setSlot(null);
-    try { const r = await fetch(`/api/public/restaurant/${restaurantId}/spa/availability?service_id=${service.id}&date=${date}`); const b = await r.json(); setSlots(b.slots || []); }
-    catch { setSlots([]); } finally { setBusy(false); }
-  };
+  // Auto-load slots when service+date are ready in step 2
+  useEffect(() => {
+    if (step !== 2 || !service || !date) return;
+    setSlotsLoading(true); setSlot(null); setSlots([]);
+    fetch(`/api/public/restaurant/${restaurantId}/spa/availability?service_id=${service.id}&date=${date}`)
+      .then(r => r.json()).then(b => setSlots(b.slots || [])).catch(() => setSlots([])).finally(() => setSlotsLoading(false));
+  }, [step, service, date, restaurantId]);
+
   const submit = async () => {
     if (!slot || !guest.client_name || !guest.client_phone) return;
-    setBusy(true);
+    setBusy(true); setError('');
     try {
       const r = await fetch(`/api/public/restaurant/${restaurantId}/spa/booking`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ service_id: service.id, start_at: slot.start_at, therapist_id: slot.therapist_id, resource_id: slot.resource_id, ...guest }),
       });
       const b = await r.json();
-      if (!r.ok) throw new Error(b.error || 'Failed');
+      if (!r.ok) { setError(b.error || 'Booking failed. Please try again.'); return; }
       setDone(b);
-    } catch (e: any) { alert(e.message); } finally { setBusy(false); }
+    } catch { setError('Network error. Please check your connection.'); } finally { setBusy(false); }
   };
 
-  if (!data) return <div className="min-h-screen flex items-center justify-center text-[#6b5d52]">Loading…</div>;
-  if (data.error) return <div className="min-h-screen flex items-center justify-center text-[#6b5d52]">Spa booking is not available.</div>;
+  if (!data) return (
+    <div className="min-h-screen flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #2d1b0e 0%, #5c3317 100%)' }}>
+      <div className="text-center text-white">
+        <div className="text-4xl mb-3 animate-pulse">🌿</div>
+        <p className="text-sm opacity-75">Preparing your experience…</p>
+      </div>
+    </div>
+  );
+  if (data.error) return (
+    <div className="min-h-screen flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #2d1b0e 0%, #5c3317 100%)' }}>
+      <div className="text-center text-white">
+        <div className="text-4xl mb-3">🌿</div>
+        <p className="opacity-75">Spa booking is not available at this time.</p>
+      </div>
+    </div>
+  );
+
   const cur = data.property?.currency_symbol || '₹';
+  const profile = data.profile || {};
+  const offers: any[] = Array.isArray(profile.offers) ? profile.offers : [];
+  const categories: string[] = ['ALL', ...Array.from(new Set<string>((data.services || []).map((s: any): string => String(s.category))))];
+  const filteredServices = categoryFilter === 'ALL' ? (data.services || []) : (data.services || []).filter((s: any) => s.category === categoryFilter);
+
+  const heroStyle: React.CSSProperties = profile.hero_image_url
+    ? { backgroundImage: `linear-gradient(to bottom, rgba(20,10,4,0.45) 0%, rgba(20,10,4,0.75) 100%), url(${profile.hero_image_url})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+    : { background: 'linear-gradient(135deg, #2d1b0e 0%, #7c3c15 50%, #cc5a16 100%)' };
+
+  // Confirmation screen
+  if (done) return (
+    <div className="min-h-screen" style={{ background: 'linear-gradient(135deg, #faf7f2 0%, #f0e4d0 100%)' }}>
+      <div style={heroStyle} className="py-14 px-4 text-center text-white">
+        {data.property?.logo_url && <img src={data.property.logo_url} alt="" className="h-12 mx-auto mb-4 rounded-lg shadow-lg" />}
+        <h1 className="text-2xl font-bold" style={{ fontFamily: 'Georgia, serif' }}>{data.property?.name}</h1>
+      </div>
+      <div className="max-w-lg mx-auto px-4 -mt-8">
+        <div className="bg-white rounded-3xl shadow-xl p-8 text-center">
+          <div className="w-20 h-20 rounded-full bg-emerald-50 flex items-center justify-center mx-auto mb-4 border-4 border-emerald-100">
+            <Check size={36} className="text-emerald-500" />
+          </div>
+          <h2 className="text-2xl font-bold mb-2" style={{ fontFamily: 'Georgia, serif' }}>Booking Confirmed!</h2>
+          <p className="text-[#6b5d52] mb-1">{service.name}</p>
+          <p className="text-sm text-[#6b5d52]">{done.start_at?.slice(0, 16).replace('T', ' at ')}</p>
+          <div className="mt-5 p-4 rounded-2xl bg-[#faf7f2] text-sm text-[#4a3728]">
+            <p className="font-semibold">{guest.client_name}</p>
+            {guest.client_phone && <p className="text-xs mt-0.5 text-[#6b5d52]">{guest.client_phone}</p>}
+          </div>
+          <p className="text-xs text-[#9d8b7e] mt-4">The spa team will confirm your appointment shortly.</p>
+          <button onClick={() => { setDone(null); setStep(1); setService(null); setSlot(null); setGuest({ client_name: '', client_phone: '', client_email: '' }); }}
+            className="mt-5 text-xs text-[#cc5a16] underline">Book another treatment</button>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-[#faf7f2] py-10 px-4">
-      <div className="max-w-2xl mx-auto">
-        <div className="text-center mb-8">
-          {data.property?.logo_url && <img src={data.property.logo_url} alt="" className="h-14 mx-auto mb-3" />}
-          <h1 className="text-3xl font-bold font-serif text-[#14110c] flex items-center justify-center gap-2"><Sparkles size={24} className="text-[#cc5a16]" /> {data.property?.name} Spa</h1>
-          <p className="text-sm text-[#6b5d52]">Book your wellness treatment online</p>
+    <div className="min-h-screen" style={{ background: '#faf7f2' }}>
+      {/* ── Hero ── */}
+      <div style={heroStyle} className="relative pt-16 pb-20 px-4 text-center text-white overflow-hidden">
+        <div className="relative z-10">
+          {data.property?.logo_url && (
+            <img src={data.property.logo_url} alt="" className="h-14 mx-auto mb-4 rounded-xl shadow-lg object-contain" style={{ background: 'rgba(255,255,255,0.15)', padding: '6px' }} />
+          )}
+          <h1 className="text-3xl font-bold tracking-wide" style={{ fontFamily: 'Georgia, serif', textShadow: '0 2px 8px rgba(0,0,0,0.4)' }}>
+            {data.property?.name}
+          </h1>
+          <p className="mt-2 text-sm font-light tracking-widest uppercase opacity-80">
+            {profile.tagline || 'Spa & Wellness'}
+          </p>
+          <p className="mt-3 text-xs opacity-60">{data.property?.city}{data.property?.state ? `, ${data.property.state}` : ''}</p>
+        </div>
+      </div>
+
+      {/* ── Offers strip ── */}
+      {offers.length > 0 && (
+        <div className="px-4 -mt-4 mb-2 overflow-x-auto">
+          <div className="flex gap-3 pb-1" style={{ minWidth: 'max-content' }}>
+            {offers.map((o: any, i: number) => (
+              <div key={i} className="flex-shrink-0 rounded-2xl overflow-hidden shadow-md" style={{ background: 'linear-gradient(135deg, #cc5a16, #8b3a0f)', minWidth: 200, maxWidth: 240 }}>
+                <div className="px-4 py-3 text-white">
+                  {o.badge && <span className="text-[10px] font-bold bg-white text-[#cc5a16] rounded-full px-2 py-0.5 uppercase tracking-wider">{o.badge}</span>}
+                  <p className="font-bold mt-1 text-sm leading-tight">{o.title}</p>
+                  {o.description && <p className="text-xs mt-0.5 opacity-80 leading-snug">{o.description}</p>}
+                  {o.valid_until && <p className="text-[10px] mt-1.5 opacity-60">Valid till {o.valid_until}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Main content ── */}
+      <div className="max-w-2xl mx-auto px-4 pb-12" style={{ marginTop: offers.length > 0 ? 8 : -24 }}>
+        {/* Step indicator */}
+        <div className="flex items-center justify-center gap-1 mb-6">
+          {['Treatment', 'Date & Time', 'Your Details'].map((label, i) => {
+            const n = i + 1;
+            const active = step === n;
+            const done_ = step > n;
+            return (
+              <React.Fragment key={n}>
+                <div className="flex flex-col items-center">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold transition-all ${done_ ? 'bg-emerald-500 text-white' : active ? 'bg-[#cc5a16] text-white' : 'bg-[#e8dccf] text-[#9d8b7e]'}`}>
+                    {done_ ? <Check size={14} /> : n}
+                  </div>
+                  <span className={`text-[10px] mt-1 font-medium ${active ? 'text-[#cc5a16]' : 'text-[#9d8b7e]'}`}>{label}</span>
+                </div>
+                {i < 2 && <div className={`h-px flex-1 mb-4 mx-1 transition-all ${step > n ? 'bg-emerald-400' : 'bg-[#e8dccf]'}`} />}
+              </React.Fragment>
+            );
+          })}
         </div>
 
-        {done ? (
-          <div className="bg-white rounded-2xl border border-[#e8dccf] p-8 text-center">
-            <Check size={48} className="mx-auto text-emerald-500 mb-3" />
-            <h2 className="text-xl font-bold font-serif mb-1">Booking Confirmed!</h2>
-            <p className="text-sm text-[#6b5d52]">{service.name} on {done.start_at?.slice(0, 16)}</p>
-            <p className="text-xs text-[#6b5d52] mt-2">We'll see you soon, {guest.client_name}.</p>
+        {/* ── Step 1: Choose treatment ── */}
+        {step === 1 && (
+          <div>
+            <h2 className="text-xl font-bold mb-1" style={{ fontFamily: 'Georgia, serif', color: '#14110c' }}>Choose a Treatment</h2>
+            <p className="text-sm text-[#6b5d52] mb-4">Select from our curated wellness menu</p>
+
+            {/* Category filter */}
+            {categories.length > 2 && (
+              <div className="flex gap-2 mb-4 overflow-x-auto pb-1">
+                {categories.map(cat => (
+                  <button key={cat} onClick={() => setCategoryFilter(cat)}
+                    className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${categoryFilter === cat ? 'text-white shadow-sm' : 'bg-white border border-[#e8dccf] text-[#6b5d52] hover:border-[#cc5a16]'}`}
+                    style={categoryFilter === cat ? { background: CATEGORY_COLOR[cat] || '#cc5a16' } : {}}>
+                    {CATEGORY_ICON[cat] || '🌸'} {cat === 'ALL' ? 'All Services' : cat.charAt(0) + cat.slice(1).toLowerCase()}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {filteredServices.map((s: any) => (
+                <button key={s.id} onClick={() => { setService(s); setStep(2); }}
+                  className="w-full text-left rounded-2xl border border-[#e8dccf] bg-white overflow-hidden hover:border-[#cc5a16] hover:shadow-md transition-all group">
+                  <div className="flex">
+                    {s.image_url ? (
+                      <img src={s.image_url} alt={s.name} className="w-24 h-24 object-cover flex-shrink-0" />
+                    ) : (
+                      <div className="w-24 h-24 flex-shrink-0 flex items-center justify-center text-3xl" style={{ background: 'linear-gradient(135deg, #faf7f2, #f0e4d0)' }}>
+                        {CATEGORY_ICON[s.category] || '🌸'}
+                      </div>
+                    )}
+                    <div className="flex-1 p-3 flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="font-semibold text-[#14110c] group-hover:text-[#cc5a16] transition-colors leading-tight">{s.name}</div>
+                          <div className="font-bold text-[#cc5a16] text-sm whitespace-nowrap">{cur}{Number(s.price).toLocaleString('en-IN')}</div>
+                        </div>
+                        {s.description && <p className="text-xs text-[#9d8b7e] mt-1 leading-snug line-clamp-2">{s.description}</p>}
+                      </div>
+                      <div className="flex items-center gap-2 mt-2">
+                        <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: `${CATEGORY_COLOR[s.category] || '#cc5a16'}18`, color: CATEGORY_COLOR[s.category] || '#cc5a16' }}>
+                          {s.category}
+                        </span>
+                        <span className="text-xs text-[#9d8b7e] flex items-center gap-1"><Clock size={11} /> {s.duration_min} min</span>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+            {filteredServices.length === 0 && (
+              <div className="text-center py-10 text-[#9d8b7e] text-sm">No services in this category.</div>
+            )}
           </div>
-        ) : (
-          <div className="bg-white rounded-2xl border border-[#e8dccf] p-6">
-            {/* step indicator */}
-            <div className="flex items-center justify-center gap-2 mb-6">
-              {[1, 2, 3].map(n => <div key={n} className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${step >= n ? 'bg-[#cc5a16] text-white' : 'bg-[#f0e9df] text-[#6b5d52]'}`}>{n}</div>)}
+        )}
+
+        {/* ── Step 2: Pick date & time ── */}
+        {step === 2 && (
+          <div>
+            <button onClick={() => { setStep(1); setSlots([]); setSlot(null); }} className="flex items-center gap-1 text-xs text-[#cc5a16] mb-4 hover:opacity-75">
+              ← Back to treatments
+            </button>
+            <div className="bg-white rounded-2xl border border-[#e8dccf] p-5 mb-4">
+              <div className="flex gap-3">
+                {service.image_url ? (
+                  <img src={service.image_url} alt={service.name} className="w-14 h-14 rounded-xl object-cover flex-shrink-0" />
+                ) : (
+                  <div className="w-14 h-14 rounded-xl flex-shrink-0 flex items-center justify-center text-2xl" style={{ background: 'linear-gradient(135deg, #faf7f2, #f0e4d0)' }}>
+                    {CATEGORY_ICON[service.category] || '🌸'}
+                  </div>
+                )}
+                <div>
+                  <p className="font-bold text-[#14110c]">{service.name}</p>
+                  <p className="text-xs text-[#6b5d52]">{service.duration_min} min · {cur}{Number(service.price).toLocaleString('en-IN')}</p>
+                  {service.description && <p className="text-xs text-[#9d8b7e] mt-0.5 leading-snug">{service.description}</p>}
+                </div>
+              </div>
             </div>
 
-            {step === 1 && (
-              <div>
-                <h3 className="font-bold mb-3">Choose a treatment</h3>
-                <div className="space-y-2">
-                  {data.services?.map((s: any) => (
-                    <button key={s.id} onClick={() => { setService(s); setStep(2); }}
-                      className="w-full text-left rounded-xl border border-[#e8dccf] p-3 hover:border-[#cc5a16] transition-colors flex justify-between items-center">
-                      <div><div className="font-semibold">{s.name}</div><div className="text-xs text-[#6b5d52]">{s.category} · {s.duration_min} min</div></div>
-                      <div className="font-bold text-[#cc5a16]">{cur}{Number(s.price).toLocaleString('en-IN')}</div>
+            <h2 className="text-xl font-bold mb-1" style={{ fontFamily: 'Georgia, serif', color: '#14110c' }}>Pick a Date & Time</h2>
+            <p className="text-sm text-[#6b5d52] mb-4">Available slots load automatically</p>
+
+            <input type="date" value={date} min={new Date().toISOString().slice(0, 10)}
+              onChange={e => { setDate(e.target.value); setSlot(null); }}
+              className="w-full px-4 py-3 rounded-2xl border border-[#e8dccf] bg-white text-sm mb-4 focus:outline-none focus:border-[#cc5a16]" />
+
+            {slotsLoading ? (
+              <div className="text-center py-8 text-[#9d8b7e]">
+                <div className="text-2xl mb-2 animate-pulse">🌿</div>
+                <p className="text-xs">Finding available slots…</p>
+              </div>
+            ) : slots.length > 0 ? (
+              <>
+                <p className="text-xs text-[#6b5d52] mb-2 font-medium">{slots.length} slot{slots.length !== 1 ? 's' : ''} available</p>
+                <div className="grid grid-cols-3 gap-2 max-h-56 overflow-y-auto pr-1">
+                  {slots.map((s, i) => (
+                    <button key={i} onClick={() => setSlot(s)}
+                      className={`py-3 rounded-xl text-xs font-semibold border transition-all ${slot === s ? 'border-[#cc5a16] text-white shadow-sm' : 'border-[#e8dccf] text-[#4a3728] bg-white hover:border-[#cc5a16]'}`}
+                      style={slot === s ? { background: '#cc5a16' } : {}}>
+                      {s.start_at.slice(11, 16)}
+                      {s.therapist_name && <span className="block text-[9px] mt-0.5 opacity-70 truncate px-1">{s.therapist_name.split(' ')[0]}</span>}
                     </button>
                   ))}
                 </div>
-              </div>
-            )}
-
-            {step === 2 && (
-              <div>
-                <button className="text-xs text-[#cc5a16] mb-3" onClick={() => setStep(1)}>← Change treatment</button>
-                <h3 className="font-bold mb-1">{service.name}</h3>
-                <p className="text-xs text-[#6b5d52] mb-3">Pick a date & time</p>
-                <div className="flex gap-2 mb-3">
-                  <input className="flex-1 px-3 py-2 rounded-xl border border-[#e8dccf] text-sm" type="date" value={date} onChange={e => setDate(e.target.value)} />
-                  <button className="px-4 py-2 rounded-xl bg-[#cc5a16] text-white text-xs font-bold" onClick={findSlots}>{busy ? '…' : 'Find Times'}</button>
-                </div>
-                <div className="grid grid-cols-4 gap-1.5 max-h-48 overflow-auto">
-                  {slots.map((s, i) => <button key={i} onClick={() => setSlot(s)} className={`px-2 py-2 rounded-lg text-xs border ${slot === s ? 'bg-[#cc5a16] text-white border-[#cc5a16]' : 'border-[#e8dccf]'}`}>{s.start_at.slice(11, 16)}</button>)}
-                </div>
-                {slot && <button className="w-full mt-4 px-4 py-2.5 rounded-xl bg-[#cc5a16] text-white text-sm font-bold" onClick={() => setStep(3)}>Continue</button>}
-                {!slots.length && !busy && <p className="text-xs text-[#6b5d52] mt-2">Select a date and tap "Find Times".</p>}
-              </div>
-            )}
-
-            {step === 3 && (
-              <div>
-                <button className="text-xs text-[#cc5a16] mb-3" onClick={() => setStep(2)}>← Change time</button>
-                <h3 className="font-bold mb-1">Your details</h3>
-                <p className="text-xs text-[#6b5d52] mb-3">{service.name} · {slot?.start_at?.slice(0, 16)}</p>
-                <div className="space-y-3">
-                  <input className="w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm" placeholder="Full name" value={guest.client_name} onChange={e => setGuest({ ...guest, client_name: e.target.value })} />
-                  <input className="w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm" placeholder="Phone" value={guest.client_phone} onChange={e => setGuest({ ...guest, client_phone: e.target.value })} />
-                  <input className="w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm" placeholder="Email (optional)" value={guest.client_email} onChange={e => setGuest({ ...guest, client_email: e.target.value })} />
-                </div>
-                <button className="w-full mt-4 px-4 py-2.5 rounded-xl bg-[#cc5a16] text-white text-sm font-bold disabled:opacity-50" disabled={busy || !guest.client_name || !guest.client_phone} onClick={submit}>{busy ? 'Booking…' : 'Confirm Booking'}</button>
+                {slot && (
+                  <button onClick={() => setStep(3)}
+                    className="w-full mt-5 py-3.5 rounded-2xl text-white font-bold text-sm shadow-md transition-all hover:opacity-90"
+                    style={{ background: 'linear-gradient(135deg, #cc5a16, #a84810)' }}>
+                    Continue with {slot.start_at.slice(11, 16)} →
+                  </button>
+                )}
+              </>
+            ) : (
+              <div className="text-center py-8 rounded-2xl border border-dashed border-[#e8dccf] text-[#9d8b7e]">
+                <p className="text-sm">No available slots for this date.</p>
+                <p className="text-xs mt-1">Try selecting another date.</p>
               </div>
             )}
           </div>
         )}
+
+        {/* ── Step 3: Guest details ── */}
+        {step === 3 && (
+          <div>
+            <button onClick={() => setStep(2)} className="flex items-center gap-1 text-xs text-[#cc5a16] mb-4 hover:opacity-75">
+              ← Change time
+            </button>
+
+            {/* Summary card */}
+            <div className="bg-white rounded-2xl border border-[#e8dccf] p-4 mb-5">
+              <p className="text-xs text-[#9d8b7e] font-semibold uppercase tracking-wider mb-2">Your Booking</p>
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl" style={{ background: 'linear-gradient(135deg, #faf7f2, #f0e4d0)' }}>
+                  {CATEGORY_ICON[service.category] || '🌸'}
+                </div>
+                <div className="flex-1">
+                  <p className="font-semibold text-[#14110c]">{service.name}</p>
+                  <p className="text-xs text-[#6b5d52]">{slot?.start_at?.slice(0, 10)} at {slot?.start_at?.slice(11, 16)} · {slot?.therapist_name}</p>
+                </div>
+                <div className="text-right">
+                  <p className="font-bold text-[#cc5a16]">{cur}{Number(service.price).toLocaleString('en-IN')}</p>
+                  <p className="text-[10px] text-[#9d8b7e]">+ GST</p>
+                </div>
+              </div>
+            </div>
+
+            <h2 className="text-xl font-bold mb-1" style={{ fontFamily: 'Georgia, serif', color: '#14110c' }}>Your Details</h2>
+            <p className="text-sm text-[#6b5d52] mb-4">We'll use these to confirm your appointment</p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Full Name *</label>
+                <input className="w-full px-4 py-3 rounded-2xl border border-[#e8dccf] bg-white text-sm focus:outline-none focus:border-[#cc5a16]"
+                  placeholder="e.g. Priya Sharma" value={guest.client_name} onChange={e => setGuest({ ...guest, client_name: e.target.value })} />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Phone Number *</label>
+                <input className="w-full px-4 py-3 rounded-2xl border border-[#e8dccf] bg-white text-sm focus:outline-none focus:border-[#cc5a16]"
+                  placeholder="+91 98765 43210" type="tel" value={guest.client_phone} onChange={e => setGuest({ ...guest, client_phone: e.target.value })} />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-[#6b5d52] block mb-1">Email Address <span className="font-normal text-[#9d8b7e]">(optional)</span></label>
+                <input className="w-full px-4 py-3 rounded-2xl border border-[#e8dccf] bg-white text-sm focus:outline-none focus:border-[#cc5a16]"
+                  placeholder="your@email.com" type="email" value={guest.client_email} onChange={e => setGuest({ ...guest, client_email: e.target.value })} />
+              </div>
+            </div>
+
+            {error && (
+              <div className="mt-3 p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700">{error}</div>
+            )}
+
+            <button onClick={submit} disabled={busy || !guest.client_name || !guest.client_phone}
+              className="w-full mt-5 py-4 rounded-2xl text-white font-bold text-sm shadow-md transition-all hover:opacity-90 disabled:opacity-50"
+              style={{ background: busy || !guest.client_name || !guest.client_phone ? '#d6c9be' : 'linear-gradient(135deg, #cc5a16, #a84810)' }}>
+              {busy ? 'Booking your appointment…' : 'Confirm Booking'}
+            </button>
+
+            <p className="text-[10px] text-center text-[#9d8b7e] mt-3">By booking you agree to our cancellation policy. No charge today.</p>
+          </div>
+        )}
+      </div>
+
+      {/* ── Footer ── */}
+      <div className="text-center py-6 text-[10px] text-[#9d8b7e]">
+        {data.property?.phone && <p>📞 {data.property.phone}</p>}
+        <p className="mt-1">{data.property?.name} · {data.property?.city}</p>
       </div>
     </div>
   );

@@ -20772,6 +20772,22 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to set skills" }); }
   });
 
+  // PUT is the idiomatic "replace entire skill set" verb — alias to the POST handler
+  app.put("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const serviceIds: string[] = Array.isArray(req.body?.service_ids) ? req.body.service_ids : [];
+      await db.run("DELETE FROM spa_therapist_services WHERE therapist_id = ?", [req.params.tid]);
+      for (const sid of serviceIds) {
+        await db.run("INSERT INTO spa_therapist_services (id, therapist_id, service_id) VALUES (?, ?, ?) ON CONFLICT (therapist_id, service_id) DO NOTHING",
+          [mkSpaId('SPATS'), req.params.tid, sid]);
+      }
+      res.json({ success: true, count: serviceIds.length });
+    } catch (err: any) { res.status(500).json({ error: "Failed to set skills" }); }
+  });
+
   // schedules
   app.get("/api/restaurant/:id/spa/therapists/:tid/schedules", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
@@ -21629,16 +21645,48 @@ ${data.tenant.name}`;
     return { ok: true, restaurant: r };
   };
 
+  // spa profile settings (admin)
+  app.get("/api/restaurant/:id/spa/profile", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const profile = await db.get("SELECT * FROM spa_profile WHERE restaurant_id = ?", [req.params.id]);
+      res.json(profile || { restaurant_id: req.params.id, hero_image_url: null, tagline: null, offers: null });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load spa profile" }); }
+  });
+
+  app.put("/api/restaurant/:id/spa/profile", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { hero_image_url, tagline, offers } = req.body || {};
+      await db.run(
+        `INSERT INTO spa_profile (restaurant_id, hero_image_url, tagline, offers)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (restaurant_id) DO UPDATE SET
+           hero_image_url = EXCLUDED.hero_image_url,
+           tagline = EXCLUDED.tagline,
+           offers = EXCLUDED.offers`,
+        [req.params.id, hero_image_url || null, tagline || null, offers ? JSON.stringify(offers) : null]
+      );
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to save spa profile" }); }
+  });
+
   app.get("/api/public/restaurant/:id/spa", async (req: Request, res: Response) => {
     try {
       const gate = await publicSpaGate(req.params.id);
       if (!gate.ok) return res.status(404).json({ error: "Spa not available" });
       const db = await getTenantDb(req.params.id);
       const services = await db.query("SELECT id, name, category, description, duration_min, price, gst_percent, image_url FROM spa_services WHERE is_active = 1 ORDER BY display_order, name");
+      const profile = await db.get("SELECT hero_image_url, tagline, offers FROM spa_profile WHERE restaurant_id = ?", [req.params.id]);
       const r = gate.restaurant;
       res.json({
         property: { name: r.name, city: r.city, state: r.state, phone: r.phone, logo_url: r.logo_url, currency_symbol: r.currency_symbol || '₹' },
         services,
+        profile: profile ? { ...profile, offers: profile.offers ? JSON.parse(profile.offers) : [] } : { hero_image_url: null, tagline: null, offers: [] },
       });
     } catch (err: any) { res.status(500).json({ error: "Failed to load spa" }); }
   });
