@@ -925,6 +925,7 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
   const [done, setDone] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [failedImages, setFailedImages] = useState<Set<number>>(new Set());
 
   // Resolve slug → real tenant id
   useEffect(() => { (async () => {
@@ -1086,11 +1087,15 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
         <SpaHeroPattern />
         <div style={{ position: 'relative', zIndex: 1, textAlign: 'center', color: '#fff', padding: '0 20px' }}>
           {step === 1 && data.property?.logo_url && (
-            <img src={data.property.logo_url} alt="" style={{ height: 58, margin: '56px auto 16px', borderRadius: 12, objectFit: 'contain', filter: 'brightness(0) invert(1)', opacity: 0.92 }} />
+            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 16, marginTop: 56 }}>
+              <div style={{ width: 72, height: 72, borderRadius: '50%', background: 'rgba(255,255,255,0.12)', border: '1.5px solid rgba(201,169,110,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', backdropFilter: 'blur(4px)' }}>
+                <img src={data.property.logo_url} alt="" style={{ width: 56, height: 56, objectFit: 'contain' }} />
+              </div>
+            </div>
           )}
           {step === 1 ? (
             <>
-              <h1 style={{ ...SERIF, fontSize: 36, fontWeight: 700, letterSpacing: -0.5, textShadow: '0 2px 20px rgba(0,0,0,0.65)', marginTop: data.property?.logo_url ? 0 : 56, lineHeight: 1.12 }}>{data.property?.name}</h1>
+              <h1 style={{ ...SERIF, fontSize: 36, fontWeight: 700, letterSpacing: -0.5, textShadow: '0 2px 20px rgba(0,0,0,0.65)', marginTop: data.property?.logo_url ? 0 : 56, lineHeight: 1.12, margin: data.property?.logo_url ? '0' : '56px 0 0' }}>{data.property?.name}</h1>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 14 }}>
                 <div style={{ height: 1, width: 48, background: 'rgba(201,169,110,0.55)' }} />
                 <span style={{ color: SPA_GOLD, fontSize: 13, lineHeight: 1 }}>✦</span>
@@ -1163,9 +1168,10 @@ export function SpaBookingPage({ tenantId }: { tenantId: string }) {
                   style={{ width: '100%', textAlign: 'left', background: '#fff', border: '1px solid #ede5d8', borderRadius: 20, overflow: 'hidden', cursor: 'pointer', boxShadow: '0 2px 12px rgba(0,0,0,0.04)', transition: 'all 0.2s' }}
                   onMouseEnter={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 8px 28px rgba(0,0,0,0.1)'; (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; }}
                   onMouseLeave={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 2px 12px rgba(0,0,0,0.04)'; (e.currentTarget as HTMLElement).style.transform = 'none'; }}>
-                  {s.image_url ? (
+                  {s.image_url && !failedImages.has(s.id) ? (
                     <div style={{ position: 'relative', height: 160, overflow: 'hidden' }}>
-                      <img src={s.image_url} alt={s.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      <img src={s.image_url} alt={s.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        onError={() => setFailedImages(prev => { const next = new Set(prev); next.add(s.id); return next; })} />
                       <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top, rgba(13,31,24,0.82) 0%, transparent 55%)' }} />
                       <div style={{ position: 'absolute', bottom: 12, left: 16, right: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
                         <span style={{ fontSize: 10, background: `${CATEGORY_COLOR[s.category] || SPA_BRAND}dd`, color: '#fff', borderRadius: 20, padding: '2px 10px', fontWeight: 600 }}>{s.category}</span>
