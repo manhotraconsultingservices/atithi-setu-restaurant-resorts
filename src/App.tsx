@@ -52323,6 +52323,11 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   const [payTarget, setPayTarget] = useState<any>(null);
   const [payForm, setPayForm] = useState({ amount: '', payment_method: 'CASH', payment_date: new Date().toISOString().slice(0, 10), reference_number: '', notes: '' });
   const [paySaving, setPaySaving] = useState(false);
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(new Set());
+  const [bulkPayModal, setBulkPayModal] = useState(false);
+  const [bulkPayForm, setBulkPayForm] = useState({ payment_method: 'CASH', payment_date: new Date().toISOString().slice(0, 10), reference_number: '', notes: '' });
+  const [bulkPaySaving, setBulkPaySaving] = useState(false);
+  const [bulkPayError, setBulkPayError] = useState('');
 
   const api = async (path: string, init: RequestInit = {}) => {
     const r = await fetch(`/api/restaurant/${restaurantId}${path}`, {
@@ -52528,6 +52533,28 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
     } catch (e: any) { alert(e.message); }
     finally { setPaySaving(false); }
   };
+
+  const saveBulkPayment = async () => {
+    const targets = invoices.filter((inv: any) => bulkSelected.has(inv.id) && Number(inv.outstanding_amount) > 0);
+    if (!targets.length) return;
+    setBulkPaySaving(true); setBulkPayError('');
+    let failed = 0;
+    for (const inv of targets) {
+      try {
+        await api(`/procurement/supplier-invoices/${inv.id}/payments`, { method: 'POST', body: JSON.stringify({ ...bulkPayForm, amount: Number(inv.outstanding_amount) }) });
+      } catch { failed++; }
+    }
+    setBulkPaySaving(false);
+    if (failed > 0) { setBulkPayError(`${failed} payment(s) failed — others were saved.`); }
+    else { setBulkPayModal(false); setBulkSelected(new Set()); setBulkPayError(''); }
+    await loadInvoices();
+    if (subTab === 'PAYMENTS') await loadPayments();
+  };
+
+  const bulkPayTargets = invoices.filter((inv: any) => bulkSelected.has(inv.id));
+  const bulkTotal = bulkPayTargets.reduce((sum: number, inv: any) => sum + Number(inv.outstanding_amount), 0);
+  const unpaidInvoices = invoices.filter((inv: any) => Number(inv.outstanding_amount) > 0);
+  const allUnpaidSelected = unpaidInvoices.length > 0 && unpaidInvoices.every((inv: any) => bulkSelected.has(inv.id));
 
   const deletePayment = async (id: string) => {
     if (!window.confirm('Reverse this payment? The invoice will return to Partial/Unpaid.')) return;
@@ -52789,7 +52816,33 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
               exportFilename="supplier-invoices"
               emptyMessage="No invoices match your filters."
               compact
+              toolbarLeft={
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => allUnpaidSelected ? setBulkSelected(new Set()) : setBulkSelected(new Set(unpaidInvoices.map((i: any) => i.id)))}
+                    className="text-xs px-3 py-1.5 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] font-bold hover:bg-[#cc5a16]/5 whitespace-nowrap"
+                  >
+                    {allUnpaidSelected ? 'Deselect All' : 'Select All Unpaid'}
+                  </button>
+                  {bulkSelected.size > 0 && (
+                    <button
+                      onClick={() => { setBulkPayForm(f => ({ ...f, payment_date: new Date().toISOString().slice(0, 10) })); setBulkPayModal(true); }}
+                      className="text-xs px-3 py-1.5 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 whitespace-nowrap"
+                    >
+                      Pay {bulkSelected.size} invoice{bulkSelected.size !== 1 ? 's' : ''} · {fmtAmt(bulkTotal)}
+                    </button>
+                  )}
+                </div>
+              }
               columns={[
+                { key: '_select', label: '', searchable: false, noExport: true, exportValue: () => '', headerClassName: 'w-8 pr-0', className: 'w-8 pr-0',
+                  render: (inv: any) => Number(inv.outstanding_amount) > 0 ? (
+                    <input type="checkbox" checked={bulkSelected.has(inv.id)}
+                      onChange={e => setBulkSelected(prev => { const next = new Set(prev); if (e.target.checked) next.add(inv.id); else next.delete(inv.id); return next; })}
+                      onClick={e => e.stopPropagation()}
+                      className="rounded cursor-pointer accent-emerald-600" />
+                  ) : null,
+                },
                 { key: 'invoice_date', label: 'Date', sortable: true, render: (inv: any) => <span className="text-xs text-[#6b5d52] whitespace-nowrap">{String(inv.invoice_date || '').slice(0, 10)}</span> },
                 { key: 'invoice_number', label: 'Invoice #', sortable: true, render: (inv: any) => <span className="font-mono text-xs">{inv.invoice_number || '—'}</span> },
                 { key: 'supplier_name', label: 'Supplier', sortable: true, render: (inv: any) => <span className="font-semibold">{inv.supplier_name}</span> },
@@ -53602,6 +53655,75 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
               <button onClick={savePayment} disabled={paySaving || !payForm.amount}
                 className="flex-1 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold disabled:opacity-50">
                 {paySaving ? 'Saving…' : 'Record Payment'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bulkPayModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { if (!bulkPaySaving) setBulkPayModal(false); }}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold font-serif">Bulk Pay Invoices</h3>
+              <button onClick={() => setBulkPayModal(false)} disabled={bulkPaySaving} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] disabled:opacity-50"><X size={18} /></button>
+            </div>
+            <div className="rounded-2xl border border-[#cc5a16]/10 overflow-hidden mb-4">
+              <div className="bg-[#faf7f2] px-4 py-2 text-[10px] font-bold uppercase tracking-wider text-[#9c8e85] flex justify-between">
+                <span>Supplier · Invoice #</span><span>Outstanding</span>
+              </div>
+              {bulkPayTargets.map((inv: any) => (
+                <div key={inv.id} className="px-4 py-2.5 flex justify-between items-center border-t border-[#f0ebe4] text-sm">
+                  <div>
+                    <span className="font-semibold">{inv.supplier_name}</span>
+                    {inv.invoice_number && <span className="text-xs text-[#6b5d52] ml-2 font-mono">#{inv.invoice_number}</span>}
+                  </div>
+                  <span className="font-bold text-rose-700">{fmtAmt(inv.outstanding_amount)}</span>
+                </div>
+              ))}
+              <div className="px-4 py-2.5 border-t-2 border-[#cc5a16]/20 flex justify-between items-center bg-[#faf7f2]">
+                <span className="text-sm font-bold">Total ({bulkPayTargets.length} invoice{bulkPayTargets.length !== 1 ? 's' : ''})</span>
+                <span className="font-bold text-emerald-700 text-base">{fmtAmt(bulkTotal)}</span>
+              </div>
+            </div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment Method</label>
+                  <select value={bulkPayForm.payment_method} onChange={e => setBulkPayForm(f => ({ ...f, payment_method: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none">
+                    <option value="CASH">Cash</option>
+                    <option value="UPI">UPI</option>
+                    <option value="NEFT">NEFT</option>
+                    <option value="RTGS">RTGS</option>
+                    <option value="CHEQUE">Cheque</option>
+                    <option value="IMPS">IMPS</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment Date</label>
+                  <input type="date" value={bulkPayForm.payment_date} onChange={e => setBulkPayForm(f => ({ ...f, payment_date: e.target.value }))}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">UTR / Cheque # / Ref</label>
+                <input value={bulkPayForm.reference_number} onChange={e => setBulkPayForm(f => ({ ...f, reference_number: e.target.value }))}
+                  placeholder="Optional — applied to all invoices" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Notes</label>
+                <input value={bulkPayForm.notes} onChange={e => setBulkPayForm(f => ({ ...f, notes: e.target.value }))}
+                  placeholder="Optional" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-2.5 text-sm outline-none" />
+              </div>
+            </div>
+            {bulkPayError && <p className="mt-3 text-xs text-red-600 bg-red-50 rounded-xl px-3 py-2">{bulkPayError}</p>}
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setBulkPayModal(false)} disabled={bulkPaySaving}
+                className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold disabled:opacity-50">Cancel</button>
+              <button onClick={saveBulkPayment} disabled={bulkPaySaving}
+                className="flex-1 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold disabled:opacity-50">
+                {bulkPaySaving ? 'Processing…' : `Pay ${bulkPayTargets.length} Invoice${bulkPayTargets.length !== 1 ? 's' : ''}`}
               </button>
             </div>
           </div>
