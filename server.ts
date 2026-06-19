@@ -15464,6 +15464,33 @@ ${data.tenant.name}`;
     }
   });
 
+  // Get one PO by ID — restaurant-scoped (uses req.params.id, works for SUPER_ADMIN)
+  app.get("/api/restaurant/:id/inventory/purchase-orders/:poId", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const po: any = await db.get(
+        `SELECT po.*, s.name AS supplier_name, s.phone AS supplier_phone,
+                s.email AS supplier_email, s.lead_time_days
+           FROM purchase_orders po
+           LEFT JOIN suppliers s ON s.id = po.supplier_id
+          WHERE po.id = ?`,
+        [req.params.poId]
+      );
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      const items = await db.query(
+        `SELECT poi.*, i.name AS ingredient_name, i.category AS ingredient_category
+           FROM purchase_order_items poi
+           LEFT JOIN ingredients i ON i.id = poi.ingredient_id
+          WHERE poi.po_id = ?
+          ORDER BY i.name`,
+        [req.params.poId]
+      );
+      res.json({ ...po, items });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch PO" });
+    }
+  });
+
   // Create a PO (status starts as DRAFT). Body:
   //   { supplier_id, expected_delivery_date?, notes?,
   //     items: [{ ingredient_id, qty_ordered, unit, unit_price }, ...] }
@@ -15535,7 +15562,7 @@ ${data.tenant.name}`;
         );
       }
 
-      res.json({ success: true, id: poId, total_amount: totalAmount, gst_amount: gstAmount, grand_total: grandTotal });
+      res.status(201).json({ success: true, id: poId, total_amount: totalAmount, gst_amount: gstAmount, grand_total: grandTotal });
     } catch (err) {
       console.error("Create PO error:", err);
       res.status(500).json({ error: "Failed to create PO" });
@@ -16024,7 +16051,7 @@ ${data.tenant.name}`;
         }
       }
 
-      res.json({ success: true, id: grnId, total_amount: totalAmount });
+      res.status(201).json({ success: true, id: grnId, total_amount: totalAmount });
 
       // ── Phase 5: re-enable items on platforms when stock crosses back above 0 ──
       // Fire-and-forget: identify ingredients whose stock just crossed from

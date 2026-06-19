@@ -170,8 +170,8 @@ async function run() {
   const poId = poR.body?.id;
   assert('PO.id present', !!poId, poId, '<id>');
 
-  // GET PO — global route (no restaurantId prefix)
-  const poGet = await gall('GET', `/api/inventory/purchase-orders/${poId}`, null);
+  // GET PO — restaurant-scoped route (works for SUPER_ADMIN whose JWT restaurantId may differ)
+  const poGet = await call('GET', `/inventory/purchase-orders/${poId}`, null);
   assert('GET PO → 200', poGet.status === 200, poGet.status, 200);
   assertClose('PO.total_amount = 5000', Number(poGet.body?.total_amount), 5000);
   assert('PO.status = DRAFT', poGet.body?.status === 'DRAFT', poGet.body?.status, 'DRAFT');
@@ -195,7 +195,7 @@ async function run() {
   });
   assert('POST GRN#1 → 201', grn1R.status === 201, grn1R.status, 201);
 
-  const po2 = await gall('GET', `/api/inventory/purchase-orders/${poId}`, null);
+  const po2 = await call('GET', `/inventory/purchase-orders/${poId}`, null);
   assert('PO.status after 60 kg = PARTIAL', po2.body?.status === 'PARTIAL', po2.body?.status, 'PARTIAL');
 
   // ══════════════════════════════════════════════════════════════════════
@@ -213,7 +213,7 @@ async function run() {
   });
   assert('POST GRN#2 → 201', grn2R.status === 201, grn2R.status, 201);
 
-  const po3 = await gall('GET', `/api/inventory/purchase-orders/${poId}`, null);
+  const po3 = await call('GET', `/inventory/purchase-orders/${poId}`, null);
   assert('PO.status after 100 kg = RECEIVED', po3.body?.status === 'RECEIVED', po3.body?.status, 'RECEIVED');
 
   // ══════════════════════════════════════════════════════════════════════
@@ -254,7 +254,7 @@ async function run() {
     amount: 2000, payment_date: today, payment_method: 'BANK_TRANSFER', reference: 'NEFT-E2E-001',
   });
   assert('POST payment₁ → 201', pay1R.status === 201, pay1R.status, 201);
-  const pay1Id = pay1R.body?.id;
+  const pay1Id = pay1R.body?.payment_id;
 
   const inv2 = await call('GET', `/procurement/supplier-invoices/${invId}`, null);
   assertClose('invoice.paid_amount = 2000', Number(inv2.body?.paid_amount), 2000);
@@ -273,7 +273,7 @@ async function run() {
     amount: 3000, payment_date: today, payment_method: 'CHEQUE', reference: 'CHQ-E2E-002',
   });
   assert('POST payment₂ → 201', pay2R.status === 201, pay2R.status, 201);
-  const pay2Id = pay2R.body?.id;
+  const pay2Id = pay2R.body?.payment_id;
 
   const inv3 = await call('GET', `/procurement/supplier-invoices/${invId}`, null);
   assertClose('invoice.paid_amount = 5000', Number(inv3.body?.paid_amount), 5000);
@@ -380,7 +380,7 @@ async function run() {
 
   const abcR  = await call('GET', '/inventory/abc-analysis', null);
   assert('GET abc-analysis → 200', abcR.status === 200, abcR.status, 200);
-  assert('abc-analysis is array', Array.isArray(abcR.body), typeof abcR.body, 'array');
+  assert('abc-analysis has items array', Array.isArray(abcR.body?.items), typeof abcR.body?.items, 'array');
 
   const agR   = await call('GET', '/procurement/reports/payables', null);
   assert('GET payables report → 200', agR.status === 200, agR.status, 200);
