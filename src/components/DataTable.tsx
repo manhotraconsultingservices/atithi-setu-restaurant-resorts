@@ -9,6 +9,7 @@ export interface ColDef<T = any> {
   getValue?: (row: T) => any;
   render?: (row: T) => React.ReactNode;
   exportValue?: (row: T) => string;
+  noExport?: boolean;
   className?: string;
   headerClassName?: string;
   align?: 'left' | 'right' | 'center';
@@ -44,7 +45,7 @@ function getVal<T>(row: T, col: ColDef<T>): any {
 }
 
 export function exportToCsv<T>(data: T[], cols: ColDef<T>[], filename: string) {
-  const visible = cols.filter(c => !c.hidden);
+  const visible = cols.filter(c => !c.hidden && !c.noExport);
   const header = visible.map(c => `"${c.label.replace(/"/g, '""')}"`).join(',');
   const rows = data.map(row =>
     visible.map(c => {

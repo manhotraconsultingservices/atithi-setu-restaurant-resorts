@@ -276,6 +276,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   const [therapists, setTherapists] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [day, setDay] = useState(new Date().toISOString().slice(0, 10));
+  const [search, setSearch] = useState('');
 
   // booking modal
   const [showBook, setShowBook] = useState(false);
@@ -289,11 +290,16 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   const [coState, setCoState] = useState<any>({ use_package: false, apply_membership: false, tip_amount: '', payment_method: 'CASH' });
   const [coResult, setCoResult] = useState<any>(null);
 
-  const load = async () => {
+  const load = async (q?: string) => {
     setLoading(true);
     try {
-      const from = `${day} 00:00:00`, to = `${day} 23:59:59`;
-      setAppts(await api(`/spa/appointments?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`));
+      const activeSearch = q !== undefined ? q : search;
+      if (activeSearch.trim()) {
+        setAppts(await api(`/spa/appointments?q=${encodeURIComponent(activeSearch.trim())}`));
+      } else {
+        const from = `${day} 00:00:00`, to = `${day} 23:59:59`;
+        setAppts(await api(`/spa/appointments?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`));
+      }
     } catch { /* */ } finally { setLoading(false); }
   };
   useEffect(() => { load(); }, [day]);
@@ -342,9 +348,13 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
   return (
     <div>
       <SectionHeader icon={<Calendar size={18} />} title={calendar ? 'Appointment Calendar' : 'Appointments'} sub="Dual-resource scheduling — therapist + cabin"
-        action={<div className="flex gap-2">
-          <input className={INPUT} type="date" value={day} onChange={e => setDay(e.target.value)} style={{ width: 'auto' }} />
-          <button className={BTN_GHOST} onClick={load}><RefreshCw size={13} /></button>
+        action={<div className="flex gap-2 flex-wrap">
+          <input className={INPUT} placeholder="Search name / phone…" value={search}
+            onChange={e => setSearch(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') load(search); if (e.key === 'Escape') { setSearch(''); load(''); } }}
+            style={{ width: 180 }} />
+          {!search.trim() && <input className={INPUT} type="date" value={day} onChange={e => setDay(e.target.value)} style={{ width: 'auto' }} />}
+          <button className={BTN_GHOST} onClick={() => load(search)}><RefreshCw size={13} /></button>
           <button className={BTN_PRIMARY} onClick={() => { setBk({ service_id: services[0]?.id || '', date: day, client_name: '', client_phone: '' }); setShowBook(true); }}><Plus size={14} /> New Appointment</button>
         </div>} />
 
@@ -371,14 +381,16 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
         <div className={CARD}>
           <DataTable
             data={appts} loading={loading} rowKey={(r: any) => r.id}
+            exportFilename="appointments"
             columns={[
-              { key: 'time', label: 'Time', render: (r: any) => `${fmtTime(r.start_at)}–${fmtTime(r.end_at)}` },
+              { key: 'time', label: 'Time', render: (r: any) => `${fmtTime(r.start_at)}–${fmtTime(r.end_at)}`, exportValue: (r: any) => `${fmtTime(r.start_at)}-${fmtTime(r.end_at)}` },
               { key: 'service_name', label: 'Service' },
               { key: 'client_name', label: 'Client' },
+              { key: 'client_phone', label: 'Phone' },
               { key: 'therapist_name', label: 'Therapist' },
               { key: 'resource_name', label: 'Cabin' },
               { key: 'status', label: 'Status', render: (r: any) => <Pill status={r.status} /> },
-              { key: '_a', label: 'Actions', render: (r: any) => (
+              { key: '_a', label: 'Actions', noExport: true, render: (r: any) => (
                 <div className="flex gap-1 flex-wrap">
                   {r.status === 'BOOKED' && <button className={BTN_GHOST} onClick={() => transition(r, 'confirm')}>Confirm</button>}
                   {['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'check-in')}>Check-in</button>}

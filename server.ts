@@ -20872,13 +20872,20 @@ ${data.tenant.name}`;
       if (req.query.to) { clauses.push("a.start_at <= ?"); params.push(req.query.to); }
       if (req.query.status) { clauses.push("a.status = ?"); params.push(req.query.status); }
       if (req.query.therapist_id) { clauses.push("a.therapist_id = ?"); params.push(req.query.therapist_id); }
+      if (req.query.q) {
+        const q = `%${String(req.query.q).trim()}%`;
+        clauses.push("(a.client_name LIKE ? OR c.phone LIKE ?)");
+        params.push(q, q);
+      }
       const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
       const rows = await db.query(
-        `SELECT a.*, s.name AS service_name_full, t.display_name AS therapist_name, r.name AS resource_name
+        `SELECT a.*, s.name AS service_name_full, t.display_name AS therapist_name, r.name AS resource_name,
+                c.phone AS client_phone
            FROM spa_appointments a
            LEFT JOIN spa_services s ON s.id = a.service_id
            LEFT JOIN spa_therapists t ON t.id = a.therapist_id
            LEFT JOIN spa_resources r ON r.id = a.resource_id
+           LEFT JOIN spa_clients c ON c.id = a.client_id
            ${where}
           ORDER BY a.start_at DESC LIMIT 1000`, params);
       res.json(rows);
