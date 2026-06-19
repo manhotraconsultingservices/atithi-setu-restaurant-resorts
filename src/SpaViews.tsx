@@ -71,7 +71,7 @@ function SpaCatalog({ restaurantId, token }: Props) {
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [edit, setEdit] = useState<any>(null);
-  const blank = { name: '', category: 'MASSAGE', duration_min: '60', buffer_after_min: '10', price: '', gst_percent: '18', requires_room: true, requires_therapist: true };
+  const blank = { name: '', category: 'MASSAGE', duration_min: '60', buffer_after_min: '10', price: '', gst_percent: '18', requires_room: true, requires_therapist: true, image_url: '', description: '' };
   const [form, setForm] = useState<any>(blank);
 
   const load = async () => { setLoading(true); try { setServices(await api('/spa/services')); } catch { /* */ } finally { setLoading(false); } };
@@ -116,10 +116,11 @@ function SpaCatalog({ restaurantId, token }: Props) {
 
       {showForm && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setShowForm(false)}>
-          <div className="bg-white rounded-2xl p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <h3 className="text-xl font-bold font-serif mb-4">{edit ? 'Edit' : 'Add'} Service</h3>
             <div className="grid grid-cols-2 gap-3">
               <div className="col-span-2"><label className={LABEL}>Name</label><input className={INPUT} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div>
+              <div className="col-span-2"><label className={LABEL}>Description <span className="font-normal text-[#9d8b7e]">(shown on public page)</span></label><textarea className={INPUT} rows={2} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Brief description guests will see when booking" /></div>
               <div><label className={LABEL}>Category</label>
                 <select className={INPUT} value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}>
                   {['MASSAGE', 'FACIAL', 'BODY', 'SAUNA', 'SALON', 'WELLNESS'].map(c => <option key={c}>{c}</option>)}
@@ -128,6 +129,13 @@ function SpaCatalog({ restaurantId, token }: Props) {
               <div><label className={LABEL}>Buffer after (min)</label><input className={INPUT} type="number" value={form.buffer_after_min} onChange={e => setForm({ ...form, buffer_after_min: e.target.value })} /></div>
               <div><label className={LABEL}>Price (₹)</label><input className={INPUT} type="number" value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} /></div>
               <div><label className={LABEL}>GST %</label><input className={INPUT} type="number" value={form.gst_percent} onChange={e => setForm({ ...form, gst_percent: e.target.value })} /></div>
+              <div className="col-span-2">
+                <label className={LABEL}>Photo URL <span className="font-normal text-[#9d8b7e]">(shown on public booking page)</span></label>
+                <input className={INPUT} value={form.image_url || ''} onChange={e => setForm({ ...form, image_url: e.target.value })} placeholder="https://example.com/swedish-massage.jpg" />
+                {form.image_url && (
+                  <img src={form.image_url} alt="preview" className="mt-2 h-24 w-full object-cover rounded-xl border border-[#e8dccf]" onError={e => (e.currentTarget.style.display = 'none')} />
+                )}
+              </div>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.requires_room} onChange={e => setForm({ ...form, requires_room: e.target.checked })} /> Requires cabin</label>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.requires_therapist} onChange={e => setForm({ ...form, requires_therapist: e.target.checked })} /> Requires therapist</label>
             </div>
@@ -694,6 +702,127 @@ function SpaInventory({ restaurantId, token }: Props) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
+// SPA SETTINGS — public page hero, tagline, offers bulletin
+// ════════════════════════════════════════════════════════════════════════
+function SpaSettings({ restaurantId, token }: Props) {
+  const api = makeApi(restaurantId, token);
+  const [profile, setProfile] = useState<any>({ hero_image_url: '', tagline: '', offers: [] });
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const blankOffer = { badge: '', title: '', description: '', valid_until: '' };
+
+  useEffect(() => { (async () => {
+    try { const p = await api('/spa/profile'); setProfile({ ...p, offers: Array.isArray(p.offers) ? p.offers : [] }); }
+    catch { /* */ }
+  })(); }, []);
+
+  const save = async () => {
+    setSaving(true); setSaved(false);
+    try { await api('/spa/profile', { method: 'PUT', body: JSON.stringify(profile) }); setSaved(true); setTimeout(() => setSaved(false), 2500); }
+    catch (e: any) { alert(e.message); } finally { setSaving(false); }
+  };
+
+  const addOffer = () => setProfile((p: any) => ({ ...p, offers: [...(p.offers || []), { ...blankOffer }] }));
+  const updateOffer = (i: number, field: string, val: string) => setProfile((p: any) => {
+    const offers = [...(p.offers || [])];
+    offers[i] = { ...offers[i], [field]: val };
+    return { ...p, offers };
+  });
+  const removeOffer = (i: number) => setProfile((p: any) => ({ ...p, offers: (p.offers || []).filter((_: any, idx: number) => idx !== i) }));
+
+  const publicUrl = `${window.location.origin}/spa/${restaurantId}`;
+
+  return (
+    <div className="space-y-6">
+      <SectionHeader icon={<Calendar size={18} />} title="Public Page Settings" sub="What guests see at your online booking page" />
+
+      {/* public link */}
+      <div className={CARD}>
+        <p className="text-xs font-semibold text-[#6b5d52] mb-1">Your public booking link</p>
+        <div className="flex items-center gap-2">
+          <a href={publicUrl} target="_blank" rel="noreferrer" className="flex-1 text-sm text-[#cc5a16] underline break-all">{publicUrl}</a>
+          <button className={BTN_GHOST} onClick={() => navigator.clipboard.writeText(publicUrl)}>Copy</button>
+        </div>
+      </div>
+
+      {/* hero + tagline */}
+      <div className={CARD}>
+        <p className="text-sm font-bold text-[#14110c] mb-3">Hero Banner</p>
+        <div className="space-y-3">
+          <div>
+            <label className={LABEL}>Background Photo URL</label>
+            <input className={INPUT} value={profile.hero_image_url || ''} onChange={e => setProfile((p: any) => ({ ...p, hero_image_url: e.target.value }))}
+              placeholder="https://example.com/spa-hero.jpg — paste any image URL" />
+            <p className="text-[11px] text-[#9d8b7e] mt-1">Use a high-quality landscape photo (1920×600px works well). Free options: Unsplash, Pexels.</p>
+            {profile.hero_image_url && (
+              <img src={profile.hero_image_url} alt="Hero preview" className="mt-2 w-full h-32 object-cover rounded-xl border border-[#e8dccf]"
+                onError={e => (e.currentTarget.style.display = 'none')} onLoad={e => (e.currentTarget.style.display = '')} />
+            )}
+          </div>
+          <div>
+            <label className={LABEL}>Tagline <span className="font-normal text-[#9d8b7e]">(short phrase below spa name)</span></label>
+            <input className={INPUT} value={profile.tagline || ''} onChange={e => setProfile((p: any) => ({ ...p, tagline: e.target.value }))}
+              placeholder="e.g. Unwind. Restore. Glow." maxLength={80} />
+          </div>
+        </div>
+      </div>
+
+      {/* offers */}
+      <div className={CARD}>
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-sm font-bold text-[#14110c]">Offers & Promotions</p>
+          <button className={BTN_GHOST} onClick={addOffer}><Plus size={13} /> Add Offer</button>
+        </div>
+        {(profile.offers || []).length === 0 && (
+          <p className="text-xs text-[#9d8b7e] py-3 text-center">No offers yet. Add one to show a promotional banner on the public page.</p>
+        )}
+        <div className="space-y-4">
+          {(profile.offers || []).map((o: any, i: number) => (
+            <div key={i} className="rounded-xl border border-[#e8dccf] p-4 relative">
+              <button className="absolute top-3 right-3 text-rose-400 hover:text-rose-600" onClick={() => removeOffer(i)}><X size={14} /></button>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className={LABEL}>Badge <span className="font-normal text-[#9d8b7e]">(e.g. SALE, NEW)</span></label>
+                  <input className={INPUT} value={o.badge || ''} onChange={e => updateOffer(i, 'badge', e.target.value)} placeholder="SALE" maxLength={12} />
+                </div>
+                <div>
+                  <label className={LABEL}>Valid Until <span className="font-normal text-[#9d8b7e]">(optional)</span></label>
+                  <input className={INPUT} type="date" value={o.valid_until || ''} onChange={e => updateOffer(i, 'valid_until', e.target.value)} />
+                </div>
+                <div className="col-span-2">
+                  <label className={LABEL}>Offer Title *</label>
+                  <input className={INPUT} value={o.title || ''} onChange={e => updateOffer(i, 'title', e.target.value)} placeholder="e.g. 20% off all massages this weekend" />
+                </div>
+                <div className="col-span-2">
+                  <label className={LABEL}>Description <span className="font-normal text-[#9d8b7e]">(optional)</span></label>
+                  <input className={INPUT} value={o.description || ''} onChange={e => updateOffer(i, 'description', e.target.value)} placeholder="Use code RELAX20 at booking — valid Sat & Sun" />
+                </div>
+              </div>
+              {/* mini preview */}
+              {o.title && (
+                <div className="mt-3 rounded-xl px-3 py-2 text-white text-xs" style={{ background: 'linear-gradient(135deg, #cc5a16, #8b3a0f)' }}>
+                  {o.badge && <span className="bg-white text-[#cc5a16] rounded-full px-1.5 py-0.5 text-[9px] font-bold mr-1">{o.badge}</span>}
+                  <span className="font-semibold">{o.title}</span>
+                  {o.description && <span className="opacity-70 ml-1">— {o.description}</span>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <button className={BTN_PRIMARY} onClick={save} disabled={saving}>
+          {saving ? 'Saving…' : 'Save Changes'}
+        </button>
+        {saved && <span className="text-xs text-emerald-600 font-semibold flex items-center gap-1"><Check size={13} /> Saved</span>}
+        <a href={publicUrl} target="_blank" rel="noreferrer" className={BTN_GHOST}>Preview Public Page</a>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════
 // Dispatcher
 // ════════════════════════════════════════════════════════════════════════
 export function SpaModule({ restaurantId, token, tab }: Props & { tab: string }) {
@@ -706,6 +835,7 @@ export function SpaModule({ restaurantId, token, tab }: Props & { tab: string })
     case 'SPA_PACKAGES': return <SpaPackages restaurantId={restaurantId} token={token} />;
     case 'SPA_REPORTS': return <SpaReports restaurantId={restaurantId} token={token} />;
     case 'SPA_INVENTORY': return <SpaInventory restaurantId={restaurantId} token={token} />;
+    case 'SPA_SETTINGS': return <SpaSettings restaurantId={restaurantId} token={token} />;
     default: return null;
   }
 }

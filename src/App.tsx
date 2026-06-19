@@ -12429,7 +12429,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
             HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
-            SPA_CALENDAR: 'Appointment Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages & Memberships', SPA_REPORTS: 'Spa Reports', SPA_INVENTORY: 'Spa Inventory',
+            SPA_CALENDAR: 'Appointment Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages & Memberships', SPA_REPORTS: 'Spa Reports', SPA_INVENTORY: 'Spa Inventory', SPA_SETTINGS: 'Public Page Settings',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
             SETTINGS: 'Brand & Settings', STAFF_ACCESS: 'Staff Access', NOTIFICATIONS: 'Notifications', SUBSCRIPTION: 'Subscription'
           } as Record<string, string>)[activeTab]}
@@ -12546,6 +12546,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'SPA_CLIENTS',      label: 'Clients' },
               { id: 'SPA_PACKAGES',     label: 'Packages & Memberships' },
               { id: 'SPA_REPORTS',      label: 'Spa Reports' },
+              { id: 'SPA_SETTINGS',     label: 'Public Page Settings' },
             ],
           },
           {
@@ -13283,7 +13284,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
         </div>
-      ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_INVENTORY') && isSpaEnabled ? (
+      ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
       ) : activeTab === 'HOTEL_INVENTORY' ? (
         <HotelInventoryView restaurantId={restaurantId} token={token!} />
