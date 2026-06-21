@@ -7899,6 +7899,37 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [masterFolioAddType, setMasterFolioAddType] = useState('SERVICE');
   const [masterFolioAddCentre, setMasterFolioAddCentre] = useState('MISC');
   const [masterFolioSaving, setMasterFolioSaving] = useState(false);
+  // PHASE-3 GROUP: group detail panel state.
+  const [groupDetailId, setGroupDetailId] = useState<string | null>(null);
+  const [groupDetailData, setGroupDetailData] = useState<any | null>(null);
+  const [groupDetailLoading, setGroupDetailLoading] = useState(false);
+  const [groupDetailTab, setGroupDetailTab] = useState<'guests'|'amend'|'deposit'|'report'>('guests');
+  const [groupGuestEdits, setGroupGuestEdits] = useState<Record<string, any>>({});
+  const [groupGuestSaving, setGroupGuestSaving] = useState<string | null>(null);
+  const [groupCheckinBusy, setGroupCheckinBusy] = useState(false);
+  const [groupTransferFrom, setGroupTransferFrom] = useState('');
+  const [groupTransferTo, setGroupTransferTo] = useState('');
+  const [groupTransferBusy, setGroupTransferBusy] = useState(false);
+  const [groupDateExt, setGroupDateExt] = useState({ check_in_date: '', check_out_date: '' });
+  const [groupDateExtBusy, setGroupDateExtBusy] = useState(false);
+  const [groupDepositAmt, setGroupDepositAmt] = useState('');
+  const [groupDepositMethod, setGroupDepositMethod] = useState('CASH');
+  const [groupDepositRef, setGroupDepositRef] = useState('');
+  const [groupDepositBusy, setGroupDepositBusy] = useState(false);
+  const [groupRevenueData, setGroupRevenueData] = useState<any[] | null>(null);
+  const [groupRevenueLoading, setGroupRevenueLoading] = useState(false);
+  const [groupRevenueFrom, setGroupRevenueFrom] = useState('');
+  const [groupRevenueTo, setGroupRevenueTo] = useState('');
+  const loadGroupDetail = async (groupId: string) => {
+    setGroupDetailId(groupId); setGroupDetailData(null); setGroupDetailLoading(true);
+    setGroupDetailTab('guests'); setGroupGuestEdits({}); setGroupTransferFrom(''); setGroupTransferTo('');
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupId}/rooms`, { headers: { Authorization: `Bearer ${token}` } });
+      const d = await r.json();
+      if (r.ok) { setGroupDetailData(d); setGroupDateExt({ check_in_date: d[0]?.check_in_date||'', check_out_date: d[0]?.check_out_date||'' }); }
+    } catch { /* silent */ }
+    setGroupDetailLoading(false);
+  };
   // REQ 5: booking-history search/filter state. Receptionists need to
   // look up a returning guest by phone/name (mid-call) or pull a past
   // booking by invoice number for an enquiry.
@@ -8141,6 +8172,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     advance_amount: number;
     advance_method: string;
     advance_reference: string;
+    promo_code_id: string;
   } | null>(null);
   const openGroupBookingModal = () => {
     const today = new Date().toISOString().slice(0, 10);
@@ -8152,6 +8184,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       special_requests: '', rooms: [], saving: false,
       discount_type: null, discount_value: 0,
       advance_amount: 0, advance_method: 'CASH', advance_reference: '',
+      promo_code_id: '',
     });
   };
   const submitGroupBooking = async () => {
@@ -8189,6 +8222,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         advance_amount: groupBookingDraft.advance_amount || 0,
         advance_method: groupBookingDraft.advance_amount > 0 ? groupBookingDraft.advance_method : null,
         advance_reference: groupBookingDraft.advance_reference.trim() || null,
+        promo_code_id: groupBookingDraft.promo_code_id.trim() || null,
       };
       const result = await hotelApi('/bookings/group', { method: 'POST', body: JSON.stringify(payload) });
       const n = result?.bookings?.length || groupBookingDraft.rooms.filter(r => r.qty > 0).reduce((s, r) => s + r.qty, 0);
@@ -19175,6 +19209,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   }}
                                   className="px-2 py-1 rounded-lg border border-emerald-400 text-emerald-700 text-[10px] font-bold hover:bg-emerald-50"
                                 >🏦 Master Acct</button>
+                                <button
+                                  onClick={() => loadGroupDetail(g.id)}
+                                  className="px-2 py-1 rounded-lg border border-indigo-300 text-indigo-700 text-[10px] font-bold hover:bg-indigo-50"
+                                >📋 Detail</button>
+                                {Number(g.booking_count) > Number(g.checked_in_count) + Number(g.checked_out_count) && !g.settled_at && (
+                                  <button
+                                    disabled={groupCheckinBusy}
+                                    onClick={async () => {
+                                      if (!confirm(`Bulk check-in all BOOKED rooms in "${g.name}"?`)) return;
+                                      setGroupCheckinBusy(true);
+                                      try {
+                                        const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkin`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+                                        const d = await r.json();
+                                        if (!r.ok) throw new Error(d?.error || 'Failed');
+                                        alert(`✓ Checked in ${d.checked_in} room${d.checked_in !== 1 ? 's' : ''}`);
+                                        setGroupsList(null);
+                                      } catch (err: any) { alert(err.message); }
+                                      finally { setGroupCheckinBusy(false); }
+                                    }}
+                                    className="px-2 py-1 rounded-lg border border-green-400 text-green-700 text-[10px] font-bold hover:bg-green-50 disabled:opacity-50"
+                                  >✓ Check In All</button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -19471,6 +19527,241 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
           {/* ── END MASTER BILLING ACCOUNT DRAWER ────────────────────────── */}
+
+          {/* ── PHASE-3 GROUP DETAIL DRAWER ──────────────────────────────── */}
+          {groupDetailId && (
+            <div className="fixed inset-0 z-50 flex" onClick={() => setGroupDetailId(null)}>
+              <div className="flex-1 bg-black/30" />
+              <div className="w-full max-w-2xl bg-white shadow-2xl flex flex-col h-full overflow-hidden" onClick={e => e.stopPropagation()}>
+                {/* Header */}
+                <div className="bg-indigo-700 text-white px-6 py-4 flex items-center justify-between shrink-0">
+                  <div>
+                    <p className="text-xs uppercase tracking-widest text-indigo-200 mb-0.5">Group Detail</p>
+                    <p className="text-lg font-bold">{groupDetailId}</p>
+                  </div>
+                  <button onClick={() => setGroupDetailId(null)} className="text-indigo-200 hover:text-white text-xl font-bold">✕</button>
+                </div>
+                {/* Tabs */}
+                <div className="flex border-b border-gray-200 shrink-0">
+                  {([['guests','Guests & Rooms'],['amend','Amend'],['deposit','Deposit']] as [typeof groupDetailTab, string][]).map(([t,l]) => (
+                    <button key={t} onClick={() => setGroupDetailTab(t)}
+                      className={cn('px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors',
+                        groupDetailTab === t ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700')}
+                    >{l}</button>
+                  ))}
+                </div>
+                {/* Body */}
+                <div className="flex-1 overflow-y-auto px-6 py-4">
+                  {groupDetailLoading && <p className="text-sm text-gray-400 text-center py-8">Loading…</p>}
+                  {!groupDetailLoading && groupDetailData && (
+                    <>
+                      {/* ── GUESTS & ROOMS TAB ── */}
+                      {groupDetailTab === 'guests' && (
+                        <div className="space-y-4">
+                          <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">Per-Room Guest Assignment</p>
+                          {groupDetailData.map((b: any) => {
+                            const edit = groupGuestEdits[b.id] ?? { guest_name: b.gg_guest_name||b.guest_name||'', guest_phone: b.gg_guest_phone||b.guest_phone||'', guest_email: b.gg_guest_email||b.guest_email||'', guest_nationality: b.guest_nationality||'Indian' };
+                            const setEdit = (patch: any) => setGroupGuestEdits(prev => ({ ...prev, [b.id]: { ...edit, ...patch } }));
+                            return (
+                              <div key={b.id} className="border border-gray-200 rounded-xl p-3 bg-gray-50">
+                                <div className="flex items-center justify-between mb-2">
+                                  <div>
+                                    <span className="text-xs font-bold text-gray-700">{b.room_name || b.type_name || 'Room'}</span>
+                                    {b.room_number && <span className="ml-1 text-[10px] text-gray-400">#{b.room_number}</span>}
+                                    <span className={cn('ml-2 text-[9px] font-bold px-1.5 py-0.5 rounded uppercase',
+                                      b.status === 'CHECKED_IN' ? 'bg-green-100 text-green-700' :
+                                      b.status === 'CHECKED_OUT' ? 'bg-gray-200 text-gray-600' :
+                                      b.status === 'CANCELLED' ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-700'
+                                    )}>{b.status}</span>
+                                  </div>
+                                  {b.status !== 'CANCELLED' && b.status !== 'CHECKED_OUT' && (
+                                    <button
+                                      disabled={groupGuestSaving === b.id}
+                                      onClick={async () => {
+                                        setGroupGuestSaving(b.id);
+                                        try {
+                                          const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupDetailId}/rooms/${b.id}/guest`, {
+                                            method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                            body: JSON.stringify(edit),
+                                          });
+                                          if (!r.ok) throw new Error((await r.json())?.error || 'Save failed');
+                                          await loadGroupDetail(groupDetailId!);
+                                        } catch (err: any) { alert(err.message); }
+                                        finally { setGroupGuestSaving(null); }
+                                      }}
+                                      className="text-[10px] font-bold px-2 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                                    >{groupGuestSaving === b.id ? 'Saving…' : 'Save'}</button>
+                                  )}
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                  {[['guest_name','Name'],['guest_phone','Phone'],['guest_email','Email'],['guest_nationality','Nationality']].map(([fld, lbl]) => (
+                                    <div key={fld} className={fld === 'guest_email' ? 'col-span-2' : ''}>
+                                      <label className="block text-[9px] font-bold text-gray-500 uppercase tracking-wide mb-0.5">{lbl}</label>
+                                      <input value={edit[fld]||''} onChange={e => setEdit({ [fld]: e.target.value })}
+                                        disabled={b.status === 'CANCELLED' || b.status === 'CHECKED_OUT'}
+                                        className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-indigo-300/40 disabled:bg-gray-100" />
+                                    </div>
+                                  ))}
+                                </div>
+                                {/* Remove room button */}
+                                {b.status === 'BOOKED' && (
+                                  <button
+                                    onClick={async () => {
+                                      if (!confirm('Remove this room from the group?')) return;
+                                      try {
+                                        const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupDetailId}/rooms/${b.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+                                        if (!r.ok) throw new Error((await r.json())?.error || 'Failed');
+                                        await loadGroupDetail(groupDetailId!);
+                                        setGroupsList(null);
+                                      } catch (err: any) { alert(err.message); }
+                                    }}
+                                    className="mt-2 text-[9px] font-bold text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-0.5 hover:bg-red-50"
+                                  >✕ Remove room</button>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {/* Transfer guest between rooms */}
+                          {groupDetailData.filter((b: any) => b.status !== 'CANCELLED').length >= 2 && (
+                            <div className="border border-dashed border-indigo-200 rounded-xl p-3 bg-indigo-50">
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-indigo-700 mb-2">Transfer Guest Between Rooms</p>
+                              <div className="grid grid-cols-2 gap-2 mb-2">
+                                <div>
+                                  <label className="block text-[9px] font-bold text-indigo-600 mb-0.5 uppercase">From</label>
+                                  <select value={groupTransferFrom} onChange={e => setGroupTransferFrom(e.target.value)}
+                                    className="w-full text-xs border border-indigo-200 rounded-lg px-2 py-1.5 outline-none">
+                                    <option value="">-- pick room --</option>
+                                    {groupDetailData.filter((b: any) => b.status !== 'CANCELLED').map((b: any) => (
+                                      <option key={b.id} value={b.id}>{b.room_name||b.type_name} — {b.guest_name||'(no name)'}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="block text-[9px] font-bold text-indigo-600 mb-0.5 uppercase">To</label>
+                                  <select value={groupTransferTo} onChange={e => setGroupTransferTo(e.target.value)}
+                                    className="w-full text-xs border border-indigo-200 rounded-lg px-2 py-1.5 outline-none">
+                                    <option value="">-- pick room --</option>
+                                    {groupDetailData.filter((b: any) => b.status !== 'CANCELLED' && b.id !== groupTransferFrom).map((b: any) => (
+                                      <option key={b.id} value={b.id}>{b.room_name||b.type_name} — {b.guest_name||'(no name)'}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                              <button
+                                disabled={!groupTransferFrom || !groupTransferTo || groupTransferBusy}
+                                onClick={async () => {
+                                  setGroupTransferBusy(true);
+                                  try {
+                                    const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupDetailId}/rooms/transfer-guest`, {
+                                      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                      body: JSON.stringify({ from_booking_id: groupTransferFrom, to_booking_id: groupTransferTo }),
+                                    });
+                                    if (!r.ok) throw new Error((await r.json())?.error || 'Failed');
+                                    setGroupTransferFrom(''); setGroupTransferTo('');
+                                    await loadGroupDetail(groupDetailId!);
+                                  } catch (err: any) { alert(err.message); }
+                                  finally { setGroupTransferBusy(false); }
+                                }}
+                                className="w-full py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-40"
+                              >{groupTransferBusy ? 'Transferring…' : '⇄ Swap Guests'}</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* ── AMEND TAB ── */}
+                      {groupDetailTab === 'amend' && (
+                        <div className="space-y-4">
+                          {/* Date extension */}
+                          <div className="border border-gray-200 rounded-xl p-3 bg-gray-50">
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-600 mb-3">Change / Extend Dates</p>
+                            <div className="grid grid-cols-2 gap-2 mb-3">
+                              <div>
+                                <label className="block text-[9px] font-bold text-gray-500 uppercase mb-0.5">Check-in</label>
+                                <input type="date" value={groupDateExt.check_in_date} onChange={e => setGroupDateExt(p => ({...p, check_in_date: e.target.value}))}
+                                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-indigo-300/40" />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold text-gray-500 uppercase mb-0.5">Check-out</label>
+                                <input type="date" value={groupDateExt.check_out_date} onChange={e => setGroupDateExt(p => ({...p, check_out_date: e.target.value}))}
+                                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-indigo-300/40" />
+                              </div>
+                            </div>
+                            <button
+                              disabled={!groupDateExt.check_out_date || groupDateExtBusy}
+                              onClick={async () => {
+                                setGroupDateExtBusy(true);
+                                try {
+                                  const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupDetailId}/dates`, {
+                                    method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                    body: JSON.stringify(groupDateExt),
+                                  });
+                                  if (!r.ok) throw new Error((await r.json())?.error || 'Failed');
+                                  await loadGroupDetail(groupDetailId!);
+                                  setGroupsList(null);
+                                } catch (err: any) { alert(err.message); }
+                                finally { setGroupDateExtBusy(false); }
+                              }}
+                              className="w-full py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-40"
+                            >{groupDateExtBusy ? 'Saving…' : 'Apply Date Change'}</button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ── DEPOSIT TAB ── */}
+                      {groupDetailTab === 'deposit' && (
+                        <div className="space-y-4">
+                          <div className="border border-gray-200 rounded-xl p-3 bg-gray-50">
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-gray-600 mb-3">Record / Update Deposit</p>
+                            <div className="grid grid-cols-2 gap-2 mb-3">
+                              <div>
+                                <label className="block text-[9px] font-bold text-gray-500 uppercase mb-0.5">Amount (₹)</label>
+                                <input type="number" min={1} value={groupDepositAmt} onChange={e => setGroupDepositAmt(e.target.value)}
+                                  placeholder="0"
+                                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-indigo-300/40" />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold text-gray-500 uppercase mb-0.5">Method</label>
+                                <select value={groupDepositMethod} onChange={e => setGroupDepositMethod(e.target.value)}
+                                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none">
+                                  {['CASH','CARD','UPI','BANK_TRANSFER','CHEQUE'].map(m => <option key={m} value={m}>{m}</option>)}
+                                </select>
+                              </div>
+                              <div className="col-span-2">
+                                <label className="block text-[9px] font-bold text-gray-500 uppercase mb-0.5">Reference / UTR</label>
+                                <input value={groupDepositRef} onChange={e => setGroupDepositRef(e.target.value)}
+                                  placeholder="UTR number, cheque number, etc."
+                                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-indigo-300/40" />
+                              </div>
+                            </div>
+                            <button
+                              disabled={!groupDepositAmt || Number(groupDepositAmt) <= 0 || groupDepositBusy}
+                              onClick={async () => {
+                                setGroupDepositBusy(true);
+                                try {
+                                  const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupDetailId}/deposit`, {
+                                    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                    body: JSON.stringify({ amount: Number(groupDepositAmt), payment_method: groupDepositMethod, reference: groupDepositRef }),
+                                  });
+                                  if (!r.ok) throw new Error((await r.json())?.error || 'Failed');
+                                  alert(`✓ Deposit of ₹${groupDepositAmt} recorded`);
+                                  setGroupDepositAmt(''); setGroupDepositRef('');
+                                  setGroupsList(null);
+                                } catch (err: any) { alert(err.message); }
+                                finally { setGroupDepositBusy(false); }
+                              }}
+                              className="w-full py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-40"
+                            >{groupDepositBusy ? 'Saving…' : '+ Record Deposit'}</button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+          {/* ── END PHASE-3 GROUP DETAIL DRAWER ──────────────────────────── */}
 
           {/* Phase 2 — Room Assignment board: reassign FLOATING upcoming
               bookings to a different room (or lock one) before arrival. */}
@@ -20981,6 +21272,101 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
               <summary className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden">📅 Booking Lead-Time Distribution — how far in advance guests book <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand · last 12 months)</span></summary>
               <div className="p-4"><BookingLeadTimeReport restaurantId={restaurantId} token={token!} /></div>
+            </details>
+          )}
+          {reportAudience === 'OWNER' && (
+            <details className="rounded-3xl border-2 border-[#e8dccf] bg-white overflow-hidden">
+              <summary
+                className="cursor-pointer px-5 py-3 bg-[#faf7f2] font-bold font-serif text-[#1a1208] [&::-webkit-details-marker]:hidden"
+                onClick={() => {
+                  if (!groupRevenueData) {
+                    setGroupRevenueLoading(true);
+                    const qs = [groupRevenueFrom && `from=${groupRevenueFrom}`, groupRevenueTo && `to=${groupRevenueTo}`].filter(Boolean).join('&');
+                    hotelApi(`/reports/group-revenue${qs ? '?' + qs : ''}`)
+                      .then((d: any) => setGroupRevenueData(d?.groups || []))
+                      .catch(() => setGroupRevenueData([]))
+                      .finally(() => setGroupRevenueLoading(false));
+                  }
+                }}
+              >
+                🏢 Group Revenue Report — corporate & event groups <span className="text-[11px] font-sans font-normal text-[#9c8e85]">(click to expand)</span>
+              </summary>
+              <div className="p-4 space-y-3">
+                <div className="flex flex-wrap items-end gap-3">
+                  <div>
+                    <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">From</label>
+                    <input type="date" value={groupRevenueFrom} onChange={e => setGroupRevenueFrom(e.target.value)}
+                      className="text-xs border border-gray-200 rounded-xl px-3 py-2 outline-none focus:ring-2 ring-indigo-300/40" />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] font-bold uppercase tracking-widest text-[#9c8e85] mb-0.5">To</label>
+                    <input type="date" value={groupRevenueTo} onChange={e => setGroupRevenueTo(e.target.value)}
+                      className="text-xs border border-gray-200 rounded-xl px-3 py-2 outline-none focus:ring-2 ring-indigo-300/40" />
+                  </div>
+                  <button
+                    onClick={() => {
+                      setGroupRevenueData(null);
+                      setGroupRevenueLoading(true);
+                      const qs = [groupRevenueFrom && `from=${groupRevenueFrom}`, groupRevenueTo && `to=${groupRevenueTo}`].filter(Boolean).join('&');
+                      hotelApi(`/reports/group-revenue${qs ? '?' + qs : ''}`)
+                        .then((d: any) => setGroupRevenueData(d?.groups || []))
+                        .catch(() => setGroupRevenueData([]))
+                        .finally(() => setGroupRevenueLoading(false));
+                    }}
+                    className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700"
+                  >↻ Load</button>
+                </div>
+                {groupRevenueLoading && <p className="text-xs text-gray-400 text-center py-6">Loading…</p>}
+                {!groupRevenueLoading && groupRevenueData !== null && (
+                  groupRevenueData.length === 0
+                    ? <p className="text-xs text-gray-400 text-center py-6">No group bookings in this date range.</p>
+                    : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-gray-200">
+                              {['Group','Contact','Check-in','Check-out','Rooms','Status','Room Rev','Master Rev','Total','Advance'].map(h => (
+                                <th key={h} className="text-left px-2 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {groupRevenueData.map((g: any) => {
+                              const total = Number(g.settled_revenue||0) + Number(g.master_folio_revenue||0);
+                              return (
+                                <tr key={g.id} className="border-b border-gray-100 hover:bg-gray-50">
+                                  <td className="px-2 py-2 font-bold text-gray-800 max-w-[120px] truncate">{g.name}</td>
+                                  <td className="px-2 py-2 text-gray-600">{g.contact_name || '—'}</td>
+                                  <td className="px-2 py-2 text-gray-600">{g.check_in_date?.slice(0,10) || '—'}</td>
+                                  <td className="px-2 py-2 text-gray-600">{g.check_out_date?.slice(0,10) || '—'}</td>
+                                  <td className="px-2 py-2 text-center text-gray-600">{g.num_rooms}</td>
+                                  <td className="px-2 py-2">
+                                    <span className={cn('px-1.5 py-0.5 rounded text-[9px] font-bold uppercase',
+                                      g.settled_at ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+                                    )}>{g.settled_at ? 'Settled' : 'Active'}</span>
+                                  </td>
+                                  <td className="px-2 py-2 text-right font-mono">₹{Number(g.settled_revenue||0).toLocaleString('en-IN')}</td>
+                                  <td className="px-2 py-2 text-right font-mono">₹{Number(g.master_folio_revenue||0).toLocaleString('en-IN')}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-bold text-indigo-700">₹{total.toLocaleString('en-IN')}</td>
+                                  <td className="px-2 py-2 text-right font-mono text-emerald-700">₹{Number(g.advance_amount||0).toLocaleString('en-IN')}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                          <tfoot className="border-t-2 border-gray-300">
+                            <tr>
+                              <td colSpan={6} className="px-2 py-2 text-right text-[10px] font-bold uppercase text-gray-500">Totals</td>
+                              <td className="px-2 py-2 text-right font-mono font-bold">₹{groupRevenueData.reduce((s:number,g:any)=>s+Number(g.settled_revenue||0),0).toLocaleString('en-IN')}</td>
+                              <td className="px-2 py-2 text-right font-mono font-bold">₹{groupRevenueData.reduce((s:number,g:any)=>s+Number(g.master_folio_revenue||0),0).toLocaleString('en-IN')}</td>
+                              <td className="px-2 py-2 text-right font-mono font-bold text-indigo-700">₹{groupRevenueData.reduce((s:number,g:any)=>s+Number(g.settled_revenue||0)+Number(g.master_folio_revenue||0),0).toLocaleString('en-IN')}</td>
+                              <td className="px-2 py-2 text-right font-mono font-bold text-emerald-700">₹{groupRevenueData.reduce((s:number,g:any)=>s+Number(g.advance_amount||0),0).toLocaleString('en-IN')}</td>
+                            </tr>
+                          </tfoot>
+                        </table>
+                      </div>
+                    )
+                )}
+              </div>
             </details>
           )}
         </div>
@@ -27359,6 +27745,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       Balance due: ₹{Math.max(0, netTotal - draft.advance_amount).toLocaleString('en-IN')}
                     </p>
                   )}
+                </div>
+
+                {/* Promo code */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Promo Code <span className="font-normal normal-case text-[#9c8e85]">(optional)</span></label>
+                  <input
+                    value={draft.promo_code_id}
+                    onChange={e => setGroupBookingDraft({ ...draft, promo_code_id: e.target.value })}
+                    placeholder="Enter promo / coupon code ID"
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                  />
                 </div>
 
                 {/* Special requests */}

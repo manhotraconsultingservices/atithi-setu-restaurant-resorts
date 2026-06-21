@@ -514,6 +514,23 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- for per-department invoice subtotals; transferred_from_folio_id tracks origin.
     ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS cost_centre TEXT;
     ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS transferred_from_folio_id TEXT;
+    -- PHASE-3 GROUP (Jun 2026): per-room guest roster for group check-in wizard.
+    -- One row per booking in a group; created/updated when staff assigns individual
+    -- guest names before group check-in. booking_id is UNIQUE so upsert is safe.
+    CREATE TABLE IF NOT EXISTS group_guests (
+      id           TEXT PRIMARY KEY,
+      group_id     TEXT NOT NULL,
+      booking_id   TEXT NOT NULL UNIQUE,
+      guest_name   TEXT,
+      guest_phone  TEXT,
+      guest_email  TEXT,
+      guest_id_proof TEXT,
+      guest_nationality TEXT DEFAULT 'Indian',
+      created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    -- PHASE-3 GROUP: promo code applied at group booking creation.
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS promo_code_id TEXT;
 
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
@@ -25288,15 +25305,16 @@ ${data.tenant.name}`;
              (id, name, contact_name, contact_phone, contact_email, num_rooms,
               check_in_date, check_out_date, total_amount, notes, created_by,
               advance_amount, advance_method, advance_reference, advance_recorded_at,
-              discount_type, discount_value)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              discount_type, discount_value, promo_code_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [groupId, String(name).trim(), contact_name, contact_phone || null,
            contact_email || null, expandedRooms.length, check_in_date, check_out_date,
            groupTotal, special_requests || null, req.user?.id || null,
            advanceAmount > 0 ? advanceAmount : 0, advanceAmount > 0 ? advanceMethod : null,
            advanceAmount > 0 ? advanceReference : null,
            advanceAmount > 0 ? new Date().toISOString() : null,
-           discountType || null, discountValue || 0]
+           discountType || null, discountValue || 0,
+           (req.body as any)?.promo_code_id || null]
         );
       } catch (e) {
         console.warn('[group-booking] failed to record group meta:', e);
@@ -29516,6 +29534,322 @@ ${data.tenant.name}`;
       res.json(rows);
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch booking groups" });
+    }
+  });
+
+  // ── PHASE-3 GROUP OPERATIONS ─────────────────────────────────────────────────
+
+  // GET rooms: list all bookings in a group with their per-room guest assignment.
+  app.get("/api/restaurant/:id/hotel/booking-groups/:groupId/rooms", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bookings: any[] = await db.query(
+        `SELECT b.id, b.room_id, b.room_type_id, b.guest_name, b.guest_phone, b.guest_email,
+                b.status, b.check_in_date, b.check_out_date, b.room_rate, b.num_adults,
+                r.name AS room_name, r.room_number, rt.name AS type_name,
+                gg.id AS gg_id, gg.guest_name AS gg_guest_name, gg.guest_phone AS gg_guest_phone,
+                gg.guest_email AS gg_guest_email, gg.guest_id_proof, gg.guest_nationality
+           FROM room_bookings b
+           LEFT JOIN rooms r ON r.id = b.room_id
+           LEFT JOIN room_types rt ON rt.id = b.room_type_id
+           LEFT JOIN group_guests gg ON gg.booking_id = b.id
+          WHERE b.group_id = ?
+          ORDER BY r.name, b.id`,
+        [req.params.groupId]
+      );
+      res.json(bookings);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch group rooms" });
+    }
+  });
+
+  // PUT per-room guest: assign / update guest details for one room in a group.
+  app.put("/api/restaurant/:id/hotel/booking-groups/:groupId/rooms/:bookingId/guest", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId, bookingId } = req.params;
+      const { guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality } = req.body || {};
+      const db = await getTenantDb(req.params.id);
+      const booking: any = await db.get("SELECT id FROM room_bookings WHERE id = ? AND group_id = ?", [bookingId, groupId]);
+      if (!booking) return res.status(404).json({ error: "Booking not found in this group" });
+      const existing: any = await db.get("SELECT id FROM group_guests WHERE booking_id = ?", [bookingId]);
+      if (existing) {
+        await db.run(
+          "UPDATE group_guests SET guest_name=?, guest_phone=?, guest_email=?, guest_id_proof=?, guest_nationality=?, updated_at=? WHERE booking_id=?",
+          [guest_name||null, guest_phone||null, guest_email||null, guest_id_proof||null, guest_nationality||'Indian', new Date().toISOString(), bookingId]
+        );
+      } else {
+        const ggId = `GG-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
+        await db.run(
+          "INSERT INTO group_guests (id,group_id,booking_id,guest_name,guest_phone,guest_email,guest_id_proof,guest_nationality) VALUES (?,?,?,?,?,?,?,?)",
+          [ggId, groupId, bookingId, guest_name||null, guest_phone||null, guest_email||null, guest_id_proof||null, guest_nationality||'Indian']
+        );
+      }
+      // Also sync back to room_bookings so existing folio / invoice paths see the name.
+      if (guest_name) await db.run("UPDATE room_bookings SET guest_name=? WHERE id=?", [guest_name, bookingId]);
+      if (guest_phone) await db.run("UPDATE room_bookings SET guest_phone=? WHERE id=?", [guest_phone, bookingId]);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update guest" });
+    }
+  });
+
+  // POST bulk check-in: check in all BOOKED rooms in the group at once.
+  // Skips rooms that are already CHECKED_IN / CHECKED_OUT / CANCELLED.
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/checkin", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId } = req.params;
+      const db = await getTenantDb(req.params.id);
+      const bookings: any[] = await db.query(
+        "SELECT * FROM room_bookings WHERE group_id = ? AND status = 'BOOKED' ORDER BY id",
+        [groupId]
+      );
+      if (bookings.length === 0) return res.status(400).json({ error: "No BOOKED rooms to check in" });
+      const now = new Date().toISOString();
+      const checkedIn: string[] = [];
+      for (const b of bookings) {
+        // Apply per-room guest name from group_guests if set.
+        const gg: any = await db.get("SELECT * FROM group_guests WHERE booking_id = ?", [b.id]);
+        const guestName = (gg?.guest_name) || b.guest_name;
+        const guestPhone = (gg?.guest_phone) || b.guest_phone;
+        await db.run(
+          "UPDATE room_bookings SET status='CHECKED_IN', locked_at=?, guest_name=?, guest_phone=? WHERE id=?",
+          [now, guestName, guestPhone, b.id]
+        );
+        if (b.room_id) {
+          await db.run("UPDATE rooms SET occupancy_status='OCCUPIED' WHERE id=?", [b.room_id]);
+        }
+        // Create folio if one doesn't already exist.
+        const existingFolio: any = await db.get(
+          "SELECT id FROM folios WHERE booking_id = ? AND (doc_type IS NULL OR doc_type='INVOICE') LIMIT 1",
+          [b.id]
+        );
+        if (!existingFolio) {
+          const folioId = `F-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
+          await db.run(
+            "INSERT INTO folios (id,booking_id,status,folio_kind,subtotal,gst_amount,grand_total) VALUES (?,?,'open','HOTEL',0,0,0)",
+            [folioId, b.id]
+          );
+        }
+        checkedIn.push(b.id);
+      }
+      res.json({ ok: true, checked_in: checkedIn.length, booking_ids: checkedIn });
+    } catch (err) {
+      res.status(500).json({ error: "Bulk check-in failed" });
+    }
+  });
+
+  // POST transfer-guest: swap / move a guest from one room to another within the same group.
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/rooms/transfer-guest", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId } = req.params;
+      const { from_booking_id, to_booking_id } = req.body || {};
+      if (!from_booking_id || !to_booking_id) return res.status(400).json({ error: "from_booking_id and to_booking_id required" });
+      const db = await getTenantDb(req.params.id);
+      const [bFrom, bTo] = await Promise.all([
+        db.get("SELECT * FROM room_bookings WHERE id=? AND group_id=?", [from_booking_id, groupId]),
+        db.get("SELECT * FROM room_bookings WHERE id=? AND group_id=?", [to_booking_id, groupId]),
+      ]);
+      if (!bFrom || !bTo) return res.status(404).json({ error: "One or both bookings not found in this group" });
+      // Swap guest_name/phone/email between the two room_bookings rows.
+      await db.run(
+        "UPDATE room_bookings SET guest_name=?, guest_phone=?, guest_email=? WHERE id=?",
+        [(bTo as any).guest_name, (bTo as any).guest_phone, (bTo as any).guest_email, from_booking_id]
+      );
+      await db.run(
+        "UPDATE room_bookings SET guest_name=?, guest_phone=?, guest_email=? WHERE id=?",
+        [(bFrom as any).guest_name, (bFrom as any).guest_phone, (bFrom as any).guest_email, to_booking_id]
+      );
+      // Swap group_guests rows too.
+      const [ggFrom, ggTo] = await Promise.all([
+        db.get("SELECT * FROM group_guests WHERE booking_id=?", [from_booking_id]),
+        db.get("SELECT * FROM group_guests WHERE booking_id=?", [to_booking_id]),
+      ]);
+      if (ggFrom && ggTo) {
+        const tmp = { name: (ggFrom as any).guest_name, phone: (ggFrom as any).guest_phone, email: (ggFrom as any).guest_email };
+        await db.run("UPDATE group_guests SET guest_name=?,guest_phone=?,guest_email=? WHERE booking_id=?",
+          [(ggTo as any).guest_name, (ggTo as any).guest_phone, (ggTo as any).guest_email, from_booking_id]);
+        await db.run("UPDATE group_guests SET guest_name=?,guest_phone=?,guest_email=? WHERE booking_id=?",
+          [tmp.name, tmp.phone, tmp.email, to_booking_id]);
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: "Transfer failed" });
+    }
+  });
+
+  // POST rooms/add: add more rooms to an existing group (same check-in/out dates).
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/rooms/add", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId } = req.params;
+      const { rooms } = req.body || {};  // same shape as group booking rooms[]
+      if (!rooms || !Array.isArray(rooms) || rooms.length === 0) return res.status(400).json({ error: "rooms array required" });
+      const db = await getTenantDb(req.params.id);
+      const grp: any = await db.get("SELECT * FROM room_booking_groups WHERE id=?", [groupId]);
+      if (!grp) return res.status(404).json({ error: "Group not found" });
+      const expandedRooms = rooms.flatMap((r: any) =>
+        Array.from({ length: Math.max(1, Math.floor(Number(r.qty)||1)) }, () => ({ ...r }))
+      );
+      const created: any[] = [];
+      for (const r of expandedRooms) {
+        // Resolve an available room of this type.
+        const available: any = r.room_id
+          ? await db.get("SELECT * FROM rooms WHERE id=? AND status='available'", [r.room_id])
+          : await db.get(
+              `SELECT ro.* FROM rooms ro
+               WHERE ro.status='available'
+                 AND (ro.type=? OR ro.room_type_id=?)
+                 AND ro.id NOT IN (
+                   SELECT room_id FROM room_bookings
+                    WHERE status NOT IN ('CANCELLED','CHECKED_OUT')
+                      AND check_in_date < ? AND check_out_date > ?
+                      AND room_id IS NOT NULL
+                 )
+               LIMIT 1`,
+              [r.room_type_id||r.type_name, r.room_type_id||r.type_name, grp.check_out_date, grp.check_in_date]
+            );
+        const bookingId = `BK-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
+        await db.run(
+          `INSERT INTO room_bookings
+             (id, room_id, room_type_id, guest_name, guest_phone, check_in_date, check_out_date,
+              room_rate, num_adults, status, group_id, group_name, booking_type, created_by)
+           VALUES (?,?,?,?,?,?,?,?,?,'BOOKED',?,?,?,?)`,
+          [bookingId, available?.id||null, r.room_type_id||null,
+           grp.contact_name||'Group Guest', grp.contact_phone||null,
+           grp.check_in_date, grp.check_out_date, Number(r.room_rate)||0,
+           Number(r.num_adults)||1, groupId, grp.name, r.booking_type||'FIT', req.user?.id||null]
+        );
+        created.push({ id: bookingId, room_id: available?.id||null });
+      }
+      // Update num_rooms on the group.
+      await db.run(
+        "UPDATE room_booking_groups SET num_rooms = (SELECT COUNT(*) FROM room_bookings WHERE group_id=? AND status!='CANCELLED') WHERE id=?",
+        [groupId, groupId]
+      );
+      res.status(201).json({ ok: true, added: created.length, bookings: created });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to add rooms" });
+    }
+  });
+
+  // DELETE rooms/:bookingId: remove (cancel) one room from a group.
+  app.delete("/api/restaurant/:id/hotel/booking-groups/:groupId/rooms/:bookingId", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId, bookingId } = req.params;
+      const db = await getTenantDb(req.params.id);
+      const b: any = await db.get("SELECT * FROM room_bookings WHERE id=? AND group_id=?", [bookingId, groupId]);
+      if (!b) return res.status(404).json({ error: "Booking not found in this group" });
+      if (b.status === 'CHECKED_IN') return res.status(409).json({ error: "Cannot remove a checked-in room — check it out first" });
+      const now = new Date().toISOString();
+      await db.run(
+        "UPDATE room_bookings SET status='CANCELLED', cancelled_at=?, cancelled_by=?, cancellation_reason=?, cancelled_source='STAFF' WHERE id=?",
+        [now, req.user?.id||null, 'Removed from group', bookingId]
+      );
+      if (b.room_id) await db.run("UPDATE rooms SET occupancy_status='VACANT' WHERE id=? AND occupancy_status!='OCCUPIED'", [b.room_id]);
+      await db.run(
+        "UPDATE room_booking_groups SET num_rooms=(SELECT COUNT(*) FROM room_bookings WHERE group_id=? AND status!='CANCELLED') WHERE id=?",
+        [groupId, groupId]
+      );
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to remove room" });
+    }
+  });
+
+  // PATCH dates: extend check-out date for all active rooms in a group.
+  app.patch("/api/restaurant/:id/hotel/booking-groups/:groupId/dates", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId } = req.params;
+      const { check_out_date, check_in_date } = req.body || {};
+      if (!check_out_date) return res.status(400).json({ error: "check_out_date required" });
+      const db = await getTenantDb(req.params.id);
+      const grp: any = await db.get("SELECT * FROM room_booking_groups WHERE id=?", [groupId]);
+      if (!grp) return res.status(404).json({ error: "Group not found" });
+      // Update all non-cancelled bookings.
+      await db.run(
+        "UPDATE room_bookings SET check_out_date=? WHERE group_id=? AND status NOT IN ('CANCELLED','CHECKED_OUT')",
+        [check_out_date, groupId]
+      );
+      if (check_in_date) {
+        await db.run(
+          "UPDATE room_bookings SET check_in_date=? WHERE group_id=? AND status='BOOKED'",
+          [check_in_date, groupId]
+        );
+      }
+      await db.run(
+        "UPDATE room_booking_groups SET check_out_date=?"+( check_in_date ? ", check_in_date=?" : "")+" WHERE id=?",
+        check_in_date ? [check_out_date, check_in_date, groupId] : [check_out_date, groupId]
+      );
+      res.json({ ok: true, check_in_date: check_in_date||grp.check_in_date, check_out_date });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update dates" });
+    }
+  });
+
+  // POST deposit: record / update the group-level advance/deposit payment.
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/deposit", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId } = req.params;
+      const { amount, payment_method, reference } = req.body || {};
+      const amt = Number(amount);
+      if (isNaN(amt) || amt <= 0) return res.status(400).json({ error: "amount must be a positive number" });
+      const db = await getTenantDb(req.params.id);
+      const grp: any = await db.get("SELECT id FROM room_booking_groups WHERE id=?", [groupId]);
+      if (!grp) return res.status(404).json({ error: "Group not found" });
+      await db.run(
+        "UPDATE room_booking_groups SET advance_amount=?, advance_method=?, advance_reference=?, advance_recorded_at=? WHERE id=?",
+        [amt, payment_method||'CASH', reference||null, new Date().toISOString(), groupId]
+      );
+      res.json({ ok: true, advance_amount: amt, advance_method: payment_method||'CASH' });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to record deposit" });
+    }
+  });
+
+  // GET group-revenue report: revenue by group, filterable by date range.
+  app.get("/api/restaurant/:id/hotel/reports/group-revenue", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as Record<string, string>;
+      const rows: any[] = await db.query(
+        `SELECT g.id, g.name, g.contact_name, g.contact_phone, g.check_in_date, g.check_out_date,
+                g.num_rooms, g.total_amount, g.advance_amount, g.discount_type, g.discount_value,
+                g.settled_at, g.payment_method, g.invoice_number, g.promo_code_id,
+                (SELECT COUNT(*) FROM room_bookings b WHERE b.group_id=g.id AND b.status='CHECKED_IN')  AS active_rooms,
+                (SELECT COUNT(*) FROM room_bookings b WHERE b.group_id=g.id AND b.status='CHECKED_OUT') AS checked_out_rooms,
+                (SELECT COUNT(*) FROM room_bookings b WHERE b.group_id=g.id AND b.status='CANCELLED')   AS cancelled_rooms,
+                COALESCE((SELECT SUM(f.grand_total) FROM folios f
+                           JOIN room_bookings b ON b.id=f.booking_id
+                          WHERE b.group_id=g.id AND f.status='settled'), 0) AS settled_revenue,
+                COALESCE((SELECT f.grand_total FROM folios f WHERE f.group_id=g.id AND f.status='settled' LIMIT 1), 0) AS master_folio_revenue
+           FROM room_booking_groups g
+          WHERE 1=1
+            ${from ? "AND g.check_in_date >= ?" : ""}
+            ${to   ? "AND g.check_in_date <= ?" : ""}
+          ORDER BY g.created_at DESC
+          LIMIT 500`,
+        [...(from ? [from] : []), ...(to ? [to] : [])]
+      );
+      res.json(rows);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch group revenue report" });
     }
   });
 
