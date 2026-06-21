@@ -25279,7 +25279,7 @@ ${data.tenant.name}`;
             meal_plan_id, meal_plan_snapshot, extra_adults,
             extra_children_with_mattress, extra_children_no_mattress, num_adults,
             group_id, group_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [bid, r.room_id, r.room_locked, contact_name, contact_phone || null, contact_email || null,
            occ.numGuests, check_in_date, check_out_date, booking_source || 'DIRECT',
            rate, total, special_requests || null, bookingType,
