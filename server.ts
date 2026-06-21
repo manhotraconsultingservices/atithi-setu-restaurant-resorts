@@ -23166,6 +23166,87 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── VERIFY GUEST ROOM (public — called from restaurant table QR) ───────────
+  // A hotel guest at a restaurant table can look themselves up by room number.
+  // Returns {ok, room_id, booking_id, guest_name, room_name} or {ok:false, error}.
+  app.get("/api/restaurant/:id/hotel/verify-guest-room", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ ok: false, error: check.error });
+    try {
+      const roomNumber = String(req.query.room_number || '').trim();
+      if (!roomNumber) return res.status(400).json({ ok: false, error: "room_number is required" });
+      const tenantDb = await getTenantDb(req.params.id);
+      // Match by room name OR room_number column (properties use different naming conventions)
+      const room: any = await tenantDb.get(
+        `SELECT id, name, room_number FROM rooms WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) OR LOWER(TRIM(CAST(room_number AS TEXT))) = LOWER(TRIM(?)) LIMIT 1`,
+        [roomNumber, roomNumber]
+      );
+      if (!room) return res.status(404).json({ ok: false, error: "Room not found. Please check your room number." });
+      const booking: any = await tenantDb.get(
+        `SELECT id, guest_name FROM room_bookings WHERE room_id = ? AND status = 'CHECKED_IN' ORDER BY actual_checkin_at DESC LIMIT 1`,
+        [room.id]
+      );
+      if (!booking) return res.status(404).json({ ok: false, error: "No active check-in found for this room. Please ask the front desk for assistance." });
+      res.json({ ok: true, room_id: room.id, booking_id: booking.id, guest_name: booking.guest_name || 'Guest', room_name: room.name || roomNumber });
+    } catch (err: any) {
+      console.error("verify-guest-room error:", err);
+      res.status(500).json({ ok: false, error: "Server error. Please try again." });
+    }
+  });
+
+  // ─── CHARGE SESSION TO ROOM (public — postpaid bill → hotel folio) ────────
+  // Posts all orders in a restaurant session (table dining) to the guest's hotel
+  // folio. Called when the guest requests the bill and chooses "Charge to Room".
+  app.post("/api/restaurant/:id/hotel/charge-session-to-room", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ ok: false, error: check.error });
+    try {
+      const { session_token, session_id, room_id, booking_id } = req.body || {};
+      if (!session_token && !session_id) return res.status(400).json({ ok: false, error: "session_token or session_id is required" });
+      if (!room_id || !booking_id) return res.status(400).json({ ok: false, error: "room_id and booking_id are required" });
+      const tenantDb = await getTenantDb(req.params.id);
+      // Verify the booking is still checked in
+      const booking: any = await tenantDb.get(
+        `SELECT id FROM room_bookings WHERE id = ? AND room_id = ? AND status = 'CHECKED_IN'`,
+        [booking_id, room_id]
+      );
+      if (!booking) return res.status(400).json({ ok: false, error: "Booking is no longer active. Please ask the front desk." });
+      // Get all unposted orders in this session
+      const orders: any[] = await tenantDb.query(
+        `SELECT o.id, o.total_amount, o.items_json FROM orders o
+         WHERE (o.session_token = ? OR o.session_id = ?)
+           AND o.status NOT IN ('CANCELLED')
+           AND (o.posted_to_folio_at IS NULL OR o.folio_id IS NULL)`,
+        [session_token || '', session_id || '']
+      );
+      if (orders.length === 0) return res.json({ ok: true, posted_count: 0, folio_id: null, message: "All orders already posted." });
+      let lastFolioId: string | null = null;
+      let postedCount = 0;
+      for (const ord of orders) {
+        // Parse items from the stored JSON
+        let items: any[] = [];
+        try { items = JSON.parse(ord.items_json || '[]'); } catch { items = []; }
+        const folioItems = items.map((it: any) => ({
+          id: it.id || it.menuItemId || '',
+          name: it.name || 'Item',
+          quantity: Number(it.quantity || it.qty || 1),
+          unitPrice: Number(it.price || it.unit_price || 0),
+        }));
+        const result = await postOrderToFolio(req.params.id, {
+          id: ord.id, room_id, booking_id,
+          items: folioItems,
+          subtype: 'RESTAURANT',
+          posted_by: 'ROOM_CHARGE_QR',
+        });
+        if (result.ok) { postedCount++; lastFolioId = result.folio_id || lastFolioId; }
+      }
+      res.json({ ok: true, posted_count: postedCount, folio_id: lastFolioId });
+    } catch (err: any) {
+      console.error("charge-session-to-room error:", err);
+      res.status(500).json({ ok: false, error: "Server error charging session to room." });
+    }
+  });
+
   // ─── SERVICE REQUESTS (guest creates, staff manages) ──────────────────────
   app.post("/api/restaurant/:id/hotel/service-requests", async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);

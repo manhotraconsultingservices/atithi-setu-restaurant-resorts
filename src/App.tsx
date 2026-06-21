@@ -77,6 +77,7 @@ import {
   Terminal,
   Building2,
   Store,
+  BedDouble,
 } from 'lucide-react';
 import { useSocket } from './lib/socket';
 import { useAlertChime } from './lib/useAlertChime';
@@ -41243,6 +41244,15 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   // ── Waiter call state ─────────────────────────────────────────────────────
   const [waiterCallStatus, setWaiterCallStatus] = useState<'idle' | 'sending' | 'sent' | 'acknowledged' | 'cooldown'>('idle');
   const [waiterCallCooldown, setWaiterCallCooldown] = useState(0);
+  // ── Room charge flow (hotel guest at restaurant table) ───────────────────
+  const [showRoomChargeModal, setShowRoomChargeModal] = useState(false);
+  const [roomChargeInput, setRoomChargeInput] = useState('');
+  const [roomChargeVerifying, setRoomChargeVerifying] = useState(false);
+  const [roomChargeVerified, setRoomChargeVerified] = useState<{ room_id: string; booking_id: string; guest_name: string; room_name: string } | null>(null);
+  const [roomChargeError, setRoomChargeError] = useState<string | null>(null);
+  const [roomChargeConfirming, setRoomChargeConfirming] = useState(false);
+  const [roomChargePurpose, setRoomChargePurpose] = useState<'ORDER' | 'SESSION'>('ORDER');
+  const [roomChargeSuccess, setRoomChargeSuccess] = useState<{ room_name: string; folio_id?: string } | null>(null);
   // ─────────────────────────────────────────────────────────────────────────
   const { lastMessage } = useSocket('CUSTOMER', restaurantId);
 
@@ -41580,7 +41590,74 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     if (isCheckingOut && cart.length === 0) setIsCheckingOut(false);
   }, [cart.length, isCheckingOut]);
 
-  const placeOrder = async (paymentMethod: 'ONLINE' | 'TABLE' | 'CASH' | 'UPI' | 'CARD') => {
+  // ── Room charge helpers ───────────────────────────────────────────────────
+  const openRoomCharge = (purpose: 'ORDER' | 'SESSION') => {
+    setRoomChargePurpose(purpose);
+    setRoomChargeInput('');
+    setRoomChargeVerified(null);
+    setRoomChargeError(null);
+    setRoomChargeSuccess(null);
+    setShowRoomChargeModal(true);
+  };
+
+  const verifyGuestRoom = async () => {
+    if (!roomChargeInput.trim() || roomChargeVerifying) return;
+    setRoomChargeVerifying(true);
+    setRoomChargeError(null);
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/verify-guest-room?room_number=${encodeURIComponent(roomChargeInput.trim())}`);
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setRoomChargeError(data.error || 'No active check-in found for this room.');
+      } else {
+        setRoomChargeVerified(data);
+      }
+    } catch {
+      setRoomChargeError('Connection error. Please try again.');
+    } finally {
+      setRoomChargeVerifying(false);
+    }
+  };
+
+  const confirmRoomCharge = async () => {
+    if (!roomChargeVerified || roomChargeConfirming) return;
+    setRoomChargeConfirming(true);
+    setRoomChargeError(null);
+    try {
+      if (roomChargePurpose === 'ORDER') {
+        await placeOrder('CHARGE_TO_ROOM', roomChargeVerified);
+        // placeOrder clears cart and closes checkout; show success step in this modal
+        setRoomChargeSuccess({ room_name: roomChargeVerified.room_name });
+      } else {
+        // Charge entire session to room
+        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/charge-session-to-room`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_token: session?.session_token,
+            session_id: session?.id,
+            room_id: roomChargeVerified.room_id,
+            booking_id: roomChargeVerified.booking_id,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to charge session to room.');
+        setRoomChargeSuccess({ room_name: roomChargeVerified.room_name, folio_id: data.folio_id });
+        setShowBillRequestModal(false);
+        setSession(prev => prev ? { ...prev, status: 'bill_requested', payment_method: 'CHARGE_TO_ROOM' } as any : null);
+        setActiveCustomerTab('MY_ORDERS');
+      }
+    } catch (err: any) {
+      setRoomChargeError(err.message || 'Something went wrong. Please try again.');
+    } finally {
+      setRoomChargeConfirming(false);
+    }
+  };
+
+  const placeOrder = async (
+    paymentMethod: 'ONLINE' | 'TABLE' | 'CASH' | 'UPI' | 'CARD' | 'CHARGE_TO_ROOM',
+    roomInfo?: { room_id: string; booking_id: string; room_name: string }
+  ) => {
     // Block new orders once bill has been requested (session locked)
     if (session?.status === 'bill_requested') {
       setPlaceOrderError('Your bill has been requested. New orders cannot be added to this session.');
@@ -41636,6 +41713,12 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         gst_amount: gstAmount,
         payment_method: paymentMethod,
         checkout_mode: checkoutMode,
+        // Room charge: link to hotel folio (hotel guest dining in restaurant)
+        ...(paymentMethod === 'CHARGE_TO_ROOM' && roomInfo ? {
+          room_id: roomInfo.room_id,
+          booking_id: roomInfo.booking_id,
+          table_number: roomInfo.room_name ? `Room ${roomInfo.room_name}` : tableName,
+        } : {}),
       };
 
       // Attach session context for postpaid
@@ -41687,7 +41770,19 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
       setCart([]);
       setIsCheckingOut(false);
 
-      if (checkoutMode === 'postpaid') {
+      if (paymentMethod === 'CHARGE_TO_ROOM') {
+        // Kitchen receives the order; folio is charged server-side.
+        // confirmRoomCharge() sets roomChargeSuccess after this returns.
+        if (checkoutMode === 'postpaid' && session) {
+          setSession(prev => prev ? {
+            ...prev,
+            orders: [...(prev.orders || []), newOrder],
+            round_count: (prev.orders?.length || 0) + 1,
+            customer_name:  prev.customer_name  || effectiveName,
+            customer_phone: prev.customer_phone || effectivePhone,
+          } : null);
+        }
+      } else if (checkoutMode === 'postpaid') {
         // Update local session state with the new order and persist customer info
         // onto the session so subsequent rounds don't ask for name/phone again.
         setSession(prev => {
@@ -43236,14 +43331,24 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
               {/* ── Mode-aware action buttons ── */}
               <div className="space-y-3">
                 {checkoutMode === 'postpaid' ? (
-                  <button
-                    onClick={() => placeOrder('TABLE')}
-                    disabled={isPlacingOrder}
-                    className="w-full bg-[#cc5a16] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#a84612] transition-all disabled:opacity-60"
-                  >
-                    {isPlacingOrder ? <RefreshCw size={20} className="animate-spin" /> : <IndianRupee size={20} />}
-                    {isPlacingOrder ? 'Placing Order…' : 'Add to Bill'}
-                  </button>
+                  <>
+                    <button
+                      onClick={() => placeOrder('TABLE')}
+                      disabled={isPlacingOrder}
+                      className="w-full bg-[#cc5a16] text-white py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#a84612] transition-all disabled:opacity-60"
+                    >
+                      {isPlacingOrder ? <RefreshCw size={20} className="animate-spin" /> : <IndianRupee size={20} />}
+                      {isPlacingOrder ? 'Placing Order…' : 'Add to Bill'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openRoomCharge('ORDER')}
+                      disabled={isPlacingOrder}
+                      className="w-full border-2 border-[#1e3a5f] text-[#1e3a5f] py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#1e3a5f] hover:text-white transition-all disabled:opacity-60"
+                    >
+                      <BedDouble size={20} /> Charge to Hotel Room
+                    </button>
+                  </>
                 ) : checkoutMode === 'cloud_kitchen' ? (
                   <button
                     onClick={() => placeOrder(cloudKitchenPayMethod)}
@@ -43273,6 +43378,14 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                       className="w-full border-2 border-[#cc5a16] text-[#1a1208] py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#cc5a16] hover:text-white transition-all disabled:opacity-60"
                     >
                       <Utensils size={20} /> Pay at Table
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openRoomCharge('ORDER')}
+                      disabled={isPlacingOrder}
+                      className="w-full border-2 border-[#1e3a5f] text-[#1e3a5f] py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#1e3a5f] hover:text-white transition-all disabled:opacity-60"
+                    >
+                      <BedDouble size={20} /> Charge to Hotel Room
                     </button>
                   </>
                 )}
@@ -43335,11 +43448,145 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                 >
                   <Utensils size={20} /> Pay at Table (Cash / Card)
                 </button>
+                <button
+                  type="button"
+                  onClick={() => openRoomCharge('SESSION')}
+                  className="w-full border-2 border-[#1e3a5f] text-[#1e3a5f] py-5 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-[#1e3a5f] hover:text-white transition-all"
+                >
+                  <BedDouble size={20} /> Charge to Hotel Room
+                </button>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
+
+      {/* ── Room Charge Modal (hotel guest at restaurant table) ─────────── */}
+      {showRoomChargeModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center z-[130] p-4">
+          <div className="bg-white rounded-t-[40px] md:rounded-[32px] w-full max-w-md shadow-2xl overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between px-8 pt-8 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-[#1e3a5f]/10 flex items-center justify-center">
+                  <BedDouble size={20} className="text-[#1e3a5f]" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold font-serif text-[#1a1208]">Charge to Hotel Room</h3>
+                  <p className="text-xs text-[#9c8e85]">Settle at checkout — no payment needed now</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRoomChargeModal(false)}
+                className="p-2 rounded-xl hover:bg-[#faf7f2] text-[#9c8e85] hover:text-[#1a1208] transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="px-8 pb-8">
+              {roomChargeSuccess ? (
+                /* ── Step 3: Success ── */
+                <div className="text-center py-4">
+                  <div className="w-16 h-16 rounded-full bg-emerald-50 flex items-center justify-center mx-auto mb-4">
+                    <Check size={28} className="text-emerald-600" />
+                  </div>
+                  <h4 className="text-lg font-bold text-[#1a1208] mb-1">
+                    {roomChargePurpose === 'SESSION' ? 'Session charged to room!' : 'Order sent to kitchen!'}
+                  </h4>
+                  <p className="text-sm text-[#6b5d52] mb-1">
+                    Room <span className="font-bold">{roomChargeSuccess.room_name}</span>
+                  </p>
+                  <p className="text-xs text-[#9c8e85] mb-6">
+                    {roomChargePurpose === 'SESSION'
+                      ? 'All orders have been added to your hotel folio. You will settle everything at check-out.'
+                      : 'Your order is being prepared. The charge has been added to your hotel folio.'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => { setShowRoomChargeModal(false); setIsCheckingOut(false); }}
+                    className="w-full bg-[#1e3a5f] text-white py-4 rounded-2xl font-bold hover:bg-[#162d4a] transition-colors"
+                  >
+                    Done
+                  </button>
+                </div>
+              ) : !roomChargeVerified ? (
+                /* ── Step 1: Enter room number ── */
+                <>
+                  <p className="text-sm text-[#6b5d52] mb-4">
+                    Enter your hotel room number so we can add this to your stay.
+                  </p>
+                  <input
+                    type="text"
+                    value={roomChargeInput}
+                    onChange={e => { setRoomChargeInput(e.target.value); setRoomChargeError(null); }}
+                    onKeyDown={e => e.key === 'Enter' && verifyGuestRoom()}
+                    placeholder="e.g. 101, Suite 2, Deluxe A"
+                    className="w-full bg-[#faf7f2] rounded-2xl px-5 py-4 text-lg font-bold text-[#1a1208] outline-none focus:ring-2 ring-[#1e3a5f]/30 mb-3"
+                    autoFocus
+                  />
+                  {roomChargeError && (
+                    <p className="text-sm text-[#c13b3b] bg-red-50 rounded-xl px-4 py-3 mb-3">{roomChargeError}</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={verifyGuestRoom}
+                    disabled={!roomChargeInput.trim() || roomChargeVerifying}
+                    className="w-full bg-[#1e3a5f] text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-[#162d4a] transition-colors disabled:opacity-50"
+                  >
+                    {roomChargeVerifying
+                      ? <><RefreshCw size={18} className="animate-spin" /> Looking up…</>
+                      : 'Find My Room'}
+                  </button>
+                </>
+              ) : (
+                /* ── Step 2: Confirm guest ── */
+                <>
+                  <div className="bg-[#1e3a5f]/5 border border-[#1e3a5f]/15 rounded-2xl p-4 mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-[#1e3a5f] flex items-center justify-center shrink-0">
+                        <span className="text-white font-bold text-sm">
+                          {roomChargeVerified.guest_name?.charAt(0)?.toUpperCase() || 'G'}
+                        </span>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-bold text-[#1a1208] truncate">{roomChargeVerified.guest_name}</p>
+                        <p className="text-xs text-[#6b5d52]">Room {roomChargeVerified.room_name}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setRoomChargeVerified(null)}
+                        className="ml-auto shrink-0 text-xs text-[#9c8e85] hover:text-[#1a1208] underline"
+                      >
+                        Change
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-sm text-[#6b5d52] mb-4">
+                    {roomChargePurpose === 'SESSION'
+                      ? 'All orders from this session will be added to your hotel folio and settled at check-out.'
+                      : 'This order will be sent to the kitchen and the charge will appear on your hotel folio at check-out.'}
+                  </p>
+                  {roomChargeError && (
+                    <p className="text-sm text-[#c13b3b] bg-red-50 rounded-xl px-4 py-3 mb-3">{roomChargeError}</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={confirmRoomCharge}
+                    disabled={roomChargeConfirming}
+                    className="w-full bg-[#1e3a5f] text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-[#162d4a] transition-colors disabled:opacity-50"
+                  >
+                    {roomChargeConfirming
+                      ? <><RefreshCw size={18} className="animate-spin" /> Processing…</>
+                      : <><Check size={18} /> Confirm Charge to Room {roomChargeVerified.room_name}</>}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
