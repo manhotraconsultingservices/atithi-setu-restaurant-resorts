@@ -25113,7 +25113,7 @@ ${data.tenant.name}`;
       // GROUP-ALLOTMENT: rooms arrive as category-level entries with qty.
       // Each entry is expanded into qty individual floating-room entries
       // before conflict detection so existing room-level logic is unchanged.
-      const rooms: Array<{ room_type_id?: string; room_id?: string; qty?: number; meal_plan_id?: string | null; room_rate?: number; num_guests?: number; num_adults?: number; extra_adults?: number; extra_children_with_mattress?: number; extra_children_no_mattress?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
+      const rooms: Array<{ room_type_id?: string; type_name?: string; room_id?: string; qty?: number; meal_plan_id?: string | null; room_rate?: number; num_guests?: number; num_adults?: number; extra_adults?: number; extra_children_with_mattress?: number; extra_children_no_mattress?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
       if (!name || String(name).trim().length === 0) {
         return res.status(400).json({ error: "Group name is required." });
       }
@@ -25155,17 +25155,35 @@ ${data.tenant.name}`;
           resolvedRooms.push({ room_id: String(r.room_id), room_locked: 1 });
           batchClaimed.add(String(r.room_id));
         } else {
-          const typeId = String(r.room_type_id!);
+          const typeId   = String(r.room_type_id || '');
+          const typeName = String(r.type_name || '');
+          const isAny   = !typeId || typeId === '__ANY__';
           const isUncat = typeId === '__UNCATEGORISED__';
-          const candidates: any[] = await tenantDb.query(
-            isUncat
-              ? "SELECT id FROM rooms WHERE type_id IS NULL AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name"
-              : "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
-            isUncat ? [] : [typeId]
-          );
+          let candidates: any[];
+          if (isAny) {
+            candidates = await tenantDb.query(
+              "SELECT id FROM rooms WHERE status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name", []
+            );
+          } else if (isUncat) {
+            candidates = await tenantDb.query(
+              "SELECT id FROM rooms WHERE type_id IS NULL AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name", []
+            );
+          } else {
+            candidates = await tenantDb.query(
+              "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
+              [typeId]
+            );
+            if (!candidates.length && typeName) {
+              candidates = await tenantDb.query(
+                "SELECT id FROM rooms WHERE type = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
+                [typeName]
+              );
+            }
+          }
           const freePool = candidates.filter((c: any) => !globalTaken.has(String(c.id)) && !batchClaimed.has(String(c.id)));
           if (!freePool.length) {
-            return res.status(409).json({ error: `No free room available in the selected category for these dates.` });
+            const label = isAny ? 'any category' : isUncat ? 'uncategorised rooms' : (typeName || typeId);
+            return res.status(409).json({ error: `No free room available (${label}) for the selected dates.` });
           }
           const assigned = freePool[0];
           resolvedRooms.push({ room_id: String(assigned.id), room_locked: 0 });

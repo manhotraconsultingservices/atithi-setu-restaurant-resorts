@@ -8212,6 +8212,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         discount_value: groupBookingDraft.discount_value || 0,
         rooms: groupBookingDraft.rooms.filter(r => r.qty > 0).map(r => ({
           room_type_id: r.room_type_id || '__UNCATEGORISED__',
+          type_name: r.type_name || null,
           qty: r.qty,
           room_rate: r.room_rate,
           num_adults: r.num_adults,
@@ -27416,7 +27417,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             }
             const ti = availByType.get(typeName);
             return { ...d, rooms: [...d.rooms, {
-              room_type_id: ti?.typeId || '__UNCATEGORISED__',
+              room_type_id: typeName === '__ANY__' ? '__ANY__' : (ti?.typeId || '__UNCATEGORISED__'),
               type_name: typeName,
               qty: 0, num_adults: ti?.defaultCapacity || 2,
               extra_children_with_mattress: 0, extra_children_no_mattress: 0,
@@ -27576,6 +27577,85 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-[#f0e8dc]">
+                          {/* ── ANY AVAILABLE row — books from any free room, no category filter ── */}
+                          {(() => {
+                            const AnyKey = '__ANY__';
+                            const anyAvailCount = availableForPick.length;
+                            const anyRow = getDraftRow(AnyKey);
+                            const anyQty = anyRow?.qty || 0;
+                            const anyOverBooked = anyQty > anyAvailCount;
+                            return (
+                              <tr key="__ANY__" className={anyQty > 0 ? 'bg-[#f0f5ff]' : 'bg-[#fafcff]'}>
+                                <td className="px-3 py-2">
+                                  <p className="font-semibold text-[#1a1208] flex items-center gap-1.5">
+                                    Any Available
+                                    <span className="text-[8px] bg-[#dce8ff] text-[#2455aa] px-1.5 py-0.5 rounded-full font-bold tracking-wide uppercase">no filter</span>
+                                  </p>
+                                  <p className={cn('text-[10px]', anyOverBooked ? 'text-[#c13b3b] font-semibold' : 'text-[#7cad6d]')}>
+                                    {anyAvailCount} avail{anyOverBooked ? ' — exceeds capacity!' : ''}
+                                  </p>
+                                </td>
+                                <td className="px-2 py-2 text-center">
+                                  <input
+                                    type="number" min={0} max={anyAvailCount}
+                                    value={anyQty || ''}
+                                    placeholder="0"
+                                    onChange={e => { const v = Math.max(0, Math.floor(Number(e.target.value) || 0)); setCategoryRow(AnyKey, { qty: v }); }}
+                                    className={cn('w-14 text-center rounded-lg px-2 py-1.5 border text-sm font-semibold outline-none focus:ring-2 ring-[#2455aa]/20',
+                                      anyOverBooked ? 'border-[#c13b3b] bg-[#fff0f0]' : 'border-[#2455aa]/25 bg-[#edf2ff]')}
+                                  />
+                                </td>
+                                <td className="px-2 py-2 text-center">
+                                  <input type="number" min={1} max={20}
+                                    value={anyRow?.num_adults ?? 2}
+                                    onChange={e => setCategoryRow(AnyKey, { num_adults: Math.max(1, Number(e.target.value) || 1) })}
+                                    className="w-14 text-center bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                  />
+                                </td>
+                                <td className="px-2 py-2 text-center">
+                                  <input type="number" min={0}
+                                    value={anyRow?.extra_children_with_mattress ?? 0}
+                                    onChange={e => setCategoryRow(AnyKey, { extra_children_with_mattress: Math.max(0, Number(e.target.value) || 0) })}
+                                    className="w-14 text-center bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                  />
+                                </td>
+                                <td className="px-2 py-2 text-center">
+                                  <input type="number" min={0}
+                                    value={anyRow?.extra_children_no_mattress ?? 0}
+                                    onChange={e => setCategoryRow(AnyKey, { extra_children_no_mattress: Math.max(0, Number(e.target.value) || 0) })}
+                                    className="w-14 text-center bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                  />
+                                </td>
+                                <td className="px-2 py-2 text-center">
+                                  <input type="number" min={0}
+                                    value={anyRow?.room_rate || ''}
+                                    placeholder="rate/nt"
+                                    onChange={e => { const v = parseInt(e.target.value, 10); setCategoryRow(AnyKey, { room_rate: isNaN(v) ? 0 : Math.max(0, v) }); }}
+                                    className="w-20 text-center bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                  />
+                                </td>
+                                {matrixMode && (
+                                  <td className="px-2 py-2 text-center">
+                                    <select
+                                      value={anyRow?.meal_plan_id || ''}
+                                      onChange={e => setCategoryRow(AnyKey, { meal_plan_id: e.target.value || null })}
+                                      className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-1.5 py-1.5 text-xs outline-none focus:ring-2 ring-[#cc5a16]/20"
+                                    >
+                                      <option value="">— none —</option>
+                                      {activeMealPlans.map((m: any) => (
+                                        <option key={m.id} value={m.id}>{m.code}</option>
+                                      ))}
+                                    </select>
+                                  </td>
+                                )}
+                                <td className="px-3 py-2 text-right font-mono font-semibold text-[#2455aa]">
+                                  {anyQty > 0 && (anyRow?.room_rate || 0) > 0
+                                    ? `₹${((anyRow!.room_rate || 0) * anyQty * nights).toLocaleString('en-IN')}`
+                                    : '—'}
+                                </td>
+                              </tr>
+                            );
+                          })()}
                           {Array.from(availByType.entries()).map(([typeName, ti]) => {
                             const row = getDraftRow(typeName);
                             const qty = row?.qty || 0;
