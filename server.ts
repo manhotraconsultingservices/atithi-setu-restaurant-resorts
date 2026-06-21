@@ -502,6 +502,9 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS advance_method    TEXT;
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS advance_reference TEXT;
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS advance_recorded_at TEXT;
+    -- GROUP-DISCOUNT (Jun 2026): group-level discount (PERCENT or flat INR).
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS discount_type  TEXT;
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS discount_value REAL DEFAULT 0;
 
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
@@ -25068,12 +25071,12 @@ ${data.tenant.name}`;
         name, contact_name, contact_phone, contact_email,
         check_in_date, check_out_date, booking_type,
         booking_source, special_requests,
-        // EXTRAS-GROUP (13 Jun 2026) — group-level meal plan applied to every
-        // room. When set (MATRIX mode), per-room rates resolve from the matrix
-        // and extra-person charges are added; null keeps the legacy base-rate
-        // path. Per-room occupancy (num_adults + children) rides on each room.
+        // Group-level meal plan (legacy / fallback when per-row meal_plan_id is absent)
         meal_plan_id,
       } = b;
+      // GROUP-DISCOUNT: optional % or flat-INR discount on the gross total.
+      const discountType  = String(b.discount_type || '').toUpperCase().trim() || null;
+      const discountValue = Math.max(0, Number(b.discount_value) || 0);
       // ADV-PAY: optional advance collected at group booking time (corporate /
       // wedding groups frequently pay a deposit upfront before any room is
       // checked in). Stored on the group row; applied as a deduction at
@@ -25081,7 +25084,10 @@ ${data.tenant.name}`;
       const advanceAmount    = Number(b.advance_amount || 0);
       const advanceMethod    = String(b.advance_method || '').toUpperCase().trim() || null;
       const advanceReference = String(b.advance_reference || '').trim() || null;
-      const rooms: Array<{ room_type_id?: string; room_id?: string; room_rate?: number; num_guests?: number; num_adults?: number; extra_adults?: number; extra_children_with_mattress?: number; extra_children_no_mattress?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
+      // GROUP-ALLOTMENT: rooms arrive as category-level entries with qty.
+      // Each entry is expanded into qty individual floating-room entries
+      // before conflict detection so existing room-level logic is unchanged.
+      const rooms: Array<{ room_type_id?: string; room_id?: string; qty?: number; meal_plan_id?: string | null; room_rate?: number; num_guests?: number; num_adults?: number; extra_adults?: number; extra_children_with_mattress?: number; extra_children_no_mattress?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
       if (!name || String(name).trim().length === 0) {
         return res.status(400).json({ error: "Group name is required." });
       }
@@ -25094,6 +25100,11 @@ ${data.tenant.name}`;
       if (rooms.some(r => !r.room_id && !r.room_type_id)) {
         return res.status(400).json({ error: "Each room entry must have room_id or room_type_id." });
       }
+      // Expand category-level qty entries into individual room slots.
+      const expandedRooms = rooms.flatMap(r => {
+        const n = Math.max(1, Math.floor(Number(r.qty) || 1));
+        return Array.from({ length: n }, () => ({ ...r }));
+      });
 
       const tenantDb = await getTenantDb(req.params.id);
 
@@ -25113,7 +25124,7 @@ ${data.tenant.name}`;
       const batchClaimed = new Set<string>();
 
       const resolvedRooms: Array<{ room_id: string; room_locked: number }> = [];
-      for (const r of rooms) {
+      for (const r of expandedRooms) {
         if (r.room_id) {
           resolvedRooms.push({ room_id: String(r.room_id), room_locked: 1 });
           batchClaimed.add(String(r.room_id));
@@ -25137,7 +25148,7 @@ ${data.tenant.name}`;
         }
       }
       // Merge resolved IDs back so downstream code uses r.room_id uniformly.
-      const resolvedRoomEntries = rooms.map((r, i) => ({ ...r, room_id: resolvedRooms[i].room_id, room_locked: resolvedRooms[i].room_locked }));
+      const resolvedRoomEntries = expandedRooms.map((r, i) => ({ ...r, room_id: resolvedRooms[i].room_id, room_locked: resolvedRooms[i].room_locked }));
 
       // EXTRAS-GROUP — resolve per-room occupancy once. When the caller sends
       // num_adults we derive the chargeable extra adults from the room's own
@@ -25161,13 +25172,21 @@ ${data.tenant.name}`;
         occByRoom.set(r.room_id, { extraAdults, numAdultsToStore, childMat, childNoMat, numGuests });
       }
 
-      // EXTRAS-GROUP — snapshot the group meal-plan label once so historical
-      // reprints stay stable if the plan is later renamed / deactivated.
-      let mealPlanSnapshot: string | null = null;
-      if (meal_plan_id) {
-        const mp: any = await tenantDb.get("SELECT code, name FROM meal_plans WHERE id = ?", [meal_plan_id]).catch(() => null);
-        if (mp) mealPlanSnapshot = `${mp.code} · ${mp.name}`;
-      }
+      // Per-room meal-plan snapshot cache — keyed by plan ID.
+      // Snapshots the label at booking time so reprints remain stable if the
+      // plan is later renamed/deactivated. Each room carries its own
+      // meal_plan_id (per-category allotment model); fall back to the
+      // group-level meal_plan_id for legacy clients that send a single plan.
+      const mpSnapshotCache = new Map<string, string | null>();
+      const getMpSnapshot = async (planId: string | null | undefined): Promise<string | null> => {
+        const id = planId || meal_plan_id || null;
+        if (!id) return null;
+        if (mpSnapshotCache.has(id)) return mpSnapshotCache.get(id)!;
+        const mp: any = await tenantDb.get("SELECT code, name FROM meal_plans WHERE id = ?", [id]).catch(() => null);
+        const snap = mp ? `${mp.code} · ${mp.name}` : null;
+        mpSnapshotCache.set(id, snap);
+        return snap;
+      };
 
       // Validate EVERY room before inserting anything — atomic semantics.
       for (const r of resolvedRoomEntries) {
@@ -25188,22 +25207,20 @@ ${data.tenant.name}`;
       }
 
       const created: any[] = [];
-      let groupTotal = 0;
+      let groupGross = 0;
       for (const r of resolvedRoomEntries) {
         const occ = occByRoom.get(r.room_id) || { extraAdults: 0, numAdultsToStore: null, childMat: 0, childNoMat: 0, numGuests: r.num_guests || 1 };
+        const rowMealPlanId = r.meal_plan_id || meal_plan_id || null;
         // Per-room rate resolution. An explicit room_rate is an all-inclusive
-        // manual override (rate × nights, no extras) — same semantics as the
-        // single New Booking modal. When the rate is 0/unset we route through
-        // computeBookingTotalWithExtras so the MATRIX path resolves the
-        // meal-plan rate AND adds extra-person charges (extra adults beyond
-        // capacity + children with/without mattress). In LEGACY mode (or no
-        // meal plan) it falls back to the existing base-rate path.
+        // manual override (rate × nights, no extras). When 0/unset we route
+        // through computeBookingTotalWithExtras so the MATRIX path resolves the
+        // per-category meal-plan rate AND adds extra-person charges.
         let rate = Number(r.room_rate) || 0;
         let total: number;
         if (bookingType === 'DAY_USE') {
           if (rate <= 0) {
             const breakdown = await computeBookingTotalWithExtras(req.params.id, r.room_id, check_in_date, check_in_date, {
-              mealPlanId: meal_plan_id || null, extraAdults: occ.extraAdults,
+              mealPlanId: rowMealPlanId, extraAdults: occ.extraAdults,
               extraChildrenWithMattress: occ.childMat, extraChildrenNoMattress: occ.childNoMat,
               bookingType: 'DAY_USE',
             });
@@ -25215,7 +25232,7 @@ ${data.tenant.name}`;
         } else {
           if (rate <= 0) {
             const breakdown = await computeBookingTotalWithExtras(req.params.id, r.room_id, check_in_date, check_out_date, {
-              mealPlanId: meal_plan_id || null, extraAdults: occ.extraAdults,
+              mealPlanId: rowMealPlanId, extraAdults: occ.extraAdults,
               extraChildrenWithMattress: occ.childMat, extraChildrenNoMattress: occ.childNoMat,
               bookingType: 'OVERNIGHT',
             });
@@ -25225,7 +25242,8 @@ ${data.tenant.name}`;
             total = rate * nights;
           }
         }
-        groupTotal += total;
+        groupGross += total;
+        const rowMpSnap = await getMpSnapshot(rowMealPlanId);
         const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         await tenantDb.run(
           `INSERT INTO room_bookings
@@ -25239,11 +25257,18 @@ ${data.tenant.name}`;
           [bid, r.room_id, r.room_locked, contact_name, contact_phone || null, contact_email || null,
            occ.numGuests, check_in_date, check_out_date, booking_source || 'DIRECT',
            rate, total, special_requests || null, bookingType,
-           meal_plan_id || null, mealPlanSnapshot, occ.extraAdults,
+           rowMealPlanId, rowMpSnap, occ.extraAdults,
            occ.childMat, occ.childNoMat, occ.numAdultsToStore,
            groupId, String(name).trim()]
         );
         created.push(await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]));
+      }
+      // Apply group discount to derive net total stored on the group row.
+      let groupTotal = groupGross;
+      if (discountType === 'PERCENT') {
+        groupTotal = groupGross * (1 - Math.min(100, discountValue) / 100);
+      } else if (discountType === 'FLAT') {
+        groupTotal = Math.max(0, groupGross - discountValue);
       }
 
       // Record the group row (best-effort — failure here doesn't roll
@@ -25253,26 +25278,31 @@ ${data.tenant.name}`;
           `INSERT INTO room_booking_groups
              (id, name, contact_name, contact_phone, contact_email, num_rooms,
               check_in_date, check_out_date, total_amount, notes, created_by,
-              advance_amount, advance_method, advance_reference, advance_recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              advance_amount, advance_method, advance_reference, advance_recorded_at,
+              discount_type, discount_value)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [groupId, String(name).trim(), contact_name, contact_phone || null,
-           contact_email || null, rooms.length, check_in_date, check_out_date,
+           contact_email || null, expandedRooms.length, check_in_date, check_out_date,
            groupTotal, special_requests || null, req.user?.id || null,
            advanceAmount > 0 ? advanceAmount : 0, advanceAmount > 0 ? advanceMethod : null,
            advanceAmount > 0 ? advanceReference : null,
-           advanceAmount > 0 ? new Date().toISOString() : null]
+           advanceAmount > 0 ? new Date().toISOString() : null,
+           discountType || null, discountValue || 0]
         );
       } catch (e) {
         console.warn('[group-booking] failed to record group meta:', e);
       }
 
-      try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { groupId, groupName: name, numRooms: rooms.length, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
+      try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { groupId, groupName: name, numRooms: expandedRooms.length, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
       for (const row of created) await logChannelSync(req.params.id, row, 'BOOKING_CREATED');
 
       res.status(201).json({
         group_id: groupId,
-        num_rooms: rooms.length,
+        num_rooms: expandedRooms.length,
         total_amount: groupTotal,
+        gross_amount: groupGross,
+        discount_type: discountType || null,
+        discount_value: discountValue || 0,
         advance_amount: advanceAmount,
         advance_method: advanceMethod,
         bookings: created,
