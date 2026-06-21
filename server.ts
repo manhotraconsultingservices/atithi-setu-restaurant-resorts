@@ -29641,7 +29641,7 @@ ${data.tenant.name}`;
           [now, guestName, guestPhone, b.id]
         );
         if (b.room_id) {
-          await db.run("UPDATE rooms SET occupancy_status='OCCUPIED' WHERE id=?", [b.room_id]);
+          await db.run("UPDATE rooms SET status='OCCUPIED' WHERE id=?", [b.room_id]);
         }
         // Create folio if one doesn't already exist.
         const existingFolio: any = await db.get(
@@ -29775,7 +29775,7 @@ ${data.tenant.name}`;
         "UPDATE room_bookings SET status='CANCELLED', cancelled_at=?, cancelled_by=?, cancellation_reason=?, cancelled_source='STAFF' WHERE id=?",
         [now, req.user?.id||null, 'Removed from group', bookingId]
       );
-      if (b.room_id) await db.run("UPDATE rooms SET occupancy_status='VACANT' WHERE id=? AND occupancy_status!='OCCUPIED'", [b.room_id]);
+      if (b.room_id) await db.run("UPDATE rooms SET status='VACANT' WHERE id=? AND status!='OCCUPIED'", [b.room_id]);
       await db.run(
         "UPDATE room_booking_groups SET num_rooms=(SELECT COUNT(*) FROM room_bookings WHERE group_id=? AND status!='CANCELLED') WHERE id=?",
         [groupId, groupId]

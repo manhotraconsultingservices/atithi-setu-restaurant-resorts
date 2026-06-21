@@ -72,9 +72,9 @@ function phase(name) { console.log(`\n${B('▶')} ${B(name)}`); }
 
 // ── Date helpers ───────────────────────────────────────────────────────────
 const d = (offset) => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
-const checkIn          = d(60);  // 60 days out — avoids conflicts with real and leftover test bookings
-const checkOut         = d(63);  // 3-night stay
-const checkOutExtended = d(64);  // +1 extra night for extension test
+const checkIn          = d(90);  // 90 days out — avoids conflicts with real and leftover test bookings
+const checkOut         = d(93);  // 3-night stay
+const checkOutExtended = d(94);  // +1 extra night for extension test
 
 // ── ═══════════════════════════════════════════════════════════════════════
 //   SETUP — Authentication
