@@ -26941,38 +26941,53 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   )}
 
                   {/* Add room dropdown */}
+                  {/* Category-based room picker: group available rooms by type so
+                      staff book "3 Deluxe" rather than picking room names one by one.
+                      Clicking "+ Add" picks the first available room of that category;
+                      the underlying room_id is still stored for availability/calendar. */}
                   {availableForPick.length > 0 ? (
-                    <select
-                      value=""
-                      onChange={e => {
-                        const id = e.target.value;
-                        if (!id) return;
-                        const r = hotelRooms.find((x: any) => x.id === id);
-                        if (!r) return;
-                        const cap = Math.max(1, Number(r.capacity || 1));
-                        setGroupBookingDraft({
-                          ...draft,
-                          // MATRIX mode → rate 0 so the server resolves the
-                          // meal-plan rate + extras; LEGACY → seed base_rate.
-                          rooms: [...draft.rooms, {
-                            room_id: id,
-                            room_rate: matrixMode ? 0 : (Number(r.base_rate) || 0),
-                            num_adults: cap,
-                            extra_children_with_mattress: 0,
-                            extra_children_no_mattress: 0,
-                            num_guests: cap,
-                          }],
-                        });
-                      }}
-                      className="w-full bg-[#faf7f2] border-2 border-dashed border-[#cc5a16]/30 rounded-2xl px-4 py-3 text-sm text-[#cc5a16] font-bold focus:ring-2 ring-[#cc5a16]/20 outline-none"
-                    >
-                      <option value="">+ Add a room…</option>
-                      {availableForPick.map((r: any) => (
-                        <option key={r.id} value={r.id}>
-                          {r.name} · {r.type || 'STANDARD'} · ₹{Number(r.base_rate || 0).toLocaleString('en-IN')}/night
-                        </option>
+                    <div className="space-y-1.5">
+                      {Array.from(
+                        (availableForPick as any[]).reduce((map: Map<string, any[]>, r: any) => {
+                          const t = String(r.type || 'STANDARD');
+                          if (!map.has(t)) map.set(t, []);
+                          map.get(t)!.push(r);
+                          return map;
+                        }, new Map<string, any[]>())
+                      ).map(([typeName, typeRooms]: [string, any[]]) => (
+                        <div key={typeName} className="flex items-center gap-3 bg-[#faf7f2] rounded-xl px-3 py-2.5 border border-[#e8dccf]">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-semibold text-[#1a1208]">{typeName}</p>
+                            <p className="text-[10px] text-[#9c8e85]">
+                              {typeRooms.length} room{typeRooms.length !== 1 ? 's' : ''} available
+                              {!matrixMode && ` · ₹${Number(typeRooms[0]?.base_rate || 0).toLocaleString('en-IN')}/night`}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const r = typeRooms[0];
+                              if (!r) return;
+                              const cap = Math.max(1, Number(r.capacity || 1));
+                              setGroupBookingDraft({
+                                ...draft,
+                                rooms: [...draft.rooms, {
+                                  room_id: r.id,
+                                  room_rate: matrixMode ? 0 : (Number(r.base_rate) || 0),
+                                  num_adults: cap,
+                                  extra_children_with_mattress: 0,
+                                  extra_children_no_mattress: 0,
+                                  num_guests: cap,
+                                }],
+                              });
+                            }}
+                            className="shrink-0 px-3 py-1.5 rounded-lg bg-[#cc5a16] text-white text-[11px] font-bold hover:bg-[#b04e13] transition-colors"
+                          >
+                            + Add
+                          </button>
+                        </div>
                       ))}
-                    </select>
+                    </div>
                   ) : (
                     <p className="text-[11px] text-[#c13b3b] italic px-1">
                       {ciStr && coStr ? 'No more rooms available for these dates.' : 'Pick dates first.'}

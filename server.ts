@@ -3782,6 +3782,31 @@ async function addLateCheckoutFolioEntry(
   await recomputeFolioTotals(tenantDb, folioId);
 }
 
+// Re-apply the tenant's CURRENT hotel GST slab rates to all hotel-tariff
+// folio entries just before settlement. This ensures that if the owner
+// updates GST settings after check-in (rate change, slab threshold change),
+// the checkout invoice uses the rate that is in effect TODAY, not the rate
+// that was current when the guest first checked in.
+// F_AND_B entries and PAYMENT entries are intentionally excluded — F&B GST
+// is governed by the restaurant/food tax structure, not the hotel room slab.
+async function reapplyHotelGstRates(tenantDb: DbInterface, restaurantId: string, folioId: string): Promise<void> {
+  const cfg = await loadHotelTaxConfig(restaurantId);
+  const entries: any[] = await tenantDb.query(
+    `SELECT id, amount, gst_rate, gst_amount FROM folio_entries
+     WHERE folio_id = ? AND entry_type NOT IN ('F_AND_B', 'PAYMENT')`,
+    [folioId]
+  );
+  for (const e of entries) {
+    const newRate = gstRateForTariff(Number(e.amount), cfg);
+    const newGst  = Math.round(Number(e.amount) * newRate / 100 * 100) / 100;
+    if (newRate === Number(e.gst_rate) && newGst === Number(e.gst_amount)) continue;
+    await tenantDb.run(
+      `UPDATE folio_entries SET gst_rate = ?, gst_amount = ? WHERE id = ?`,
+      [newRate, newGst, e.id]
+    );
+  }
+}
+
 async function settleFolioForBooking(
   restaurantId: string,
   bookingId: string,
@@ -3840,6 +3865,7 @@ async function settleFolioForBooking(
     if (effectiveDiscount > 0) {
       await tenantDb.run("UPDATE folios SET discount = ? WHERE id = ?", [effectiveDiscount, folio.id]);
     }
+    await reapplyHotelGstRates(tenantDb, restaurantId, folio.id);
     await recomputeFolioTotals(tenantDb, folio.id);
     await tenantDb.run("UPDATE folios SET status = 'settled', settled_at = ?, payment_method = ? WHERE id = ?",
       [new Date().toISOString(), paymentMethod, folio.id]);
