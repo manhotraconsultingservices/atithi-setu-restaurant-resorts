@@ -114,7 +114,7 @@ export async function generateFormCPdf(data: FormCData): Promise<Buffer> {
       // ── SECTION 3: Stay details ─────────────────────────────────────────
       y = drawSectionHeader(doc, 'C. Stay Details', LEFT, RIGHT, y);
       y = drawField(doc, 'Room / Unit', data.booking.room_name || '—', LEFT, RIGHT, y, 0.5);
-      y = drawField(doc, 'Date of Check-in at Hotel', fmt(data.booking.actual_checkin_at || data.booking.check_in_date), LEFT, RIGHT, y, 0.5, true);
+      y = drawField(doc, 'Date & Time of Check-in at Hotel', fmtWithTime(data.booking.actual_checkin_at) || fmt(data.booking.check_in_date), LEFT, RIGHT, y, 0.5, true);
       y = drawField(doc, 'Scheduled Check-out', fmt(data.booking.check_out_date), LEFT, RIGHT, y);
       y += 15;
 
@@ -185,6 +185,17 @@ function fmt(val: string | undefined): string {
     const d = new Date(val);
     if (isNaN(d.getTime())) return val;
     return d.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: '2-digit' });
+  } catch {
+    return val;
+  }
+}
+
+function fmtWithTime(val: string | undefined): string {
+  if (!val) return '—';
+  try {
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return val;
+    return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
   } catch {
     return val;
   }

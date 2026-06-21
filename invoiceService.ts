@@ -603,7 +603,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
             const raw = String(p.payment_type || 'PAYMENT');
             const tl = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
             const method = p.payment_method ? ` · ${p.payment_method}` : '';
-            const dt = p.recorded_at ? ` · ${String(p.recorded_at).slice(0, 10)}` : '';
+            const dt = p.recorded_at ? ` · ${String(p.recorded_at).slice(0, 16).replace('T', ' ')}` : '';
             const amt = Math.abs(Number(p.amount || 0));
             drawTotalRow(`${tl}${method}${dt}`, `${isRefund ? '+ ' : '− '}${m(amt)}`);
           }

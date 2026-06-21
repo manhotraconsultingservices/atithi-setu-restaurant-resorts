@@ -18810,7 +18810,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     r.id || '', r.service_name || '', r.category || '',
                     r.room_name || r.room_id || '', r.guest_name || '',
                     r.priority || '', r.status || '', r.assigned_role || '',
-                    String(r.requested_at || '').slice(0, 19),
+                    String(r.requested_at || '').slice(0, 16).replace('T', ' '),
                     (r.notes || '').replace(/\s+/g, ' ').slice(0, 200),
                   ])
                 )}
@@ -19491,7 +19491,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           b.extra_adults ?? 0,
                           fmtINR(b.room_rate), fmtINR(b.total_amount),
                           b.status || '', b.booking_source || '',
-                          String(b.created_at || '').slice(0, 10),
+                          String(b.created_at || '').slice(0, 16).replace('T', ' '),
                         ];
                       })
                     );
@@ -22162,7 +22162,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       f.status || '',
                       Number(f.subtotal || 0), Number(f.discount || 0),
                       Number(f.gst_amount || 0), Number(f.grand_total || 0),
-                      f.payment_method || '', String(f.settled_at || '').slice(0, 19),
+                      f.payment_method || '', String(f.settled_at || '').slice(0, 16).replace('T', ' '),
                     ])
                   )}
                   className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] hover:underline flex items-center gap-1"
@@ -37534,7 +37534,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
         (data.rows || []).map((r: any) => [r.guest_name, r.guest_phone, r.guest_email, r.stays, r.total_spend, String(r.last_visit || '').slice(0, 10)]));
     } else if (active === 'cancellations') {
       downloadCsv(`cancelled-reservations-${stamp}.csv`, ['Booking', 'Guest', 'Phone', 'Room', 'Check-in', 'Cancelled At', 'Cancelled By', 'Reason', 'Refund %', 'Refund Amount'],
-        (data.rows || []).map((r: any) => [r.id, r.guest_name, r.guest_phone, r.room_name, String(r.check_in_date || '').slice(0, 10), String(r.cancelled_at || '').slice(0, 10), r.cancelled_by_label || '', r.cancellation_reason, r.cancellation_refund_pct, r.cancellation_refund_amount]));
+        (data.rows || []).map((r: any) => [r.id, r.guest_name, r.guest_phone, r.room_name, String(r.check_in_date || '').slice(0, 10), String(r.cancelled_at || '').slice(0, 16).replace('T', ' '), r.cancelled_by_label || '', r.cancellation_reason, r.cancellation_refund_pct, r.cancellation_refund_amount]));
     } else if (active === 'purchase') {
       downloadCsv(`purchase-spend-${stamp}.csv`, ['Date', 'PO', 'Supplier', 'Status', 'Amount'],
         (data.rows || []).map((r: any) => [String(r.raised_at || '').slice(0, 10), r.id, r.supplier_name, r.status, r.amount]));
@@ -37601,7 +37601,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
         <div className="grid grid-cols-3 gap-2 mb-3">{kpi('Cancelled', data.count ?? 0)}{kpi('Lost revenue', cur(data.lost_revenue))}{kpi('Refunded', cur(data.refund_total))}</div>
         {rows.length === 0 ? empty() : (
           <table className="w-full text-xs"><thead><tr className="border-b border-[#e8dccf]">{['Guest', 'Room', 'Check-in', 'Cancelled', 'Cancelled by', 'Reason', 'Refund'].map(th)}</tr></thead>
-            <tbody>{rows.map((r: any) => (<tr key={r.id} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3 font-semibold">{r.guest_name}</td><td className="py-1.5 px-3">{r.room_name || '—'}</td><td className="py-1.5 px-3">{String(r.check_in_date || '').slice(0, 10)}</td><td className="py-1.5 px-3">{String(r.cancelled_at || '').slice(0, 10) || '—'}</td><td className="py-1.5 px-3 whitespace-nowrap">{r.cancelled_by_label || '—'}</td><td className="py-1.5 px-3 text-[#6b5d52]">{r.cancellation_reason || '—'}</td><td className="py-1.5 px-3 font-bold">{cur(r.cancellation_refund_amount)}</td></tr>))}</tbody></table>
+            <tbody>{rows.map((r: any) => (<tr key={r.id} className="border-b border-[#f1ece3]"><td className="py-1.5 px-3 font-semibold">{r.guest_name}</td><td className="py-1.5 px-3">{r.room_name || '—'}</td><td className="py-1.5 px-3">{String(r.check_in_date || '').slice(0, 10)}</td><td className="py-1.5 px-3 whitespace-nowrap">{String(r.cancelled_at || '').slice(0, 16).replace('T', ' ') || '—'}</td><td className="py-1.5 px-3 whitespace-nowrap">{r.cancelled_by_label || '—'}</td><td className="py-1.5 px-3 text-[#6b5d52]">{r.cancellation_reason || '—'}</td><td className="py-1.5 px-3 font-bold">{cur(r.cancellation_refund_amount)}</td></tr>))}</tbody></table>
         )}
       </>);
     }

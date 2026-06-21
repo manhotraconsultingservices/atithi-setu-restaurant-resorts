@@ -402,7 +402,7 @@ export async function generateBoutiqueInvoicePdf(data: InvoiceData): Promise<Buf
             const raw = String(p.payment_type || 'PAYMENT');
             const tl = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
             const method = p.payment_method ? ` · ${p.payment_method}` : '';
-            const dt = p.recorded_at ? ` · ${String(p.recorded_at).slice(0, 10)}` : '';
+            const dt = p.recorded_at ? ` · ${String(p.recorded_at).slice(0, 16).replace('T', ' ')}` : '';
             const amt = Math.abs(Number(p.amount || 0));
             drawMiniRow(`${tl}${method}${dt}`, `${isRefund ? '+ ' : '− '}${money(data.tenant, amt)}`);
           }
