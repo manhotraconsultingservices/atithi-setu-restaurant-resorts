@@ -25336,7 +25336,7 @@ ${data.tenant.name}`;
       });
     } catch (err: any) {
       console.error("group booking create error:", err);
-      res.status(500).json({ error: "Failed to create group booking" });
+      res.status(500).json({ error: "Failed to create group booking", detail: String(err?.message || err) });
     }
   });
 
