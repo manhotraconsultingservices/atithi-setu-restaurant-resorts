@@ -12423,13 +12423,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
       {/* ── MOBILE: top bar with hamburger (hidden on md+) ── */}
       <div className="md:hidden flex items-center justify-between bg-white border border-[#cc5a16]/10 rounded-2xl px-4 py-3 shadow-sm mb-4">
-        <span className="text-sm font-bold text-[#1a1208]">
+        <span className="text-sm font-bold text-[#1a1208] truncate min-w-0 flex-1 mr-2">
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
             HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
-            SPA_CALENDAR: 'Appointment Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages & Memberships', SPA_REPORTS: 'Spa Reports', SPA_INVENTORY: 'Spa Inventory', SPA_SETTINGS: 'Public Page Settings',
+            SPA_CALENDAR: 'Appt. Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages', SPA_REPORTS: 'Spa Reports', SPA_INVENTORY: 'Spa Inventory', SPA_SETTINGS: 'Spa Page Settings',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
             SETTINGS: 'Brand & Settings', STAFF_ACCESS: 'Staff Access', NOTIFICATIONS: 'Notifications', SUBSCRIPTION: 'Subscription'
           } as Record<string, string>)[activeTab]}

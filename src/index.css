@@ -33,10 +33,17 @@
   --radius-xl: 2rem;     /* 32px — hero, landing */
 }
 
-body {
+html, body {
   @apply font-sans antialiased;
   color: var(--color-text-body, #3d3128);
   background-color: #faf7f2; /* warm ivory — Heritage Premium page */
+  overflow-x: hidden; /* prevent horizontal bleed on mobile */
+}
+
+/* PWA safe-area insets for notched iPhones (X/11/12/13/14/15) */
+body {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 /* Heading defaults — font only, no color (Tailwind text-[...] classes own color per-element) */
