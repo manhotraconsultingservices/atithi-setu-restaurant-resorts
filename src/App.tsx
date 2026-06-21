@@ -26881,9 +26881,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <div key={idx} className="bg-[#faf7f2] rounded-xl px-3 py-2.5 space-y-2">
                             <div className="flex items-start gap-2">
                               <div className="flex-1 min-w-0">
-                                <p className="text-sm font-semibold text-[#1a1208] truncate">{r?.name || sel.room_id}</p>
+                                <p className="text-sm font-semibold text-[#1a1208] truncate">{sel.type_name || r?.name || sel.room_id}</p>
                                 <p className="text-[10px] text-[#9c8e85]">
-                                  {r?.room_number ? `#${r.room_number} · ` : ''}cap {cap} · {nights}n = <span className="font-mono text-[#cc5a16] font-semibold">₹{groupRowTotal(sel).toLocaleString('en-IN')}</span>
+                                  Unassigned · cap {cap} · {nights}n = <span className="font-mono text-[#cc5a16] font-semibold">₹{groupRowTotal(sel).toLocaleString('en-IN')}</span>
                                 </p>
                               </div>
                               <button
