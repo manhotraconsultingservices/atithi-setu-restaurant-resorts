@@ -7888,6 +7888,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [groupsList, setGroupsList] = useState<any[] | null>(null);
   const [groupsPanelOpen, setGroupsPanelOpen] = useState(false);
   const [groupsLoading, setGroupsLoading] = useState(false);
+  // MASTER-BILLING: slide-over drawer showing the master folio for a group.
+  const [masterFolioGroupId, setMasterFolioGroupId] = useState<string | null>(null);
+  const [masterFolioData, setMasterFolioData] = useState<any | null>(null);
+  const [masterFolioLoading, setMasterFolioLoading] = useState(false);
+  const [masterFolioAddDesc, setMasterFolioAddDesc] = useState('');
+  const [masterFolioAddAmt, setMasterFolioAddAmt] = useState('');
+  const [masterFolioAddGst, setMasterFolioAddGst] = useState('0');
+  const [masterFolioAddQty, setMasterFolioAddQty] = useState('1');
+  const [masterFolioAddType, setMasterFolioAddType] = useState('SERVICE');
+  const [masterFolioSaving, setMasterFolioSaving] = useState(false);
   // REQ 5: booking-history search/filter state. Receptionists need to
   // look up a returning guest by phone/name (mid-call) or pull a past
   // booking by invoice number for an enquiry.
@@ -19148,6 +19158,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   }}
                                   className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50"
                                 >📧 Email</button>
+                                <button
+                                  onClick={async () => {
+                                    setMasterFolioGroupId(g.id);
+                                    setMasterFolioData(null);
+                                    setMasterFolioLoading(true);
+                                    setMasterFolioAddDesc(''); setMasterFolioAddAmt(''); setMasterFolioAddGst('0'); setMasterFolioAddQty('1'); setMasterFolioAddType('SERVICE');
+                                    try {
+                                      const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/master-folio`, { headers: { Authorization: `Bearer ${token}` } });
+                                      const d = await r.json();
+                                      if (!r.ok) throw new Error(d?.error || 'Load failed');
+                                      setMasterFolioData(d);
+                                    } catch (err: any) { alert(err.message); setMasterFolioGroupId(null); }
+                                    finally { setMasterFolioLoading(false); }
+                                  }}
+                                  className="px-2 py-1 rounded-lg border border-emerald-400 text-emerald-700 text-[10px] font-bold hover:bg-emerald-50"
+                                >🏦 Master Acct</button>
                               </div>
                             </td>
                           </tr>
@@ -19159,6 +19185,227 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             )}
           </details>
+
+          {/* ── MASTER BILLING ACCOUNT DRAWER ────────────────────────────── */}
+          {masterFolioGroupId && (
+            <div className="fixed inset-0 z-50 flex">
+              {/* Backdrop */}
+              <div className="flex-1 bg-black/40" onClick={() => setMasterFolioGroupId(null)} />
+              {/* Slide-over panel */}
+              <div className="w-full max-w-2xl bg-white flex flex-col shadow-2xl overflow-hidden">
+                {/* Header */}
+                <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between shrink-0 bg-gradient-to-r from-emerald-700 to-emerald-900">
+                  <div>
+                    <p className="text-white font-bold text-base">Master Billing Account</p>
+                    {masterFolioData?.group && (
+                      <p className="text-emerald-200 text-xs mt-0.5">{masterFolioData.group.name} · {masterFolioData.group.check_in_date} → {masterFolioData.group.check_out_date}</p>
+                    )}
+                  </div>
+                  <button onClick={() => setMasterFolioGroupId(null)} className="text-white/70 hover:text-white text-xl font-bold px-2">✕</button>
+                </div>
+
+                {masterFolioLoading ? (
+                  <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">Loading…</div>
+                ) : masterFolioData ? (
+                  <div className="flex-1 overflow-y-auto">
+
+                    {/* Room subtotals */}
+                    <div className="px-6 pt-5 pb-3">
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Room Folios</p>
+                      {masterFolioData.bookings?.length === 0 ? (
+                        <p className="text-xs text-gray-400 italic">No room bookings in this group.</p>
+                      ) : (
+                        <div className="rounded-xl border border-gray-200 overflow-hidden">
+                          <table className="w-full text-xs">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="text-left px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">Room</th>
+                                <th className="text-left px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">Guest</th>
+                                <th className="text-center px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">Status</th>
+                                <th className="text-right px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">Folio Total</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                              {masterFolioData.bookings.map((b: any) => (
+                                <tr key={b.id} className="hover:bg-gray-50">
+                                  <td className="px-3 py-2 font-semibold">{b.room_name || b.room_id}{b.room_number ? ` #${b.room_number}` : ''}</td>
+                                  <td className="px-3 py-2 text-gray-600">{b.guest_name || '—'}</td>
+                                  <td className="px-3 py-2 text-center">
+                                    <span className={cn('text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded',
+                                      b.status === 'CHECKED_IN' ? 'bg-emerald-100 text-emerald-700' :
+                                      b.status === 'CHECKED_OUT' ? 'bg-gray-100 text-gray-600' :
+                                      'bg-amber-100 text-amber-700')}>{b.status}</span>
+                                  </td>
+                                  <td className="px-3 py-2 text-right font-mono">
+                                    {b.folio_grand_total != null ? `₹${Number(b.folio_grand_total).toLocaleString('en-IN')}` : '—'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Master folio charges */}
+                    <div className="px-6 pb-3 border-t border-dashed border-gray-200 pt-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-700">Master Account Charges</p>
+                        <p className="text-xs text-gray-400">{masterFolioData.entries?.length || 0} item{(masterFolioData.entries?.length || 0) !== 1 ? 's' : ''}</p>
+                      </div>
+                      {(!masterFolioData.entries || masterFolioData.entries.length === 0) ? (
+                        <p className="text-xs text-gray-400 italic px-1 mb-3">No master account charges yet. Add banquet, AV, or event charges below.</p>
+                      ) : (
+                        <div className="rounded-xl border border-emerald-200 overflow-hidden mb-3">
+                          <table className="w-full text-xs">
+                            <thead className="bg-emerald-50">
+                              <tr>
+                                <th className="text-left px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-emerald-700">Description</th>
+                                <th className="text-center px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-emerald-700">Qty</th>
+                                <th className="text-right px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-emerald-700">Rate</th>
+                                <th className="text-right px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-emerald-700">GST%</th>
+                                <th className="text-right px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-emerald-700">Total</th>
+                                <th className="px-2 py-2"></th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-emerald-100">
+                              {masterFolioData.entries.map((e: any) => (
+                                <tr key={e.id} className="hover:bg-emerald-50/50">
+                                  <td className="px-3 py-2">{e.description}</td>
+                                  <td className="px-3 py-2 text-center">{e.quantity}</td>
+                                  <td className="px-3 py-2 text-right font-mono">₹{Number(e.unit_price).toLocaleString('en-IN')}</td>
+                                  <td className="px-3 py-2 text-right">{Number(e.gst_rate) > 0 ? `${e.gst_rate}%` : '—'}</td>
+                                  <td className="px-3 py-2 text-right font-mono font-semibold">₹{Number(e.amount + (e.gst_amount || 0)).toLocaleString('en-IN')}</td>
+                                  <td className="px-2 py-2 text-right">
+                                    <button
+                                      onClick={async () => {
+                                        if (!confirm(`Delete "${e.description}"?`)) return;
+                                        try {
+                                          const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${masterFolioGroupId}/master-folio/entries/${e.id}`, {
+                                            method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
+                                          });
+                                          const d = await r.json();
+                                          if (!r.ok) throw new Error(d?.error || 'Delete failed');
+                                          setMasterFolioData((prev: any) => ({
+                                            ...prev,
+                                            entries: prev.entries.filter((x: any) => x.id !== e.id),
+                                            folio: { ...prev.folio, subtotal: d.subtotal, gst_amount: d.gst, grand_total: d.grand_total },
+                                          }));
+                                        } catch (err: any) { alert(err.message); }
+                                      }}
+                                      className="text-red-500 hover:text-red-700 text-[10px] font-bold px-1"
+                                    >✕</button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+
+                      {/* Add charge form */}
+                      <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-200">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 mb-2">Add Charge</p>
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                          <div className="col-span-2">
+                            <input
+                              placeholder="Description (e.g. Banquet hall hire, AV equipment)"
+                              value={masterFolioAddDesc}
+                              onChange={e => setMasterFolioAddDesc(e.target.value)}
+                              className="w-full bg-white border border-emerald-200 rounded-lg px-3 py-2 text-xs outline-none focus:ring-2 ring-emerald-300/40"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase tracking-widest">Amount (₹)</label>
+                            <input
+                              type="number" min={1} placeholder="0"
+                              value={masterFolioAddAmt}
+                              onChange={e => setMasterFolioAddAmt(e.target.value)}
+                              className="w-full bg-white border border-emerald-200 rounded-lg px-3 py-1.5 text-xs outline-none focus:ring-2 ring-emerald-300/40"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase tracking-widest">Qty</label>
+                            <input
+                              type="number" min={1} placeholder="1"
+                              value={masterFolioAddQty}
+                              onChange={e => setMasterFolioAddQty(e.target.value)}
+                              className="w-full bg-white border border-emerald-200 rounded-lg px-3 py-1.5 text-xs outline-none focus:ring-2 ring-emerald-300/40"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase tracking-widest">GST %</label>
+                            <select value={masterFolioAddGst} onChange={e => setMasterFolioAddGst(e.target.value)}
+                              className="w-full bg-white border border-emerald-200 rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-2 ring-emerald-300/40">
+                              {[0, 5, 12, 18, 28].map(r => <option key={r} value={r}>{r}%</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase tracking-widest">Type</label>
+                            <select value={masterFolioAddType} onChange={e => setMasterFolioAddType(e.target.value)}
+                              className="w-full bg-white border border-emerald-200 rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-2 ring-emerald-300/40">
+                              {['SERVICE', 'FOOD', 'BEVERAGE', 'ROOM_RENT', 'TRANSPORT', 'OTHER'].map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          </div>
+                        </div>
+                        <button
+                          disabled={masterFolioSaving || !masterFolioAddDesc.trim() || !masterFolioAddAmt}
+                          onClick={async () => {
+                            if (!masterFolioAddDesc.trim() || !masterFolioAddAmt) return;
+                            setMasterFolioSaving(true);
+                            try {
+                              const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${masterFolioGroupId}/master-folio/charge`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                body: JSON.stringify({ description: masterFolioAddDesc.trim(), amount: Number(masterFolioAddAmt), quantity: Number(masterFolioAddQty) || 1, gst_rate: Number(masterFolioAddGst), entry_type: masterFolioAddType }),
+                              });
+                              const d = await r.json();
+                              if (!r.ok) throw new Error(d?.error || 'Failed to add charge');
+                              // Refetch full data to get entry IDs etc.
+                              const r2 = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${masterFolioGroupId}/master-folio`, { headers: { Authorization: `Bearer ${token}` } });
+                              const d2 = await r2.json();
+                              if (r2.ok) setMasterFolioData(d2);
+                              setMasterFolioAddDesc(''); setMasterFolioAddAmt(''); setMasterFolioAddQty('1');
+                            } catch (err: any) { alert(err.message); }
+                            finally { setMasterFolioSaving(false); }
+                          }}
+                          className={cn('w-full py-2 rounded-xl text-xs font-bold transition-colors',
+                            masterFolioSaving || !masterFolioAddDesc.trim() || !masterFolioAddAmt
+                              ? 'bg-emerald-200 text-emerald-600 cursor-not-allowed'
+                              : 'bg-emerald-700 text-white hover:bg-emerald-800')}
+                        >
+                          {masterFolioSaving ? 'Adding…' : '+ Add to Master Account'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Grand total summary */}
+                    <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 shrink-0">
+                      {(() => {
+                        const roomTotal = masterFolioData.bookings?.reduce((s: number, b: any) => s + Number(b.folio_grand_total || 0), 0) || 0;
+                        const masterTotal = Number(masterFolioData.folio?.grand_total || 0);
+                        const grandTotal = roomTotal + masterTotal;
+                        return (
+                          <div className="flex items-end justify-between">
+                            <div className="space-y-0.5 text-xs text-gray-500">
+                              <div className="flex gap-6"><span>Room folios</span><span className="font-mono text-gray-700">₹{roomTotal.toLocaleString('en-IN')}</span></div>
+                              <div className="flex gap-4"><span>Master account</span><span className="font-mono text-emerald-700 font-semibold">₹{masterTotal.toLocaleString('en-IN')}</span></div>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[10px] uppercase tracking-widest text-gray-400">Grand Total</p>
+                              <p className="text-2xl font-bold font-mono text-gray-900">₹{grandTotal.toLocaleString('en-IN')}</p>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+          {/* ── END MASTER BILLING ACCOUNT DRAWER ────────────────────────── */}
 
           {/* Phase 2 — Room Assignment board: reassign FLOATING upcoming
               bookings to a different room (or lock one) before arrival. */}

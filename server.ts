@@ -505,6 +505,11 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- GROUP-DISCOUNT (Jun 2026): group-level discount (PERCENT or flat INR).
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS discount_type  TEXT;
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS discount_value REAL DEFAULT 0;
+    -- MASTER-BILLING (Jun 2026): links each group to a single master folio that
+    -- accumulates ad-hoc group charges (banquet, AV, meeting-room hire, etc.)
+    -- separate from individual room folios.
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS master_folio_id TEXT;
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS group_id TEXT;
 
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
@@ -29424,6 +29429,23 @@ ${data.tenant.name}`;
         }
       }
 
+      // MASTER-BILLING: settle the master folio if it exists and has charges.
+      const masterFolioRow: any = await tenantDb.get(
+        "SELECT f.* FROM folios f WHERE f.group_id = ? AND f.status = 'open' LIMIT 1",
+        [req.params.groupId]
+      ).catch(() => null);
+      if (masterFolioRow && Number(masterFolioRow.grand_total || 0) > 0) {
+        try {
+          await tenantDb.run(
+            "UPDATE folios SET status = 'settled', payment_method = ?, settled_at = ? WHERE id = ?",
+            [payment_method || 'CASH', now, masterFolioRow.id]
+          );
+          totalGrand += Number(masterFolioRow.grand_total || 0);
+        } catch (mfErr) {
+          console.warn('[group-checkout] failed to settle master folio:', mfErr);
+        }
+      }
+
       // Stamp the consolidated invoice number on the group ONCE. We use
       // COALESCE so re-running this endpoint (after fixing a partial
       // failure) preserves the original number — keeping audit stable.
@@ -29492,6 +29514,119 @@ ${data.tenant.name}`;
       res.status(500).json({ error: "Failed to fetch booking groups" });
     }
   });
+
+  // ── MASTER-BILLING ──────────────────────────────────────────────────────────
+  // Shared helper: idempotently create/return the master folio for a group.
+  const ensureGroupMasterFolio = async (restaurantId: string, groupId: string): Promise<string> => {
+    const db = await getTenantDb(restaurantId);
+    const grp: any = await db.get("SELECT master_folio_id FROM room_booking_groups WHERE id = ?", [groupId]);
+    if (!grp) throw new Error(`Group ${groupId} not found`);
+    if (grp.master_folio_id) return String(grp.master_folio_id);
+    const folioId = `GF-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    await db.run(
+      "INSERT INTO folios (id, status, group_id, folio_kind, subtotal, gst_amount, grand_total) VALUES (?, 'open', ?, 'HOTEL', 0, 0, 0)",
+      [folioId, groupId]
+    );
+    await db.run("UPDATE room_booking_groups SET master_folio_id = ? WHERE id = ?", [folioId, groupId]);
+    return folioId;
+  };
+
+  // GET  — master folio state: header + line items + per-room subtotals.
+  app.get("/api/restaurant/:id/hotel/booking-groups/:groupId/master-folio", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId } = req.params;
+      const db = await getTenantDb(req.params.id);
+      const grp: any = await db.get("SELECT * FROM room_booking_groups WHERE id = ?", [groupId]);
+      if (!grp) return res.status(404).json({ error: "Group not found" });
+      const folioId = await ensureGroupMasterFolio(req.params.id, groupId);
+      const folio: any = await db.get("SELECT * FROM folios WHERE id = ?", [folioId]);
+      const entries: any[] = await db.query("SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC", [folioId]);
+      // Room-level summaries: each booking + its folio subtotal
+      const bookings: any[] = await db.query(
+        `SELECT b.id, b.room_id, b.guest_name, b.status, b.check_in_date, b.check_out_date,
+                r.name AS room_name, r.room_number,
+                f.id AS folio_id, f.subtotal AS folio_subtotal, f.grand_total AS folio_grand_total,
+                f.status AS folio_status
+           FROM room_bookings b
+           LEFT JOIN rooms r ON r.id = b.room_id
+           LEFT JOIN folios f ON f.booking_id = b.id AND (f.doc_type IS NULL OR f.doc_type = 'INVOICE')
+          WHERE b.group_id = ?
+          ORDER BY r.name`,
+        [groupId]
+      );
+      const masterSubtotal = entries.reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+      const masterGst     = entries.reduce((s: number, e: any) => s + Number(e.gst_amount || 0), 0);
+      // Recompute and persist folio totals so the settlement step sees fresh numbers.
+      await db.run(
+        "UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?",
+        [masterSubtotal, masterGst, masterSubtotal + masterGst, folioId]
+      );
+      res.json({ group: grp, folio: { ...folio, subtotal: masterSubtotal, gst_amount: masterGst, grand_total: masterSubtotal + masterGst }, entries, bookings });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to load master folio" });
+    }
+  });
+
+  // POST — add a charge to the master folio.
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/master-folio/charge", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId } = req.params;
+      const { description, amount, gst_rate, entry_type, quantity } = req.body || {};
+      if (!description || !description.trim()) return res.status(400).json({ error: "Description is required" });
+      const amt = Number(amount);
+      if (isNaN(amt) || amt <= 0) return res.status(400).json({ error: "Amount must be a positive number" });
+      const db = await getTenantDb(req.params.id);
+      const grp: any = await db.get("SELECT id FROM room_booking_groups WHERE id = ?", [groupId]);
+      if (!grp) return res.status(404).json({ error: "Group not found" });
+      const folioId = await ensureGroupMasterFolio(req.params.id, groupId);
+      const qty    = Math.max(1, Number(quantity) || 1);
+      const rate   = Number(gst_rate) || 0;
+      const lineAmt = amt * qty;
+      const gstAmt  = lineAmt * (rate / 100);
+      const entryId = `GFE-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [entryId, folioId, entry_type || 'SERVICE', String(description).trim(), qty, amt, lineAmt, rate, gstAmt]
+      );
+      // Recompute folio totals.
+      const allEntries: any[] = await db.query("SELECT amount, gst_amount FROM folio_entries WHERE folio_id = ?", [folioId]);
+      const newSub = allEntries.reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+      const newGst = allEntries.reduce((s: number, e: any) => s + Number(e.gst_amount || 0), 0);
+      await db.run("UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?", [newSub, newGst, newSub + newGst, folioId]);
+      res.json({ ok: true, entry_id: entryId, subtotal: newSub, gst: newGst, grand_total: newSub + newGst });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to add charge" });
+    }
+  });
+
+  // DELETE — remove a charge from the master folio.
+  app.delete("/api/restaurant/:id/hotel/booking-groups/:groupId/master-folio/entries/:entryId", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId, entryId } = req.params;
+      const db = await getTenantDb(req.params.id);
+      // Verify entry belongs to this group's master folio.
+      const grp: any = await db.get("SELECT master_folio_id FROM room_booking_groups WHERE id = ?", [groupId]);
+      if (!grp?.master_folio_id) return res.status(404).json({ error: "No master folio found" });
+      const entry: any = await db.get("SELECT id FROM folio_entries WHERE id = ? AND folio_id = ?", [entryId, grp.master_folio_id]);
+      if (!entry) return res.status(404).json({ error: "Entry not found" });
+      await db.run("DELETE FROM folio_entries WHERE id = ?", [entryId]);
+      const allEntries: any[] = await db.query("SELECT amount, gst_amount FROM folio_entries WHERE folio_id = ?", [grp.master_folio_id]);
+      const newSub = allEntries.reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+      const newGst = allEntries.reduce((s: number, e: any) => s + Number(e.gst_amount || 0), 0);
+      await db.run("UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?", [newSub, newGst, newSub + newGst, grp.master_folio_id]);
+      res.json({ ok: true, subtotal: newSub, gst: newGst, grand_total: newSub + newGst });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to delete entry" });
+    }
+  });
+  // ── END MASTER-BILLING ───────────────────────────────────────────────────────
 
   app.patch("/api/restaurant/:id/hotel/bookings/:bookingId", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
@@ -32066,6 +32201,30 @@ ${data.tenant.name}`;
         for (const e of entries) {
           aggEntries.push({
             description: `[${b.room_name || b.room_id}] ${e.description}`,
+            entryType:   e.entry_type,
+            quantity:    Number(e.quantity || 1),
+            unitPrice:   Number(e.unit_price || 0),
+            amount:      Number(e.amount || 0),
+            gstRate:     Number(e.gst_rate || 0),
+            gstAmount:   Number(e.gst_amount || 0),
+          });
+        }
+      }
+    }
+    // MASTER-BILLING: append master folio line items as a distinct section.
+    if (group?.master_folio_id) {
+      const mfEntries: any[] = await tenantDb.query(
+        "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
+        [group.master_folio_id]
+      ).catch(() => []);
+      const mf: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [group.master_folio_id]).catch(() => null);
+      if (mfEntries.length > 0) {
+        aggSubtotal += Number(mf?.subtotal || 0);
+        aggGst      += Number(mf?.gst_amount || 0);
+        aggGrand    += Number(mf?.grand_total || 0);
+        for (const e of mfEntries) {
+          aggEntries.push({
+            description: `[Master Acct] ${e.description}`,
             entryType:   e.entry_type,
             quantity:    Number(e.quantity || 1),
             unitPrice:   Number(e.unit_price || 0),
