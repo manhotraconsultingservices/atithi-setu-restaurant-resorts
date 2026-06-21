@@ -7897,6 +7897,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [masterFolioAddGst, setMasterFolioAddGst] = useState('0');
   const [masterFolioAddQty, setMasterFolioAddQty] = useState('1');
   const [masterFolioAddType, setMasterFolioAddType] = useState('SERVICE');
+  const [masterFolioAddCentre, setMasterFolioAddCentre] = useState('MISC');
   const [masterFolioSaving, setMasterFolioSaving] = useState(false);
   // REQ 5: booking-history search/filter state. Receptionists need to
   // look up a returning guest by phone/name (mid-call) or pull a past
@@ -19271,7 +19272,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <tbody className="divide-y divide-emerald-100">
                               {masterFolioData.entries.map((e: any) => (
                                 <tr key={e.id} className="hover:bg-emerald-50/50">
-                                  <td className="px-3 py-2">{e.description}</td>
+                                  <td className="px-3 py-2">
+                                    <span>{e.description}</span>
+                                    {e.cost_centre && (
+                                      <span className="ml-1.5 inline-block px-1.5 py-0.5 rounded text-[8px] font-bold bg-teal-100 text-teal-700 uppercase tracking-wide">{e.cost_centre}</span>
+                                    )}
+                                    {e.transferred_from_folio_id && (
+                                      <span className="ml-1 inline-block px-1.5 py-0.5 rounded text-[8px] font-bold bg-blue-100 text-blue-700">transferred</span>
+                                    )}
+                                  </td>
                                   <td className="px-3 py-2 text-center">{e.quantity}</td>
                                   <td className="px-3 py-2 text-right font-mono">₹{Number(e.unit_price).toLocaleString('en-IN')}</td>
                                   <td className="px-3 py-2 text-right">{Number(e.gst_rate) > 0 ? `${e.gst_rate}%` : '—'}</td>
@@ -19347,6 +19356,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               {['SERVICE', 'FOOD', 'BEVERAGE', 'ROOM_RENT', 'TRANSPORT', 'OTHER'].map(t => <option key={t} value={t}>{t}</option>)}
                             </select>
                           </div>
+                          <div className="col-span-2">
+                            <label className="block text-[9px] font-bold text-emerald-700 mb-0.5 uppercase tracking-widest">Cost Centre</label>
+                            <select value={masterFolioAddCentre} onChange={e => setMasterFolioAddCentre(e.target.value)}
+                              className="w-full bg-white border border-emerald-200 rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-2 ring-emerald-300/40">
+                              {['ROOMS', 'F&B', 'AV', 'TRANSPORT', 'BANQUET', 'MISC'].map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                          </div>
                         </div>
                         <button
                           disabled={masterFolioSaving || !masterFolioAddDesc.trim() || !masterFolioAddAmt}
@@ -19357,7 +19373,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${masterFolioGroupId}/master-folio/charge`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                body: JSON.stringify({ description: masterFolioAddDesc.trim(), amount: Number(masterFolioAddAmt), quantity: Number(masterFolioAddQty) || 1, gst_rate: Number(masterFolioAddGst), entry_type: masterFolioAddType }),
+                                body: JSON.stringify({ description: masterFolioAddDesc.trim(), amount: Number(masterFolioAddAmt), quantity: Number(masterFolioAddQty) || 1, gst_rate: Number(masterFolioAddGst), entry_type: masterFolioAddType, cost_centre: masterFolioAddCentre }),
                               });
                               const d = await r.json();
                               if (!r.ok) throw new Error(d?.error || 'Failed to add charge');
@@ -19377,6 +19393,55 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           {masterFolioSaving ? 'Adding…' : '+ Add to Master Account'}
                         </button>
                       </div>
+
+                      {/* Transfer from room — move individual room folio lines to master */}
+                      {masterFolioData.bookings?.some((b: any) => masterFolioData.roomEntries?.[b.id]?.length > 0) && (
+                        <div className="px-6 pb-4 border-t border-dashed border-gray-200 pt-4">
+                          <p className="text-[11px] font-bold uppercase tracking-widest text-blue-700 mb-2">Transfer Charge from Room</p>
+                          <p className="text-[10px] text-gray-400 mb-3">Move an individual room-folio line to the master account (e.g. banquet billed to wrong folio).</p>
+                          {masterFolioData.bookings.map((b: any) => {
+                            const rEntries: any[] = (masterFolioData.roomEntries?.[b.id] || []).filter((e: any) => !e.transferred_from_folio_id);
+                            if (rEntries.length === 0) return null;
+                            return (
+                              <div key={b.id} className="mb-3">
+                                <p className="text-[10px] font-semibold text-gray-600 mb-1">{b.room_name || b.room_id} — {b.guest_name}</p>
+                                <div className="rounded-lg border border-blue-100 overflow-hidden">
+                                  <table className="w-full text-xs">
+                                    <tbody className="divide-y divide-blue-50">
+                                      {rEntries.map((e: any) => (
+                                        <tr key={e.id} className="hover:bg-blue-50/40">
+                                          <td className="px-3 py-1.5 text-gray-700">{e.description}</td>
+                                          <td className="px-3 py-1.5 text-right font-mono text-gray-600">₹{Number((e.amount || 0) + (e.gst_amount || 0)).toLocaleString('en-IN')}</td>
+                                          <td className="px-2 py-1.5 text-right">
+                                            <button
+                                              onClick={async () => {
+                                                try {
+                                                  const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${masterFolioGroupId}/master-folio/transfer`, {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                                    body: JSON.stringify({ folio_entry_id: e.id }),
+                                                  });
+                                                  const d = await r.json();
+                                                  if (!r.ok) throw new Error(d?.error || 'Transfer failed');
+                                                  // Refetch full master folio data.
+                                                  const r2 = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${masterFolioGroupId}/master-folio`, { headers: { Authorization: `Bearer ${token}` } });
+                                                  const d2 = await r2.json();
+                                                  if (r2.ok) setMasterFolioData(d2);
+                                                } catch (err: any) { alert(err.message); }
+                                              }}
+                                              className="text-[9px] font-bold text-blue-600 hover:text-blue-800 border border-blue-200 rounded px-1.5 py-0.5 hover:bg-blue-50"
+                                            >→ Master</button>
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
 
                     {/* Grand total summary */}

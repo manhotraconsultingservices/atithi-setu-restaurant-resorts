@@ -510,6 +510,10 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- separate from individual room folios.
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS master_folio_id TEXT;
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS group_id TEXT;
+    -- COST-CENTRE + TRANSFER (Jun 2026): cost_centre tags master-account charges
+    -- for per-department invoice subtotals; transferred_from_folio_id tracks origin.
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS cost_centre TEXT;
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS transferred_from_folio_id TEXT;
 
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
@@ -29543,7 +29547,7 @@ ${data.tenant.name}`;
       const folioId = await ensureGroupMasterFolio(req.params.id, groupId);
       const folio: any = await db.get("SELECT * FROM folios WHERE id = ?", [folioId]);
       const entries: any[] = await db.query("SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC", [folioId]);
-      // Room-level summaries: each booking + its folio subtotal
+      // Room-level summaries: each booking + its folio subtotal + transferable entries
       const bookings: any[] = await db.query(
         `SELECT b.id, b.room_id, b.guest_name, b.status, b.check_in_date, b.check_out_date,
                 r.name AS room_name, r.room_number,
@@ -29556,6 +29560,17 @@ ${data.tenant.name}`;
           ORDER BY r.name`,
         [groupId]
       );
+      // Fetch folio entries for each room so the UI can show individual charges
+      // available for transfer to the master account.
+      const roomEntries: Record<string, any[]> = {};
+      for (const b of bookings) {
+        if (b.folio_id) {
+          roomEntries[b.id] = await db.query(
+            "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
+            [b.folio_id]
+          );
+        }
+      }
       const masterSubtotal = entries.reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
       const masterGst     = entries.reduce((s: number, e: any) => s + Number(e.gst_amount || 0), 0);
       // Recompute and persist folio totals so the settlement step sees fresh numbers.
@@ -29563,7 +29578,7 @@ ${data.tenant.name}`;
         "UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?",
         [masterSubtotal, masterGst, masterSubtotal + masterGst, folioId]
       );
-      res.json({ group: grp, folio: { ...folio, subtotal: masterSubtotal, gst_amount: masterGst, grand_total: masterSubtotal + masterGst }, entries, bookings });
+      res.json({ group: grp, folio: { ...folio, subtotal: masterSubtotal, gst_amount: masterGst, grand_total: masterSubtotal + masterGst }, entries, bookings, roomEntries });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to load master folio" });
     }
@@ -29575,7 +29590,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const { groupId } = req.params;
-      const { description, amount, gst_rate, entry_type, quantity } = req.body || {};
+      const { description, amount, gst_rate, entry_type, quantity, cost_centre } = req.body || {};
       if (!description || !description.trim()) return res.status(400).json({ error: "Description is required" });
       const amt = Number(amount);
       if (isNaN(amt) || amt <= 0) return res.status(400).json({ error: "Amount must be a positive number" });
@@ -29588,10 +29603,11 @@ ${data.tenant.name}`;
       const lineAmt = amt * qty;
       const gstAmt  = lineAmt * (rate / 100);
       const entryId = `GFE-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const cc = cost_centre ? String(cost_centre).trim().toUpperCase() : 'MISC';
       await db.run(
-        `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [entryId, folioId, entry_type || 'SERVICE', String(description).trim(), qty, amt, lineAmt, rate, gstAmt]
+        `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, cost_centre)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [entryId, folioId, entry_type || 'SERVICE', String(description).trim(), qty, amt, lineAmt, rate, gstAmt, cc]
       );
       // Recompute folio totals.
       const allEntries: any[] = await db.query("SELECT amount, gst_amount FROM folio_entries WHERE folio_id = ?", [folioId]);
@@ -29624,6 +29640,47 @@ ${data.tenant.name}`;
       res.json({ ok: true, subtotal: newSub, gst: newGst, grand_total: newSub + newGst });
     } catch (err: any) {
       res.status(500).json({ error: "Failed to delete entry" });
+    }
+  });
+  // POST — transfer a room folio entry to the master folio.
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/master-folio/transfer", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId } = req.params;
+      const { folio_entry_id } = req.body || {};
+      if (!folio_entry_id) return res.status(400).json({ error: "folio_entry_id is required" });
+      const db = await getTenantDb(req.params.id);
+      // Validate: entry must belong to a folio of a booking in this group.
+      const entry: any = await db.get(
+        `SELECT fe.*, f.booking_id AS source_booking_id, f.id AS source_folio_id
+           FROM folio_entries fe
+           JOIN folios f ON f.id = fe.folio_id
+           JOIN room_bookings rb ON rb.id = f.booking_id
+          WHERE fe.id = ? AND rb.group_id = ?`,
+        [folio_entry_id, groupId]
+      );
+      if (!entry) return res.status(404).json({ error: "Entry not found or does not belong to this group" });
+      if (entry.transferred_from_folio_id) return res.status(409).json({ error: "Entry has already been transferred" });
+      const masterFolioId = await ensureGroupMasterFolio(req.params.id, groupId);
+      // Move entry: update folio_id and record the source folio for the audit trail.
+      await db.run(
+        "UPDATE folio_entries SET folio_id = ?, transferred_from_folio_id = ? WHERE id = ?",
+        [masterFolioId, entry.source_folio_id, folio_entry_id]
+      );
+      // Recompute source folio totals.
+      const srcEntries: any[] = await db.query("SELECT amount, gst_amount FROM folio_entries WHERE folio_id = ?", [entry.source_folio_id]);
+      const srcSub = srcEntries.reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+      const srcGst = srcEntries.reduce((s: number, e: any) => s + Number(e.gst_amount || 0), 0);
+      await db.run("UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?", [srcSub, srcGst, srcSub + srcGst, entry.source_folio_id]);
+      // Recompute master folio totals.
+      const mfEntries: any[] = await db.query("SELECT amount, gst_amount FROM folio_entries WHERE folio_id = ?", [masterFolioId]);
+      const mfSub = mfEntries.reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+      const mfGst = mfEntries.reduce((s: number, e: any) => s + Number(e.gst_amount || 0), 0);
+      await db.run("UPDATE folios SET subtotal = ?, gst_amount = ?, grand_total = ? WHERE id = ?", [mfSub, mfGst, mfSub + mfGst, masterFolioId]);
+      res.json({ ok: true, master_folio_id: masterFolioId, master_subtotal: mfSub, master_gst: mfGst, master_grand_total: mfSub + mfGst });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to transfer entry" });
     }
   });
   // ── END MASTER-BILLING ───────────────────────────────────────────────────────
@@ -32211,10 +32268,10 @@ ${data.tenant.name}`;
         }
       }
     }
-    // MASTER-BILLING: append master folio line items as a distinct section.
+    // MASTER-BILLING: append master folio line items grouped by cost_centre.
     if (group?.master_folio_id) {
       const mfEntries: any[] = await tenantDb.query(
-        "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
+        "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY cost_centre ASC, created_at ASC",
         [group.master_folio_id]
       ).catch(() => []);
       const mf: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [group.master_folio_id]).catch(() => null);
@@ -32222,15 +32279,36 @@ ${data.tenant.name}`;
         aggSubtotal += Number(mf?.subtotal || 0);
         aggGst      += Number(mf?.gst_amount || 0);
         aggGrand    += Number(mf?.grand_total || 0);
+        // Group entries by cost_centre so the PDF shows subtotals per centre.
+        const byCentre: Map<string, any[]> = new Map();
         for (const e of mfEntries) {
+          const cc = (e.cost_centre || 'MISC').toUpperCase();
+          if (!byCentre.has(cc)) byCentre.set(cc, []);
+          byCentre.get(cc)!.push(e);
+        }
+        for (const [centre, centreEntries] of byCentre) {
+          for (const e of centreEntries) {
+            aggEntries.push({
+              description: `[Master / ${centre}] ${e.description}`,
+              entryType:   e.entry_type,
+              quantity:    Number(e.quantity || 1),
+              unitPrice:   Number(e.unit_price || 0),
+              amount:      Number(e.amount || 0),
+              gstRate:     Number(e.gst_rate || 0),
+              gstAmount:   Number(e.gst_amount || 0),
+            });
+          }
+          const ctrSub = centreEntries.reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
+          const ctrGst = centreEntries.reduce((s: number, e: any) => s + Number(e.gst_amount || 0), 0);
+          // Subtotal sentinel row — rendered as a greyed summary line in generateInvoicePdf.
           aggEntries.push({
-            description: `[Master Acct] ${e.description}`,
-            entryType:   e.entry_type,
-            quantity:    Number(e.quantity || 1),
-            unitPrice:   Number(e.unit_price || 0),
-            amount:      Number(e.amount || 0),
-            gstRate:     Number(e.gst_rate || 0),
-            gstAmount:   Number(e.gst_amount || 0),
+            description: `  ↳ ${centre} subtotal`,
+            entryType:   'SUBTOTAL',
+            quantity:    1,
+            unitPrice:   ctrSub,
+            amount:      ctrSub,
+            gstRate:     0,
+            gstAmount:   ctrGst,
           });
         }
       }
