@@ -41253,6 +41253,9 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [roomChargeConfirming, setRoomChargeConfirming] = useState(false);
   const [roomChargePurpose, setRoomChargePurpose] = useState<'ORDER' | 'SESSION'>('ORDER');
   const [roomChargeSuccess, setRoomChargeSuccess] = useState<{ room_name: string; folio_id?: string } | null>(null);
+  const [roomChargeRequestId, setRoomChargeRequestId] = useState<string | null>(null);
+  const [roomChargeWaiting, setRoomChargeWaiting] = useState(false);
+  const [roomChargeDeclined, setRoomChargeDeclined] = useState<string | null>(null);
   // ─────────────────────────────────────────────────────────────────────────
   const { lastMessage } = useSocket('CUSTOMER', restaurantId);
 
@@ -41597,6 +41600,9 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     setRoomChargeVerified(null);
     setRoomChargeError(null);
     setRoomChargeSuccess(null);
+    setRoomChargeRequestId(null);
+    setRoomChargeWaiting(false);
+    setRoomChargeDeclined(null);
     setShowRoomChargeModal(true);
   };
 
@@ -41624,35 +41630,72 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
     setRoomChargeConfirming(true);
     setRoomChargeError(null);
     try {
-      if (roomChargePurpose === 'ORDER') {
-        await placeOrder('CHARGE_TO_ROOM', roomChargeVerified);
-        // placeOrder clears cart and closes checkout; show success step in this modal
-        setRoomChargeSuccess({ room_name: roomChargeVerified.room_name });
-      } else {
-        // Charge entire session to room
-        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/charge-session-to-room`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            session_token: session?.session_token,
-            session_id: session?.id,
-            room_id: roomChargeVerified.room_id,
-            booking_id: roomChargeVerified.booking_id,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to charge session to room.');
-        setRoomChargeSuccess({ room_name: roomChargeVerified.room_name, folio_id: data.folio_id });
-        setShowBillRequestModal(false);
-        setSession(prev => prev ? { ...prev, status: 'bill_requested', payment_method: 'CHARGE_TO_ROOM' } as any : null);
-        setActiveCustomerTab('MY_ORDERS');
-      }
+      // Snapshot cart items for ORDER purpose
+      const cartItems = (cart as any[]).map((item: any) => ({
+        id: item.id, name: item.name,
+        price: Number(item.price || 0),
+        quantity: Number(item.quantity || 1),
+      }));
+      const orderAmount  = cartItems.reduce((s: number, i: any) => s + i.price * i.quantity, 0);
+      const sessionAmount = (session?.orders || []).reduce(
+        (s: number, o: any) => s + Number(o.totalAmount || o.total_amount || 0), 0
+      );
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/room-charge-request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          room_id:       roomChargeVerified.room_id,
+          booking_id:    roomChargeVerified.booking_id,
+          guest_name:    roomChargeVerified.guest_name,
+          room_name:     roomChargeVerified.room_name,
+          purpose:       roomChargePurpose,
+          cart_json:     JSON.stringify(roomChargePurpose === 'ORDER' ? cartItems : []),
+          amount:        roomChargePurpose === 'ORDER' ? orderAmount : sessionAmount,
+          table_number:  tableName,
+          table_id:      tableNumber,
+          session_token: session?.session_token,
+          session_id:    session?.id,
+          customer_name:  customerInfo.name  || undefined,
+          customer_phone: customerInfo.phone || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to submit request. Please try again.');
+      setRoomChargeRequestId(data.request_id);
+      setRoomChargeWaiting(true);
     } catch (err: any) {
       setRoomChargeError(err.message || 'Something went wrong. Please try again.');
     } finally {
       setRoomChargeConfirming(false);
     }
   };
+
+  // Poll for staff approval/decline every 3 s while waiting
+  useEffect(() => {
+    if (!roomChargeWaiting || !roomChargeRequestId) return;
+    const iv = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/room-charge-request/${roomChargeRequestId}/status`);
+        const data = await res.json();
+        if (data.status === 'APPROVED') {
+          setRoomChargeWaiting(false);
+          setRoomChargeSuccess({ room_name: roomChargeVerified?.room_name || '' });
+          if (roomChargePurpose === 'ORDER') {
+            setCart([]);
+            setIsCheckingOut(false);
+          } else {
+            setShowBillRequestModal(false);
+            setSession((prev: any) => prev ? { ...prev, status: 'bill_requested', payment_method: 'CHARGE_TO_ROOM' } : null);
+            setActiveCustomerTab('MY_ORDERS');
+          }
+        } else if (data.status === 'DECLINED') {
+          setRoomChargeWaiting(false);
+          setRoomChargeDeclined(data.declined_reason || 'Request declined. Please pay at the counter.');
+        }
+      } catch { /* network blip — retry next tick */ }
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [roomChargeWaiting, roomChargeRequestId, restaurantId, roomChargeVerified, roomChargePurpose]);
 
   const placeOrder = async (
     paymentMethod: 'ONLINE' | 'TABLE' | 'CASH' | 'UPI' | 'CARD' | 'CHARGE_TO_ROOM',
@@ -43487,21 +43530,21 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 
             <div className="px-8 pb-8">
               {roomChargeSuccess ? (
-                /* ── Step 3: Success ── */
+                /* ── Step 4: Success (staff approved) ── */
                 <div className="text-center py-4">
                   <div className="w-16 h-16 rounded-full bg-emerald-50 flex items-center justify-center mx-auto mb-4">
                     <Check size={28} className="text-emerald-600" />
                   </div>
                   <h4 className="text-lg font-bold text-[#1a1208] mb-1">
-                    {roomChargePurpose === 'SESSION' ? 'Session charged to room!' : 'Order sent to kitchen!'}
+                    {roomChargePurpose === 'SESSION' ? 'Session charged to room!' : 'Order confirmed!'}
                   </h4>
                   <p className="text-sm text-[#6b5d52] mb-1">
                     Room <span className="font-bold">{roomChargeSuccess.room_name}</span>
                   </p>
                   <p className="text-xs text-[#9c8e85] mb-6">
                     {roomChargePurpose === 'SESSION'
-                      ? 'All orders have been added to your hotel folio. You will settle everything at check-out.'
-                      : 'Your order is being prepared. The charge has been added to your hotel folio.'}
+                      ? 'All orders have been added to your hotel folio and will be settled at check-out.'
+                      : 'Your order is being prepared. The charge will appear on your hotel folio at check-out.'}
                   </p>
                   <button
                     type="button"
@@ -43509,6 +43552,57 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                     className="w-full bg-[#1e3a5f] text-white py-4 rounded-2xl font-bold hover:bg-[#162d4a] transition-colors"
                   >
                     Done
+                  </button>
+                </div>
+              ) : roomChargeDeclined ? (
+                /* ── Step 3b: Declined ── */
+                <div className="text-center py-4">
+                  <div className="w-16 h-16 rounded-full bg-red-50 flex items-center justify-center mx-auto mb-4">
+                    <X size={28} className="text-red-500" />
+                  </div>
+                  <h4 className="text-lg font-bold text-[#1a1208] mb-2">Request Not Approved</h4>
+                  <p className="text-sm text-[#6b5d52] bg-[#faf7f2] rounded-2xl px-4 py-3 mb-6">{roomChargeDeclined}</p>
+                  <div className="space-y-3">
+                    <button
+                      type="button"
+                      onClick={() => setRoomChargeDeclined(null)}
+                      className="w-full border-2 border-[#1e3a5f] text-[#1e3a5f] py-3 rounded-2xl font-bold hover:bg-[#1e3a5f] hover:text-white transition-colors"
+                    >
+                      Try a Different Room
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setShowRoomChargeModal(false); }}
+                      className="w-full bg-[#faf7f2] text-[#6b5d52] py-3 rounded-2xl font-bold hover:bg-[#f0ebe4] transition-colors"
+                    >
+                      Pay Another Way
+                    </button>
+                  </div>
+                </div>
+              ) : roomChargeWaiting ? (
+                /* ── Step 3a: Waiting for staff approval ── */
+                <div className="text-center py-6">
+                  <div className="w-16 h-16 rounded-full bg-[#1e3a5f]/10 flex items-center justify-center mx-auto mb-4">
+                    <RefreshCw size={28} className="text-[#1e3a5f] animate-spin" />
+                  </div>
+                  <h4 className="text-lg font-bold text-[#1a1208] mb-2">Waiting for Staff Approval</h4>
+                  <p className="text-sm text-[#6b5d52] mb-2">
+                    Room <span className="font-bold">{roomChargeVerified?.room_name}</span> — <span className="font-bold">{roomChargeVerified?.guest_name}</span>
+                  </p>
+                  <p className="text-xs text-[#9c8e85] mb-6">
+                    A waiter or cashier will verify your identity and approve the charge. This usually takes less than a minute.
+                  </p>
+                  <div className="flex gap-1 justify-center mb-6">
+                    {[0,1,2].map(i => (
+                      <span key={i} className="w-2 h-2 rounded-full bg-[#1e3a5f]/30 animate-pulse" style={{ animationDelay: `${i * 0.3}s` }} />
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setRoomChargeWaiting(false); setRoomChargeRequestId(null); setRoomChargeVerified(null); }}
+                    className="text-xs text-[#9c8e85] hover:text-[#1a1208] underline"
+                  >
+                    Cancel request
                   </button>
                 </div>
               ) : !roomChargeVerified ? (
@@ -43578,9 +43672,10 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
                     className="w-full bg-[#1e3a5f] text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-[#162d4a] transition-colors disabled:opacity-50"
                   >
                     {roomChargeConfirming
-                      ? <><RefreshCw size={18} className="animate-spin" /> Processing…</>
-                      : <><Check size={18} /> Confirm Charge to Room {roomChargeVerified.room_name}</>}
+                      ? <><RefreshCw size={18} className="animate-spin" /> Sending request…</>
+                      : <><BedDouble size={18} /> Request Charge to Room {roomChargeVerified.room_name}</>}
                   </button>
+                  <p className="text-center text-[11px] text-[#9c8e85] mt-2">A staff member will verify your identity before approving</p>
                 </>
               )}
             </div>
@@ -49487,6 +49582,8 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
   const [liveTables, setLiveTables] = useState<LiveTableView[]>([]);
   const [liveNow, setLiveNow] = useState(Date.now());
   const [waiterCalls, setWaiterCalls] = useState<any[]>([]);
+  const [pendingRoomCharges, setPendingRoomCharges] = useState<any[]>([]);
+  const [declineReasonMap, setDeclineReasonMap] = useState<Record<string,string>>({});
   const [waiterOrderTable, setWaiterOrderTable] = useState<{ tableId: string; tableName: string } | null>(null);
   const [alertsEnabled, setAlertsEnabled] = useState(true);
   const { lastMessage: waiterMsg } = useSocket('WAITER', restaurantId);
@@ -49531,11 +49628,18 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
     } catch (err) {
       console.error(err);
     }
+    try {
+      const chargesRes = await fetch(`/api/restaurant/${restaurantId}/hotel/room-charge-requests`,
+        { headers: { 'Authorization': `Bearer ${token}` } });
+      if (chargesRes.ok) { const d = await chargesRes.json(); if (d.ok) setPendingRoomCharges(d.requests || []); }
+      else setPendingRoomCharges([]);
+    } catch { setPendingRoomCharges([]); }
   };
 
-  // Refresh on WAITER_CALL / WAITER_CALL_UPDATE WebSocket events
+  // Refresh on WAITER_CALL / WAITER_CALL_UPDATE / ROOM_CHARGE WebSocket events
   useEffect(() => {
-    if (waiterMsg?.type === 'WAITER_CALL' || waiterMsg?.type === 'WAITER_CALL_UPDATE') {
+    if (waiterMsg?.type === 'WAITER_CALL' || waiterMsg?.type === 'WAITER_CALL_UPDATE'
+        || waiterMsg?.type === 'ROOM_CHARGE_REQUEST' || waiterMsg?.type === 'ROOM_CHARGE_UPDATE') {
       fetchData();
     }
   }, [waiterMsg]);
@@ -49556,6 +49660,23 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify(body),
+    });
+    fetchData();
+  };
+
+  const approveRoomCharge = async (reqId: string) => {
+    await fetch(`/api/restaurant/${restaurantId}/hotel/room-charge-request/${reqId}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    });
+    fetchData();
+  };
+
+  const declineRoomCharge = async (reqId: string, reason: string) => {
+    await fetch(`/api/restaurant/${restaurantId}/hotel/room-charge-request/${reqId}/decline`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ reason }),
     });
     fetchData();
   };
@@ -49611,6 +49732,102 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
               {readyOrders.length} Orders Ready for Pickup
             </div>
           </div>
+
+          {/* ── Pending Room Charge Requests panel ── */}
+          {pendingRoomCharges.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <span className="text-[#1e3a5f] text-lg">🏨</span>
+                <h3 className="text-lg font-bold text-[#1a1208]">Room Charge Requests</h3>
+                <span className="bg-[#1e3a5f] text-white text-[11px] font-black px-2.5 py-0.5 rounded-full animate-pulse">
+                  {pendingRoomCharges.length}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {pendingRoomCharges.map(req => {
+                  const elapsed = Math.floor((Date.now() - new Date(req.created_at).getTime()) / 1000);
+                  const elapsedStr = elapsed < 60 ? `${elapsed}s ago` : `${Math.floor(elapsed/60)}m ago`;
+                  const cartItems: any[] = (() => { try { return JSON.parse(req.cart_json || '[]'); } catch { return []; } })();
+                  const declineInput = declineReasonMap[req.id] ?? '';
+                  return (
+                    <div key={req.id} className="bg-white rounded-2xl border-2 border-[#1e3a5f]/40 p-4 space-y-3 shadow-sm alert-pulse">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <p className="font-bold text-[#1a1208]">Room {req.room_name}</p>
+                          <p className="text-sm font-semibold text-[#1e3a5f]">{req.guest_name}</p>
+                          {req.table_number && (
+                            <p className="text-xs text-[#6b5d52]">Table: {req.table_number}</p>
+                          )}
+                          {req.customer_name && (
+                            <p className="text-xs text-[#9c8e85]">Guest says: {req.customer_name}</p>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs font-bold text-[#1e3a5f] bg-[#e8edf4] px-2 py-1 rounded-full">
+                            {req.purpose === 'ORDER' ? '🍽 Order' : '🧾 Bill'}
+                          </p>
+                          <p className="text-xs font-bold text-[#1a1208] mt-1">₹{Number(req.amount).toFixed(2)}</p>
+                          <p className="text-[11px] text-[#9c8e85] font-mono mt-0.5">{elapsedStr}</p>
+                        </div>
+                      </div>
+                      {cartItems.length > 0 && (
+                        <div className="bg-[#faf7f2] rounded-xl px-3 py-2 space-y-0.5">
+                          {cartItems.map((item: any, i: number) => (
+                            <p key={i} className="text-xs text-[#3d3128]">{item.quantity}× {item.name} — ₹{(item.price * item.quantity).toFixed(2)}</p>
+                          ))}
+                        </div>
+                      )}
+                      <p className="text-[11px] text-[#9c8e85] italic">Verify guest identity before approving</p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => approveRoomCharge(req.id)}
+                          className="flex-1 py-2 rounded-xl bg-[#1e3a5f] text-white text-xs font-bold transition-all hover:bg-[#162d4b] active:scale-95"
+                        >
+                          ✓ Approve
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (declineInput.trim()) {
+                              declineRoomCharge(req.id, declineInput.trim());
+                              setDeclineReasonMap(prev => { const n = {...prev}; delete n[req.id]; return n; });
+                            } else {
+                              setDeclineReasonMap(prev => ({ ...prev, [req.id]: prev[req.id] ?? ' ' }));
+                            }
+                          }}
+                          className="flex-1 py-2 rounded-xl bg-[#c13b3b]/10 text-[#c13b3b] text-xs font-bold border border-[#c13b3b]/20 transition-all hover:bg-[#c13b3b]/20 active:scale-95"
+                        >
+                          ✕ Decline
+                        </button>
+                      </div>
+                      {declineReasonMap[req.id] !== undefined && (
+                        <div className="flex gap-2">
+                          <input
+                            autoFocus
+                            type="text"
+                            value={declineInput.trim() === '' && declineInput === ' ' ? '' : declineInput}
+                            onChange={e => setDeclineReasonMap(prev => ({ ...prev, [req.id]: e.target.value }))}
+                            placeholder="Reason for declining..."
+                            className="flex-1 text-xs px-3 py-2 rounded-xl border border-[#c13b3b]/30 bg-[#fdf0f0] text-[#1a1208] placeholder:text-[#9c8e85] outline-none focus:border-[#c13b3b]"
+                          />
+                          <button
+                            onClick={() => {
+                              if (declineInput.trim()) {
+                                declineRoomCharge(req.id, declineInput.trim());
+                                setDeclineReasonMap(prev => { const n = {...prev}; delete n[req.id]; return n; });
+                              }
+                            }}
+                            className="px-3 py-2 rounded-xl bg-[#c13b3b] text-white text-xs font-bold transition-all hover:bg-[#a32e2e] active:scale-95"
+                          >
+                            Send
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* ── Waiter Call Requests panel ── */}
           {myWaiterCalls.length > 0 && (

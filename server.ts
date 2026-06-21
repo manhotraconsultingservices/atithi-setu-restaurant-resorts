@@ -23247,6 +23247,233 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── PATTERN B: room_charge_requests — guest initiates, staff gate-keeps ─────
+  // Zero-auth attack prevention: room number alone is not enough to charge.
+  // Staff must visually verify guest identity before approving.
+
+  async function ensureRoomChargeRequestsTable(db: any) {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS room_charge_requests (
+        id               TEXT PRIMARY KEY,
+        restaurant_id    TEXT NOT NULL,
+        table_id         TEXT,
+        table_number     TEXT,
+        session_token    TEXT,
+        session_id       TEXT,
+        room_id          TEXT NOT NULL,
+        booking_id       TEXT NOT NULL,
+        guest_name       TEXT NOT NULL,
+        room_name        TEXT NOT NULL,
+        purpose          TEXT NOT NULL DEFAULT 'ORDER',
+        cart_json        TEXT NOT NULL DEFAULT '[]',
+        amount           REAL NOT NULL DEFAULT 0,
+        customer_name    TEXT,
+        customer_phone   TEXT,
+        status           TEXT NOT NULL DEFAULT 'PENDING',
+        approved_by      TEXT,
+        approved_by_name TEXT,
+        approved_at      TEXT,
+        declined_reason  TEXT,
+        order_id         TEXT,
+        folio_id         TEXT,
+        created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+  }
+
+  // Guest submits — no auth (public table QR)
+  app.post("/api/restaurant/:id/hotel/room-charge-request", async (req: Request, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ ok: false, error: check.error });
+    try {
+      const { room_id, booking_id, guest_name, room_name, purpose, cart_json,
+              amount, table_number, table_id, session_token, session_id,
+              customer_name, customer_phone } = req.body || {};
+      if (!room_id || !booking_id) return res.status(400).json({ ok: false, error: 'room_id and booking_id are required' });
+      const tenantDb = await getTenantDb(req.params.id);
+      await ensureRoomChargeRequestsTable(tenantDb);
+      const booking: any = await tenantDb.get(
+        `SELECT id FROM room_bookings WHERE id = ? AND room_id = ? AND status = 'CHECKED_IN'`,
+        [booking_id, room_id]
+      );
+      if (!booking) return res.status(400).json({ ok: false, error: 'Booking is no longer active. Please ask the front desk.' });
+      const reqId = `RCR-${Date.now()}`;
+      await tenantDb.run(
+        `INSERT INTO room_charge_requests
+           (id, restaurant_id, table_id, table_number, session_token, session_id,
+            room_id, booking_id, guest_name, room_name, purpose, cart_json,
+            amount, customer_name, customer_phone)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [reqId, req.params.id, table_id || null, table_number || null,
+         session_token || null, session_id || null,
+         room_id, booking_id, guest_name || 'Guest', room_name || '',
+         purpose || 'ORDER', cart_json || '[]', Number(amount) || 0,
+         customer_name || null, customer_phone || null]
+      );
+      // broadcastWs is defined later in the file but closures resolve at call-time
+      broadcastWs('ROOM_CHARGE_REQUEST', {
+        id: reqId, restaurant_id: req.params.id, table_number, room_name,
+        guest_name, purpose: purpose || 'ORDER', amount: Number(amount) || 0,
+        cart_json: cart_json || '[]', created_at: new Date().toISOString(),
+      }, req.params.id);
+      res.status(201).json({ ok: true, request_id: reqId });
+    } catch (err: any) {
+      console.error('room-charge-request POST error:', err);
+      res.status(500).json({ ok: false, error: 'Server error. Please try again.' });
+    }
+  });
+
+  // Guest polls for approval — no auth
+  app.get("/api/restaurant/:id/hotel/room-charge-request/:reqId/status", async (req: Request, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await ensureRoomChargeRequestsTable(tenantDb);
+      const rcr: any = await tenantDb.get(
+        `SELECT status, approved_by_name, declined_reason, order_id, folio_id
+         FROM room_charge_requests WHERE id = ? AND restaurant_id = ?`,
+        [req.params.reqId, req.params.id]
+      );
+      if (!rcr) return res.status(404).json({ ok: false, error: 'Request not found.' });
+      res.json({ ok: true, status: rcr.status, approved_by_name: rcr.approved_by_name,
+                 declined_reason: rcr.declined_reason, order_id: rcr.order_id, folio_id: rcr.folio_id });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: 'Server error.' });
+    }
+  });
+
+  // Staff lists all PENDING requests — auth required
+  app.get("/api/restaurant/:id/hotel/room-charge-requests", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await ensureRoomChargeRequestsTable(tenantDb);
+      const requests: any[] = await tenantDb.query(
+        `SELECT * FROM room_charge_requests WHERE restaurant_id = ? AND status = 'PENDING' ORDER BY created_at DESC`,
+        [req.params.id]
+      );
+      res.json({ ok: true, requests });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: 'Server error.' });
+    }
+  });
+
+  // Staff approves — creates order + posts to hotel folio — auth required
+  app.post("/api/restaurant/:id/hotel/room-charge-request/:reqId/approve", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      await ensureRoomChargeRequestsTable(tenantDb);
+      const rcr: any = await tenantDb.get(
+        `SELECT * FROM room_charge_requests WHERE id = ? AND restaurant_id = ? AND status = 'PENDING'`,
+        [req.params.reqId, req.params.id]
+      );
+      if (!rcr) return res.status(404).json({ ok: false, error: 'Request not found or already resolved.' });
+      const booking: any = await tenantDb.get(
+        `SELECT id FROM room_bookings WHERE id = ? AND room_id = ? AND status = 'CHECKED_IN'`,
+        [rcr.booking_id, rcr.room_id]
+      );
+      if (!booking) return res.status(400).json({ ok: false, error: 'Guest has already checked out. Cannot charge to room.' });
+
+      let orderId: string | null = null;
+      let folioId: string | null = null;
+      let items: any[] = [];
+      try { items = JSON.parse(rcr.cart_json || '[]'); } catch { items = []; }
+
+      if (rcr.purpose === 'ORDER') {
+        orderId = `ORD-${Date.now()}`;
+        await tenantDb.run(
+          `INSERT INTO orders (id, restaurant_id, table_number, table_id, customer_name, customer_phone,
+             items_json, total_amount, payment_method, payment_status, status,
+             session_token, session_id, room_id, booking_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CHARGE_TO_ROOM', 'PENDING', 'PENDING', ?, ?, ?, ?, datetime('now'))`,
+          [orderId, req.params.id,
+           rcr.table_number || `Room ${rcr.room_name}`, rcr.table_id || null,
+           rcr.customer_name || rcr.guest_name, rcr.customer_phone || null,
+           rcr.cart_json, rcr.amount,
+           rcr.session_token || null, rcr.session_id || null,
+           rcr.room_id, rcr.booking_id]
+        );
+        const folioResult = await postOrderToFolio(req.params.id, {
+          id: orderId, room_id: rcr.room_id, booking_id: rcr.booking_id,
+          items: items.map((it: any) => ({
+            name: it.name || 'Item',
+            quantity: Number(it.quantity || 1),
+            unitPrice: Number(it.price || it.unitPrice || 0),
+          })),
+          subtype: 'RESTAURANT',
+          posted_by: `ROOM_CHARGE_APPROVED:${(req as any).user?.id || 'staff'}`,
+        }).catch(() => ({ ok: false as const, folio_id: undefined }));
+        folioId = folioResult.folio_id || null;
+        // Notify KDS so kitchen sees the new order
+        const newOrder = await tenantDb.get('SELECT * FROM orders WHERE id = ?', [orderId]).catch(() => null);
+        if (newOrder) broadcastWs('NEW_ORDER', newOrder, req.params.id);
+      } else {
+        // SESSION — post all unposted session orders to folio
+        const sessionOrders: any[] = await tenantDb.query(
+          `SELECT id, total_amount, items_json FROM orders
+           WHERE (session_token = ? OR session_id = ?)
+             AND status NOT IN ('CANCELLED')
+             AND (posted_to_folio_at IS NULL OR folio_id IS NULL)`,
+          [rcr.session_token || '', rcr.session_id || '']
+        );
+        for (const ord of sessionOrders) {
+          let oItems: any[] = [];
+          try { oItems = JSON.parse(ord.items_json || '[]'); } catch { oItems = []; }
+          const result = await postOrderToFolio(req.params.id, {
+            id: ord.id, room_id: rcr.room_id, booking_id: rcr.booking_id,
+            items: oItems.map((it: any) => ({
+              name: it.name || 'Item',
+              quantity: Number(it.quantity || 1),
+              unitPrice: Number(it.price || it.unitPrice || 0),
+            })),
+            subtype: 'RESTAURANT',
+            posted_by: `ROOM_CHARGE_APPROVED:${(req as any).user?.id || 'staff'}`,
+          }).catch(() => ({ ok: false as const, folio_id: undefined }));
+          if (result.folio_id) folioId = result.folio_id;
+        }
+      }
+
+      const staffName = (req as any).user?.name || (req as any).user?.email || 'Staff';
+      await tenantDb.run(
+        `UPDATE room_charge_requests SET status = 'APPROVED', approved_by = ?, approved_by_name = ?,
+         approved_at = datetime('now'), order_id = ?, folio_id = ? WHERE id = ?`,
+        [(req as any).user?.id || null, staffName, orderId, folioId, req.params.reqId]
+      );
+      broadcastWs('ROOM_CHARGE_UPDATE', {
+        id: req.params.reqId, status: 'APPROVED', approved_by_name: staffName,
+        restaurant_id: req.params.id,
+      }, req.params.id);
+      res.json({ ok: true, order_id: orderId, folio_id: folioId });
+    } catch (err: any) {
+      console.error('room-charge-approve error:', err);
+      res.status(500).json({ ok: false, error: 'Server error approving charge.' });
+    }
+  });
+
+  // Staff declines — auth required
+  app.post("/api/restaurant/:id/hotel/room-charge-request/:reqId/decline", authenticate, restaurantStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const { reason } = req.body || {};
+      const tenantDb = await getTenantDb(req.params.id);
+      await ensureRoomChargeRequestsTable(tenantDb);
+      const rcr: any = await tenantDb.get(
+        `SELECT id FROM room_charge_requests WHERE id = ? AND restaurant_id = ? AND status = 'PENDING'`,
+        [req.params.reqId, req.params.id]
+      );
+      if (!rcr) return res.status(404).json({ ok: false, error: 'Request not found or already resolved.' });
+      const declineMsg = reason || 'Request declined. Please pay at the counter.';
+      await tenantDb.run(
+        `UPDATE room_charge_requests SET status = 'DECLINED', declined_reason = ? WHERE id = ?`,
+        [declineMsg, req.params.reqId]
+      );
+      broadcastWs('ROOM_CHARGE_UPDATE', {
+        id: req.params.reqId, status: 'DECLINED', declined_reason: declineMsg,
+        restaurant_id: req.params.id,
+      }, req.params.id);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: 'Server error.' });
+    }
+  });
+
   // ─── SERVICE REQUESTS (guest creates, staff manages) ──────────────────────
   app.post("/api/restaurant/:id/hotel/service-requests", async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
