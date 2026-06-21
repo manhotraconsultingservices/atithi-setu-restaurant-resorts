@@ -27368,21 +27368,39 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           .sort((a: any, b: any) => Number(a.display_order || 0) - Number(b.display_order || 0));
         const defaultMealPlanId: string | null = matrixMode ? (activeMealPlans[0]?.id || null) : null;
 
-        // Build category summary from available physical rooms
-        const availByType = new Map<string, { typeId: string; availCount: number; defaultCapacity: number; defaultRate: number; firstRoom: any }>();
-        availableForPick.forEach((r: any) => {
-          const t = String(r.type || 'UNCATEGORISED');
-          if (!availByType.has(t)) {
-            availByType.set(t, { typeId: r.type_id || '__UNCATEGORISED__', availCount: 0, defaultCapacity: Math.max(1, Number(r.capacity || 2)), defaultRate: Number(r.base_rate || 0), firstRoom: r });
+        // Build category map from room_types master (keyed by type_id).
+        // Shows real category names instead of stale r.type text fallbacks.
+        const canonicalRoomTypes: any[] = hotelRoomTypes.length > 0 ? hotelRoomTypes : (tariffData.room_types || []);
+        const availByType = new Map<string, { typeId: string; displayName: string; availCount: number; defaultCapacity: number; defaultRate: number; firstRoom: any }>();
+        if (canonicalRoomTypes.length > 0) {
+          for (const rt of canonicalRoomTypes) {
+            const matching = availableForPick.filter((r: any) => r.type_id === rt.id);
+            if (matching.length === 0) continue;
+            availByType.set(String(rt.id), {
+              typeId: String(rt.id),
+              displayName: String(rt.name || rt.id),
+              availCount: matching.length,
+              defaultCapacity: Math.max(1, Number(rt.capacity || matching[0]?.capacity || 2)),
+              defaultRate: Number(rt.base_rate || matching[0]?.base_rate || 0),
+              firstRoom: matching[0],
+            });
           }
-          availByType.get(t)!.availCount++;
-        });
+        } else {
+          availableForPick.forEach((r: any) => {
+            const key = String(r.type_id || r.id);
+            const name = String(r.type || r.name || r.room_number || 'Room');
+            if (!availByType.has(key)) {
+              availByType.set(key, { typeId: key, displayName: name, availCount: 0, defaultCapacity: Math.max(1, Number(r.capacity || 2)), defaultRate: Number(r.base_rate || 0), firstRoom: r });
+            }
+            availByType.get(key)!.availCount++;
+          });
+        }
 
         // Per-row total: qty × (manual rate or matrix preview per room)
-        const groupRowTotal = (sel: { type_name: string; qty: number; room_rate: number; num_adults: number; extra_children_with_mattress: number; extra_children_no_mattress: number; meal_plan_id: string | null }): number => {
+        const groupRowTotal = (sel: { room_type_id: string; qty: number; room_rate: number; num_adults: number; extra_children_with_mattress: number; extra_children_no_mattress: number; meal_plan_id: string | null }): number => {
           if (sel.qty <= 0) return 0;
           if (Number(sel.room_rate) > 0) return Number(sel.room_rate) * sel.qty * nights;
-          const ti = availByType.get(sel.type_name);
+          const ti = availByType.get(sel.room_type_id);
           if (!ti) return 0;
           const cap = ti.defaultCapacity;
           const preview = previewMatrixPrice({
@@ -27405,20 +27423,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const netTotal = grossTotal - discountAmt;
         const totalRooms = draft.rooms.reduce((s, r) => s + (r.qty || 0), 0);
 
-        // Update or insert a category row in the draft
-        const setCategoryRow = (typeName: string, patch: Partial<{ qty: number; num_adults: number; extra_children_with_mattress: number; extra_children_no_mattress: number; room_rate: number; meal_plan_id: string | null }>) => {
+        // Update or insert a category row in the draft (keyed by room_type_id)
+        const setCategoryRow = (typeId: string, patch: Partial<{ qty: number; num_adults: number; extra_children_with_mattress: number; extra_children_no_mattress: number; room_rate: number; meal_plan_id: string | null }>) => {
           setGroupBookingDraft((d: any) => {
             if (!d) return d;
-            const idx = d.rooms.findIndex((r: any) => r.type_name === typeName);
+            const idx = d.rooms.findIndex((r: any) => r.room_type_id === typeId);
             if (idx >= 0) {
               const next = [...d.rooms];
               next[idx] = { ...next[idx], ...patch };
               return { ...d, rooms: next };
             }
-            const ti = availByType.get(typeName);
+            const ti = availByType.get(typeId);
             return { ...d, rooms: [...d.rooms, {
-              room_type_id: typeName === '__ANY__' ? '__ANY__' : (ti?.typeId || '__UNCATEGORISED__'),
-              type_name: typeName,
+              room_type_id: typeId,
+              type_name: ti?.displayName || typeId,
               qty: 0, num_adults: ti?.defaultCapacity || 2,
               extra_children_with_mattress: 0, extra_children_no_mattress: 0,
               room_rate: 0, meal_plan_id: defaultMealPlanId,
@@ -27426,7 +27444,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             }]};
           });
         };
-        const getDraftRow = (typeName: string) => draft.rooms.find((r: any) => r.type_name === typeName);
+        const getDraftRow = (typeId: string) => draft.rooms.find((r: any) => r.room_type_id === typeId);
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
             {/* MODAL-WIDTH-FIX: group bookings list multiple per-room rows
@@ -27656,15 +27674,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               </tr>
                             );
                           })()}
-                          {Array.from(availByType.entries()).map(([typeName, ti]) => {
-                            const row = getDraftRow(typeName);
+                          {Array.from(availByType.entries()).map(([typeId, ti]) => {
+                            const row = getDraftRow(typeId);
                             const qty = row?.qty || 0;
                             const rowTot = row ? groupRowTotal(row) : 0;
                             const overBooked = qty > ti.availCount;
                             return (
-                              <tr key={typeName} className={qty > 0 ? 'bg-[#fff9f5]' : 'bg-white'}>
+                              <tr key={typeId} className={qty > 0 ? 'bg-[#fff9f5]' : 'bg-white'}>
                                 <td className="px-3 py-2">
-                                  <p className="font-semibold text-[#1a1208]">{typeName}</p>
+                                  <p className="font-semibold text-[#1a1208]">{ti.displayName}</p>
                                   <p className={cn('text-[10px]', overBooked ? 'text-[#c13b3b] font-semibold' : 'text-[#7cad6d]')}>
                                     {ti.availCount} avail{overBooked ? ' — exceeds capacity!' : ''}
                                   </p>
@@ -27674,7 +27692,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     type="number" min={0} max={ti.availCount}
                                     value={qty || ''}
                                     placeholder="0"
-                                    onChange={e => { const v = Math.max(0, Math.floor(Number(e.target.value) || 0)); setCategoryRow(typeName, { qty: v }); }}
+                                    onChange={e => { const v = Math.max(0, Math.floor(Number(e.target.value) || 0)); setCategoryRow(typeId, { qty: v }); }}
                                     className={cn('w-14 text-center rounded-lg px-2 py-1.5 border text-sm font-semibold outline-none focus:ring-2 ring-[#cc5a16]/20',
                                       overBooked ? 'border-[#c13b3b] bg-[#fff0f0]' : 'border-[#cc5a16]/15 bg-[#faf7f2]')}
                                   />
@@ -27683,7 +27701,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <input
                                     type="number" min={1} max={20}
                                     value={row?.num_adults ?? ti.defaultCapacity}
-                                    onChange={e => setCategoryRow(typeName, { num_adults: Math.max(1, Number(e.target.value) || 1) })}
+                                    onChange={e => setCategoryRow(typeId, { num_adults: Math.max(1, Number(e.target.value) || 1) })}
                                     className="w-14 text-center bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-[#cc5a16]/20"
                                   />
                                 </td>
@@ -27691,7 +27709,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <input
                                     type="number" min={0}
                                     value={row?.extra_children_with_mattress ?? 0}
-                                    onChange={e => setCategoryRow(typeName, { extra_children_with_mattress: Math.max(0, Number(e.target.value) || 0) })}
+                                    onChange={e => setCategoryRow(typeId, { extra_children_with_mattress: Math.max(0, Number(e.target.value) || 0) })}
                                     className="w-14 text-center bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-[#cc5a16]/20"
                                   />
                                 </td>
@@ -27699,7 +27717,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <input
                                     type="number" min={0}
                                     value={row?.extra_children_no_mattress ?? 0}
-                                    onChange={e => setCategoryRow(typeName, { extra_children_no_mattress: Math.max(0, Number(e.target.value) || 0) })}
+                                    onChange={e => setCategoryRow(typeId, { extra_children_no_mattress: Math.max(0, Number(e.target.value) || 0) })}
                                     className="w-14 text-center bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-[#cc5a16]/20"
                                   />
                                 </td>
@@ -27708,7 +27726,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     type="number" min={0}
                                     value={row?.room_rate || ''}
                                     placeholder={matrixMode ? '0=matrix' : String(ti.defaultRate)}
-                                    onChange={e => { const v = parseInt(e.target.value, 10); setCategoryRow(typeName, { room_rate: isNaN(v) ? 0 : Math.max(0, v) }); }}
+                                    onChange={e => { const v = parseInt(e.target.value, 10); setCategoryRow(typeId, { room_rate: isNaN(v) ? 0 : Math.max(0, v) }); }}
                                     className="w-20 text-center bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-2 py-1.5 outline-none focus:ring-2 ring-[#cc5a16]/20"
                                   />
                                 </td>
@@ -27716,7 +27734,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <td className="px-2 py-2 text-center">
                                     <select
                                       value={row?.meal_plan_id || ''}
-                                      onChange={e => setCategoryRow(typeName, { meal_plan_id: e.target.value || null })}
+                                      onChange={e => setCategoryRow(typeId, { meal_plan_id: e.target.value || null })}
                                       className="bg-[#faf7f2] border border-[#cc5a16]/15 rounded-lg px-1.5 py-1.5 text-xs outline-none focus:ring-2 ring-[#cc5a16]/20"
                                     >
                                       <option value="">— none —</option>
