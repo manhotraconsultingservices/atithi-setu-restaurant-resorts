@@ -72,9 +72,9 @@ function phase(name) { console.log(`\n${B('▶')} ${B(name)}`); }
 
 // ── Date helpers ───────────────────────────────────────────────────────────
 const d = (offset) => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
-const checkIn          = d(1);   // tomorrow
-const checkOut         = d(4);   // 3-night stay
-const checkOutExtended = d(5);   // +1 extra night for extension test
+const checkIn          = d(60);  // 60 days out — avoids conflicts with real and leftover test bookings
+const checkOut         = d(63);  // 3-night stay
+const checkOutExtended = d(64);  // +1 extra night for extension test
 
 // ── ═══════════════════════════════════════════════════════════════════════
 //   SETUP — Authentication
@@ -152,7 +152,7 @@ phase('PHASE A — Group Booking Creation (3 rooms, advance, discount, promo)');
   if (!r.ok) {
     console.log(R(`  Response: ${JSON.stringify(r.body)?.slice(0, 200)}`));
   }
-  groupId = r.body?.group?.id || r.body?.id || '';
+  groupId = r.body?.group?.id || r.body?.id || r.body?.group_id || '';
   ok('groupId returned', !!groupId, groupId);
   bookingIds = (r.body?.bookings || []).map(b => b.id);
   ok('Room bookings created', bookingIds.length >= 1, `${bookingIds.length} booking(s)`);
@@ -600,13 +600,13 @@ phase('PHASE M — Group Revenue Report');
   ok('GET /reports/group-revenue exists (not 404)', r.status !== 404, `status=${r.status}`);
   ok('Report endpoint 200', r.ok, `status=${r.status}`);
   if (r.ok) {
-    const groups = r.body?.groups || [];
+    const groups = toArr(r.body);
     ok('Report returns groups array', Array.isArray(groups), `length=${groups.length}`);
 
     // Date-filtered
     const rf = await api('GET', H(`/reports/group-revenue?from=${checkIn}&to=${checkOutExtended}`));
     ok('Date-filtered report 200', rf.ok, `status=${rf.status}`);
-    const filtered = rf.body?.groups || [];
+    const filtered = toArr(rf.body);
     ok('Date-filtered is array', Array.isArray(filtered), `length=${filtered.length}`);
 
     if (filtered.length > 0) {

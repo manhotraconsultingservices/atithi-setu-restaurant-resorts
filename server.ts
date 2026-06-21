@@ -25336,7 +25336,7 @@ ${data.tenant.name}`;
       });
     } catch (err: any) {
       console.error("group booking create error:", err);
-      res.status(500).json({ error: "Failed to create group booking", detail: String(err?.message || err) });
+      res.status(500).json({ error: "Failed to create group booking" });
     }
   });
 
@@ -29550,28 +29550,28 @@ ${data.tenant.name}`;
       let bookings: any[];
       try {
         bookings = await db.query(
-          `SELECT b.id, b.room_id, b.room_type_id, b.guest_name, b.guest_phone, b.guest_email,
+          `SELECT b.id, b.room_id, b.guest_name, b.guest_phone, b.guest_email,
                   b.status, b.check_in_date, b.check_out_date, b.room_rate, b.num_adults,
                   r.name AS room_name, r.room_number, rt.name AS type_name,
                   gg.id AS gg_id, gg.guest_name AS gg_guest_name, gg.guest_phone AS gg_guest_phone,
                   gg.guest_email AS gg_guest_email, gg.guest_id_proof, gg.guest_nationality
              FROM room_bookings b
              LEFT JOIN rooms r ON r.id = b.room_id
-             LEFT JOIN room_types rt ON rt.id = b.room_type_id
+             LEFT JOIN room_types rt ON rt.id = r.type_id
              LEFT JOIN group_guests gg ON gg.booking_id = b.id
             WHERE b.group_id = ?
             ORDER BY r.name, b.id`,
           [req.params.groupId]
         );
       } catch (_joinErr) {
-        // group_guests table may not exist yet (migration pending) — return rooms without guest data
+        // group_guests table may not exist on older tenant schema — fallback without guest data
         bookings = await db.query(
-          `SELECT b.id, b.room_id, b.room_type_id, b.guest_name, b.guest_phone, b.guest_email,
+          `SELECT b.id, b.room_id, b.guest_name, b.guest_phone, b.guest_email,
                   b.status, b.check_in_date, b.check_out_date, b.room_rate, b.num_adults,
                   r.name AS room_name, r.room_number, rt.name AS type_name
              FROM room_bookings b
              LEFT JOIN rooms r ON r.id = b.room_id
-             LEFT JOIN room_types rt ON rt.id = b.room_type_id
+             LEFT JOIN room_types rt ON rt.id = r.type_id
             WHERE b.group_id = ?
             ORDER BY r.name, b.id`,
           [req.params.groupId]
@@ -29632,11 +29632,12 @@ ${data.tenant.name}`;
       const checkedIn: string[] = [];
       for (const b of bookings) {
         // Apply per-room guest name from group_guests if set.
-        const gg: any = await db.get("SELECT * FROM group_guests WHERE booking_id = ?", [b.id]);
+        let gg: any = null;
+        try { gg = await db.get("SELECT * FROM group_guests WHERE booking_id = ?", [b.id]); } catch(_) {}
         const guestName = (gg?.guest_name) || b.guest_name;
         const guestPhone = (gg?.guest_phone) || b.guest_phone;
         await db.run(
-          "UPDATE room_bookings SET status='CHECKED_IN', locked_at=?, guest_name=?, guest_phone=? WHERE id=?",
+          "UPDATE room_bookings SET status='CHECKED_IN', actual_checkin_at=?, guest_name=?, guest_phone=? WHERE id=?",
           [now, guestName, guestPhone, b.id]
         );
         if (b.room_id) {
@@ -29725,7 +29726,7 @@ ${data.tenant.name}`;
           : await db.get(
               `SELECT ro.* FROM rooms ro
                WHERE ro.status='available'
-                 AND (ro.type=? OR ro.room_type_id=?)
+                 AND (ro.type=? OR ro.type_id=?)
                  AND ro.id NOT IN (
                    SELECT room_id FROM room_bookings
                     WHERE status NOT IN ('CANCELLED','CHECKED_OUT')
@@ -29738,13 +29739,13 @@ ${data.tenant.name}`;
         const bookingId = `BK-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
         await db.run(
           `INSERT INTO room_bookings
-             (id, room_id, room_type_id, guest_name, guest_phone, check_in_date, check_out_date,
-              room_rate, num_adults, status, group_id, group_name, booking_type, created_by)
-           VALUES (?,?,?,?,?,?,?,?,?,'BOOKED',?,?,?,?)`,
-          [bookingId, available?.id||null, r.room_type_id||null,
+             (id, room_id, guest_name, guest_phone, check_in_date, check_out_date,
+              room_rate, num_adults, status, group_id, group_name, booking_type)
+           VALUES (?,?,?,?,?,?,?,?,'BOOKED',?,?,?)`,
+          [bookingId, available?.id||null,
            grp.contact_name||'Group Guest', grp.contact_phone||null,
            grp.check_in_date, grp.check_out_date, Number(r.room_rate)||0,
-           Number(r.num_adults)||1, groupId, grp.name, r.booking_type||'FIT', req.user?.id||null]
+           Number(r.num_adults)||1, groupId, grp.name, r.booking_type||'FIT']
         );
         created.push({ id: bookingId, room_id: available?.id||null });
       }
