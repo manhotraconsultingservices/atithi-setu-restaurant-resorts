@@ -25081,7 +25081,7 @@ ${data.tenant.name}`;
       const advanceAmount    = Number(b.advance_amount || 0);
       const advanceMethod    = String(b.advance_method || '').toUpperCase().trim() || null;
       const advanceReference = String(b.advance_reference || '').trim() || null;
-      const rooms: Array<{ room_id: string; room_rate?: number; num_guests?: number; num_adults?: number; extra_adults?: number; extra_children_with_mattress?: number; extra_children_no_mattress?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
+      const rooms: Array<{ room_type_id?: string; room_id?: string; room_rate?: number; num_guests?: number; num_adults?: number; extra_adults?: number; extra_children_with_mattress?: number; extra_children_no_mattress?: number }> = Array.isArray(b.rooms) ? b.rooms : [];
       if (!name || String(name).trim().length === 0) {
         return res.status(400).json({ error: "Group name is required." });
       }
@@ -25091,13 +25091,53 @@ ${data.tenant.name}`;
       if (rooms.length === 0) {
         return res.status(400).json({ error: "At least one room is required for a group booking." });
       }
-      // Defensive — reject obvious dup room_ids in the request.
-      const ids = rooms.map(r => r.room_id);
-      if (new Set(ids).size !== ids.length) {
-        return res.status(400).json({ error: "Same room selected twice in this group. Pick distinct rooms." });
+      if (rooms.some(r => !r.room_id && !r.room_type_id)) {
+        return res.status(400).json({ error: "Each room entry must have room_id or room_type_id." });
       }
 
       const tenantDb = await getTenantDb(req.params.id);
+
+      // Floating-room resolution for group bookings (Option A, mirrors single-booking
+      // path). Rooms sent with room_type_id are auto-assigned to the first free
+      // physical room of that category and written as room_locked=0 (floating).
+      // Rooms sent with an explicit room_id remain pinned (room_locked=1).
+      const bConflictRows: any[] = await tenantDb.query(
+        "SELECT room_id FROM room_bookings WHERE status NOT IN ('CANCELLED','CHECKED_OUT') AND check_in_date < ? AND check_out_date > ?",
+        [check_out_date, check_in_date]
+      );
+      const hConflictRows: any[] = await tenantDb.query(
+        "SELECT room_id FROM room_holds WHERE start_date < ? AND end_date > ?",
+        [check_out_date, check_in_date]
+      );
+      const globalTaken = new Set<string>([...bConflictRows, ...hConflictRows].map((r: any) => String(r.room_id)));
+      const batchClaimed = new Set<string>();
+
+      const resolvedRooms: Array<{ room_id: string; room_locked: number }> = [];
+      for (const r of rooms) {
+        if (r.room_id) {
+          resolvedRooms.push({ room_id: String(r.room_id), room_locked: 1 });
+          batchClaimed.add(String(r.room_id));
+        } else {
+          const typeId = String(r.room_type_id!);
+          const isUncat = typeId === '__UNCATEGORISED__';
+          const candidates: any[] = await tenantDb.query(
+            isUncat
+              ? "SELECT id FROM rooms WHERE type_id IS NULL AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name"
+              : "SELECT id FROM rooms WHERE type_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED') ORDER BY name",
+            isUncat ? [] : [typeId]
+          );
+          const freePool = candidates.filter((c: any) => !globalTaken.has(String(c.id)) && !batchClaimed.has(String(c.id)));
+          if (!freePool.length) {
+            return res.status(409).json({ error: `No free room available in the selected category for these dates.` });
+          }
+          const assigned = freePool[0];
+          resolvedRooms.push({ room_id: String(assigned.id), room_locked: 0 });
+          batchClaimed.add(String(assigned.id));
+          globalTaken.add(String(assigned.id));
+        }
+      }
+      // Merge resolved IDs back so downstream code uses r.room_id uniformly.
+      const resolvedRoomEntries = rooms.map((r, i) => ({ ...r, room_id: resolvedRooms[i].room_id, room_locked: resolvedRooms[i].room_locked }));
 
       // EXTRAS-GROUP — resolve per-room occupancy once. When the caller sends
       // num_adults we derive the chargeable extra adults from the room's own
@@ -25105,7 +25145,7 @@ ${data.tenant.name}`;
       // mattress are charged separately per the extra_person_charges matrix.
       // Older clients that only send num_guests keep their explicit value.
       const occByRoom = new Map<string, { extraAdults: number; numAdultsToStore: number | null; childMat: number; childNoMat: number; numGuests: number }>();
-      for (const r of rooms) {
+      for (const r of resolvedRoomEntries) {
         const childMat   = Math.max(0, Number(r.extra_children_with_mattress || 0));
         const childNoMat = Math.max(0, Number(r.extra_children_no_mattress || 0));
         let extraAdults  = Math.max(0, Number(r.extra_adults || 0));
@@ -25130,7 +25170,7 @@ ${data.tenant.name}`;
       }
 
       // Validate EVERY room before inserting anything — atomic semantics.
-      for (const r of rooms) {
+      for (const r of resolvedRoomEntries) {
         const v = await validateBookingRequest(req.params.id, {
           room_id: r.room_id,
           check_in_date, check_out_date,
@@ -25149,7 +25189,7 @@ ${data.tenant.name}`;
 
       const created: any[] = [];
       let groupTotal = 0;
-      for (const r of rooms) {
+      for (const r of resolvedRoomEntries) {
         const occ = occByRoom.get(r.room_id) || { extraAdults: 0, numAdultsToStore: null, childMat: 0, childNoMat: 0, numGuests: r.num_guests || 1 };
         // Per-room rate resolution. An explicit room_rate is an all-inclusive
         // manual override (rate × nights, no extras) — same semantics as the
@@ -25189,14 +25229,14 @@ ${data.tenant.name}`;
         const bid = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
         await tenantDb.run(
           `INSERT INTO room_bookings
-           (id, room_id, guest_name, guest_phone, guest_email,
+           (id, room_id, room_locked, guest_name, guest_phone, guest_email,
             num_guests, check_in_date, check_out_date, status, booking_source,
             room_rate, total_amount, special_requests, booking_type,
             meal_plan_id, meal_plan_snapshot, extra_adults,
             extra_children_with_mattress, extra_children_no_mattress, num_adults,
             group_id, group_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [bid, r.room_id, contact_name, contact_phone || null, contact_email || null,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [bid, r.room_id, r.room_locked, contact_name, contact_phone || null, contact_email || null,
            occ.numGuests, check_in_date, check_out_date, booking_source || 'DIRECT',
            rate, total, special_requests || null, bookingType,
            meal_plan_id || null, mealPlanSnapshot, occ.extraAdults,

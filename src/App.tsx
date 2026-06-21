@@ -8120,7 +8120,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // room_rate=0 routes through the matrix resolver (extras included); a
     // positive room_rate is an all-inclusive manual override (no extras added),
     // matching the single New Booking modal semantics.
-    rooms: Array<{ room_id: string; room_rate: number; num_guests: number; num_adults: number; extra_children_with_mattress: number; extra_children_no_mattress: number }>;
+    rooms: Array<{ room_type_id: string; type_name: string; room_id: string; room_rate: number; num_guests: number; num_adults: number; extra_children_with_mattress: number; extra_children_no_mattress: number }>;
     // Group-level meal plan (MATRIX mode only) — applied to every room in the
     // group, which is the common case for corporate / wedding blocks.
     meal_plan_id: string | null;
@@ -8172,7 +8172,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // server derives extra adults from each room's capacity and charges
         // children per the extra_person_charges matrix.
         meal_plan_id: groupBookingDraft.meal_plan_id || null,
-        rooms: groupBookingDraft.rooms,
+        rooms: groupBookingDraft.rooms.map(r => ({
+          room_type_id: r.room_type_id || '__UNCATEGORISED__',
+          room_rate: r.room_rate,
+          num_guests: r.num_guests,
+          num_adults: r.num_adults,
+          extra_children_with_mattress: r.extra_children_with_mattress,
+          extra_children_no_mattress: r.extra_children_no_mattress,
+        })),
         // ADV-PAY: pass advance to server; stored on room_booking_groups row.
         advance_amount: groupBookingDraft.advance_amount || 0,
         advance_method: groupBookingDraft.advance_amount > 0 ? groupBookingDraft.advance_method : null,
@@ -26973,6 +26980,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               setGroupBookingDraft({
                                 ...draft,
                                 rooms: [...draft.rooms, {
+                                  room_type_id: r.type_id || '__UNCATEGORISED__',
+                                  type_name: typeName,
                                   room_id: r.id,
                                   room_rate: matrixMode ? 0 : (Number(r.base_rate) || 0),
                                   num_adults: cap,
