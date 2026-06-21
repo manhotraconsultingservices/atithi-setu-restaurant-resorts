@@ -29545,20 +29545,38 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const bookings: any[] = await db.query(
-        `SELECT b.id, b.room_id, b.room_type_id, b.guest_name, b.guest_phone, b.guest_email,
-                b.status, b.check_in_date, b.check_out_date, b.room_rate, b.num_adults,
-                r.name AS room_name, r.room_number, rt.name AS type_name,
-                gg.id AS gg_id, gg.guest_name AS gg_guest_name, gg.guest_phone AS gg_guest_phone,
-                gg.guest_email AS gg_guest_email, gg.guest_id_proof, gg.guest_nationality
-           FROM room_bookings b
-           LEFT JOIN rooms r ON r.id = b.room_id
-           LEFT JOIN room_types rt ON rt.id = b.room_type_id
-           LEFT JOIN group_guests gg ON gg.booking_id = b.id
-          WHERE b.group_id = ?
-          ORDER BY r.name, b.id`,
-        [req.params.groupId]
-      );
+      const group: any = await db.get('SELECT id FROM room_booking_groups WHERE id = ?', [req.params.groupId]);
+      if (!group) return res.status(404).json({ error: 'Group not found' });
+      let bookings: any[];
+      try {
+        bookings = await db.query(
+          `SELECT b.id, b.room_id, b.room_type_id, b.guest_name, b.guest_phone, b.guest_email,
+                  b.status, b.check_in_date, b.check_out_date, b.room_rate, b.num_adults,
+                  r.name AS room_name, r.room_number, rt.name AS type_name,
+                  gg.id AS gg_id, gg.guest_name AS gg_guest_name, gg.guest_phone AS gg_guest_phone,
+                  gg.guest_email AS gg_guest_email, gg.guest_id_proof, gg.guest_nationality
+             FROM room_bookings b
+             LEFT JOIN rooms r ON r.id = b.room_id
+             LEFT JOIN room_types rt ON rt.id = b.room_type_id
+             LEFT JOIN group_guests gg ON gg.booking_id = b.id
+            WHERE b.group_id = ?
+            ORDER BY r.name, b.id`,
+          [req.params.groupId]
+        );
+      } catch (_joinErr) {
+        // group_guests table may not exist yet (migration pending) — return rooms without guest data
+        bookings = await db.query(
+          `SELECT b.id, b.room_id, b.room_type_id, b.guest_name, b.guest_phone, b.guest_email,
+                  b.status, b.check_in_date, b.check_out_date, b.room_rate, b.num_adults,
+                  r.name AS room_name, r.room_number, rt.name AS type_name
+             FROM room_bookings b
+             LEFT JOIN rooms r ON r.id = b.room_id
+             LEFT JOIN room_types rt ON rt.id = b.room_type_id
+            WHERE b.group_id = ?
+            ORDER BY r.name, b.id`,
+          [req.params.groupId]
+        );
+      }
       res.json(bookings);
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch group rooms" });
