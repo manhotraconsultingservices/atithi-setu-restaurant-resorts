@@ -29839,38 +29839,116 @@ ${data.tenant.name}`;
     }
   });
 
-  // POST bulk check-in: check in all BOOKED rooms in the group at once.
-  // Skips rooms that are already CHECKED_IN / CHECKED_OUT / CANCELLED.
-  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/checkin", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+  // GET checkin-readiness: per-room readiness status for the group check-in wizard.
+  app.get("/api/restaurant/:id/hotel/booking-groups/:groupId/checkin-readiness", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const { groupId } = req.params;
       const db = await getTenantDb(req.params.id);
+      let requireId = true;
+      try {
+        const cfg: any = await db.get("SELECT value FROM hotel_config WHERE key = 'hotel_require_id_at_checkin'", []);
+        requireId = cfg ? cfg.value !== '0' : true;
+      } catch(_) {}
       const bookings: any[] = await db.query(
-        "SELECT * FROM room_bookings WHERE group_id = ? AND status = 'BOOKED' ORDER BY id",
+        `SELECT b.id, b.room_id, b.guest_name, b.guest_phone, b.guest_email, b.guest_nationality,
+                b.status, b.check_in_date, b.check_out_date, b.room_rate, b.num_adults,
+                r.name AS room_name, r.room_number, rt.name AS type_name,
+                gg.guest_name AS gg_name, gg.guest_phone AS gg_phone, gg.guest_email AS gg_email,
+                gg.guest_id_proof AS gg_id_proof, gg.guest_nationality AS gg_nationality
+           FROM room_bookings b
+           LEFT JOIN rooms r ON r.id = b.room_id
+           LEFT JOIN room_types rt ON rt.id = r.type_id
+           LEFT JOIN group_guests gg ON gg.booking_id = b.id
+          WHERE b.group_id = ? AND b.status NOT IN ('CANCELLED')
+          ORDER BY r.name, b.id`,
         [groupId]
       );
-      if (bookings.length === 0) return res.status(400).json({ error: "No BOOKED rooms to check in" });
+      const rooms = [];
+      for (const b of bookings) {
+        const docRow: any = await db.get(
+          "SELECT COUNT(*)::int AS n FROM guest_documents WHERE booking_id = ?", [b.id]
+        ).catch(() => db.get("SELECT COUNT(*) AS n FROM guest_documents WHERE booking_id = ?", [b.id]));
+        const docCount = Number(docRow?.n ?? 0);
+        const effectiveName  = b.gg_name  || b.guest_name  || '';
+        const effectivePhone = b.gg_phone || b.guest_phone || '';
+        const effectiveNat   = b.gg_nationality || b.guest_nationality || 'Indian';
+        const issues: string[] = [];
+        if (!effectivePhone || effectivePhone.trim().length < 7) issues.push('missing_phone');
+        if (requireId && docCount === 0) issues.push('missing_id');
+        rooms.push({
+          booking_id: b.id, room_name: b.room_name || b.room_id, room_number: b.room_number,
+          type_name: b.type_name, status: b.status,
+          check_in_date: b.check_in_date, check_out_date: b.check_out_date,
+          room_rate: b.room_rate, num_adults: b.num_adults,
+          guest_name: effectiveName, guest_phone: effectivePhone,
+          guest_email: b.gg_email || b.guest_email || '',
+          guest_id_proof: b.gg_id_proof || '', guest_nationality: effectiveNat,
+          doc_count: docCount, issues, ready: b.status === 'BOOKED' && issues.length === 0,
+        });
+      }
+      const booked = rooms.filter(r => r.status === 'BOOKED');
+      const readyCount = booked.filter(r => r.ready).length;
+      res.json({ rooms, all_ready: readyCount === booked.length && booked.length > 0, ready_count: readyCount, booked_count: booked.length, total: rooms.length, require_id: requireId });
+    } catch (err) {
+      console.error('checkin-readiness error', err);
+      res.status(500).json({ error: "Failed to get check-in readiness" });
+    }
+  });
+
+  // POST bulk check-in: check in BOOKED rooms in the group.
+  // Body: { booking_ids?: string[], force?: boolean }
+  //   booking_ids — if provided, only those rooms are processed (partial check-in).
+  //   force — skip phone + ID validation gates (emergency use).
+  app.post("/api/restaurant/:id/hotel/booking-groups/:groupId/checkin", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId } = req.params;
+      const { booking_ids, force = false } = req.body || {};
+      const db = await getTenantDb(req.params.id);
+      let requireId = true;
+      try {
+        const cfg: any = await db.get("SELECT value FROM hotel_config WHERE key = 'hotel_require_id_at_checkin'", []);
+        requireId = cfg ? cfg.value !== '0' : true;
+      } catch(_) {}
+      const allBookings: any[] = await db.query(
+        "SELECT * FROM room_bookings WHERE group_id = ? AND status = 'BOOKED' ORDER BY id", [groupId]
+      );
+      const toProcess = (booking_ids?.length)
+        ? allBookings.filter((b: any) => booking_ids.includes(b.id))
+        : allBookings;
+      if (toProcess.length === 0) return res.status(400).json({ error: "No BOOKED rooms to check in" });
       const now = new Date().toISOString();
       const checkedIn: string[] = [];
-      for (const b of bookings) {
-        // Apply per-room guest name from group_guests if set.
+      const skipped: Array<{booking_id: string; room_name?: string; reason: string}> = [];
+      for (const b of toProcess) {
         let gg: any = null;
         try { gg = await db.get("SELECT * FROM group_guests WHERE booking_id = ?", [b.id]); } catch(_) {}
-        const guestName = (gg?.guest_name) || b.guest_name;
-        const guestPhone = (gg?.guest_phone) || b.guest_phone;
+        const guestPhone = (gg?.guest_phone || b.guest_phone || '').trim();
+        const guestName  = gg?.guest_name  || b.guest_name  || '';
+        if (!force) {
+          if (!guestPhone || guestPhone.length < 7) {
+            skipped.push({ booking_id: b.id, reason: 'missing_phone' }); continue;
+          }
+          if (requireId) {
+            const docRow: any = await db.get(
+              "SELECT COUNT(*)::int AS n FROM guest_documents WHERE booking_id = ?", [b.id]
+            ).catch(() => db.get("SELECT COUNT(*) AS n FROM guest_documents WHERE booking_id = ?", [b.id]));
+            if (Number(docRow?.n ?? 0) === 0) {
+              skipped.push({ booking_id: b.id, reason: 'missing_id' }); continue;
+            }
+          }
+        }
         await db.run(
           "UPDATE room_bookings SET status='CHECKED_IN', actual_checkin_at=?, guest_name=?, guest_phone=? WHERE id=?",
           [now, guestName, guestPhone, b.id]
         );
-        if (b.room_id) {
-          await db.run("UPDATE rooms SET status='OCCUPIED' WHERE id=?", [b.room_id]);
-        }
-        // Create folio if one doesn't already exist.
+        if (b.room_id) await db.run("UPDATE rooms SET status='OCCUPIED' WHERE id=?", [b.room_id]);
+        try { await db.run("UPDATE guest_documents SET locked_at=? WHERE booking_id=? AND locked_at IS NULL", [now, b.id]); } catch(_) {}
         const existingFolio: any = await db.get(
-          "SELECT id FROM folios WHERE booking_id = ? AND (doc_type IS NULL OR doc_type='INVOICE') LIMIT 1",
-          [b.id]
+          "SELECT id FROM folios WHERE booking_id = ? AND (doc_type IS NULL OR doc_type='INVOICE') LIMIT 1", [b.id]
         );
         if (!existingFolio) {
           const folioId = `F-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
@@ -29881,8 +29959,9 @@ ${data.tenant.name}`;
         }
         checkedIn.push(b.id);
       }
-      res.json({ ok: true, checked_in: checkedIn.length, booking_ids: checkedIn });
+      res.json({ ok: true, checked_in: checkedIn.length, booking_ids: checkedIn, skipped, skipped_count: skipped.length });
     } catch (err) {
+      console.error('group checkin error', err);
       res.status(500).json({ error: "Bulk check-in failed" });
     }
   });
@@ -32339,7 +32418,8 @@ ${data.tenant.name}`;
       // recent open one (another guest's), so one guest's advance / outstanding
       // showed up on a different guest at checkout. Scope it to the booking.
       const bookingId = (req.query.booking_id as string) || null;
-      let sql = `SELECT f.*, b.guest_name, b.check_in_date, b.check_out_date, r.name AS room_name
+      let sql = `SELECT f.*, b.guest_name, b.check_in_date, b.check_out_date,
+                        b.actual_checkin_at, b.actual_checkout_at, r.name AS room_name
                  FROM folios f
                  LEFT JOIN room_bookings b ON b.id = f.booking_id
                  LEFT JOIN rooms r ON r.id = f.room_id
@@ -32842,7 +32922,8 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const folio: any = await tenantDb.get(
-        `SELECT f.*, b.guest_name, b.guest_phone, b.guest_email, b.check_in_date, b.check_out_date, b.guest_nationality, r.name AS room_name
+        `SELECT f.*, b.guest_name, b.guest_phone, b.guest_email, b.check_in_date, b.check_out_date,
+                b.actual_checkin_at, b.actual_checkout_at, b.guest_nationality, r.name AS room_name
          FROM folios f
          LEFT JOIN room_bookings b ON b.id = f.booking_id
          LEFT JOIN rooms r ON r.id = f.room_id

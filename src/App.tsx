@@ -7907,6 +7907,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [groupGuestEdits, setGroupGuestEdits] = useState<Record<string, any>>({});
   const [groupGuestSaving, setGroupGuestSaving] = useState<string | null>(null);
   const [groupCheckinBusy, setGroupCheckinBusy] = useState(false);
+  const [groupCheckInWizardTarget, setGroupCheckInWizardTarget] = useState<{groupId: string; groupName: string} | null>(null);
   const [groupTransferFrom, setGroupTransferFrom] = useState('');
   const [groupTransferTo, setGroupTransferTo] = useState('');
   const [groupTransferBusy, setGroupTransferBusy] = useState(false);
@@ -19256,21 +19257,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 >📋 Detail</button>
                                 {Number(g.booking_count) > Number(g.checked_in_count) + Number(g.checked_out_count) && !g.settled_at && (
                                   <button
-                                    disabled={groupCheckinBusy}
-                                    onClick={async () => {
-                                      if (!confirm(`Bulk check-in all BOOKED rooms in "${g.name}"?`)) return;
-                                      setGroupCheckinBusy(true);
-                                      try {
-                                        const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkin`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
-                                        const d = await r.json();
-                                        if (!r.ok) throw new Error(d?.error || 'Failed');
-                                        alert(`✓ Checked in ${d.checked_in} room${d.checked_in !== 1 ? 's' : ''}`);
-                                        setGroupsList(null);
-                                      } catch (err: any) { alert(err.message); }
-                                      finally { setGroupCheckinBusy(false); }
-                                    }}
-                                    className="px-2 py-1 rounded-lg border border-green-400 text-green-700 text-[10px] font-bold hover:bg-green-50 disabled:opacity-50"
-                                  >✓ Check In All</button>
+                                    onClick={() => setGroupCheckInWizardTarget({ groupId: g.id, groupName: g.name })}
+                                    className="px-2 py-1 rounded-lg border border-green-400 text-green-700 text-[10px] font-bold hover:bg-green-50"
+                                  >✓ Check In Group</button>
                                 )}
                               </div>
                             </td>
@@ -19283,6 +19272,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             )}
           </details>
+
+          {/* ── GROUP CHECK-IN WIZARD ────────────────────────────────────── */}
+          {groupCheckInWizardTarget && (
+            <GroupCheckInWizard
+              groupId={groupCheckInWizardTarget.groupId}
+              groupName={groupCheckInWizardTarget.groupName}
+              restaurantId={restaurantId}
+              token={token}
+              onClose={() => setGroupCheckInWizardTarget(null)}
+              onSuccess={() => { setGroupsList(null); fetchHotelBookings(); }}
+            />
+          )}
 
           {/* ── MASTER BILLING ACCOUNT DRAWER ────────────────────────────── */}
           {masterFolioGroupId && (
@@ -35850,6 +35851,419 @@ const GuestDocumentsWidget: React.FC<{
         >
           {uploading ? 'Uploading…' : 'Upload'}
         </button>
+      </div>
+    </div>
+  );
+};
+
+/* ─── GroupCheckInWizard — Group Check-In process ────────────────────
+   3-step wizard for checking in an entire group booking:
+
+   STEP 1 (ROOMS) — Readiness dashboard: per-room grid showing guest
+     assignment status, phone capture, and ID document upload. Staff can
+     expand each room to fill in guest details and upload an ID inline
+     before executing check-in.
+
+   STEP 2 (CONFIRM) — Summary of ready vs. incomplete rooms. Executes
+     the partial or full check-in against the enhanced bulk-checkin
+     endpoint which validates phone + docs per room.
+
+   STEP 3 (DONE) — Per-room result: how many checked in, which were
+     skipped and why.                                                   */
+
+const NATIONALITIES = ['Indian', 'American', 'British', 'Canadian', 'Australian', 'German', 'French', 'Chinese', 'Japanese', 'Singaporean', 'UAE', 'Other'];
+
+const GroupCheckInWizard: React.FC<{
+  groupId: string;
+  groupName: string;
+  restaurantId: string;
+  token: string;
+  onClose: () => void;
+  onSuccess: () => void;
+}> = ({ groupId, groupName, restaurantId, token, onClose, onSuccess }) => {
+  const [step, setStep] = useState<'rooms' | 'confirm' | 'done'>('rooms');
+  const [rooms, setRooms] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedRoom, setExpandedRoom] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, any>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+  const [checkinBusy, setCheckinBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [requireId, setRequireId] = useState(true);
+  const [uploadingFor, setUploadingFor] = useState<string | null>(null);
+  const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
+  useEffect(() => { loadReadiness(); }, []);
+
+  async function loadReadiness() {
+    setLoading(true);
+    try {
+      const r = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/booking-groups/${groupId}/checkin-readiness`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.error || 'Failed');
+      setRooms(d.rooms || []);
+      setRequireId(d.require_id ?? true);
+      setDrafts(prev => {
+        const next: Record<string, any> = { ...prev };
+        for (const room of (d.rooms || [])) {
+          if (!next[room.booking_id]) {
+            next[room.booking_id] = {
+              guest_name: room.guest_name || '',
+              guest_phone: room.guest_phone || '',
+              guest_email: room.guest_email || '',
+              guest_nationality: room.guest_nationality || 'Indian',
+              guest_id_proof: room.guest_id_proof || '',
+            };
+          }
+        }
+        return next;
+      });
+    } catch (err: any) { console.error(err); }
+    finally { setLoading(false); }
+  }
+
+  async function saveGuest(bookingId: string) {
+    setSaving(bookingId);
+    try {
+      const draft = drafts[bookingId] || {};
+      const r = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/booking-groups/${groupId}/rooms/${bookingId}/guest`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(draft),
+        }
+      );
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Failed to save'); }
+      setExpandedRoom(null);
+      await loadReadiness();
+    } catch (err: any) { alert(err.message); }
+    finally { setSaving(null); }
+  }
+
+  async function uploadDoc(bookingId: string, file: File) {
+    setUploadingFor(bookingId);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('doc_type', 'OTHER');
+      const r = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/bookings/${bookingId}/documents`,
+        { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd }
+      );
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Upload failed'); }
+      await loadReadiness();
+    } catch (err: any) { alert(err.message); }
+    finally { setUploadingFor(null); }
+  }
+
+  async function executeCheckin(bookingIds?: string[]) {
+    setCheckinBusy(true);
+    try {
+      const body: any = {};
+      if (bookingIds?.length) body.booking_ids = bookingIds;
+      const r = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/booking-groups/${groupId}/checkin`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(body),
+        }
+      );
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.error || 'Check-in failed');
+      setResult(d);
+      setStep('done');
+    } catch (err: any) { alert(err.message); }
+    finally { setCheckinBusy(false); }
+  }
+
+  const bookedRooms    = rooms.filter(r => r.status === 'BOOKED');
+  const readyRooms     = bookedRooms.filter(r => r.ready);
+  const notReadyRooms  = bookedRooms.filter(r => !r.ready);
+  const alreadyDone    = rooms.filter(r => r.status === 'CHECKED_IN' || r.status === 'CHECKED_OUT');
+
+  function readinessBadge(room: any) {
+    if (room.status === 'CHECKED_IN')  return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-100 text-blue-700">CHECKED IN</span>;
+    if (room.status === 'CHECKED_OUT') return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 text-gray-500">CHECKED OUT</span>;
+    if (room.ready)                    return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-100 text-green-700">READY</span>;
+    if (room.issues.includes('missing_id') && room.issues.includes('missing_phone'))
+      return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-100 text-red-600">MISSING DETAILS + ID</span>;
+    if (room.issues.includes('missing_id'))
+      return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-700">MISSING ID</span>;
+    return <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-100 text-amber-700">MISSING DETAILS</span>;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[92vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-7 pt-6 pb-4 border-b border-[#f0ede8]">
+          <div>
+            <h2 className="text-xl font-bold font-serif text-[#1a1208]">Group Check-In</h2>
+            <p className="text-xs text-[#6b5d52] mt-0.5">{groupName}</p>
+          </div>
+          <div className="flex items-center gap-3">
+            {/* Step indicator */}
+            {['rooms', 'confirm', 'done'].map((s, i) => (
+              <div key={s} className={`flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide ${step === s ? 'text-[#cc5a16]' : 'text-[#c9bdb7]'}`}>
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] ${step === s ? 'bg-[#cc5a16] text-white' : 'bg-[#f0ede8] text-[#9c8e85]'}`}>{i + 1}</span>
+                {s === 'rooms' ? 'Rooms' : s === 'confirm' ? 'Confirm' : 'Done'}
+              </div>
+            ))}
+            <button onClick={onClose} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] ml-2"><X size={18} /></button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-7 py-5">
+
+          {/* ── STEP: ROOMS ─────────────────────────────────────────── */}
+          {step === 'rooms' && (
+            <div className="space-y-3">
+              {loading ? (
+                <div className="text-center py-12 text-[#9c8e85] text-sm">Loading room readiness…</div>
+              ) : (
+                <>
+                  {/* Summary bar */}
+                  <div className="flex items-center gap-4 bg-[#faf7f2] rounded-2xl px-4 py-3">
+                    <div className="text-center">
+                      <div className="text-2xl font-bold font-mono text-green-700">{readyRooms.length}</div>
+                      <div className="text-[10px] text-[#6b5d52] uppercase tracking-wide">Ready</div>
+                    </div>
+                    <div className="w-px h-8 bg-[#e8e0d8]" />
+                    <div className="text-center">
+                      <div className="text-2xl font-bold font-mono text-amber-600">{notReadyRooms.length}</div>
+                      <div className="text-[10px] text-[#6b5d52] uppercase tracking-wide">Needs attention</div>
+                    </div>
+                    <div className="w-px h-8 bg-[#e8e0d8]" />
+                    <div className="text-center">
+                      <div className="text-2xl font-bold font-mono text-blue-600">{alreadyDone.length}</div>
+                      <div className="text-[10px] text-[#6b5d52] uppercase tracking-wide">Already done</div>
+                    </div>
+                    <div className="ml-auto text-xs text-[#9c8e85]">{rooms.length} total rooms</div>
+                  </div>
+
+                  {/* Room cards */}
+                  {rooms.map(room => {
+                    const draft = drafts[room.booking_id] || {};
+                    const isExpanded = expandedRoom === room.booking_id;
+                    const isSaving = saving === room.booking_id;
+                    const isUploading = uploadingFor === room.booking_id;
+                    const isLocked = room.status !== 'BOOKED';
+                    const nights = (() => {
+                      const ci = new Date(room.check_in_date).getTime();
+                      const co = new Date(room.check_out_date).getTime();
+                      return isNaN(ci) || isNaN(co) ? 1 : Math.max(1, Math.round((co - ci) / 86400000));
+                    })();
+                    return (
+                      <div key={room.booking_id} className={`border rounded-2xl overflow-hidden transition-all ${room.ready ? 'border-green-200 bg-green-50/30' : isLocked ? 'border-gray-200 bg-gray-50/50' : 'border-amber-200 bg-amber-50/30'}`}>
+                        {/* Room row */}
+                        <div className="flex items-center gap-3 px-4 py-3">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-semibold text-sm text-[#1a1208]">{room.room_name}</span>
+                              {room.room_number && <span className="text-[10px] text-[#9c8e85] font-mono">#{room.room_number}</span>}
+                              {room.type_name && <span className="text-[10px] text-[#9c8e85]">· {room.type_name}</span>}
+                              <span className="text-[10px] text-[#9c8e85]">· {nights}N</span>
+                              {readinessBadge(room)}
+                            </div>
+                            <div className="flex items-center gap-3 mt-1 text-[11px] text-[#6b5d52]">
+                              <span>{room.guest_name || <span className="text-amber-600 italic">No guest name</span>}</span>
+                              {room.guest_phone
+                                ? <span className="text-green-700">✓ {room.guest_phone}</span>
+                                : <span className="text-red-500">✗ No phone</span>}
+                              <span className={room.doc_count > 0 ? 'text-green-700' : 'text-red-500'}>
+                                {room.doc_count > 0 ? `✓ ${room.doc_count} ID${room.doc_count > 1 ? 's' : ''}` : requireId ? '✗ No ID' : '— No ID'}
+                              </span>
+                            </div>
+                          </div>
+                          {!isLocked && (
+                            <button
+                              onClick={() => setExpandedRoom(isExpanded ? null : room.booking_id)}
+                              className="px-3 py-1.5 rounded-xl border border-[#cc5a16]/30 text-[#cc5a16] text-[11px] font-bold hover:bg-[#cc5a16]/5 shrink-0"
+                            >{isExpanded ? 'Close' : 'Edit Guest'}</button>
+                          )}
+                        </div>
+
+                        {/* Expanded per-room form */}
+                        {isExpanded && !isLocked && (
+                          <div className="border-t border-amber-200 bg-white px-4 pb-4 pt-3">
+                            <div className="grid grid-cols-2 gap-3 mb-3">
+                              <div>
+                                <label className="block text-[10px] font-bold uppercase tracking-wide text-[#6b5d52] mb-1">Guest Name *</label>
+                                <input
+                                  className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16]"
+                                  value={draft.guest_name || ''}
+                                  onChange={e => setDrafts(p => ({ ...p, [room.booking_id]: { ...p[room.booking_id], guest_name: e.target.value } }))}
+                                  placeholder="Full name"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold uppercase tracking-wide text-[#6b5d52] mb-1">Mobile *</label>
+                                <input
+                                  className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16]"
+                                  value={draft.guest_phone || ''}
+                                  onChange={e => setDrafts(p => ({ ...p, [room.booking_id]: { ...p[room.booking_id], guest_phone: e.target.value } }))}
+                                  placeholder="+91 98765 43210"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold uppercase tracking-wide text-[#6b5d52] mb-1">Email</label>
+                                <input
+                                  className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16]"
+                                  value={draft.guest_email || ''}
+                                  onChange={e => setDrafts(p => ({ ...p, [room.booking_id]: { ...p[room.booking_id], guest_email: e.target.value } }))}
+                                  placeholder="guest@email.com"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold uppercase tracking-wide text-[#6b5d52] mb-1">Nationality</label>
+                                <select
+                                  className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16] bg-white"
+                                  value={draft.guest_nationality || 'Indian'}
+                                  onChange={e => setDrafts(p => ({ ...p, [room.booking_id]: { ...p[room.booking_id], guest_nationality: e.target.value } }))}
+                                >
+                                  {NATIONALITIES.map(n => <option key={n}>{n}</option>)}
+                                </select>
+                              </div>
+                              <div className="col-span-2">
+                                <label className="block text-[10px] font-bold uppercase tracking-wide text-[#6b5d52] mb-1">ID Number (Aadhaar / Passport)</label>
+                                <input
+                                  className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16]"
+                                  value={draft.guest_id_proof || ''}
+                                  onChange={e => setDrafts(p => ({ ...p, [room.booking_id]: { ...p[room.booking_id], guest_id_proof: e.target.value } }))}
+                                  placeholder="ID document number"
+                                />
+                              </div>
+                            </div>
+                            {/* ID document upload */}
+                            <div className="flex items-center gap-3 bg-[#faf7f2] rounded-xl px-3 py-2">
+                              <div className="text-[11px] text-[#6b5d52]">
+                                {room.doc_count > 0
+                                  ? <span className="text-green-700 font-semibold">✓ {room.doc_count} ID document{room.doc_count > 1 ? 's' : ''} uploaded</span>
+                                  : <span className={requireId ? 'text-red-500' : 'text-[#9c8e85]'}>No ID document{requireId ? ' (required)' : ''}</span>
+                                }
+                              </div>
+                              <label className={`ml-auto px-3 py-1 rounded-lg text-[11px] font-bold cursor-pointer border transition ${isUploading ? 'opacity-50 cursor-not-allowed' : 'border-[#cc5a16]/40 text-[#cc5a16] hover:bg-[#cc5a16]/5'}`}>
+                                {isUploading ? 'Uploading…' : '+ Upload ID'}
+                                <input
+                                  type="file"
+                                  accept="image/*,.pdf"
+                                  className="hidden"
+                                  disabled={isUploading}
+                                  onChange={e => { const f = e.target.files?.[0]; if (f) uploadDoc(room.booking_id, f); e.target.value = ''; }}
+                                />
+                              </label>
+                            </div>
+                            <div className="flex justify-end gap-2 mt-3">
+                              <button onClick={() => setExpandedRoom(null)} className="px-4 py-1.5 rounded-xl border border-[#e8e0d8] text-[#6b5d52] text-sm hover:bg-[#faf7f2]">Cancel</button>
+                              <button
+                                disabled={isSaving}
+                                onClick={() => saveGuest(room.booking_id)}
+                                className="px-4 py-1.5 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50"
+                              >{isSaving ? 'Saving…' : 'Save Guest'}</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── STEP: CONFIRM ─────────────────────────────────────────── */}
+          {step === 'confirm' && (
+            <div className="space-y-4">
+              <div className="bg-green-50 border border-green-200 rounded-2xl p-4">
+                <div className="font-bold text-green-800 mb-2 text-sm">Ready to check in: {readyRooms.length} room{readyRooms.length !== 1 ? 's' : ''}</div>
+                <div className="space-y-1">
+                  {readyRooms.map(r => (
+                    <div key={r.booking_id} className="flex items-center gap-3 text-xs text-green-700">
+                      <span className="font-semibold">{r.room_name}</span>
+                      <span>{r.guest_name}</span>
+                      <span className="font-mono">{r.guest_phone}</span>
+                      <span>{r.doc_count} ID{r.doc_count !== 1 ? 's' : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {notReadyRooms.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
+                  <div className="font-bold text-amber-800 mb-2 text-sm">Will be skipped: {notReadyRooms.length} room{notReadyRooms.length !== 1 ? 's' : ''}</div>
+                  <div className="space-y-1">
+                    {notReadyRooms.map(r => (
+                      <div key={r.booking_id} className="flex items-center gap-3 text-xs text-amber-700">
+                        <span className="font-semibold">{r.room_name}</span>
+                        <span className="text-amber-600">{r.issues.join(', ').replace(/_/g, ' ')}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-amber-600 mt-2">Go back and complete guest details + ID upload to include these rooms.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── STEP: DONE ─────────────────────────────────────────────── */}
+          {step === 'done' && result && (
+            <div className="space-y-4 text-center py-4">
+              <div className="text-5xl">🏨</div>
+              <div className="text-xl font-bold font-serif text-[#1a1208]">
+                {result.checked_in} room{result.checked_in !== 1 ? 's' : ''} checked in
+              </div>
+              {result.skipped_count > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-left">
+                  <div className="font-bold text-amber-800 text-sm mb-2">{result.skipped_count} room{result.skipped_count !== 1 ? 's' : ''} skipped</div>
+                  {result.skipped.map((s: any) => (
+                    <div key={s.booking_id} className="text-xs text-amber-700">{s.booking_id} — {(s.reason || '').replace(/_/g, ' ')}</div>
+                  ))}
+                </div>
+              )}
+              <p className="text-sm text-[#6b5d52]">Folios have been created. F&B charges will auto-post throughout the stay.</p>
+            </div>
+          )}
+
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between px-7 py-4 border-t border-[#f0ede8] bg-[#fdfcfb] rounded-b-3xl">
+          {step === 'rooms' && (
+            <>
+              <button onClick={onClose} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-[#6b5d52] text-sm hover:bg-[#faf7f2]">Cancel</button>
+              <button
+                disabled={loading || bookedRooms.length === 0}
+                onClick={() => setStep('confirm')}
+                className="px-6 py-2 rounded-xl bg-[#1a1208] text-white text-sm font-bold hover:bg-[#2d1f0e] disabled:opacity-50"
+              >
+                Review & Check In →
+              </button>
+            </>
+          )}
+          {step === 'confirm' && (
+            <>
+              <button onClick={() => setStep('rooms')} className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-[#6b5d52] text-sm hover:bg-[#faf7f2]">← Back</button>
+              <button
+                disabled={checkinBusy || readyRooms.length === 0}
+                onClick={() => executeCheckin(readyRooms.map(r => r.booking_id))}
+                className="px-6 py-2 rounded-xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] disabled:opacity-50"
+              >
+                {checkinBusy ? 'Checking in…' : `Check In ${readyRooms.length} Room${readyRooms.length !== 1 ? 's' : ''}`}
+              </button>
+            </>
+          )}
+          {step === 'done' && (
+            <button
+              onClick={() => { onSuccess(); onClose(); }}
+              className="ml-auto px-6 py-2 rounded-xl bg-green-700 text-white text-sm font-bold hover:bg-green-800"
+            >Done</button>
+          )}
+        </div>
       </div>
     </div>
   );
