@@ -531,6 +531,9 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     );
     -- PHASE-3 GROUP: promo code applied at group booking creation.
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS promo_code_id TEXT;
+    -- GROUP-STATUS (Jun 2026): sales lifecycle — TENTATIVE (provisional hold),
+    -- CONFIRMED (deposit received / contract signed), CANCELLED.
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS group_status TEXT DEFAULT 'TENTATIVE';
 
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
@@ -25323,8 +25326,8 @@ ${data.tenant.name}`;
              (id, name, contact_name, contact_phone, contact_email, num_rooms,
               check_in_date, check_out_date, total_amount, notes, created_by,
               advance_amount, advance_method, advance_reference, advance_recorded_at,
-              discount_type, discount_value, promo_code_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              discount_type, discount_value, promo_code_id, group_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [groupId, String(name).trim(), contact_name, contact_phone || null,
            contact_email || null, expandedRooms.length, check_in_date, check_out_date,
            groupTotal, special_requests || null, req.user?.id || null,
@@ -25332,7 +25335,7 @@ ${data.tenant.name}`;
            advanceAmount > 0 ? advanceReference : null,
            advanceAmount > 0 ? new Date().toISOString() : null,
            discountType || null, discountValue || 0,
-           (req.body as any)?.promo_code_id || null]
+           (req.body as any)?.promo_code_id || null, 'TENTATIVE']
         );
       } catch (e) {
         console.warn('[group-booking] failed to record group meta:', e);
@@ -29315,10 +29318,59 @@ ${data.tenant.name}`;
           groupId: req.params.groupId, numCancelled: results.filter(r => !r.skipped).length, totalRefund,
         });
       } catch {}
+      await tenantDb.run(
+        "UPDATE room_booking_groups SET group_status = 'CANCELLED' WHERE id = ?",
+        [req.params.groupId]
+      );
       res.json({ success: true, group_id: req.params.groupId, total_refund: totalRefund, results });
     } catch (err) {
       console.error("group cancel error:", err);
       res.status(500).json({ error: "Failed to cancel group" });
+    }
+  });
+
+  // ── GROUP STATUS: PATCH /booking-groups/:groupId/status ──────────────
+  // Updates group_status (TENTATIVE → CONFIRMED, or → CANCELLED).
+  // CANCELLED also cancels all non-checked-in child bookings.
+  app.patch("/api/restaurant/:id/hotel/booking-groups/:groupId/status", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const newStatus = String(req.body?.status || '').toUpperCase().trim();
+      if (!['TENTATIVE', 'CONFIRMED', 'CANCELLED'].includes(newStatus)) {
+        return res.status(400).json({ error: 'status must be TENTATIVE, CONFIRMED, or CANCELLED' });
+      }
+      const group: any = await tenantDb.get("SELECT * FROM room_booking_groups WHERE id = ?", [req.params.groupId]);
+      if (!group) return res.status(404).json({ error: 'Group not found' });
+      if (group.settled_at && newStatus !== 'CANCELLED') {
+        return res.status(409).json({ error: 'Cannot change status of a settled group' });
+      }
+      await tenantDb.run(
+        "UPDATE room_booking_groups SET group_status = ? WHERE id = ?",
+        [newStatus, req.params.groupId]
+      );
+      if (newStatus === 'CANCELLED') {
+        const children: any[] = await tenantDb.query(
+          "SELECT * FROM room_bookings WHERE group_id = ?", [req.params.groupId]
+        );
+        const reason = String(req.body?.reason || 'Group cancelled').slice(0, 500);
+        for (const b of children) {
+          if (['CHECKED_IN', 'CHECKED_OUT', 'CANCELLED'].includes(b.status)) continue;
+          const refund = await computeCancellationRefund(req.params.id, b.check_in_date, Number(b.total_amount || 0));
+          await tenantDb.run(
+            `UPDATE room_bookings SET status='CANCELLED', cancelled_at=?, cancelled_by=?,
+             cancelled_source='STAFF', cancellation_reason=?,
+             cancellation_refund_pct=?, cancellation_refund_amount=? WHERE id=?`,
+            [new Date().toISOString(), req.user?.id || null, reason,
+             refund.refund_pct, refund.refund_amount, b.id]
+          );
+        }
+      }
+      res.json({ ok: true, group_id: req.params.groupId, group_status: newStatus });
+    } catch (err) {
+      console.error("group status update error:", err);
+      res.status(500).json({ error: "Failed to update group status" });
     }
   });
 

@@ -19134,10 +19134,50 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="py-2 pr-3">
                               {settled
                                 ? <span className="text-[10px] font-bold uppercase tracking-widest bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded">Settled · {g.invoice_number}</span>
-                                : <span className="text-[10px] font-bold uppercase tracking-widest bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">Open</span>}
+                                : g.group_status === 'CANCELLED'
+                                ? <span className="text-[10px] font-bold uppercase tracking-widest bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">Cancelled</span>
+                                : g.group_status === 'CONFIRMED'
+                                ? <span className="text-[10px] font-bold uppercase tracking-widest bg-green-100 text-green-800 px-1.5 py-0.5 rounded">Confirmed</span>
+                                : <span className="text-[10px] font-bold uppercase tracking-widest bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">Tentative</span>}
                             </td>
                             <td className="py-2 text-right">
                               <div className="flex gap-1 justify-end flex-wrap">
+                                {/* Status transition buttons */}
+                                {!settled && g.group_status !== 'CANCELLED' && g.group_status !== 'CONFIRMED' && (
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {
+                                          method: 'PATCH',
+                                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                          body: JSON.stringify({ status: 'CONFIRMED' }),
+                                        });
+                                        if (!res.ok) throw new Error((await res.json())?.error || 'Failed');
+                                        setGroupsList(null); setGroupsPanelOpen(false); setTimeout(() => setGroupsPanelOpen(true), 50);
+                                      } catch (err: any) { alert(err.message); }
+                                    }}
+                                    className="px-2 py-1 rounded-lg bg-green-600 text-white text-[10px] font-bold hover:bg-green-700"
+                                  >Confirm</button>
+                                )}
+                                {!settled && g.group_status !== 'CANCELLED' && (
+                                  <button
+                                    onClick={async () => {
+                                      const reason = prompt(`Cancel group "${g.name}"? Enter reason (optional):`) ;
+                                      if (reason === null) return;
+                                      try {
+                                        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {
+                                          method: 'PATCH',
+                                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                          body: JSON.stringify({ status: 'CANCELLED', reason: reason.trim() || null }),
+                                        });
+                                        if (!res.ok) throw new Error((await res.json())?.error || 'Failed');
+                                        setGroupsList(null); setGroupsPanelOpen(false); setTimeout(() => setGroupsPanelOpen(true), 50);
+                                        fetchHotelBookings();
+                                      } catch (err: any) { alert(err.message); }
+                                    }}
+                                    className="px-2 py-1 rounded-lg border border-red-300 text-red-600 text-[10px] font-bold hover:bg-red-50"
+                                  >Cancel</button>
+                                )}
                                 {hasCheckedIn && (
                                   <button
                                     onClick={async () => {
