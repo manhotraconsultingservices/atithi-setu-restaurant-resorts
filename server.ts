@@ -31105,7 +31105,7 @@ ${data.tenant.name}`;
       //    the folio id) and a grand total, then upserts loyalty_customers
       //    + recomputes tier + writes a redemption row when discounted.
       //    Best-effort: never blocks the checkout response.
-      if (settled && settled.status === 'settled') {
+      if (settled && (settled.status === 'settled' || settled.status === 'voided')) {
         const loy = (settled as any).loyalty || null;
         _loyaltyHook({
           tenantId:        req.params.id,
