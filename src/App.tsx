@@ -36366,6 +36366,10 @@ const GroupCheckInWizard: React.FC<{
   const [requireId, setRequireId] = useState(true);
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const [roomPickerFor, setRoomPickerFor] = useState<string | null>(null);
+  const [roomPickerList, setRoomPickerList] = useState<any[]>([]);
+  const [loadingRoomPicker, setLoadingRoomPicker] = useState(false);
+  const [reassigningRoom, setReassigningRoom] = useState<string | null>(null);
 
   useEffect(() => { loadReadiness(); }, []);
 
@@ -36432,6 +36436,46 @@ const GroupCheckInWizard: React.FC<{
       await loadReadiness();
     } catch (err: any) { alert(err.message); }
     finally { setUploadingFor(null); }
+  }
+
+  async function openRoomPicker(room: any) {
+    setRoomPickerFor(room.booking_id);
+    setRoomPickerList([]);
+    setLoadingRoomPicker(true);
+    try {
+      const ci = room.check_in_date?.slice(0, 10) || '';
+      const co = room.check_out_date?.slice(0, 10) || '';
+      const r = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/find-available-rooms?start=${ci}&end=${co}&guests=${room.num_adults || 1}&exclude_booking_id=${room.booking_id}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.error || 'Failed');
+      // Filter to same room category only; include current room (exclude_booking_id makes it show as available).
+      const filtered = (d.rooms || []).filter((rm: any) =>
+        (!room.type_id || rm.type_id === room.type_id) && rm.available
+      );
+      setRoomPickerList(filtered);
+    } catch (err: any) { alert(err.message); setRoomPickerFor(null); }
+    finally { setLoadingRoomPicker(false); }
+  }
+
+  async function reassignRoom(bookingId: string, newRoomId: string) {
+    setReassigningRoom(bookingId);
+    try {
+      const r = await fetch(
+        `/api/restaurant/${restaurantId}/hotel/booking-groups/${groupId}/rooms/${bookingId}/reassign`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ new_room_id: newRoomId }),
+        }
+      );
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Reassign failed'); }
+      setRoomPickerFor(null);
+      await loadReadiness();
+    } catch (err: any) { alert(err.message); }
+    finally { setReassigningRoom(null); }
   }
 
   async function executeCheckin(bookingIds?: string[]) {
@@ -36632,6 +36676,70 @@ const GroupCheckInWizard: React.FC<{
                                   onChange={e => { const f = e.target.files?.[0]; if (f) uploadDoc(room.booking_id, f); e.target.value = ''; }}
                                 />
                               </label>
+                            </div>
+                            {/* Room Reassignment */}
+                            <div className="mt-3 border-t border-[#f0ede8] pt-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-[10px] font-bold uppercase tracking-wide text-[#6b5d52]">Room Assignment</span>
+                                {roomPickerFor !== room.booking_id ? (
+                                  <button
+                                    onClick={() => openRoomPicker(room)}
+                                    disabled={loadingRoomPicker}
+                                    className="px-3 py-1 rounded-lg border border-[#e8e0d8] text-[11px] text-[#6b5d52] font-semibold hover:bg-[#faf7f2] disabled:opacity-50"
+                                  >
+                                    {loadingRoomPicker && roomPickerFor === room.booking_id ? 'Loading…' : 'Change Room'}
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => setRoomPickerFor(null)}
+                                    className="px-3 py-1 rounded-lg border border-[#e8e0d8] text-[11px] text-[#9c8e85] hover:bg-[#faf7f2]"
+                                  >Close</button>
+                                )}
+                              </div>
+                              {roomPickerFor !== room.booking_id && (
+                                <p className="text-[11px] text-[#9c8e85]">
+                                  Currently assigned: <span className="font-semibold text-[#1a1208]">{room.room_name}{room.room_number ? ` #${room.room_number}` : ''}</span>
+                                  {room.type_name && <span className="text-[#9c8e85]"> · {room.type_name}</span>}
+                                </p>
+                              )}
+                              {roomPickerFor === room.booking_id && (
+                                <div className="bg-[#faf7f2] rounded-xl p-2 max-h-44 overflow-y-auto">
+                                  {loadingRoomPicker ? (
+                                    <p className="text-[11px] text-[#9c8e85] text-center py-3">Loading available rooms…</p>
+                                  ) : roomPickerList.length === 0 ? (
+                                    <p className="text-[11px] text-amber-600 text-center py-3">No other available rooms in the <strong>{room.type_name || 'same'}</strong> category for these dates.</p>
+                                  ) : (
+                                    <div className="space-y-1">
+                                      {roomPickerList.map(rm => {
+                                        const isCurrent = rm.id === room.room_id;
+                                        const isReassigning = reassigningRoom === room.booking_id;
+                                        return (
+                                          <div
+                                            key={rm.id}
+                                            className={`flex items-center justify-between px-3 py-2 rounded-lg transition ${isCurrent ? 'bg-blue-50 border border-blue-200' : 'bg-white border border-[#e8e0d8] hover:border-[#cc5a16]/40'}`}
+                                          >
+                                            <div>
+                                              <span className="text-sm font-semibold text-[#1a1208]">{rm.name}</span>
+                                              {rm.room_number && <span className="text-[10px] text-[#9c8e85] ml-1">#{rm.room_number}</span>}
+                                              {rm.floor && <span className="text-[10px] text-[#9c8e85] ml-1">· Floor {rm.floor}</span>}
+                                              {rm.capacity && <span className="text-[10px] text-[#9c8e85] ml-1">· {rm.capacity} pax</span>}
+                                            </div>
+                                            {isCurrent ? (
+                                              <span className="text-[10px] font-bold text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">Current</span>
+                                            ) : (
+                                              <button
+                                                disabled={isReassigning}
+                                                onClick={() => reassignRoom(room.booking_id, rm.id)}
+                                                className="px-3 py-1 rounded-lg bg-[#cc5a16] text-white text-[11px] font-bold hover:bg-[#a84612] disabled:opacity-50"
+                                              >{isReassigning ? '…' : 'Select'}</button>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                             <div className="flex justify-end gap-2 mt-3">
                               <button onClick={() => setExpandedRoom(null)} className="px-4 py-1.5 rounded-xl border border-[#e8e0d8] text-[#6b5d52] text-sm hover:bg-[#faf7f2]">Cancel</button>

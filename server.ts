@@ -30004,6 +30004,46 @@ ${data.tenant.name}`;
     }
   });
 
+  // PATCH reassign: swap a BOOKED room to another room in the same category before check-in.
+  app.patch("/api/restaurant/:id/hotel/booking-groups/:groupId/rooms/:bookingId/reassign", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const { groupId, bookingId } = req.params;
+      const { new_room_id } = req.body || {};
+      if (!new_room_id) return res.status(400).json({ error: "new_room_id is required" });
+      const db = await getTenantDb(req.params.id);
+      // Verify booking belongs to this group and is still BOOKED.
+      const booking: any = await db.get(
+        "SELECT id, room_id, check_in_date, check_out_date, status FROM room_bookings WHERE id = ? AND group_id = ?",
+        [bookingId, groupId]
+      );
+      if (!booking) return res.status(404).json({ error: "Booking not found in this group" });
+      if (booking.status !== 'BOOKED') return res.status(409).json({ error: "Can only reassign BOOKED rooms" });
+      if (booking.room_id === new_room_id) return res.json({ ok: true }); // no-op
+      // Verify same room category.
+      const curRoom: any = await db.get("SELECT type_id FROM rooms WHERE id = ?", [booking.room_id]);
+      const newRoom: any = await db.get("SELECT id, type_id, status, name FROM rooms WHERE id = ?", [new_room_id]);
+      if (!newRoom) return res.status(404).json({ error: "Target room not found" });
+      if (curRoom?.type_id && newRoom.type_id && curRoom.type_id !== newRoom.type_id)
+        return res.status(409).json({ error: "Target room is in a different category" });
+      if (newRoom.status === 'MAINTENANCE' || newRoom.status === 'BLOCKED')
+        return res.status(409).json({ error: "Target room is not available" });
+      // Check no overlapping active booking on the target room (excluding this booking).
+      const conflict: any = await db.get(
+        `SELECT id FROM room_bookings
+          WHERE room_id = ? AND id <> ? AND status NOT IN ('CANCELLED','CHECKED_OUT')
+            AND check_in_date < ? AND check_out_date > ?`,
+        [new_room_id, bookingId, booking.check_out_date, booking.check_in_date]
+      );
+      if (conflict) return res.status(409).json({ error: `Room ${newRoom.name} is already booked for these dates` });
+      await db.run("UPDATE room_bookings SET room_id = ? WHERE id = ?", [new_room_id, bookingId]);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to reassign room" });
+    }
+  });
+
   // GET checkin-readiness: per-room readiness status for the group check-in wizard.
   app.get("/api/restaurant/:id/hotel/booking-groups/:groupId/checkin-readiness", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
@@ -30019,7 +30059,7 @@ ${data.tenant.name}`;
       const bookings: any[] = await db.query(
         `SELECT b.id, b.room_id, b.guest_name, b.guest_phone, b.guest_email, b.guest_nationality,
                 b.status, b.check_in_date, b.check_out_date, b.room_rate, b.num_adults,
-                r.name AS room_name, r.room_number, rt.name AS type_name,
+                r.name AS room_name, r.room_number, r.type_id, rt.name AS type_name,
                 gg.guest_name AS gg_name, gg.guest_phone AS gg_phone, gg.guest_email AS gg_email,
                 gg.guest_id_proof AS gg_id_proof, gg.guest_nationality AS gg_nationality
            FROM room_bookings b
@@ -30043,8 +30083,8 @@ ${data.tenant.name}`;
         if (!effectivePhone || effectivePhone.trim().length < 7) issues.push('missing_phone');
         if (requireId && docCount === 0) issues.push('missing_id');
         rooms.push({
-          booking_id: b.id, room_name: b.room_name || b.room_id, room_number: b.room_number,
-          type_name: b.type_name, status: b.status,
+          booking_id: b.id, room_id: b.room_id, room_name: b.room_name || b.room_id, room_number: b.room_number,
+          type_id: b.type_id, type_name: b.type_name, status: b.status,
           check_in_date: b.check_in_date, check_out_date: b.check_out_date,
           room_rate: b.room_rate, num_adults: b.num_adults,
           guest_name: effectiveName, guest_phone: effectivePhone,
