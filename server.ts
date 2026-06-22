@@ -513,6 +513,14 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- COST-CENTRE + TRANSFER (Jun 2026): cost_centre tags master-account charges
     -- for per-department invoice subtotals; transferred_from_folio_id tracks origin.
     ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS cost_centre TEXT;
+    -- Sprint 1 BCG (Jun 2026) — every folio_entries row maps to an income account
+    -- so the P&L can split Rooms vs F&B vs Services vs Ancillary. Values:
+    --   ROOM_REVENUE         room rent + extra person charges
+    --   SERVICE_CHARGE_REVENUE  hotel mandatory service charge (% of room rent)
+    --   F_AND_B_REVENUE      restaurant / room-service / bar / minibar
+    --   ANCILLARY_REVENUE    spa, laundry, telecom, retail, service requests
+    --   ADJUSTMENT           discounts, waivers, write-offs (negative entries)
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS account_head TEXT;
     ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS transferred_from_folio_id TEXT;
     -- PHASE-3 GROUP (Jun 2026): per-room guest roster for group check-in wizard.
     -- One row per booking in a group; created/updated when staff assigns individual
@@ -1715,8 +1723,8 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
       const baseGst = Math.round((lineGst - extrasGst) * 100) / 100;
       const roomEntryId = `FE-${Date.now()}-${i}-${tag}`;
       await tenantDb.run(
-        `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
-         VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?)`,
+        `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, cost_centre, account_head)
+         VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?, 'ROOMS', 'ROOM_REVENUE')`,
         [roomEntryId, folioId, `Room charge · ${dateStr}${labelSuffix}`, baseAmount, baseAmount, gstPct, baseGst]
       );
       if (extrasAmount > 0) {
@@ -1750,8 +1758,8 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
           const unit = t.count > 0 ? Math.round((amt / t.count) * 100) / 100 : amt;
           const extraEntryId = `FE-${Date.now()}-${i}-X${ti}-${tag}`;
           await tenantDb.run(
-            `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
-             VALUES (?, ?, 'ROOM_CHARGE', ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, cost_centre, account_head)
+             VALUES (?, ?, 'ROOM_CHARGE', ?, ?, ?, ?, ?, ?, 'ROOMS', 'ROOM_REVENUE')`,
             [extraEntryId, folioId, `${t.label}${t.count > 1 ? ` × ${t.count}` : ''} · ${dateStr}`, t.count, unit, amt, gstPct, gst]
           );
         }
@@ -1765,8 +1773,8 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
           const svcGst = Math.round((svcAmount * gstPct / 100) * 100) / 100;
           const svcEntryId = `FE-${Date.now()}-${i}-S-${tag}`;
           await tenantDb.run(
-            `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
-             VALUES (?, ?, 'SERVICE_CHARGE', ?, 1, ?, ?, ?, ?)`,
+            `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, cost_centre, account_head)
+             VALUES (?, ?, 'SERVICE_CHARGE', ?, 1, ?, ?, ?, ?, 'ROOMS', 'SERVICE_CHARGE_REVENUE')`,
             [svcEntryId, folioId, `Service charge (${svcPct}%) · ${dateStr}`, svcAmount, svcAmount, gstPct, svcGst]
           );
         }
@@ -1820,8 +1828,8 @@ async function postServiceChargeToFolio(restaurantId: string, sr: any): Promise<
   } catch { /* fall back to 5% */ }
   const gstAmt = amount * gstPct / 100;
   await tenantDb.run(
-    `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, source_id)
-     VALUES (?, ?, 'SERVICE', ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, source_id, cost_centre, account_head)
+     VALUES (?, ?, 'SERVICE', ?, ?, ?, ?, ?, ?, ?, 'SERVICES', 'ANCILLARY_REVENUE')`,
     [entryId, folioId, sr.service_name, qty, unitPrice, amount, gstPct, gstAmt, sr.id]
   );
   await tenantDb.run("UPDATE service_requests SET folio_entry_id = ? WHERE id = ?", [entryId, sr.id]);
@@ -2026,8 +2034,8 @@ async function postOrderToFolio(
       `INSERT INTO folio_entries
          (id, folio_id, entry_type, entry_subtype, description,
           quantity, unit_price, amount, gst_rate, gst_amount,
-          source_id, reference_number, posted_by)
-       VALUES (?, ?, 'F_AND_B', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          source_id, reference_number, posted_by, cost_centre, account_head)
+       VALUES (?, ?, 'F_AND_B', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'F_AND_B', 'F_AND_B_REVENUE')`,
       [entryId, folioId, subtype, item.name,
        qty, unit, amount, gstRate, gstAmt,
        order.id, order.id, order.posted_by || null]
@@ -2075,13 +2083,14 @@ async function reverseOrderFolioPosting(
       `INSERT INTO folio_entries
          (id, folio_id, entry_type, entry_subtype, description,
           quantity, unit_price, amount, gst_rate, gst_amount,
-          source_id, reference_number, reversal_of_entry_id, posted_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          source_id, reference_number, reversal_of_entry_id, posted_by, cost_centre, account_head)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [negId, o.folio_id, o.entry_type, o.entry_subtype,
        `REVERSAL — ${o.description} (${reason})`,
        o.quantity, o.unit_price, -Number(o.amount || 0),
        o.gst_rate, -Number(o.gst_amount || 0),
-       o.source_id, o.reference_number, o.id, reversedBy || null]
+       o.source_id, o.reference_number, o.id, reversedBy || null,
+       o.cost_centre || null, o.account_head || null]
     );
     reversed++;
   }
@@ -25337,6 +25346,29 @@ ${data.tenant.name}`;
            discountType || null, discountValue || 0,
            (req.body as any)?.promo_code_id || null, 'TENTATIVE']
         );
+        // BCG Sprint 1 — if an advance was collected at group creation time,
+        // post it to the master folio immediately so it is ledger-visible.
+        if (advanceAmount > 0) {
+          try {
+            const mfId = `GF-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+            await tenantDb.run(
+              "INSERT INTO folios (id, status, group_id, folio_kind, subtotal, gst_amount, grand_total) VALUES (?, 'open', ?, 'HOTEL', 0, 0, 0)",
+              [mfId, groupId]
+            );
+            await tenantDb.run("UPDATE room_booking_groups SET master_folio_id = ? WHERE id = ?", [mfId, groupId]);
+            await recordFolioPayment(tenantDb, {
+              folioId: mfId,
+              amount: advanceAmount,
+              method: (advanceMethod || 'CASH').toUpperCase(),
+              type: 'ADVANCE',
+              reference: advanceReference || null,
+              recordedBy: req.user?.id || null,
+              notes: 'Advance collected at group booking creation',
+            });
+          } catch (e) {
+            console.warn('[group-booking] master folio advance post failed (non-fatal):', e);
+          }
+        }
       } catch (e) {
         console.warn('[group-booking] failed to record group meta:', e);
       }
@@ -29904,6 +29936,22 @@ ${data.tenant.name}`;
         "UPDATE room_booking_groups SET advance_amount=?, advance_method=?, advance_reference=?, advance_recorded_at=? WHERE id=?",
         [amt, payment_method||'CASH', reference||null, new Date().toISOString(), groupId]
       );
+      // BCG Sprint 1: also post to master folio so the advance is visible
+      // in the ledger (not just stored on the group row).
+      try {
+        const masterFolioId = await ensureGroupMasterFolio(req.params.id, groupId);
+        await recordFolioPayment(db, {
+          folioId: masterFolioId,
+          amount: amt,
+          method: (payment_method || 'CASH').toUpperCase(),
+          type: 'ADVANCE',
+          reference: reference || null,
+          recordedBy: (req as AuthRequest).user?.id || null,
+          notes: 'Group deposit',
+        });
+      } catch (e) {
+        console.warn('[group-deposit] master folio advance post failed (non-fatal):', e);
+      }
       res.json({ ok: true, advance_amount: amt, advance_method: payment_method||'CASH' });
     } catch (err) {
       res.status(500).json({ error: "Failed to record deposit" });
@@ -31240,6 +31288,54 @@ ${data.tenant.name}`;
         ]
       );
       try { await triggerNotification(req.params.id, 'BOOKING_CANCELLED', { bookingId: b.id, refundPct: refund.refund_pct, refundAmount: refund.refund_amount }); } catch {}
+      // BCG Sprint 1 — reverse any open folio entries for this booking.
+      // For BOOKED bookings that had an advance payment (and therefore a folio),
+      // we must reverse the ROOM_CHARGE/SERVICE_CHARGE lines so the folio total
+      // goes to zero before any refund is issued. This prevents revenue over-
+      // statement from pre-paid cancellations. Audit-preserving: original rows
+      // stay; negative mirror entries are inserted with reversal_of_entry_id.
+      try {
+        const openFolio: any = await tenantDb.get(
+          "SELECT id FROM folios WHERE booking_id = ? AND status = 'open' LIMIT 1",
+          [req.params.bookingId]
+        );
+        if (openFolio?.id) {
+          const chargeable: any[] = await tenantDb.query(
+            `SELECT * FROM folio_entries
+              WHERE folio_id = ? AND reversal_of_entry_id IS NULL
+                AND entry_type IN ('ROOM_CHARGE', 'SERVICE_CHARGE', 'SERVICE', 'F_AND_B')
+                AND amount > 0`,
+            [openFolio.id]
+          );
+          for (const o of chargeable) {
+            const dup: any = await tenantDb.get(
+              "SELECT id FROM folio_entries WHERE reversal_of_entry_id = ? LIMIT 1",
+              [o.id]
+            );
+            if (dup) continue;
+            const negId = `FE-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+            await tenantDb.run(
+              `INSERT INTO folio_entries
+                 (id, folio_id, entry_type, entry_subtype, description, quantity, unit_price,
+                  amount, gst_rate, gst_amount, source_id, reference_number,
+                  reversal_of_entry_id, posted_by, cost_centre, account_head)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [negId, o.folio_id, o.entry_type, o.entry_subtype || null,
+               `REVERSAL — ${o.description} (booking cancelled)`,
+               o.quantity, o.unit_price, -Number(o.amount || 0),
+               o.gst_rate, -Number(o.gst_amount || 0),
+               o.source_id || null, o.reference_number || null,
+               o.id, req.user?.id || null,
+               o.cost_centre || null, o.account_head || null]
+            );
+          }
+          if (chargeable.length > 0) {
+            await recomputeFolioTotals(tenantDb, openFolio.id);
+          }
+        }
+      } catch (e) {
+        console.warn('[cancel] folio reversal failed (non-fatal):', e);
+      }
       // Phase H1 — log cancel for channel re-sync. Even DIRECT bookings
       // get an audit row (status='skipped_direct') so the front desk has
       // a unified history.
