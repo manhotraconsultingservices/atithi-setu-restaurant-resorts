@@ -20241,8 +20241,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         {/* Dates — whitespace-nowrap + min-width so each date shows in full. */}
                         {colOn('dates') && (
                           <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap min-w-[160px]">
-                            <div className="font-medium whitespace-nowrap">{formatDateForTenant(b.check_in_date, restaurant?.date_format)}</div>
-                            <div className="text-[#9c8e85] whitespace-nowrap">→ {formatDateForTenant(b.check_out_date, restaurant?.date_format)}</div>
+                            <div className="font-medium whitespace-nowrap">
+                              {formatDateForTenant(b.check_in_date, restaurant?.date_format)}
+                              {b.actual_checkin_at && <span className="ml-1 text-[10px] text-[#9c8e85]">{new Date(b.actual_checkin_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
+                            </div>
+                            <div className="text-[#9c8e85] whitespace-nowrap">
+                              → {formatDateForTenant(b.check_out_date, restaurant?.date_format)}
+                              {b.actual_checkout_at && <span className="ml-1 text-[10px] text-[#cc5a16]/70">{new Date(b.actual_checkout_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
+                            </div>
                           </td>
                         )}
                         {/* Actual check-in / check-out timestamps (date + hh:mm, IST). */}
@@ -23102,9 +23108,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <tr key={f.id} className="border-t border-[#cc5a16]/10 hover:bg-[#faf7f2]/50">
                       <td className="px-4 py-3 font-semibold text-[#1a1208]">{f.guest_name || '—'}</td>
                       <td className="px-4 py-3 text-[#3d3128]">{f.room_name || f.room_id}</td>
-                      <td className="px-4 py-3 text-xs text-[#3d3128]">
-                        {f.check_in_date && formatDateForTenant(f.check_in_date, restaurant?.date_format)}<br />
-                        {f.check_out_date && new Date(f.check_out_date).toLocaleDateString('en-IN')}
+                      <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap">
+                        <div>
+                          {f.check_in_date && formatDateForTenant(f.check_in_date, restaurant?.date_format)}
+                          {f.actual_checkin_at && <span className="text-[10px] text-[#9c8e85] ml-1">{new Date(f.actual_checkin_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
+                        </div>
+                        <div>
+                          {f.check_out_date && formatDateForTenant(f.check_out_date, restaurant?.date_format)}
+                          {f.actual_checkout_at && <span className="text-[10px] text-[#cc5a16]/70 ml-1">{new Date(f.actual_checkout_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
+                        </div>
                       </td>
                       <td className="px-4 py-3">
                         <span className={cn("px-2 py-1 rounded-md text-[10px] font-bold uppercase",
@@ -30744,6 +30756,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   {viewFolio.guest_name || '—'} · {viewFolio.room_name || viewFolio.room_id}
                   {viewFolio.status === 'settled' && viewFolio.settled_at ? ` · Settled ${new Date(viewFolio.settled_at).toLocaleDateString('en-IN')}` : ''}
                 </p>
+                {(viewFolio.check_in_date || viewFolio.check_out_date) && (
+                  <p className="text-[10px] text-[#9c8e85] mt-1 font-mono">
+                    {viewFolio.check_in_date && <>
+                      CI: {formatDateForTenant(viewFolio.check_in_date, restaurant?.date_format)}
+                      {viewFolio.actual_checkin_at && <span className="ml-1">{new Date(viewFolio.actual_checkin_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
+                    </>}
+                    {viewFolio.check_in_date && viewFolio.check_out_date && <span className="mx-1">→</span>}
+                    {viewFolio.check_out_date && <>
+                      CO: {formatDateForTenant(viewFolio.check_out_date, restaurant?.date_format)}
+                      {viewFolio.actual_checkout_at && <span className="ml-1 text-[#cc5a16]/70">{new Date(viewFolio.actual_checkout_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
+                    </>}
+                  </p>
+                )}
               </div>
               <button onClick={() => setViewFolio(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
             </div>
@@ -33775,8 +33800,10 @@ const HotelRoomDrawer: React.FC<{
                       <p className="text-[#f0ede8] truncate">{h.guest_name}</p>
                       <p className="text-[10px] text-[#f0ede8]/45 font-mono">
                         {new Date(h.check_in_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                        {h.actual_checkin_at && <span className="ml-1 opacity-70">{new Date(h.actual_checkin_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
                         {' → '}
                         {new Date(h.check_out_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                        {h.actual_checkout_at && <span className="ml-1 text-[#f4b07a]/70">{new Date(h.actual_checkout_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
                       </p>
                     </div>
                     <span className="font-mono text-[#f4b07a] shrink-0">₹{Number(h.total_amount || 0).toLocaleString('en-IN')}</span>
