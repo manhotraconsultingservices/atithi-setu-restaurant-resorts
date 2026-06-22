@@ -33102,6 +33102,7 @@ ${data.tenant.name}`;
          FROM room_bookings b
     LEFT JOIN rooms r ON r.id = b.room_id
         WHERE b.group_id = ?
+          AND b.status NOT IN ('CANCELLED', 'NO_SHOW')
      ORDER BY r.name, b.id`,
       [groupId]
     );
@@ -33110,11 +33111,12 @@ ${data.tenant.name}`;
     let aggSubtotal = 0, aggGst = 0, aggDiscount = 0, aggGrand = 0;
     const aggEntries: any[] = [];
     for (const b of bookings) {
-      // P2-B-FIX (B2): exclude CREDIT_NOTE rows.
+      // Exclude CREDIT_NOTE and voided/cancelled folios — only settled/open invoice folios.
       const folio: any = await tenantDb.get(
         `SELECT * FROM folios
           WHERE booking_id = ?
             AND (doc_type IS NULL OR doc_type = 'INVOICE')
+            AND status IN ('settled', 'open')
         ORDER BY created_at DESC LIMIT 1`,
         [b.id]
       );
@@ -33123,8 +33125,18 @@ ${data.tenant.name}`;
         aggGst      += Number(folio.gst_amount || 0);
         aggDiscount += Number(folio.discount || 0);
         aggGrand    += Number(folio.grand_total || 0);
+        // Exclude reversal entries and entries that have been reversed — they net to zero
+        // and would make the same charge appear twice. PAYMENT entries are already
+        // reflected in folio.subtotal (via recomputeFolioTotals) so omit them from display.
         const entries: any[] = await tenantDb.query(
-          "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC",
+          `SELECT fe.* FROM folio_entries fe
+            WHERE fe.folio_id = ?
+              AND fe.reversal_of_entry_id IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM folio_entries r WHERE r.reversal_of_entry_id = fe.id
+              )
+              AND fe.entry_type NOT IN ('PAYMENT', 'TAX', 'DISCOUNT')
+           ORDER BY fe.created_at ASC`,
           [folio.id]
         );
         for (const e of entries) {
@@ -33143,7 +33155,14 @@ ${data.tenant.name}`;
     // MASTER-BILLING: append master folio line items grouped by cost_centre.
     if (group?.master_folio_id) {
       const mfEntries: any[] = await tenantDb.query(
-        "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY cost_centre ASC, created_at ASC",
+        `SELECT fe.* FROM folio_entries fe
+          WHERE fe.folio_id = ?
+            AND fe.reversal_of_entry_id IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM folio_entries r WHERE r.reversal_of_entry_id = fe.id
+            )
+            AND fe.entry_type NOT IN ('PAYMENT', 'TAX', 'DISCOUNT')
+         ORDER BY fe.cost_centre ASC, fe.created_at ASC`,
         [group.master_folio_id]
       ).catch(() => []);
       const mf: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [group.master_folio_id]).catch(() => null);
@@ -33151,7 +33170,9 @@ ${data.tenant.name}`;
         aggSubtotal += Number(mf?.subtotal || 0);
         aggGst      += Number(mf?.gst_amount || 0);
         aggGrand    += Number(mf?.grand_total || 0);
-        // Group entries by cost_centre so the PDF shows subtotals per centre.
+        // Group entries by cost_centre for visual clarity in the invoice.
+        // No sentinel SUBTOTAL rows — the invoice renderer's drawSectionSubtotal
+        // already produces per-section subtotals from the actual entries.
         const byCentre: Map<string, any[]> = new Map();
         for (const e of mfEntries) {
           const cc = (e.cost_centre || 'MISC').toUpperCase();
@@ -33170,18 +33191,6 @@ ${data.tenant.name}`;
               gstAmount:   Number(e.gst_amount || 0),
             });
           }
-          const ctrSub = centreEntries.reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
-          const ctrGst = centreEntries.reduce((s: number, e: any) => s + Number(e.gst_amount || 0), 0);
-          // Subtotal sentinel row — rendered as a greyed summary line in generateInvoicePdf.
-          aggEntries.push({
-            description: `  ↳ ${centre} subtotal`,
-            entryType:   'SUBTOTAL',
-            quantity:    1,
-            unitPrice:   ctrSub,
-            amount:      ctrSub,
-            gstRate:     0,
-            gstAmount:   ctrGst,
-          });
         }
       }
     }

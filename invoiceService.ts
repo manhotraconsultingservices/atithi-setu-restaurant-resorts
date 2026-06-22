@@ -349,7 +349,7 @@ async function generateClassicInvoicePdf(data: InvoiceData): Promise<Buffer> {
       y += ROW_H;
 
       const sign = data.isCreditNote ? -1 : 1;
-      const billableEntries = data.entries.filter(e => !['TAX', 'DISCOUNT', 'PAYMENT'].includes(e.entryType));
+      const billableEntries = data.entries.filter(e => !['TAX', 'DISCOUNT', 'PAYMENT', 'SUBTOTAL'].includes(e.entryType));
 
       // BILL-SPLIT (16 Jun 2026): present the bill as a consolidated document
       // with distinct sections — Room Charges, Restaurant / Food & Beverage,
