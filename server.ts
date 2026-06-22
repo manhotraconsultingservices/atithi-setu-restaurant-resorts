@@ -3847,6 +3847,133 @@ async function triggerAriPush(
 }
 
 // ════════════════════════════════════════════════════════════════════════
+//  triggerAllRoomRatePush — fire-and-forget full-calendar ARI push
+//
+//  Called when rate plans or rate overrides change (no specific booking).
+//  Pushes the next 90 days of rate + availability for every active room
+//  to every enabled OTA channel.  Uses the same rate resolver as bookings
+//  (rate_overrides → base_rate) but pre-loads overrides in bulk to avoid
+//  N×90 individual DB queries.
+//
+//  Never throws — failures are logged to channel_sync_log with
+//  booking_id='RATE_PLAN_UPDATE' as a sentinel.
+// ════════════════════════════════════════════════════════════════════════
+async function triggerAllRoomRatePush(restaurantId: string): Promise<void> {
+  try {
+    const db = await getTenantDb(restaurantId);
+    const enabledOtas: any[] = await db.query(
+      "SELECT channel, api_key, api_secret, property_id, is_enabled FROM channel_credentials WHERE is_enabled = 1"
+    ).catch(() => []);
+    if (enabledOtas.length === 0) return;
+
+    const rooms: any[] = await db.query(
+      "SELECT id, name, type_id, base_rate FROM rooms WHERE (is_active = 1 OR is_active IS NULL)"
+    ).catch(() => []);
+    if (rooms.length === 0) return;
+
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const windowStart = today.toISOString().slice(0, 10);
+    const windowEnd   = new Date(today.getTime() + 90 * 86400000).toISOString().slice(0, 10);
+    const dates: string[] = [];
+    for (let i = 0; i < 90; i++) {
+      dates.push(new Date(today.getTime() + i * 86400000).toISOString().slice(0, 10));
+    }
+
+    // Pre-load all rate overrides for the 90-day window in 2 queries
+    const allRoomOvr: any[] = await db.query(
+      "SELECT * FROM rate_overrides WHERE scope = 'ROOM' AND start_date <= ? AND end_date >= ?",
+      [windowEnd, windowStart]
+    ).catch(() => []);
+    const allTypeOvr: any[] = await db.query(
+      "SELECT * FROM rate_overrides WHERE scope = 'TYPE' AND start_date <= ? AND end_date >= ?",
+      [windowEnd, windowStart]
+    ).catch(() => []);
+
+    const WD = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+    function resolveRate(room: any, date: string): number {
+      const wd = WD[new Date(date + 'T12:00:00Z').getUTCDay()];
+      const pick = (rows: any[]): number | null => {
+        const cands = rows.filter((r: any) => {
+          if (date < r.start_date || date > r.end_date) return false;
+          if (r.applies_to_days) {
+            const days = String(r.applies_to_days).split(',').map((s: string) => s.trim().toUpperCase());
+            if (days.length > 0 && !days.includes(wd)) return false;
+          }
+          return true;
+        });
+        if (!cands.length) return null;
+        cands.sort((a: any, b: any) => Number(b.priority || 0) - Number(a.priority || 0)
+          || String(b.created_at || '').localeCompare(String(a.created_at || '')));
+        return Number(cands[0].rate);
+      };
+      return pick(allRoomOvr.filter((r: any) => r.scope_id === room.id))
+          ?? pick(allTypeOvr.filter((r: any) => r.scope_id === room.type_id))
+          ?? Number(room.base_rate || 0);
+    }
+
+    for (const credRow of enabledOtas) {
+      const channelKey = String(credRow.channel || '').toUpperCase();
+      const adapter = getChannelAdapter(channelKey);
+      if (!adapter.isReady(credRow)) continue;
+
+      for (const room of rooms) {
+        const mapping: any = await db.get(
+          "SELECT external_room_code FROM channel_room_mappings WHERE channel = ? AND local_room_id = ?",
+          [channelKey, room.id]
+        ).catch(() => null);
+        const extRoomCode = mapping?.external_room_code || room.name;
+
+        // One query to get all active bookings for this room in the window
+        const bookings: any[] = await db.query(
+          `SELECT check_in_date, check_out_date FROM room_bookings
+            WHERE room_id = ? AND status NOT IN ('CANCELLED', 'CHECKED_OUT')
+              AND check_in_date < ? AND check_out_date > ?`,
+          [room.id, windowEnd, windowStart]
+        ).catch(() => []);
+
+        const occupied = new Set<string>();
+        for (const b of bookings) {
+          const ci = new Date(String(b.check_in_date) + 'T00:00:00Z');
+          const co = new Date(String(b.check_out_date) + 'T00:00:00Z');
+          while (ci < co) { occupied.add(ci.toISOString().slice(0, 10)); ci.setUTCDate(ci.getUTCDate() + 1); }
+        }
+
+        const payloads: import('./channelAdapters.ts').AdapterAvailabilityPayload[] = dates.map(date => ({
+          roomId: room.id,
+          roomName: extRoomCode,
+          date,
+          available: !occupied.has(date),
+          rate: resolveRate(room, date),
+          rateLabel: 'BAR',
+        }));
+
+        adapter.pushAvailability(credRow, payloads)
+          .then((result: import('./channelAdapters.ts').AdapterResult) => {
+            db.run(
+              `INSERT INTO channel_sync_log (booking_id, channel, event_type, status, payload, error)
+               VALUES ('RATE_PLAN_UPDATE', ?, 'RATE_PUSH', ?, ?, ?)`,
+              [channelKey, result.ok ? 'sent' : 'failed',
+               JSON.stringify({ room_id: room.id, dates: 90 }),
+               result.ok ? null : (result.message || null)]
+            ).catch(() => {});
+          })
+          .catch((e: any) => {
+            db.run(
+              `INSERT INTO channel_sync_log (booking_id, channel, event_type, status, payload, error)
+               VALUES ('RATE_PLAN_UPDATE', ?, 'RATE_PUSH', 'failed', ?, ?)`,
+              [channelKey, JSON.stringify({ room_id: room.id, dates: 90 }),
+               String(e?.message || e).slice(0, 500)]
+            ).catch(() => {});
+          });
+      }
+    }
+  } catch (e: any) {
+    console.warn('[rate-push] error:', e?.message);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
 //  computeGuestPerkOnCheckIn — Phase H1
 //
 //  Looks up the guest by phone in loyalty_customers and returns whether
@@ -22269,7 +22396,9 @@ ${data.tenant.name}`;
         [id, scope, b.scope_id, b.start_date, b.end_date, rate,
          b.label || null, appliesTo, Number(b.priority) || 0]
       );
-      res.status(201).json(await tenantDb.get("SELECT * FROM rate_overrides WHERE id = ?", [id]));
+      const created = await tenantDb.get("SELECT * FROM rate_overrides WHERE id = ?", [id]);
+      res.status(201).json(created);
+      triggerAllRoomRatePush(req.params.id).catch(() => {});
     } catch (err) {
       console.error("create rate-override error:", err);
       res.status(500).json({ error: "Failed to create rate override" });
@@ -22283,6 +22412,7 @@ ${data.tenant.name}`;
       const tenantDb = await getTenantDb(req.params.id);
       await tenantDb.run("DELETE FROM rate_overrides WHERE id = ?", [req.params.overrideId]);
       res.json({ success: true });
+      triggerAllRoomRatePush(req.params.id).catch(() => {});
     } catch (err) {
       res.status(500).json({ error: "Failed to delete rate override" });
     }
@@ -26047,6 +26177,7 @@ ${data.tenant.name}`;
     }
     const persisted = await tenantDb.query("SELECT * FROM rate_plans ORDER BY display_order, code").catch(() => []);
     res.json({ ok: true, count: saved, rate_plans: persisted });
+    triggerAllRoomRatePush(req.params.id).catch(() => {});
   });
 
   app.delete("/api/restaurant/:id/hotel/rate-plans/:planId", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
