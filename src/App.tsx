@@ -13033,6 +13033,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           onNewBooking={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
           onNewOrder={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
           onOpenReports={() => { setDashboardMode('HOTEL'); setActiveTab('FRONT_OFFICE_REPORTS'); }}
+          role={localStorage.getItem('role')}
         />
       ) : activeTab === 'MENU' ? (
         <div className="space-y-5">
@@ -39039,37 +39040,48 @@ const HotelLateFeeBanner: React.FC<{
 // sees both (and the tile click also flips dashboardMode via the callbacks).
 function HotelHomeLaunchpad({
   restaurantId, token, propertyName, restaurantImageUrl, isHotelEnabled, isRestaurantEnabled,
-  onOpenHotel, onOpenRestaurant, onNewBooking, onNewOrder, onOpenReports, isSpaEnabled, onOpenSpa,
+  onOpenHotel, onOpenRestaurant, onNewBooking, onNewOrder, onOpenReports, isSpaEnabled, onOpenSpa, role,
 }: {
   restaurantId: string; token: string; propertyName: string; restaurantImageUrl?: string;
   isHotelEnabled: boolean; isRestaurantEnabled: boolean; isSpaEnabled: boolean;
   onOpenHotel: () => void; onOpenRestaurant: () => void; onOpenSpa: () => void;
   onNewBooking: () => void; onNewOrder: () => void; onOpenReports: () => void;
+  role: string | null;
 }) {
   const [snap, setSnap] = useState<any>(null);
   const [heroUrl, setHeroUrl] = useState<string>('');
   const [bookingSlug, setBookingSlug] = useState<string>('');
+  const [worklist, setWorklist] = useState<{arrivals:any[];departures:any[];spaToday:any[];rooms:any[]}>({arrivals:[],departures:[],spaToday:[],rooms:[]});
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
   const dateLabel = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
 
-  // Best-effort hotel snapshot (night-audit summary) + the property's own hero
-  // image (property-profile) — drive the tile stats and the wallpaper. Both
-  // are silent on failure so Home always renders.
   useEffect(() => {
     if (!isHotelEnabled) return;
     let abort = false;
     (async () => {
       const get = (p: string) => fetch(`/api/restaurant/${restaurantId}/hotel${p}`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.ok ? r.json() : null).catch(() => null);
       const today = todayISO();
-      const [audit, profile] = await Promise.all([get(`/reports/night-audit?date=${today}`), get('/property-profile')]);
+      const isFD = ['FRONT_DESK','CONCIERGE'].includes(role || '');
+      const isHK = ['HOUSEKEEPING','MAINTENANCE'].includes(role || '');
+      const [audit, profile, arrData, depData, roomData, spaData] = await Promise.all([
+        get(`/reports/night-audit?date=${today}`),
+        get('/property-profile'),
+        isFD ? get(`/bookings?status=BOOKED&from=${today}&to=${today}`) : Promise.resolve(null),
+        (isFD || isHK) ? get(`/bookings?status=CHECKED_IN&to=${today}`) : Promise.resolve(null),
+        isHK ? get('/rooms') : Promise.resolve(null),
+        (isFD && isSpaEnabled)
+          ? fetch(`/api/restaurant/${restaurantId}/spa/appointments?from=${today}T00:00:00&to=${today}T23:59:59`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.ok ? r.json() : []).catch(() => [])
+          : Promise.resolve([]),
+      ]);
       if (abort) return;
       if (audit) setSnap(audit.summary || null);
       if (profile?.hero_image_url) setHeroUrl(profile.hero_image_url);
       if (profile?.booking_slug) setBookingSlug(profile.booking_slug);
+      if (isFD || isHK) setWorklist({ arrivals: arrData || [], departures: depData || [], spaToday: Array.isArray(spaData) ? spaData : [], rooms: roomData || [] });
     })();
     return () => { abort = true; };
-  }, [restaurantId, token, isHotelEnabled]);
+  }, [restaurantId, token, isHotelEnabled, role, isSpaEnabled]);
 
   const s = snap || {};
   const inr = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
@@ -39185,6 +39197,156 @@ function HotelHomeLaunchpad({
               </div>
             </div>
           );
+        })()}
+        {/* Role-specific shift worklist — FRONT_DESK / CONCIERGE / HOUSEKEEPING / MAINTENANCE */}
+        {(() => {
+          const isFD = ['FRONT_DESK','CONCIERGE'].includes(role || '');
+          const isHK = ['HOUSEKEEPING','MAINTENANCE'].includes(role || '');
+          if (!isFD && !isHK) return null;
+          const badge = (label: string, color: string) => (
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style={{ background: `${color}18`, color }}>{label}</span>
+          );
+          const metricCard = (label: string, value: number | string, sub: string, accent: string) => (
+            <div className="bg-white rounded-2xl border border-[#cc5a16]/10 px-3 py-3 text-center">
+              <div className="text-xl font-bold font-mono" style={{ color: accent }}>{value}</div>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mt-0.5">{label}</div>
+              {sub && <div className="text-[9px] text-[#b0a298]">{sub}</div>}
+            </div>
+          );
+          if (isFD) {
+            const pendingArr = worklist.arrivals.filter((b: any) => b.status !== 'CHECKED_IN');
+            const checkedIn  = worklist.arrivals.filter((b: any) => b.status === 'CHECKED_IN');
+            const dueForDep  = worklist.departures;
+            return (
+              <div className="mb-6 space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Your shift at a glance</p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {metricCard('Expected', worklist.arrivals.length, `${checkedIn.length} done`, '#cc5a16')}
+                  {metricCard('Pending Check-in', pendingArr.length, 'still to arrive', pendingArr.length > 0 ? '#b45309' : '#059669')}
+                  {metricCard('Due Departures', dueForDep.length, 'in-house today', dueForDep.length > 0 ? '#b45309' : '#059669')}
+                  {isSpaEnabled ? metricCard('Spa Appts', worklist.spaToday.length, 'today', '#7e5792') : metricCard('On Shift', '--', 'have a great day', '#9c8e85')}
+                </div>
+                {worklist.arrivals.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-[#cc5a16]/10 flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-widest text-[#cc5a16]">Today's Arrivals</span>
+                      <span className="text-[10px] text-[#9c8e85]">{worklist.arrivals.length} guests</span>
+                    </div>
+                    <div className="divide-y divide-[#f5ede6]">
+                      {worklist.arrivals.slice(0, 8).map((b: any) => (
+                        <div key={b.id} className="flex items-center justify-between px-4 py-2.5 gap-3">
+                          <div className="min-w-0">
+                            <p className="text-[13px] font-semibold text-[#1a1208] truncate">{b.guest_name}</p>
+                            <p className="text-[11px] text-[#9c8e85]">{b.room_name || b.room_number || 'Room TBA'}</p>
+                          </div>
+                          {b.status === 'CHECKED_IN' ? badge('Checked In','#059669') : badge('Pending','#b45309')}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {dueForDep.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-[#0f6e56]/10 overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-[#0f6e56]/10 flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-widest text-[#0f6e56]">Due for Departure</span>
+                      <span className="text-[10px] text-[#9c8e85]">{dueForDep.length} rooms</span>
+                    </div>
+                    <div className="divide-y divide-[#e8f5f1]">
+                      {dueForDep.slice(0, 8).map((b: any) => (
+                        <div key={b.id} className="flex items-center justify-between px-4 py-2.5 gap-3">
+                          <div className="min-w-0">
+                            <p className="text-[13px] font-semibold text-[#1a1208] truncate">{b.guest_name}</p>
+                            <p className="text-[11px] text-[#9c8e85]">{b.room_name || b.room_number || '—'} · Out: {b.check_out_date || '—'}</p>
+                          </div>
+                          {badge('Still In-House','#b45309')}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {isSpaEnabled && worklist.spaToday.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-[#7e5792]/15 overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-[#7e5792]/10 flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-widest text-[#7e5792]">Spa Appointments Today</span>
+                      <span className="text-[10px] text-[#9c8e85]">{worklist.spaToday.length} booked</span>
+                    </div>
+                    <div className="divide-y divide-[#f3eef7]">
+                      {worklist.spaToday.slice(0, 8).map((a: any) => (
+                        <div key={a.id} className="flex items-center justify-between px-4 py-2.5 gap-3">
+                          <div className="min-w-0">
+                            <p className="text-[13px] font-semibold text-[#1a1208] truncate">{a.client_name}</p>
+                            <p className="text-[11px] text-[#9c8e85] truncate">{a.service_name_full || a.service_name}{a.therapist_name ? ` · ${a.therapist_name}` : ''}</p>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="text-[11px] font-bold text-[#7e5792]">
+                              {a.start_at ? new Date(a.start_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Kolkata'}) : '—'}
+                            </p>
+                            {a.status==='COMPLETED' ? badge('Done','#059669') : a.status==='IN_PROGRESS' ? badge('In Progress','#0ea5e9') : badge(a.status||'Booked','#7e5792')}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          }
+          if (isHK) {
+            const checkoutIds = new Set(worklist.departures.map((b: any) => b.room_id));
+            const priority = worklist.rooms.filter((r: any) => checkoutIds.has(r.id));
+            const stayover = worklist.rooms.filter((r: any) => !checkoutIds.has(r.id) && !['MAINTENANCE','BLOCKED'].includes(r.status));
+            const maint    = worklist.rooms.filter((r: any) => r.status === 'MAINTENANCE');
+            return (
+              <div className="mb-6 space-y-3">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Your shift at a glance</p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {metricCard('Priority', priority.length, 'clean for arrivals', '#cc5a16')}
+                  {metricCard('Stay-over', stayover.length, 'need servicing', '#6b5d52')}
+                  {metricCard('Maintenance', maint.length, 'out of service', maint.length > 0 ? '#b45309' : '#059669')}
+                  {metricCard('Total Rooms', worklist.rooms.length, 'in property', '#6b5d52')}
+                </div>
+                {priority.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-[#cc5a16]/15 overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-[#cc5a16]/10 flex items-center gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-widest text-[#cc5a16]">Priority — Clean for Incoming Guests</span>
+                      <span className="text-[10px] bg-[#cc5a16] text-white rounded-full px-2 py-0.5 font-bold">{priority.length}</span>
+                    </div>
+                    <div className="divide-y divide-[#f5ede6]">
+                      {priority.map((r: any) => (
+                        <div key={r.id} className="flex items-center justify-between px-4 py-2.5 gap-3">
+                          <div>
+                            <p className="text-[13px] font-semibold text-[#1a1208]">{r.name || r.room_number}</p>
+                            {r.floor && <p className="text-[11px] text-[#9c8e85]">Floor {r.floor}</p>}
+                          </div>
+                          {badge('Clean Urgently','#cc5a16')}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {stayover.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-[#6b5d52]/10 overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-[#6b5d52]/08 flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Stay-over Rooms</span>
+                      <span className="text-[10px] text-[#9c8e85]">{stayover.length} rooms</span>
+                    </div>
+                    <div className="divide-y divide-[#f5f0eb]">
+                      {stayover.slice(0, 8).map((r: any) => (
+                        <div key={r.id} className="flex items-center justify-between px-4 py-2.5 gap-3">
+                          <div>
+                            <p className="text-[13px] font-semibold text-[#1a1208]">{r.name || r.room_number}</p>
+                            {r.floor && <p className="text-[11px] text-[#9c8e85]">Floor {r.floor}</p>}
+                          </div>
+                          {r.status === 'OCCUPIED' ? badge('Occupied','#b45309') : badge('Available','#059669')}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          }
+          return null;
         })()}
         {/* Today at a glance — hotel snapshot */}
         {isHotelEnabled && snap && (
