@@ -522,6 +522,49 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     --   ADJUSTMENT           discounts, waivers, write-offs (negative entries)
     ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS account_head TEXT;
     ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS transferred_from_folio_id TEXT;
+    -- Sprint 2 BCG (Jun 2026) — GST output register.
+    -- One row per settled folio_entry carrying GST; used to build GSTR-1.
+    CREATE TABLE IF NOT EXISTS gst_output_register (
+      id              TEXT PRIMARY KEY,
+      restaurant_id   TEXT NOT NULL,
+      period          TEXT NOT NULL,
+      folio_id        TEXT NOT NULL,
+      booking_id      TEXT,
+      invoice_number  TEXT,
+      invoice_date    TEXT,
+      entry_type      TEXT,
+      account_head    TEXT,
+      cost_centre     TEXT,
+      taxable_value   REAL NOT NULL DEFAULT 0,
+      cgst_rate       REAL DEFAULT 0,
+      cgst_amount     REAL DEFAULT 0,
+      sgst_rate       REAL DEFAULT 0,
+      sgst_amount     REAL DEFAULT 0,
+      igst_rate       REAL DEFAULT 0,
+      igst_amount     REAL DEFAULT 0,
+      total_gst       REAL DEFAULT 0,
+      hsn_sac         TEXT,
+      supply_type     TEXT DEFAULT 'B2C',
+      guest_gstin     TEXT,
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_gst_register_period ON gst_output_register (restaurant_id, period);
+    CREATE INDEX IF NOT EXISTS idx_gst_register_folio  ON gst_output_register (folio_id);
+    -- Sprint 2 BCG (Jun 2026) — OTA commission expense ledger.
+    -- Captures the platform commission owed per settled OTA booking.
+    CREATE TABLE IF NOT EXISTS ota_commission_entries (
+      id              TEXT PRIMARY KEY,
+      restaurant_id   TEXT NOT NULL,
+      booking_id      TEXT NOT NULL,
+      folio_id        TEXT,
+      channel         TEXT NOT NULL,
+      commission_pct  REAL NOT NULL,
+      revenue_base    REAL NOT NULL,
+      commission_amt  REAL NOT NULL,
+      period          TEXT NOT NULL,
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_ota_commission_period ON ota_commission_entries (restaurant_id, period);
     -- PHASE-3 GROUP (Jun 2026): per-room guest roster for group check-in wizard.
     -- One row per booking in a group; created/updated when staff assigns individual
     -- guest names before group check-in. booking_id is UNIQUE so upsert is safe.
@@ -2522,6 +2565,71 @@ async function recordFolioPayment(
      args.reference || null, args.recordedBy || null, args.notes || null]
   );
   return tenantDb.get("SELECT * FROM folio_payments WHERE id = ?", [id]);
+}
+
+/**
+ * Sprint 2 BCG — Write GST output register rows for every taxable
+ * folio_entry on a just-settled folio. Called at checkout (individual
+ * and group). Idempotent: skips if rows already exist for this folio.
+ * Best-effort — caller wraps in .catch(); failure never blocks settlement.
+ */
+async function writeGstRegisterFromFolio(
+  tenantDb: DbInterface,
+  restaurantId: string,
+  folioId: string,
+  opts: {
+    invoiceNumber?: string | null;
+    invoiceDate?: string | null;
+    bookingId?: string | null;
+    guestGstin?: string | null;
+  } = {}
+): Promise<void> {
+  const existing: any = await tenantDb.get(
+    "SELECT COUNT(*) AS cnt FROM gst_output_register WHERE folio_id = ?", [folioId]
+  );
+  if (Number(existing?.cnt || 0) > 0) return;
+
+  const entries: any[] = await tenantDb.query(
+    `SELECT * FROM folio_entries
+      WHERE folio_id = ? AND amount > 0 AND reversal_of_entry_id IS NULL`,
+    [folioId]
+  );
+
+  const settlementDate = (opts.invoiceDate || new Date().toISOString()).slice(0, 10);
+  const period = settlementDate.slice(0, 7);
+  const supplyType = opts.guestGstin ? 'B2B' : 'B2C';
+
+  const hsnBySac: Record<string, string> = {
+    ROOM_REVENUE:            '996311',
+    SERVICE_CHARGE_REVENUE:  '996311',
+    F_AND_B_REVENUE:         '996331',
+    ANCILLARY_REVENUE:       '999700',
+    ADJUSTMENT:              '',
+  };
+
+  for (const entry of entries) {
+    const taxable = Number(entry.amount || 0);
+    const gstAmt  = Number(entry.gst_amount || 0);
+    const gstRate = Number(entry.gst_rate || 0);
+    const half    = gstRate / 2;
+    const cgst    = Math.round(gstAmt / 2 * 100) / 100;
+    const sgst    = Math.round((gstAmt - cgst) * 100) / 100;
+    const id      = `GR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    await tenantDb.run(
+      `INSERT INTO gst_output_register
+         (id, restaurant_id, period, folio_id, booking_id, invoice_number, invoice_date,
+          entry_type, account_head, cost_centre,
+          taxable_value, cgst_rate, cgst_amount, sgst_rate, sgst_amount,
+          igst_rate, igst_amount, total_gst, hsn_sac, supply_type, guest_gstin)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, restaurantId, period, folioId,
+       opts.bookingId || null, opts.invoiceNumber || null, settlementDate,
+       entry.entry_type, entry.account_head || null, entry.cost_centre || null,
+       taxable, half, cgst, half, sgst,
+       0, 0, gstAmt,
+       hsnBySac[entry.account_head as string] || null, supplyType, opts.guestGstin || null]
+    );
+  }
 }
 
 /**
@@ -29542,6 +29650,14 @@ ${data.tenant.name}`;
             [now, b.room_id]
           );
           totalGrand += Number(settled?.grand_total || 0);
+          // Sprint 2 BCG — write GST register for each settled child folio.
+          if (settled?.id) {
+            writeGstRegisterFromFolio(tenantDb, req.params.id, settled.id, {
+              invoiceDate: now.slice(0, 10),
+              bookingId: b.id,
+              guestGstin: b.guest_gstin || null,
+            }).catch(e => console.warn('[group-checkout] GST register write failed:', e));
+          }
           settledResults.push({
             id: b.id, room_id: b.room_id, guest_name: b.guest_name,
             folio_id: settled?.id || null,
@@ -31001,6 +31117,43 @@ ${data.tenant.name}`;
           discountAmount:  loy?.discount_amount || 0,
           discountPercent: loy?.discount_percent || 0,
         }).catch(err => console.warn('[hotel-checkout] loyalty hook failed:', err));
+
+        // Sprint 2 BCG — GST output register (best-effort, never blocks checkout).
+        writeGstRegisterFromFolio(tenantDb, req.params.id, settled.id, {
+          invoiceDate: (settled as any).settled_at || new Date().toISOString().slice(0, 10),
+          bookingId:   b.id,
+          guestGstin:  b.guest_gstin || null,
+        }).catch(e => console.warn('[hotel-checkout] GST register write failed:', e));
+
+        // Sprint 2 BCG — OTA commission expense (best-effort).
+        const OTA_CHANNELS = new Set(['BOOKING_COM','MAKEMYTRIP','MMT','AGODA','EXPEDIA','AIRBNB','GOIBIBO']);
+        if (b.booking_source && OTA_CHANNELS.has(String(b.booking_source).toUpperCase())) {
+          (async () => {
+            try {
+              const pa: any = await tenantDb.get(
+                "SELECT commission_pct FROM partner_accounts WHERE channel = ? LIMIT 1",
+                [b.booking_source]
+              );
+              const commPct = Number(pa?.commission_pct || 0);
+              if (commPct > 0) {
+                const base     = Number((settled as any).subtotal || 0);
+                const commAmt  = Math.round(base * commPct / 100 * 100) / 100;
+                const period   = new Date().toISOString().slice(0, 7);
+                const cid      = `OC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+                await tenantDb.run(
+                  `INSERT INTO ota_commission_entries
+                     (id, restaurant_id, booking_id, folio_id, channel,
+                      commission_pct, revenue_base, commission_amt, period)
+                   VALUES (?,?,?,?,?,?,?,?,?)`,
+                  [cid, req.params.id, b.id, settled.id, b.booking_source,
+                   commPct, base, commAmt, period]
+                );
+              }
+            } catch (e) {
+              console.warn('[hotel-checkout] OTA commission post failed:', e);
+            }
+          })();
+        }
       }
 
       try { await triggerNotification(req.params.id, 'GUEST_CHECKED_OUT', { bookingId: b.id, guestName: b.guest_name, roomId: b.room_id }); } catch {}
@@ -32711,6 +32864,77 @@ ${data.tenant.name}`;
       });
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch folio" });
+    }
+  });
+
+  // ─── Sprint 2 BCG: GST OUTPUT REGISTER ───────────────────────────────────
+  // GET /hotel/gst-register?period=YYYY-MM&format=summary|detail
+  // Returns all GST register rows for the month, with a CGST+SGST+IGST summary.
+  app.get("/api/restaurant/:id/hotel/gst-register", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const period = String(req.query.period || new Date().toISOString().slice(0, 7));
+      const rows: any[] = await tenantDb.query(
+        `SELECT * FROM gst_output_register
+          WHERE restaurant_id = ? AND period = ?
+          ORDER BY invoice_date ASC, created_at ASC`,
+        [req.params.id, period]
+      );
+      const summary = rows.reduce(
+        (acc: any, r: any) => {
+          acc.taxable_value += Number(r.taxable_value || 0);
+          acc.total_cgst    += Number(r.cgst_amount  || 0);
+          acc.total_sgst    += Number(r.sgst_amount  || 0);
+          acc.total_igst    += Number(r.igst_amount  || 0);
+          acc.total_gst     += Number(r.total_gst    || 0);
+          return acc;
+        },
+        { taxable_value: 0, total_cgst: 0, total_sgst: 0, total_igst: 0, total_gst: 0 }
+      );
+      // Breakdown by account_head for GSTR-1 B2B / B2C split
+      const byHead: Record<string, any> = {};
+      for (const r of rows) {
+        const k = `${r.account_head || 'OTHER'}:${r.supply_type || 'B2C'}`;
+        if (!byHead[k]) byHead[k] = { account_head: r.account_head, supply_type: r.supply_type, taxable_value: 0, cgst: 0, sgst: 0, igst: 0, gst: 0, count: 0 };
+        byHead[k].taxable_value += Number(r.taxable_value || 0);
+        byHead[k].cgst          += Number(r.cgst_amount  || 0);
+        byHead[k].sgst          += Number(r.sgst_amount  || 0);
+        byHead[k].igst          += Number(r.igst_amount  || 0);
+        byHead[k].gst           += Number(r.total_gst    || 0);
+        byHead[k].count++;
+      }
+      res.json({ period, rows, summary, breakdown: Object.values(byHead) });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch GST register' });
+    }
+  });
+
+  // ─── Sprint 2 BCG: OTA COMMISSION LEDGER ─────────────────────────────────
+  // GET /hotel/ota-commissions?period=YYYY-MM
+  app.get("/api/restaurant/:id/hotel/ota-commissions", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const period = String(req.query.period || new Date().toISOString().slice(0, 7));
+      const rows: any[] = await tenantDb.query(
+        `SELECT oc.*, rb.guest_name, rb.guest_phone, rb.check_in_date, rb.check_out_date
+           FROM ota_commission_entries oc
+           LEFT JOIN room_bookings rb ON rb.id = oc.booking_id
+          WHERE oc.restaurant_id = ? AND oc.period = ?
+          ORDER BY oc.created_at ASC`,
+        [req.params.id, period]
+      );
+      const total = rows.reduce((s: number, r: any) => s + Number(r.commission_amt || 0), 0);
+      const byChannel: Record<string, number> = {};
+      for (const r of rows) {
+        byChannel[r.channel] = (byChannel[r.channel] || 0) + Number(r.commission_amt || 0);
+      }
+      res.json({ period, rows, total_commission: total, by_channel: byChannel });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch OTA commissions' });
     }
   });
 

@@ -8292,7 +8292,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Clicking a different report card replaces the data; CSV export
   // operates on the currently-loaded data.
   const [foActiveReport, setFoActiveReport] = useState<{
-    kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'stay-view' | 'ota-inventory';
+    kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'stay-view' | 'ota-inventory' | 'gst-register' | 'ota-commissions';
     data: any;
     loadedAt: number;
   } | null>(null);
@@ -20629,7 +20629,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // foDateFrom/foDateTo state to flush — fixes "report shows 1 day even
             // though a wider period is selected" (the report only loaded on the
             // card click and never re-fetched when the dates changed).
-            const loadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'ota-inventory', fromArg: string = foDateFrom, toArg: string = foDateTo) => {
+            const loadReport = async (kind: 'arrivals' | 'departures' | 'room-status' | 'night-audit' | 'ota-inventory' | 'gst-register' | 'ota-commissions', fromArg: string = foDateFrom, toArg: string = foDateTo) => {
               setFoLoading(kind);
               try {
                 let url = '';
@@ -20646,6 +20646,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   const b = new Date(toArg   + 'T00:00:00Z').getTime();
                   const days = Math.max(1, Math.min(90, Math.round((b - a) / 86400000) + 1));
                   url = `/availability?start=${fromArg}&days=${days}`;
+                } else if (kind === 'gst-register' || kind === 'ota-commissions') {
+                  // Period-based reports: derive YYYY-MM from the from-date
+                  const period = fromArg.slice(0, 7);
+                  url = kind === 'gst-register'
+                    ? `/gst-register?period=${period}`
+                    : `/ota-commissions?period=${period}`;
                 } else {
                   url = `/reports/night-audit?date=${toArg}`;
                 }
@@ -20760,6 +20766,30 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 downloadCsv(`ota-inventory-${stamp}.csv`,
                   ['Room Type', 'Sellable', ...m.dates],
                   m.rows.map(r => [r.name, r.sellable, ...r.counts]));
+              } else if (kind === 'gst-register') {
+                const period = foDateFrom.slice(0, 7);
+                downloadCsv(`gst-register-${period}.csv`,
+                  ['Period','Invoice Date','Invoice No','Folio ID','Booking ID','Entry Type','Account Head','Cost Centre','HSN/SAC','Supply Type','Guest GSTIN','Taxable Value','CGST Rate','CGST','SGST Rate','SGST','IGST Rate','IGST','Total GST'],
+                  (data.rows || []).map((r: any) => [
+                    r.period || '', r.invoice_date || '', r.invoice_number || '',
+                    r.folio_id || '', r.booking_id || '',
+                    r.entry_type || '', r.account_head || '', r.cost_centre || '',
+                    r.hsn_sac || '', r.supply_type || '', r.guest_gstin || '',
+                    fmtINR(r.taxable_value), r.cgst_rate ?? 0, fmtINR(r.cgst_amount),
+                    r.sgst_rate ?? 0, fmtINR(r.sgst_amount),
+                    r.igst_rate ?? 0, fmtINR(r.igst_amount), fmtINR(r.total_gst),
+                  ]));
+              } else if (kind === 'ota-commissions') {
+                const period = foDateFrom.slice(0, 7);
+                downloadCsv(`ota-commissions-${period}.csv`,
+                  ['Period','Booking ID','Guest','Check-In','Check-Out','Channel','Commission %','Revenue Base','Commission Amount'],
+                  (data.rows || []).map((r: any) => [
+                    r.period || '', r.booking_id || '', r.guest_name || '',
+                    r.check_in_date?.toString().slice(0,10) || '',
+                    r.check_out_date?.toString().slice(0,10) || '',
+                    r.channel || '', r.commission_pct ?? 0,
+                    fmtINR(r.revenue_base), fmtINR(r.commission_amt),
+                  ]));
               } else {
                 const s = data.summary || {};
                 const rows: any[][] = [
@@ -20859,11 +20889,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                          : kind === 'departures' ? 'amber'
                          : kind === 'room-status' ? 'blue'
                          : kind === 'ota-inventory' ? 'teal'
+                         : kind === 'gst-register' ? 'orange'
+                         : kind === 'ota-commissions' ? 'indigo'
                          : 'violet';
               const title = kind === 'arrivals' ? `Arrival Report · ${foDateFrom}${foDateFrom === foDateTo ? '' : ` → ${foDateTo}`}`
                           : kind === 'departures' ? `Departure Report · ${foDateFrom}${foDateFrom === foDateTo ? '' : ` → ${foDateTo}`}`
                           : kind === 'room-status' ? `Room Status as of ${data.as_of || foDateTo}`
                           : kind === 'ota-inventory' ? `OTA Inventory · ${foDateFrom}${foDateFrom === foDateTo ? '' : ` → ${foDateTo}`}`
+                          : kind === 'gst-register' ? `GST Output Register · ${foDateFrom.slice(0, 7)}`
+                          : kind === 'ota-commissions' ? `OTA Commission Ledger · ${foDateFrom.slice(0, 7)}`
                           : `Night Audit · ${data.as_of || foDateTo}`;
               const toneClasses: Record<string, { bg: string; head: string; text: string; border: string }> = {
                 emerald: { bg: 'bg-emerald-50',  head: 'bg-emerald-100', text: 'text-emerald-900', border: 'border-emerald-200' },
@@ -20871,6 +20905,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 blue:    { bg: 'bg-blue-50',     head: 'bg-blue-100',    text: 'text-blue-900',    border: 'border-blue-200'    },
                 violet:  { bg: 'bg-violet-50',   head: 'bg-violet-100',  text: 'text-violet-900',  border: 'border-violet-200'  },
                 teal:    { bg: 'bg-teal-50',     head: 'bg-teal-100',    text: 'text-teal-900',    border: 'border-teal-200'    },
+                orange:  { bg: 'bg-orange-50',   head: 'bg-orange-100',  text: 'text-orange-900',  border: 'border-orange-200'  },
+                indigo:  { bg: 'bg-indigo-50',   head: 'bg-indigo-100',  text: 'text-indigo-900',  border: 'border-indigo-200'  },
               };
               const t = toneClasses[tone];
 
@@ -20911,6 +20947,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           tone === 'amber'   ? 'bg-amber-600 hover:bg-amber-700' :
                           tone === 'blue'    ? 'bg-blue-600 hover:bg-blue-700' :
                           tone === 'teal'    ? 'bg-teal-600 hover:bg-teal-700' :
+                          tone === 'orange'  ? 'bg-orange-600 hover:bg-orange-700' :
+                          tone === 'indigo'  ? 'bg-indigo-600 hover:bg-indigo-700' :
                           'bg-violet-600 hover:bg-violet-700')}
                       >
                         <Download size={12} /> Download CSV
@@ -21045,6 +21083,109 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           </table>
                         </div>
                       </>
+                    );
+                  })()}
+
+                  {/* GST Output Register — line-level detail + summary band */}
+                  {kind === 'gst-register' && (() => {
+                    const rows: any[] = data.rows || [];
+                    const s = data.summary || {};
+                    return (
+                      <div className="p-5 space-y-4">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                          {[
+                            { label: 'Taxable Value', value: fmtINR(s.taxable_value) },
+                            { label: 'Total CGST',    value: fmtINR(s.total_cgst) },
+                            { label: 'Total SGST',    value: fmtINR(s.total_sgst) },
+                            { label: 'Total IGST',    value: fmtINR(s.total_igst) },
+                            { label: 'Total GST',     value: fmtINR(s.total_gst) },
+                          ].map(k => (
+                            <div key={k.label} className="bg-white rounded-2xl border border-orange-200 px-3 py-2.5">
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-orange-700">{k.label}</p>
+                              <p className="text-lg font-bold font-mono text-orange-900 mt-0.5">{k.value}</p>
+                            </div>
+                          ))}
+                        </div>
+                        {rows.length === 0 ? (
+                          <p className="text-center text-sm italic text-orange-800 py-6">No GST register entries for this period. Entries are written at guest checkout.</p>
+                        ) : (
+                          <div className="overflow-x-auto bg-white rounded-2xl border border-orange-200">
+                            <table className="w-full text-xs">
+                              <thead className="bg-orange-100">
+                                <tr>{['Date','Invoice #','Entry Type','Account','HSN/SAC','Supply','Taxable','CGST','SGST','IGST','Total GST'].map(c =>
+                                  <th key={c} className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-orange-900 whitespace-nowrap">{c}</th>
+                                )}</tr>
+                              </thead>
+                              <tbody>
+                                {rows.map((r: any, i: number) => (
+                                  <tr key={r.id || i} className={cn('border-t border-orange-100', i % 2 === 1 && 'bg-orange-50/40')}>
+                                    <td className="px-3 py-1.5 text-xs">{r.invoice_date || '—'}</td>
+                                    <td className="px-3 py-1.5 font-mono text-[10px]">{r.invoice_number || '—'}</td>
+                                    <td className="px-3 py-1.5">{r.entry_type || '—'}</td>
+                                    <td className="px-3 py-1.5 text-[10px]">{r.account_head || '—'}</td>
+                                    <td className="px-3 py-1.5 font-mono">{r.hsn_sac || '—'}</td>
+                                    <td className="px-3 py-1.5">{r.supply_type || 'B2C'}</td>
+                                    <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.taxable_value)}</td>
+                                    <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.cgst_amount)}</td>
+                                    <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.sgst_amount)}</td>
+                                    <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.igst_amount)}</td>
+                                    <td className="px-3 py-1.5 text-right font-mono font-bold">{fmtINR(r.total_gst)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* OTA Commission Ledger */}
+                  {kind === 'ota-commissions' && (() => {
+                    const rows: any[] = data.rows || [];
+                    const byChannel: Record<string, number> = data.by_channel || {};
+                    return (
+                      <div className="p-5 space-y-4">
+                        <div className="flex flex-wrap gap-3">
+                          <div className="bg-white rounded-2xl border border-indigo-200 px-4 py-2.5">
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-indigo-700">Total Commission</p>
+                            <p className="text-xl font-bold font-mono text-indigo-900 mt-0.5">{fmtINR(data.total_commission || 0)}</p>
+                          </div>
+                          {Object.entries(byChannel).map(([ch, amt]) => (
+                            <div key={ch} className="bg-white rounded-2xl border border-indigo-200 px-4 py-2.5">
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-indigo-700">{ch}</p>
+                              <p className="text-lg font-bold font-mono text-indigo-900 mt-0.5">{fmtINR(amt as number)}</p>
+                            </div>
+                          ))}
+                        </div>
+                        {rows.length === 0 ? (
+                          <p className="text-center text-sm italic text-indigo-800 py-6">No OTA commission entries for this period. Entries are written when an OTA booking is checked out.</p>
+                        ) : (
+                          <div className="overflow-x-auto bg-white rounded-2xl border border-indigo-200">
+                            <table className="w-full text-xs">
+                              <thead className="bg-indigo-100">
+                                <tr>{['Booking ID','Guest','Check-In','Check-Out','Channel','Comm %','Revenue Base','Commission'].map(c =>
+                                  <th key={c} className="text-left px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-indigo-900 whitespace-nowrap">{c}</th>
+                                )}</tr>
+                              </thead>
+                              <tbody>
+                                {rows.map((r: any, i: number) => (
+                                  <tr key={r.id || i} className={cn('border-t border-indigo-100', i % 2 === 1 && 'bg-indigo-50/40')}>
+                                    <td className="px-3 py-1.5 font-mono text-[10px]">{r.booking_id}</td>
+                                    <td className="px-3 py-1.5 font-semibold">{r.guest_name || '—'}</td>
+                                    <td className="px-3 py-1.5">{r.check_in_date?.toString().slice(0,10) || '—'}</td>
+                                    <td className="px-3 py-1.5">{r.check_out_date?.toString().slice(0,10) || '—'}</td>
+                                    <td className="px-3 py-1.5 font-semibold">{r.channel}</td>
+                                    <td className="px-3 py-1.5 text-center">{r.commission_pct}%</td>
+                                    <td className="px-3 py-1.5 text-right font-mono">{fmtINR(r.revenue_base)}</td>
+                                    <td className="px-3 py-1.5 text-right font-mono font-bold text-indigo-700">{fmtINR(r.commission_amt)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
                     );
                   })()}
 
@@ -21274,6 +21415,38 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         {foLoading === 'ota-inventory' ? <span className="text-[10px] text-teal-700">Loading…</span> : <Globe size={14} className="text-teal-700" />}
                       </div>
                       <p className="text-[10px] text-teal-800 leading-snug">Available rooms per type, <strong>{foDateFrom}</strong> → <strong>{foDateTo}</strong>. For updating OTA channels.</p>
+                    </button>
+
+                    {/* GST Output Register — period-based, derives month from from-date */}
+                    <button
+                      type="button" disabled={foLoading === 'gst-register'}
+                      onClick={() => loadReport('gst-register')}
+                      className={cn("text-left p-4 rounded-2xl border-2 transition-all disabled:opacity-50",
+                        foActiveReport?.kind === 'gst-register'
+                          ? "bg-orange-100 border-orange-500 shadow-md"
+                          : "bg-orange-50 border-orange-200 hover:border-orange-400 hover:bg-orange-100")}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-orange-900">GST Register</span>
+                        {foLoading === 'gst-register' ? <span className="text-[10px] text-orange-700">Loading…</span> : <Eye size={14} className="text-orange-700" />}
+                      </div>
+                      <p className="text-[10px] text-orange-800 leading-snug">Output GST register for <strong>{foDateFrom.slice(0,7)}</strong>. CGST + SGST + IGST by entry. For GSTR-1 filing.</p>
+                    </button>
+
+                    {/* OTA Commission Ledger — period-based */}
+                    <button
+                      type="button" disabled={foLoading === 'ota-commissions'}
+                      onClick={() => loadReport('ota-commissions')}
+                      className={cn("text-left p-4 rounded-2xl border-2 transition-all disabled:opacity-50",
+                        foActiveReport?.kind === 'ota-commissions'
+                          ? "bg-indigo-100 border-indigo-500 shadow-md"
+                          : "bg-indigo-50 border-indigo-200 hover:border-indigo-400 hover:bg-indigo-100")}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-indigo-900">OTA Commissions</span>
+                        {foLoading === 'ota-commissions' ? <span className="text-[10px] text-indigo-700">Loading…</span> : <Eye size={14} className="text-indigo-700" />}
+                      </div>
+                      <p className="text-[10px] text-indigo-800 leading-snug">Platform commission expense for <strong>{foDateFrom.slice(0,7)}</strong>. Auto-posted at checkout for OTA bookings.</p>
                     </button>
                   </div>
 
