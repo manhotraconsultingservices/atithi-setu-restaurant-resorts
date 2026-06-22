@@ -36800,6 +36800,9 @@ const CheckInWizardModal: React.FC<{
     // from saveAndNext() lands fine.
     room_id:           booking.room_id || '',
     room_rate:         booking.room_rate ?? 0,
+    // 1 = GST exclusive (add on top, default), 0 = GST inclusive (baked in).
+    // Stored as integer on the booking; drives folio math at check-in time.
+    room_rate_gst_exclusive: Number(booking.room_rate_gst_exclusive ?? 1),
     // Meal plan is editable at check-in (MATRIX tenants) — changing it re-quotes
     // the stay total and is PATCHed before check-in so the folio bills the new
     // plan's rate. null = room-only (EP).
@@ -37276,6 +37279,21 @@ const CheckInWizardModal: React.FC<{
                     <span className="text-[10px] text-amber-700 font-semibold whitespace-nowrap">= ₹{(Number(draft.room_rate) * nightCount).toLocaleString('en-IN')} stay</span>
                   )}
                 </div>
+                {/* GST mode toggle — only meaningful when a rate is entered or tariff applies */}
+                <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={Number(draft.room_rate_gst_exclusive) !== 0}
+                    onChange={e => updateDraft({ room_rate_gst_exclusive: e.target.checked ? 1 : 0 })}
+                    className="w-4 h-4 rounded accent-[#cc5a16]"
+                  />
+                  <span className="text-[12px] text-amber-900 font-semibold">Add GST on top of this rate</span>
+                </label>
+                <p className="text-[10px] text-[#9c8e85] mt-1 leading-relaxed">
+                  {Number(draft.room_rate_gst_exclusive) !== 0
+                    ? 'Checked — GST is charged extra on top of the rate entered above. Invoice shows base + GST as separate lines.'
+                    : 'Unchecked — the rate entered above already includes GST. Invoice back-calculates and shows base + GST breakdown.'}
+                </p>
               </div>
               {draft.room_id !== booking.room_id && (
                 <p className="text-[10px] text-[#9c8e85] mt-1">

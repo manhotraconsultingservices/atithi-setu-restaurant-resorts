@@ -1199,6 +1199,7 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_room_holds_room_dates ON room_holds (room_id, start_date, end_date);
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_refund_pct DOUBLE PRECISION;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancellation_refund_amount DOUBLE PRECISION;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS room_rate_gst_exclusive INTEGER NOT NULL DEFAULT 1;
 
     CREATE TABLE IF NOT EXISTS services (
       id               TEXT PRIMARY KEY,
@@ -1739,6 +1740,11 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
     const nights = perNight.length;
     const svcPct = cfg.serviceChargePct;
 
+    // GST mode: 1 (default) = exclusive — GST is ADDED on top of the rate
+    //            0           = inclusive — GST is BAKED INTO the rate (back-calculate taxable base)
+    // Default is 1 so all legacy bookings keep their existing billing behaviour.
+    const gstExclusive = Number(booking.room_rate_gst_exclusive ?? 1) !== 0;
+
     for (let i = 0; i < nights; i++) {
       const n = perNight[i];
       const dateStr = n.date;
@@ -1752,22 +1758,42 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
 
       // Build a descriptive line label: "Room charge · DATE [· PLAN]"
       const labelSuffix = n.label ? ` · ${n.label}` : '';
-      const lineGst = Math.round((lineAmount * gstPct / 100) * 100) / 100;
 
       // INVOICE-FIX (extra-person breakup): emit the extra-person charge as a
       // SEPARATE folio line so the invoice itemises it (extra adult / child
-      // w-mat / no-mat) instead of folding it into the room-charge text. The
-      // split is sum-preserving — base + extras === lineAmount and
-      // baseGst + extrasGst === lineGst (exact remainder) — so recompute keeps
-      // the folio grand total byte-identical. Legacy / no-extras stays a
-      // single ROOM_CHARGE line (extrasAmount = 0).
-      // Itemise extras on any night that has them (matrix meal-plan stays AND
-      // room-only stays that now resolve a per-night extra-person charge).
-      const extrasAmount = (totalExtraHeads > 0 && n.extras > 0)
+      // w-mat / no-mat) instead of folding it into the room-charge text.
+      const extrasAllIn = (totalExtraHeads > 0 && n.extras > 0)
         ? Math.round(n.extras * 100) / 100 : 0;
-      const baseAmount = Math.round((lineAmount - extrasAmount) * 100) / 100;
-      const extrasGst = extrasAmount > 0 ? Math.round((extrasAmount * gstPct / 100) * 100) / 100 : 0;
-      const baseGst = Math.round((lineGst - extrasGst) * 100) / 100;
+      const baseAllIn = Math.round((lineAmount - extrasAllIn) * 100) / 100;
+
+      // ── GST-inclusive back-calculation ──────────────────────────────
+      // When gst_exclusive=0 the staff entered an ALL-IN tariff. We store
+      // the PRE-TAX amount in folio_entries.amount and the extracted tax
+      // in gst_amount so that amount + gst_amount = the entered all-in rate
+      // (what the guest actually pays per night). The invoice PDF and
+      // recomputeFolioTotals both read amount + gst_amount so they remain
+      // correct without any further changes.
+      let baseAmount: number;
+      let baseGst: number;
+      let extrasAmount: number;
+      let extrasGst: number;
+      if (gstExclusive) {
+        // Standard path (existing behaviour): amount is pre-GST, GST added on top.
+        extrasAmount = extrasAllIn;
+        baseAmount   = baseAllIn;
+        baseGst      = Math.round((baseAllIn * gstPct / 100) * 100) / 100;
+        extrasGst    = extrasAllIn > 0 ? Math.round((extrasAllIn * gstPct / 100) * 100) / 100 : 0;
+      } else {
+        // Inclusive path: back-calculate the pre-tax base from the all-in amount.
+        const divisor = 1 + gstPct / 100;
+        const taxableBase   = Math.round((baseAllIn   / divisor) * 100) / 100;
+        const taxableExtras = extrasAllIn > 0 ? Math.round((extrasAllIn / divisor) * 100) / 100 : 0;
+        baseAmount   = taxableBase;
+        baseGst      = Math.round((baseAllIn   - taxableBase)   * 100) / 100;
+        extrasAmount = taxableExtras;
+        extrasGst    = extrasAllIn > 0 ? Math.round((extrasAllIn - taxableExtras) * 100) / 100 : 0;
+      }
+
       const roomEntryId = `FE-${Date.now()}-${i}-${tag}`;
       await tenantDb.run(
         `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, cost_centre, account_head)
@@ -1811,11 +1837,14 @@ async function createFolioWithRoomCharges(restaurantId: string, booking: any): P
           );
         }
       }
-      // Service charge line — % of THIS night's full line (base + extras)
-      // so the percent matches real-world hotel billing on the full room
-      // package. 0% service charge skips the row.
+      // Service charge line — % of the TAXABLE (pre-GST) base for this night.
+      // In exclusive mode baseAmount+extrasAmount === lineAmount (pre-GST total).
+      // In inclusive mode they are the back-calculated taxable values, so the
+      // service charge is correctly applied to the room-revenue base, not the
+      // all-in gross. 0% service charge skips the row.
       if (svcPct > 0) {
-        const svcAmount = Math.round((lineAmount * svcPct / 100) * 100) / 100;
+        const svcBase   = Math.round((baseAmount + extrasAmount) * 100) / 100;
+        const svcAmount = Math.round((svcBase * svcPct / 100) * 100) / 100;
         if (svcAmount > 0) {
           const svcGst = Math.round((svcAmount * gstPct / 100) * 100) / 100;
           const svcEntryId = `FE-${Date.now()}-${i}-S-${tag}`;
@@ -30523,7 +30552,7 @@ ${data.tenant.name}`;
       // locked after check-in (they affect the rate and would invalidate
       // the folio). Pre-check-in they're freely editable along with rate.
       const LOCKED_AFTER_CHECKIN = [
-        'room_rate','check_in_date','check_out_date','room_id','room_locked','booking_type','num_guests','status',
+        'room_rate','room_rate_gst_exclusive','check_in_date','check_out_date','room_id','room_locked','booking_type','num_guests','status',
         'guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin',
         'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress','num_adults',
         'child_rate_with_mattress','child_rate_no_mattress',
@@ -30533,7 +30562,7 @@ ${data.tenant.name}`;
       // above so it can't change once the guest is checked in. It was MISSING
       // from this allow list, so reassignment PATCHes silently dropped room_id
       // — the booking row, folio + invoice all kept the OLD room.
-      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','room_id','room_locked','check_in_date','check_out_date','room_rate','special_requests','status','booking_type',
+      const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','room_id','room_locked','check_in_date','check_out_date','room_rate','room_rate_gst_exclusive','special_requests','status','booking_type',
         'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress','num_adults',
         'child_rate_with_mattress','child_rate_no_mattress',
         // Receivables Phase 2 — agent + booking_source editable post-create
