@@ -19289,6 +19289,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             );
           })()}
 
+          {/* ── GROUP CHECK-IN WIZARD — rendered outside sub-tab guard so it
+               shows regardless of which sub-tab is active when triggered. */}
+          {groupCheckInWizardTarget && (
+            <GroupCheckInWizard
+              groupId={groupCheckInWizardTarget.groupId}
+              groupName={groupCheckInWizardTarget.groupName}
+              restaurantId={restaurantId}
+              token={token}
+              onClose={() => setGroupCheckInWizardTarget(null)}
+              onSuccess={() => { setGroupsList(null); fetchHotelBookings(); }}
+            />
+          )}
+
           {/* ── GROUPS sub-tab ─────────────────────────────────────────── */}
           {bookingSubTab === 'GROUPS' && (
             <div className="space-y-4">
@@ -19447,18 +19460,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
           {/* ── RESERVATIONS sub-tab ───────────────────────────────────── */}
           {bookingSubTab === 'RESERVATIONS' && (<>
-
-          {/* ── GROUP CHECK-IN WIZARD ────────────────────────────────────── */}
-          {groupCheckInWizardTarget && (
-            <GroupCheckInWizard
-              groupId={groupCheckInWizardTarget.groupId}
-              groupName={groupCheckInWizardTarget.groupName}
-              restaurantId={restaurantId}
-              token={token}
-              onClose={() => setGroupCheckInWizardTarget(null)}
-              onSuccess={() => { setGroupsList(null); fetchHotelBookings(); }}
-            />
-          )}
 
           {/* ── MASTER BILLING ACCOUNT DRAWER ────────────────────────────── */}
           {masterFolioGroupId && (
