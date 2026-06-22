@@ -13026,8 +13026,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           restaurantImageUrl={(restaurant as any)?.logo_url || (restaurant as any)?.cover_image_url || ''}
           isHotelEnabled={isHotelEnabled}
           isRestaurantEnabled={isRestaurantEnabled}
+          isSpaEnabled={isSpaEnabled}
           onOpenHotel={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
           onOpenRestaurant={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
+          onOpenSpa={() => setActiveTab('SPA_CALENDAR')}
           onNewBooking={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
           onNewOrder={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
           onOpenReports={() => { setDashboardMode('HOTEL'); setActiveTab('FRONT_OFFICE_REPORTS'); }}
@@ -39037,15 +39039,16 @@ const HotelLateFeeBanner: React.FC<{
 // sees both (and the tile click also flips dashboardMode via the callbacks).
 function HotelHomeLaunchpad({
   restaurantId, token, propertyName, restaurantImageUrl, isHotelEnabled, isRestaurantEnabled,
-  onOpenHotel, onOpenRestaurant, onNewBooking, onNewOrder, onOpenReports,
+  onOpenHotel, onOpenRestaurant, onNewBooking, onNewOrder, onOpenReports, isSpaEnabled, onOpenSpa,
 }: {
   restaurantId: string; token: string; propertyName: string; restaurantImageUrl?: string;
-  isHotelEnabled: boolean; isRestaurantEnabled: boolean;
-  onOpenHotel: () => void; onOpenRestaurant: () => void;
+  isHotelEnabled: boolean; isRestaurantEnabled: boolean; isSpaEnabled: boolean;
+  onOpenHotel: () => void; onOpenRestaurant: () => void; onOpenSpa: () => void;
   onNewBooking: () => void; onNewOrder: () => void; onOpenReports: () => void;
 }) {
   const [snap, setSnap] = useState<any>(null);
   const [heroUrl, setHeroUrl] = useState<string>('');
+  const [bookingSlug, setBookingSlug] = useState<string>('');
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
   const dateLabel = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
@@ -39063,13 +39066,14 @@ function HotelHomeLaunchpad({
       if (abort) return;
       if (audit) setSnap(audit.summary || null);
       if (profile?.hero_image_url) setHeroUrl(profile.hero_image_url);
+      if (profile?.booking_slug) setBookingSlug(profile.booking_slug);
     })();
     return () => { abort = true; };
   }, [restaurantId, token, isHotelEnabled]);
 
   const s = snap || {};
   const inr = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
-  const tileCount = (isHotelEnabled ? 1 : 0) + (isRestaurantEnabled ? 1 : 0);
+  const tileCount = (isHotelEnabled ? 1 : 0) + (isRestaurantEnabled ? 1 : 0) + (isSpaEnabled ? 1 : 0);
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -39083,7 +39087,7 @@ function HotelHomeLaunchpad({
         {/* Module tiles — branded with the property's own name + photo. When a
             hero/cover image is set it becomes the tile wallpaper (dark overlay
             for legibility); otherwise the tile falls back to a clean accent card. */}
-        <div className={cn('grid gap-4 mb-6', tileCount === 2 ? 'sm:grid-cols-2' : 'grid-cols-1')}>
+        <div className={cn('grid gap-4 mb-6', tileCount === 3 ? 'sm:grid-cols-3' : tileCount === 2 ? 'sm:grid-cols-2' : 'grid-cols-1')}>
           {isHotelEnabled && (() => {
             const hasImg = !!heroUrl;
             return (
@@ -39135,8 +39139,53 @@ function HotelHomeLaunchpad({
               </button>
             );
           })()}
+          {isSpaEnabled && (
+            <button type="button" onClick={onOpenSpa}
+              className="relative text-left rounded-3xl overflow-hidden border transition-all hover:shadow-lg group min-h-[190px] flex bg-white"
+              style={{ borderColor: 'rgba(126,87,146,0.2)' }}>
+              <div className="relative p-5 w-full flex flex-col">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="w-11 h-11 rounded-2xl flex items-center justify-center" style={{ background: '#f3eef7', color: '#7e5792' }}><Sparkles size={22} /></span>
+                </div>
+                <div className="mt-auto">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: '#7e5792' }}>Spa & Wellness</div>
+                  <div className="text-xl font-bold font-serif truncate text-[#1a1208]">{propertyName}</div>
+                  <div className="text-[12px] mb-2 text-[#3d3128]">Appointments · therapists · packages</div>
+                  <div className="text-[12px] font-bold flex items-center gap-1 group-hover:gap-2 transition-all" style={{ color: '#7e5792' }}>Manage spa <ChevronRight size={15} /></div>
+                </div>
+              </div>
+            </button>
+          )}
         </div>
 
+        {/* Public pages */}
+        {(() => {
+          const origin = window.location.origin;
+          const links: { label: string; url: string; color: string }[] = [];
+          if (isHotelEnabled && bookingSlug) links.push({ label: 'Hotel booking', url: `${origin}/book/${bookingSlug}`, color: '#cc5a16' });
+          if (isSpaEnabled) links.push({ label: 'Spa booking', url: `${origin}/spa/${restaurantId}`, color: '#7e5792' });
+          if (links.length === 0) return null;
+          return (
+            <div className="mb-5">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-2">Public pages</p>
+              <div className="flex flex-wrap gap-2">
+                {links.map(({ label, url, color }) => (
+                  <div key={label} className="flex items-center gap-1.5 bg-white border rounded-xl px-3 py-1.5 text-xs" style={{ borderColor: `${color}30` }}>
+                    <span className="font-bold" style={{ color }}>{label}</span>
+                    <a href={url} target="_blank" rel="noopener noreferrer"
+                      className="font-mono text-[10px] text-[#6b5d52] hover:underline truncate max-w-[220px]"
+                      title={url}>{url.replace(/^https?:\/\//, '')}</a>
+                    <button type="button" title="Copy link"
+                      onClick={() => { navigator.clipboard?.writeText(url).then(() => alert('Copied!')); }}
+                      className="ml-0.5 text-[#9c8e85] hover:text-[#3d3128] transition-colors shrink-0">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
         {/* Today at a glance — hotel snapshot */}
         {isHotelEnabled && snap && (
           <div className="bg-white rounded-2xl border border-[#cc5a16]/10 grid grid-cols-2 sm:grid-cols-5 mb-6">
