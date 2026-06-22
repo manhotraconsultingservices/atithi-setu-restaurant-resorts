@@ -8349,7 +8349,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [colWidths, setColWidths] = useState<Record<string,number>>({});
   const colWidthsRef = useRef<Record<string,number>>({});
   const [openActionMenu, setOpenActionMenu] = useState<string|null>(null);
-  const [actionMenuPos, setActionMenuPos] = useState<{top:number;right:number}|null>(null);
+  const [actionMenuPos, setActionMenuPos] = useState<{top:number;left:number}|null>(null);
   const [bookingDetailTarget, setBookingDetailTarget] = useState<any>(null);
   // Reservations table — client-side sort + live filter (13 Jun 2026 fix).
   // The "All bookings" table had no sort and clipped its right-hand columns,
@@ -8555,6 +8555,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   }, [openActionMenu]);
 
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
+  const [foliosStatusFilter, setFoliosStatusFilter] = useState('all');
+  const [foliosSearch, setFoliosSearch] = useState('');
+  const [foliosDateFrom, setFoliosDateFrom] = useState('');
+  const [foliosDateTo, setFoliosDateTo] = useState('');
+  const [foliosSort, setFoliosSort] = useState<{col:string;dir:'asc'|'desc'}>({col:'check_in_date',dir:'desc'});
   const [complianceList, setComplianceList] = useState<any[]>([]);
   const [hotelAnalytics, setHotelAnalytics] = useState<any>(null);
   const [showBookingModal, setShowBookingModal] = useState(false);
@@ -11802,6 +11807,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!isHotelEnabled) return;
     try { setHotelFolios(await hotelApi('/folios')); } catch (err: any) { setHotelError(err.message); }
   };
+  const openFolioPdf = async (folioId: string) => {
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${folioId}/invoice-pdf`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error || `Failed (HTTP ${res.status})`); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err: any) { alert(err?.message || 'Failed to download invoice'); }
+  };
   // RS-FIX — room-service orders the kitchen received but couldn't auto-bill
   // to a folio. Silent on failure (it only drives a badge, never blocks).
   const fetchPendingFolioOrders = async () => {
@@ -12707,7 +12724,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         // (BCG consolidation 11 Jun 2026), so the ops trio is now a duo.
         const opsTrio = (mode: 'RESTAURANT' | 'HOTEL'): NavTab[] => [
           { id: 'MONITOR',  label: 'Command Centre', mode },
-          { id: 'INVOICES', label: 'Invoices',       mode },
+          ...(mode === 'RESTAURANT' ? [{ id: 'INVOICES', label: 'Invoices', mode } as NavTab] : []),
         ];
 
         const modules: NavModule[] = [
@@ -20528,7 +20545,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   } else {
                                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                                     setOpenActionMenu(b.id);
-                                    setActionMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                                    setActionMenuPos({ top: rect.bottom + 4, left: Math.max(8, rect.right - 240) });
                                   }
                                 }}
                                 className="px-2.5 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[13px] font-bold hover:bg-[#faf7f2] leading-none select-none"
@@ -20544,8 +20561,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 const sep = <div className="my-1 border-t border-[#cc5a16]/10" />;
                                 return (
                                   <div
-                                    style={{ position: 'fixed', top: actionMenuPos?.top ?? 0, right: actionMenuPos?.right ?? 0, zIndex: 9999 }}
-                                    className="bg-white rounded-xl border border-[#cc5a16]/15 shadow-2xl py-1 min-w-[220px] w-max text-left"
+                                    style={{ position: 'fixed', top: actionMenuPos?.top ?? 0, left: actionMenuPos?.left ?? 0, zIndex: 9999 }}
+                                    className="bg-white rounded-xl border border-[#cc5a16]/15 shadow-2xl py-1 w-60 text-left"
                                     data-booking-action-menu
                                   >
                                     {/* Edit — BOOKED only */}
@@ -23166,13 +23183,44 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       ) : activeTab === 'FOLIOS' && isHotelEnabled ? (
-        /* ════════════════ FOLIOS ════════════════ */
+        /* ════════════════ FOLIOS & SETTLEMENT ════════════════ */
         <div className="space-y-5">
-          <div>
-            <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Folios</h2>
-            <p className="text-sm text-[#6b5d52] mt-1">Per-booking ledgers. Charges auto-post on check-in and when chargeable services complete.</p>
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Folios & Settlement</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">Per-booking ledgers — charges, payments, and invoices in one view.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => fetchHotelFolios()}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-[#cc5a16]/20 text-[#6b5d52] hover:bg-[#faf7f2] text-xs font-bold uppercase tracking-widest">
+                <RefreshCw size={13} /> Refresh
+              </button>
+              <button type="button"
+                onClick={() => {
+                  const q = foliosSearch.trim().toLowerCase();
+                  const rows = hotelFolios.filter((f: any) => {
+                    if (foliosStatusFilter !== 'all' && f.status !== foliosStatusFilter) return false;
+                    if (foliosDateFrom && String(f.check_in_date||'').slice(0,10) < foliosDateFrom) return false;
+                    if (foliosDateTo   && String(f.check_in_date||'').slice(0,10) > foliosDateTo)   return false;
+                    if (!q) return true;
+                    return String(f.guest_name||'').toLowerCase().includes(q) || String(f.id||'').toLowerCase().includes(q) || String(f.room_name||f.room_id||'').toLowerCase().includes(q) || String(f.invoice_number||'').toLowerCase().includes(q);
+                  }).map((f: any) => [
+                    f.id||'', f.invoice_number||'', f.guest_name||'', f.room_name||f.room_id||'',
+                    String(f.check_in_date||'').slice(0,10), String(f.check_out_date||'').slice(0,10),
+                    f.status||'', Number(f.subtotal||0), Number(f.discount||0), Number(f.gst_amount||0), Number(f.grand_total||0),
+                    f.payment_method||'', String(f.settled_at||'').slice(0,16).replace('T',' '),
+                  ]);
+                  downloadCsv(`folios-${new Date().toISOString().slice(0,10)}.csv`,
+                    ['Folio ID','Invoice #','Guest','Room','Check-in','Check-out','Status','Subtotal','Discount','GST','Grand Total','Payment Method','Settled At'],
+                    rows);
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-[#cc5a16]/20 text-[#cc5a16] hover:bg-[#faf7f2] text-xs font-bold uppercase tracking-widest">
+                <Download size={13} /> CSV
+              </button>
+            </div>
           </div>
-          {/* RS-FIX — unbilled room orders awaiting reconciliation onto a folio */}
+          {/* RS-FIX — unbilled room orders */}
           <PendingRoomOrdersAlert
             orders={pendingFolioOrders}
             openFolios={hotelFolios.filter((f: any) => f.status === 'open')}
@@ -23180,83 +23228,157 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             token={token}
             onReconciled={async () => { await fetchPendingFolioOrders(); await fetchHotelFolios(); }}
           />
-          <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-hidden shadow-sm">
-            {hotelFolios.length === 0 ? (
-              <div className="p-12 text-center text-sm text-[#6b5d52]">No folios yet. Folios are created automatically on check-in.</div>
-            ) : (<>
-              <div className="flex items-center justify-between px-5 py-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
-                <span className="text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">
-                  {hotelFolios.length} folio{hotelFolios.length === 1 ? '' : 's'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => downloadCsv(
-                    `folios-${new Date().toISOString().slice(0, 10)}.csv`,
-                    ['Folio ID', 'Invoice #', 'Guest', 'Room', 'Check-in', 'Check-out',
-                     'Status', 'Subtotal', 'Discount', 'GST', 'Grand Total',
-                     'Payment Method', 'Settled At'],
-                    hotelFolios.map((f: any) => [
-                      f.id || '', f.invoice_number || '',
-                      f.guest_name || '', f.room_name || f.room_id || '',
-                      String(f.check_in_date || '').slice(0, 10),
-                      String(f.check_out_date || '').slice(0, 10),
-                      f.status || '',
-                      Number(f.subtotal || 0), Number(f.discount || 0),
-                      Number(f.gst_amount || 0), Number(f.grand_total || 0),
-                      f.payment_method || '', String(f.settled_at || '').slice(0, 16).replace('T', ' '),
-                    ])
-                  )}
-                  className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] hover:underline flex items-center gap-1"
-                >
-                  <Download size={12} /> Export CSV
-                </button>
+          {/* Stats strip */}
+          {(() => {
+            const settled = hotelFolios.filter((f:any) => f.status === 'settled');
+            const open    = hotelFolios.filter((f:any) => f.status === 'open');
+            const totalSettled = settled.reduce((s:number,f:any) => s+Number(f.grand_total||0), 0);
+            return (
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-2xl bg-white border border-[#cc5a16]/10 p-4 shadow-sm">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Settled</p>
+                  <p className="text-2xl font-bold text-[#1a1208] mt-1">{settled.length}</p>
+                </div>
+                <div className="rounded-2xl bg-white border border-[#cc5a16]/10 p-4 shadow-sm">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Open</p>
+                  <p className="text-2xl font-bold text-[#1a1208] mt-1">{open.length}</p>
+                </div>
+                <div className="rounded-2xl bg-white border border-[#cc5a16]/10 p-4 shadow-sm">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Total Settled</p>
+                  <p className="text-2xl font-bold text-[#cc5a16] mt-1 font-mono">₹{totalSettled.toLocaleString('en-IN')}</p>
+                </div>
               </div>
-              <table className="w-full text-sm">
-                <thead className="bg-[#faf7f2] text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
-                  <tr>
-                    <th className="text-left px-4 py-3">Guest</th>
-                    <th className="text-left px-4 py-3">Room</th>
-                    <th className="text-left px-4 py-3">Dates</th>
-                    <th className="text-left px-4 py-3">Status</th>
-                    <th className="text-right px-4 py-3">Subtotal</th>
-                    <th className="text-right px-4 py-3">GST</th>
-                    <th className="text-right px-4 py-3">Grand Total</th>
-                    <th className="px-4 py-3"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {hotelFolios.map((f: any) => (
-                    <tr key={f.id} className="border-t border-[#cc5a16]/10 hover:bg-[#faf7f2]/50">
-                      <td className="px-4 py-3 font-semibold text-[#1a1208]">{f.guest_name || '—'}</td>
-                      <td className="px-4 py-3 text-[#3d3128]">{f.room_name || f.room_id}</td>
-                      <td className="px-4 py-3 text-xs text-[#3d3128] whitespace-nowrap">
-                        <div>
-                          {f.check_in_date && formatDateForTenant(f.check_in_date, restaurant?.date_format)}
-                          {f.actual_checkin_at && <span className="text-[10px] text-[#9c8e85] ml-1">{new Date(f.actual_checkin_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
-                        </div>
-                        <div>
-                          {f.check_out_date && formatDateForTenant(f.check_out_date, restaurant?.date_format)}
-                          {f.actual_checkout_at && <span className="text-[10px] text-[#cc5a16]/70 ml-1">{new Date(f.actual_checkout_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={cn("px-2 py-1 rounded-md text-[10px] font-bold uppercase",
-                          f.status === 'open' ? 'bg-amber-50 text-amber-700'
-                          : f.status === 'settled' ? 'bg-emerald-50 text-emerald-700'
-                          : 'bg-slate-100 text-slate-500')}>{f.status}</span>
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono">₹{Number(f.subtotal || 0).toLocaleString('en-IN')}</td>
-                      <td className="px-4 py-3 text-right font-mono text-[#6b5d52]">₹{Number(f.gst_amount || 0).toLocaleString('en-IN')}</td>
-                      <td className="px-4 py-3 text-right font-mono font-bold text-[#1a1208]">₹{Number(f.grand_total || 0).toLocaleString('en-IN')}</td>
-                      <td className="px-4 py-3 text-right">
-                        <button onClick={() => loadFolio(f.id)} className="px-3 py-1.5 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[11px] font-bold hover:bg-[#cc5a16]/10">View</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>)}
+            );
+          })()}
+          {/* Filters */}
+          <div className="bg-white rounded-2xl border border-[#cc5a16]/10 shadow-sm p-4 space-y-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] shrink-0">Check-in Date</span>
+              <input type="date" value={foliosDateFrom} onChange={e => setFoliosDateFrom(e.target.value)}
+                className="px-3 py-1.5 text-xs rounded-lg border border-[#cc5a16]/15 bg-[#faf7f2] focus:outline-none focus:ring-1 ring-[#cc5a16]/30" />
+              <span className="text-[10px] text-[#9c8e85]">to</span>
+              <input type="date" value={foliosDateTo} onChange={e => setFoliosDateTo(e.target.value)}
+                className="px-3 py-1.5 text-xs rounded-lg border border-[#cc5a16]/15 bg-[#faf7f2] focus:outline-none focus:ring-1 ring-[#cc5a16]/30" />
+              {(foliosDateFrom || foliosDateTo) && (
+                <button type="button" onClick={() => { setFoliosDateFrom(''); setFoliosDateTo(''); }}
+                  className="text-[10px] text-red-500 hover:underline">Clear dates</button>
+              )}
+            </div>
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex gap-1 bg-[#faf7f2] rounded-xl p-1 border border-[#cc5a16]/10 shrink-0">
+                {(['all','settled','open','voided'] as const).map(s => (
+                  <button key={s} type="button" onClick={() => setFoliosStatusFilter(s)}
+                    className={cn('px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all',
+                      foliosStatusFilter === s ? 'bg-[#cc5a16] text-white shadow' : 'text-[#6b5d52] hover:bg-white')}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+              <div className="relative flex-1 min-w-[180px]">
+                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#9c8e85] pointer-events-none" />
+                <input type="text" placeholder="Search guest, folio ID, invoice #, room…"
+                  value={foliosSearch} onChange={e => setFoliosSearch(e.target.value)}
+                  className="w-full bg-[#faf7f2] border border-[#cc5a16]/10 rounded-xl pl-9 pr-3 py-1.5 text-xs outline-none focus:ring-1 ring-[#cc5a16]/20" />
+              </div>
+            </div>
           </div>
+          {/* Table */}
+          {(() => {
+            const q = foliosSearch.trim().toLowerCase();
+            const filtered = hotelFolios.filter((f: any) => {
+              if (foliosStatusFilter !== 'all' && f.status !== foliosStatusFilter) return false;
+              if (foliosDateFrom && String(f.check_in_date||'').slice(0,10) < foliosDateFrom) return false;
+              if (foliosDateTo   && String(f.check_in_date||'').slice(0,10) > foliosDateTo)   return false;
+              if (!q) return true;
+              return String(f.guest_name||'').toLowerCase().includes(q)
+                  || String(f.id||'').toLowerCase().includes(q)
+                  || String(f.room_name||f.room_id||'').toLowerCase().includes(q)
+                  || String(f.invoice_number||'').toLowerCase().includes(q);
+            });
+            const toggleFolioSort = (col: string) => setFoliosSort(s => s.col === col ? {...s, dir: s.dir==='asc'?'desc':'asc'} : {col, dir:'asc'});
+            const fArrow = (col: string) => foliosSort.col === col ? (foliosSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+            const numCols = ['subtotal','gst_amount','grand_total'];
+            const sorted = [...filtered].sort((a: any, b: any) => {
+              const dir = foliosSort.dir === 'asc' ? 1 : -1;
+              const av = numCols.includes(foliosSort.col) ? Number(a[foliosSort.col]||0) : String(a[foliosSort.col]||'');
+              const bv = numCols.includes(foliosSort.col) ? Number(b[foliosSort.col]||0) : String(b[foliosSort.col]||'');
+              return av < bv ? -dir : av > bv ? dir : 0;
+            });
+            const thCls = 'px-3 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] cursor-pointer select-none hover:text-[#cc5a16] whitespace-nowrap';
+            const thRCls = thCls.replace('text-left','text-right');
+            const statusColors: Record<string,string> = {
+              settled: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+              open: 'bg-amber-50 text-amber-700 border-amber-200',
+              voided: 'bg-rose-50 text-rose-700 border-rose-200',
+            };
+            return (
+              <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 overflow-hidden shadow-sm">
+                <div className="px-5 py-2.5 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
+                  <span className="text-[11px] text-[#6b5d52]">
+                    {sorted.length === hotelFolios.length ? `${hotelFolios.length} folio${hotelFolios.length === 1 ? '' : 's'}` : `${sorted.length} of ${hotelFolios.length} folios`}
+                  </span>
+                </div>
+                {hotelFolios.length === 0 ? (
+                  <div className="p-12 text-center text-sm text-[#6b5d52]">No folios yet. Folios are created automatically on check-in.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm min-w-[1000px]">
+                      <thead className="bg-[#faf7f2]">
+                        <tr>
+                          <th className={thCls} onClick={() => toggleFolioSort('guest_name')}>Guest{fArrow('guest_name')}</th>
+                          <th className={thCls} onClick={() => toggleFolioSort('room_name')}>Room{fArrow('room_name')}</th>
+                          <th className={thCls} onClick={() => toggleFolioSort('check_in_date')}>Check-in / out{fArrow('check_in_date')}</th>
+                          <th className={thCls} onClick={() => toggleFolioSort('invoice_number')}>Invoice #{fArrow('invoice_number')}</th>
+                          <th className={thCls} onClick={() => toggleFolioSort('status')}>Status{fArrow('status')}</th>
+                          <th className={thRCls} onClick={() => toggleFolioSort('subtotal')}>Subtotal{fArrow('subtotal')}</th>
+                          <th className={thRCls} onClick={() => toggleFolioSort('gst_amount')}>GST{fArrow('gst_amount')}</th>
+                          <th className={thRCls} onClick={() => toggleFolioSort('grand_total')}>Total{fArrow('grand_total')}</th>
+                          <th className={thCls} onClick={() => toggleFolioSort('payment_method')}>Payment{fArrow('payment_method')}</th>
+                          <th className={thCls} onClick={() => toggleFolioSort('settled_at')}>Settled At{fArrow('settled_at')}</th>
+                          <th className="px-3 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sorted.length === 0 ? (
+                          <tr><td colSpan={11} className="px-4 py-12 text-center text-sm text-[#9c8e85] italic">No folios match the current filters.</td></tr>
+                        ) : sorted.map((f: any) => (
+                          <tr key={f.id} className="border-t border-[#cc5a16]/5 hover:bg-[#faf7f2]/50 transition-colors">
+                            <td className="px-3 py-3 font-semibold text-[#1a1208]">{f.guest_name || '—'}</td>
+                            <td className="px-3 py-3 text-[#3d3128]">{f.room_name || f.room_id || '—'}</td>
+                            <td className="px-3 py-3 text-xs text-[#3d3128] whitespace-nowrap">
+                              <div>{f.check_in_date ? formatDateForTenant(f.check_in_date, restaurant?.date_format) : '—'}{f.actual_checkin_at && <span className="text-[10px] text-[#9c8e85] ml-1">{new Date(f.actual_checkin_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'})}</span>}</div>
+                              <div className="text-[10px] text-[#9c8e85]">{f.check_out_date ? formatDateForTenant(f.check_out_date, restaurant?.date_format) : '—'}{f.actual_checkout_at && <span className="ml-1">{new Date(f.actual_checkout_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'})}</span>}</div>
+                            </td>
+                            <td className="px-3 py-3 font-mono text-[11px] text-[#6b5d52]">{f.invoice_number || '—'}</td>
+                            <td className="px-3 py-3">
+                              <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full border', statusColors[f.status] || 'bg-slate-50 text-slate-700 border-slate-200')}>{f.status}</span>
+                            </td>
+                            <td className="px-3 py-3 text-right font-mono text-xs">₹{Number(f.subtotal||0).toLocaleString('en-IN')}</td>
+                            <td className="px-3 py-3 text-right font-mono text-xs text-[#6b5d52]">₹{Number(f.gst_amount||0).toLocaleString('en-IN')}</td>
+                            <td className="px-3 py-3 text-right font-mono font-bold text-[#cc5a16]">₹{Number(f.grand_total||0).toLocaleString('en-IN')}</td>
+                            <td className="px-3 py-3 text-xs text-[#6b5d52]">{f.payment_method || '—'}</td>
+                            <td className="px-3 py-3 text-xs text-[#9c8e85] whitespace-nowrap">{f.settled_at ? String(f.settled_at).slice(0,16).replace('T',' ') : '—'}</td>
+                            <td className="px-3 py-3 text-right">
+                              <div className="flex items-center gap-1 justify-end">
+                                <button onClick={() => loadFolio(f.id)}
+                                  className="px-2.5 py-1 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[10px] font-bold hover:bg-[#cc5a16]/10">View</button>
+                                {f.status !== 'voided' && (
+                                  <button onClick={() => openFolioPdf(f.id)}
+                                    className="px-2.5 py-1 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[10px] font-bold hover:bg-[#faf7f2] flex items-center gap-1">
+                                    <Eye size={11} /> PDF
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       ) : activeTab === 'COMPLIANCE' && isHotelEnabled ? (
         /* ════════════════ COMPLIANCE ════════════════ */
