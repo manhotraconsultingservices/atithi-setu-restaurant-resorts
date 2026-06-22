@@ -32911,6 +32911,48 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── Sprint 2 BCG: GST REGISTER BACKFILL (debug/admin) ──────────────────
+  // POST /hotel/gst-register/backfill  body: { folio_id: "..." }
+  // Runs writeGstRegisterFromFolio synchronously and surfaces any error.
+  // Returns { entries_found, rows_written } on success, or { error, detail } on failure.
+  app.post("/api/restaurant/:id/hotel/gst-register/backfill", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const folioId = String(req.body?.folio_id || '').trim();
+      if (!folioId) return res.status(400).json({ error: 'folio_id required' });
+      const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folioId]);
+      if (!folio) return res.status(404).json({ error: 'Folio not found' });
+      const entriesBefore: any[] = await tenantDb.query(
+        `SELECT id, entry_type, amount, gst_rate, gst_amount, reversal_of_entry_id, account_head
+           FROM folio_entries WHERE folio_id = ?`, [folioId]
+      );
+      const beforeCount: any = await tenantDb.get(
+        "SELECT COUNT(*) AS cnt FROM gst_output_register WHERE folio_id = ?", [folioId]
+      );
+      await writeGstRegisterFromFolio(tenantDb, req.params.id, folioId, {
+        invoiceDate: folio.settled_at || new Date().toISOString().slice(0, 10),
+        bookingId: folio.booking_id || null,
+        guestGstin: null,
+      });
+      const afterCount: any = await tenantDb.get(
+        "SELECT COUNT(*) AS cnt FROM gst_output_register WHERE folio_id = ?", [folioId]
+      );
+      res.json({
+        folio_id: folioId,
+        folio_status: folio.status,
+        entries_in_folio: entriesBefore.length,
+        entries_eligible: entriesBefore.filter((e: any) => Number(e.amount) > 0 && !e.reversal_of_entry_id).length,
+        folio_entries: entriesBefore,
+        gst_rows_before: Number(beforeCount?.cnt || 0),
+        gst_rows_after: Number(afterCount?.cnt || 0),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: 'backfill failed', detail: String(err?.message || err) });
+    }
+  });
+
   // ─── Sprint 2 BCG: OTA COMMISSION LEDGER ─────────────────────────────────
   // GET /hotel/ota-commissions?period=YYYY-MM
   app.get("/api/restaurant/:id/hotel/ota-commissions", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
