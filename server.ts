@@ -29947,16 +29947,12 @@ ${data.tenant.name}`;
         );
         if (b.room_id) await db.run("UPDATE rooms SET status='OCCUPIED' WHERE id=?", [b.room_id]);
         try { await db.run("UPDATE guest_documents SET locked_at=? WHERE booking_id=? AND locked_at IS NULL", [now, b.id]); } catch(_) {}
-        const existingFolio: any = await db.get(
-          "SELECT id FROM folios WHERE booking_id = ? AND (doc_type IS NULL OR doc_type='INVOICE') LIMIT 1", [b.id]
-        );
-        if (!existingFolio) {
-          const folioId = `F-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
-          await db.run(
-            "INSERT INTO folios (id,booking_id,status,folio_kind,subtotal,gst_amount,grand_total) VALUES (?,?,'open','HOTEL',0,0,0)",
-            [folioId, b.id]
-          );
-        }
+        // Mirror the individual check-in: createFolioWithRoomCharges is idempotent
+        // (skips if an open folio already exists) and seeds one ROOM_CHARGE entry
+        // per night then calls recomputeFolioTotals so grand_total is non-zero at
+        // checkout time. The blank INSERT that was here previously left the folio
+        // with subtotal=0, causing the group invoice to total ₹0.
+        await createFolioWithRoomCharges(req.params.id, b);
         checkedIn.push(b.id);
       }
       res.json({ ok: true, checked_in: checkedIn.length, booking_ids: checkedIn, skipped, skipped_count: skipped.length });
