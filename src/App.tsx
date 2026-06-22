@@ -8347,6 +8347,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [colWidths, setColWidths] = useState<Record<string,number>>({});
   const colWidthsRef = useRef<Record<string,number>>({});
   const [openActionMenu, setOpenActionMenu] = useState<string|null>(null);
+  const [actionMenuPos, setActionMenuPos] = useState<{top:number;right:number}|null>(null);
+  const [bookingDetailTarget, setBookingDetailTarget] = useState<any>(null);
   // Reservations table — client-side sort + live filter (13 Jun 2026 fix).
   // The "All bookings" table had no sort and clipped its right-hand columns,
   // so checked-in guests were hard to locate. displayedBookings sorts +
@@ -8539,10 +8541,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!openActionMenu) return;
     const close = (e: MouseEvent) => {
       const t = e.target as HTMLElement;
-      if (!t.closest('[data-booking-action-menu]')) setOpenActionMenu(null);
+      if (!t.closest('[data-booking-action-menu]')) { setOpenActionMenu(null); setActionMenuPos(null); }
     };
+    const onScroll = () => { setOpenActionMenu(null); setActionMenuPos(null); };
     document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
+    document.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('scroll', onScroll, true);
+    };
   }, [openActionMenu]);
 
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
@@ -20324,17 +20331,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           <td className="px-4 py-3 whitespace-nowrap">
                             <button
                               type="button"
-                              title="Open folio for this booking · right-click to copy ID"
-                              onClick={async () => {
-                                if (b.open_folio_id) { try { await loadFolio(b.open_folio_id); } catch { /* ignore */ } return; }
-                                try {
-                                  const _fr = await fetch(`/api/restaurant/${restaurantId}/hotel/folios?booking_id=${b.id}`, { headers: { Authorization: `Bearer ${token}` } });
-                                  const _fl = await _fr.json();
-                                  if (Array.isArray(_fl) && _fl.length > 0) { await loadFolio(_fl[0].id); return; }
-                                } catch { /* ignore */ }
-                                try { navigator.clipboard?.writeText(String(b.id)); } catch { /* ignore */ }
-                              }}
-                              className="font-mono text-[10px] text-[#6b5d52] hover:text-[#cc5a16] hover:underline"
+                              title="View booking details"
+                              onClick={() => setBookingDetailTarget(b)}
+                              className="font-mono text-[10px] text-blue-600 hover:text-blue-800 hover:underline underline-offset-2 font-bold"
                             >{b.id}</button>
                           </td>
                         )}
@@ -20496,7 +20495,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <div className="relative" data-booking-action-menu>
                               <button
                                 type="button"
-                                onClick={() => setOpenActionMenu(openActionMenu === b.id ? null : b.id)}
+                                onClick={(e) => {
+                                  if (openActionMenu === b.id) {
+                                    setOpenActionMenu(null);
+                                    setActionMenuPos(null);
+                                  } else {
+                                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                    setOpenActionMenu(b.id);
+                                    setActionMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                                  }
+                                }}
                                 className="px-2.5 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[13px] font-bold hover:bg-[#faf7f2] leading-none select-none"
                                 title="More actions"
                                 data-booking-action-menu
@@ -20510,7 +20518,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 const sep = <div className="my-1 border-t border-[#cc5a16]/10" />;
                                 return (
                                   <div
-                                    className="absolute right-0 top-full mt-1 z-50 bg-white rounded-xl border border-[#cc5a16]/15 shadow-2xl py-1 min-w-[180px] text-left"
+                                    style={{ position: 'fixed', top: actionMenuPos?.top ?? 0, right: actionMenuPos?.right ?? 0, zIndex: 9999 }}
+                                    className="bg-white rounded-xl border border-[#cc5a16]/15 shadow-2xl py-1 min-w-[180px] text-left"
                                     data-booking-action-menu
                                   >
                                     {/* Edit — BOOKED only */}
@@ -30419,6 +30428,101 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       )}
 
+      {/* ═══ Booking Detail Modal ══════════════════════════════════════ */}
+        {bookingDetailTarget && (() => {
+          const bd = bookingDetailTarget;
+          const nights = (() => {
+            const ci = new Date(String(bd.check_in_date||'').slice(0,10)).getTime();
+            const co = new Date(String(bd.check_out_date||'').slice(0,10)).getTime();
+            return (!isNaN(ci)&&!isNaN(co)&&co>ci) ? Math.round((co-ci)/86400000) : 1;
+          })();
+          const outstanding = Math.max(0, Number(bd.total_amount||0) - Number(bd.advance_paid||0));
+          const STATUS_LABEL: Record<string,string> = { BOOKED:'Confirmed', CHECKED_IN:'Checked In', CHECKING_OUT:'Checking Out', CHECKED_OUT:'Checked Out', CANCELLED:'Cancelled', ASSIGNED:'Assigned' };
+          const STATUS_CLS: Record<string,string> = { BOOKED:'bg-blue-100 text-blue-800', CHECKED_IN:'bg-emerald-100 text-emerald-800', CHECKING_OUT:'bg-amber-100 text-amber-800', CHECKED_OUT:'bg-slate-100 text-slate-700', CANCELLED:'bg-stone-100 text-stone-500', ASSIGNED:'bg-rose-100 text-rose-700' };
+          return (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setBookingDetailTarget(null)}>
+              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg max-h-[92vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                {/* Header */}
+                <div className="flex items-start justify-between px-6 pt-6 pb-4 border-b border-[#cc5a16]/10">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-mono text-xs text-[#9c8e85]">{bd.id}</span>
+                      <span className={cn('text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full', STATUS_CLS[bd.status] || 'bg-gray-100 text-gray-600')}>{STATUS_LABEL[bd.status] || bd.status}</span>
+                      {bd.group_name && <span className="text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-violet-100 text-violet-800">{bd.group_name}</span>}
+                    </div>
+                    <h3 className="text-lg font-bold font-serif text-[#1a1208]">{bd.guest_name}</h3>
+                    <p className="text-[12px] text-[#6b5d52]">{bd.guest_phone || '—'}{bd.guest_email ? ` · ${bd.guest_email}` : ''}</p>
+                  </div>
+                  <button onClick={() => setBookingDetailTarget(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18}/></button>
+                </div>
+                <div className="px-6 py-4 space-y-4">
+                  {/* Stay summary */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-[#faf7f2] rounded-2xl p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Room</p>
+                      <p className="text-sm font-bold text-[#1a1208]">{bd.room_name || bd.room_id || '—'}</p>
+                      {bd.room_type_name && <p className="text-[11px] text-[#6b5d52]">{bd.room_type_name}</p>}
+                    </div>
+                    <div className="bg-[#faf7f2] rounded-2xl p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Dates</p>
+                      <p className="text-sm font-bold text-[#1a1208]">{String(bd.check_in_date||'').slice(0,10)}</p>
+                      <p className="text-[11px] text-[#6b5d52]">→ {String(bd.check_out_date||'').slice(0,10)} · {nights} night{nights!==1?'s':''}</p>
+                    </div>
+                    <div className="bg-[#faf7f2] rounded-2xl p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Guests</p>
+                      <p className="text-sm font-bold text-[#1a1208]">{bd.num_guests||1} guest{(bd.num_guests||1)!==1?'s':''}</p>
+                      {bd.num_adults && <p className="text-[11px] text-[#6b5d52]">{bd.num_adults} adult{bd.num_adults!==1?'s':''}{bd.extra_adults>0?` · ${bd.extra_adults} extra`:''}</p>}
+                    </div>
+                    <div className="bg-[#faf7f2] rounded-2xl p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85] mb-1">Source</p>
+                      <p className="text-sm font-bold text-[#1a1208]">{bd.booking_source || '—'}</p>
+                      {bd.meal_plan_snapshot && <p className="text-[11px] text-[#6b5d52]">{bd.meal_plan_snapshot}</p>}
+                    </div>
+                  </div>
+                  {/* Financials */}
+                  <div className="rounded-2xl border border-[#cc5a16]/10 overflow-hidden">
+                    <div className="bg-[#cc5a16]/5 px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Financials</div>
+                    <div className="divide-y divide-[#cc5a16]/5">
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Room rate / night</span><span className="font-mono font-bold">₹{Number(bd.room_rate||0).toLocaleString('en-IN')}</span></div>
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Total</span><span className="font-mono font-bold">₹{Number(bd.total_amount||0).toLocaleString('en-IN')}</span></div>
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Advance paid</span><span className="font-mono font-bold text-emerald-700">₹{Number(bd.advance_paid||0).toLocaleString('en-IN')}</span></div>
+                      <div className="flex justify-between px-4 py-2 text-[12px]"><span className="text-[#6b5d52]">Outstanding</span><span className={cn('font-mono font-bold', outstanding>0?'text-rose-600':'text-emerald-700')}>₹{outstanding.toLocaleString('en-IN')}</span></div>
+                    </div>
+                  </div>
+                  {/* Special requests */}
+                  {bd.special_requests && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-amber-800 mb-1">Special Requests</p>
+                      <p className="text-[12px] text-amber-900">{bd.special_requests}</p>
+                    </div>
+                  )}
+                  {/* Actions */}
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setBookingDetailTarget(null);
+                        if (bd.open_folio_id) { try { await loadFolio(bd.open_folio_id); } catch {} return; }
+                        try {
+                          const r = await fetch(`/api/restaurant/${restaurantId}/hotel/folios?booking_id=${bd.id}`, { headers: { Authorization: `Bearer ${token}` } });
+                          const fl = await r.json();
+                          if (Array.isArray(fl) && fl.length > 0) { await loadFolio(fl[0].id); }
+                        } catch {}
+                      }}
+                      className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-[12px] font-bold hover:bg-[#a84612]"
+                    >Open Folio</button>
+                    <button
+                      type="button"
+                      onClick={() => { navigator.clipboard?.writeText(String(bd.id)).catch(()=>{}); }}
+                      className="px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-[12px] font-bold hover:bg-[#faf7f2]"
+                    >Copy ID</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
       {/* ═════════ Check-In Wizard (CHK-2 — replaces CheckInChecklistModal) ═════════
           2-page wizard that opens on EVERY "Check In" click:
             Page 1 — Edit guest details (name, phone, GSTIN, etc.)
@@ -36526,6 +36630,10 @@ const CheckInWizardModal: React.FC<{
     // the stay total and is PATCHed before check-in so the folio bills the new
     // plan's rate. null = room-only (EP).
     meal_plan_id:      booking.meal_plan_id ?? null,
+    extra_children_with_mattress: booking.extra_children_with_mattress ?? 0,
+    child_rate_with_mattress:     booking.child_rate_with_mattress ?? 0,
+    extra_children_no_mattress:   booking.extra_children_no_mattress ?? 0,
+    child_rate_no_mattress:       booking.child_rate_no_mattress ?? 0,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -36869,6 +36977,56 @@ const CheckInWizardModal: React.FC<{
               <p className="text-[10px] text-[#9c8e85] mt-1">Total adults in the room. Anything above the room's included capacity is billed as extra adults on the folio; children are billed per the tariff.</p>
             </div>
 
+            {/* Child occupancy & rates */}
+            <div className="rounded-2xl border border-[#cc5a16]/15 bg-[#faf7f2]/60 p-3 space-y-2">
+              <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52]">Child Occupancy &amp; Rates</label>
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[10px] text-[#6b5d52] mb-1 font-medium">Children with mattress</label>
+                  <input type="number" min="0" max="10"
+                    value={draft.extra_children_with_mattress || ''}
+                    placeholder="0"
+                    onChange={e => updateDraft({ extra_children_with_mattress: Math.max(0, parseInt(e.target.value,10)||0) })}
+                    className="w-full bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-[#6b5d52] mb-1 font-medium">Rate / night (₹)</label>
+                  <input type="number" min="0" step="1"
+                    value={draft.child_rate_with_mattress || ''}
+                    placeholder="₹ 0"
+                    onChange={e => updateDraft({ child_rate_with_mattress: Math.max(0, Number(e.target.value)||0) })}
+                    className="w-full bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm font-mono focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-[#6b5d52] mb-1 font-medium">Children without mattress</label>
+                  <input type="number" min="0" max="10"
+                    value={draft.extra_children_no_mattress || ''}
+                    placeholder="0"
+                    onChange={e => updateDraft({ extra_children_no_mattress: Math.max(0, parseInt(e.target.value,10)||0) })}
+                    className="w-full bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-[#6b5d52] mb-1 font-medium">Rate / night (₹)</label>
+                  <input type="number" min="0" step="1"
+                    value={draft.child_rate_no_mattress || ''}
+                    placeholder="₹ 0"
+                    onChange={e => updateDraft({ child_rate_no_mattress: Math.max(0, Number(e.target.value)||0) })}
+                    className="w-full bg-white border border-[#cc5a16]/15 rounded-xl px-3 py-2 text-sm font-mono focus:ring-2 ring-[#cc5a16]/20 outline-none"
+                  />
+                </div>
+              </div>
+              {(Number(draft.extra_children_with_mattress)>0 || Number(draft.extra_children_no_mattress)>0) && (
+                <p className="text-[10px] text-[#9c8e85]">
+                  Child charges:
+                  {Number(draft.extra_children_with_mattress)>0 && ` ${draft.extra_children_with_mattress}×with mattress ₹${(Number(draft.child_rate_with_mattress)*nightCount*Number(draft.extra_children_with_mattress)).toLocaleString('en-IN')}`}
+                  {Number(draft.extra_children_no_mattress)>0 && ` ${draft.extra_children_no_mattress}×without mattress ₹${(Number(draft.child_rate_no_mattress)*nightCount*Number(draft.extra_children_no_mattress)).toLocaleString('en-IN')}`}
+                </p>
+              )}
+            </div>
+
             {/* FIX (#2/#4) — Room assignment: reassign or upgrade during check-in.
                 Shows the assigned room with a picker over rooms free for the
                 booking's dates. Picking a different category = upgrade. */}
@@ -36924,6 +37082,25 @@ const CheckInWizardModal: React.FC<{
                 <div className="bg-white rounded-lg border border-[#cc5a16]/10 px-2.5 py-1.5 min-w-0">
                   <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Stay total {draft.room_id !== booking.room_id ? '(new room)' : ''}</p>
                   <p className="text-[12px] text-[#cc5a16] font-bold font-mono">₹{Number(stayTotal || 0).toLocaleString('en-IN')}</p>
+                </div>
+              </div>
+              {/* Rate override — staff can negotiate a different per-night rate at check-in */}
+              <div className="mt-2 bg-amber-50/60 border border-amber-200/60 rounded-xl p-2.5">
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-amber-800 mb-1.5">
+                  Override room rate / night <span className="font-normal normal-case text-[#9c8e85]">leave blank to use tariff</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-[#6b5d52] font-bold">₹</span>
+                  <input
+                    type="number" min="0" step="1"
+                    value={draft.room_rate || ''}
+                    placeholder="0 — use tariff"
+                    onChange={e => updateDraft({ room_rate: Math.max(0, Number(e.target.value) || 0) })}
+                    className="flex-1 bg-white border border-amber-200 rounded-lg px-3 py-1.5 text-sm font-mono focus:ring-2 ring-amber-300 outline-none"
+                  />
+                  {Number(draft.room_rate) > 0 && (
+                    <span className="text-[10px] text-amber-700 font-semibold whitespace-nowrap">= ₹{(Number(draft.room_rate) * nightCount).toLocaleString('en-IN')} stay</span>
+                  )}
                 </div>
               </div>
               {draft.room_id !== booking.room_id && (

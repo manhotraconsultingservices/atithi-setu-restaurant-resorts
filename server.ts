@@ -1153,6 +1153,8 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS extra_adults INT DEFAULT 0;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS extra_children_with_mattress INT DEFAULT 0;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS extra_children_no_mattress INT DEFAULT 0;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS child_rate_with_mattress REAL DEFAULT 0;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS child_rate_no_mattress REAL DEFAULT 0;
     -- Total adults staying (12 Jun 2026). The booking form now captures the
     -- TOTAL adult headcount; the server derives extra_adults from the room's
     -- own capacity (capacity = adults included in the base rate):
@@ -30521,6 +30523,7 @@ ${data.tenant.name}`;
         'room_rate','check_in_date','check_out_date','room_id','room_locked','booking_type','num_guests','status',
         'guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin',
         'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress','num_adults',
+        'child_rate_with_mattress','child_rate_no_mattress',
       ];
       // RES-FIX: room_id is editable PRE-check-in (room reassignment / upgrade
       // in the check-in wizard + Edit Booking). It's in LOCKED_AFTER_CHECKIN
@@ -30529,6 +30532,7 @@ ${data.tenant.name}`;
       // — the booking row, folio + invoice all kept the OLD room.
       const allow = ['guest_name','guest_phone','guest_email','guest_id_proof','guest_nationality','guest_state','guest_gstin','num_guests','room_id','room_locked','check_in_date','check_out_date','room_rate','special_requests','status','booking_type',
         'meal_plan_id','extra_adults','extra_children_with_mattress','extra_children_no_mattress','num_adults',
+        'child_rate_with_mattress','child_rate_no_mattress',
         // Receivables Phase 2 — agent + booking_source editable post-create
         // so owner can re-tag a misattributed booking. Not locked after
         // check-in: tagging the right partner is a back-office concern.
