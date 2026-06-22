@@ -27572,9 +27572,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           !conflictRoomIds.has(r.id) &&
           r.status !== 'MAINTENANCE' && r.status !== 'BLOCKED'
         );
+        const _ciMs = new Date(draft.check_in_date).getTime();
+        const _coMs = new Date(draft.check_out_date).getTime();
         const nights = draft.booking_type === 'DAY_USE'
           ? 1
-          : Math.max(1, Math.ceil((new Date(draft.check_out_date).getTime() - new Date(draft.check_in_date).getTime()) / 86400000));
+          : (isNaN(_ciMs) || isNaN(_coMs)) ? 1 : Math.max(1, Math.ceil((_coMs - _ciMs) / 86400000));
         const matrixMode = tariffData.tariff_model === 'MATRIX' && tariffData.meal_plans.filter((m: any) => m.is_active !== 0).length > 0;
         const activeMealPlans: any[] = tariffData.meal_plans
           .filter((m: any) => m.is_active !== 0)
@@ -27754,9 +27756,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         const v = e.target.value;
                         const next: any = { ...draft, check_in_date: v, rooms: [] };
                         if (draft.booking_type === 'DAY_USE') next.check_out_date = v;
-                        else if (next.check_out_date <= v) {
-                          const d = new Date(v); d.setDate(d.getDate() + 1);
-                          next.check_out_date = d.toISOString().slice(0, 10);
+                        else if (v.length === 10 && next.check_out_date <= v) {
+                          const d = new Date(v);
+                          if (!isNaN(d.getTime())) { d.setDate(d.getDate() + 1); next.check_out_date = d.toISOString().slice(0, 10); }
                         }
                         setGroupBookingDraft(next);
                       }}
@@ -27769,7 +27771,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       required type="date"
                       disabled={draft.booking_type === 'DAY_USE'}
                       min={draft.booking_type === 'DAY_USE' ? draft.check_in_date : (() => {
-                        const d = new Date(draft.check_in_date); d.setDate(d.getDate() + 1);
+                        if (!draft.check_in_date || draft.check_in_date.length < 10) return undefined;
+                        const d = new Date(draft.check_in_date);
+                        if (isNaN(d.getTime())) return undefined;
+                        d.setDate(d.getDate() + 1);
                         return d.toISOString().slice(0, 10);
                       })()}
                       value={draft.check_out_date}
@@ -29649,13 +29654,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       //   • OVERNIGHT → bump check_out to at least min-stay nights ahead
                       if (bt === 'DAY_USE') {
                         next.check_out_date = v;
-                      } else {
-                        const minOut = (() => {
-                          const d = new Date(v); d.setDate(d.getDate() + minNights);
-                          return d.toISOString().slice(0, 10);
-                        })();
-                        if (!next.check_out_date || next.check_out_date < minOut) {
-                          next.check_out_date = minOut;
+                      } else if (v.length === 10) {
+                        const _d = new Date(v);
+                        if (!isNaN(_d.getTime())) {
+                          _d.setDate(_d.getDate() + minNights);
+                          const minOut = _d.toISOString().slice(0, 10);
+                          if (!next.check_out_date || next.check_out_date < minOut) next.check_out_date = minOut;
                         }
                       }
                       setEditingBooking(next);
