@@ -8153,6 +8153,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       // 4. Close modal + refresh views
       setWalkInDraft(null);
       await fetchHotelBookings();
+      fetchBookingStats();
       markAvailabilityDirty();
       alert(`✓ Walk-in complete — ${walkInDraft.guest_name} checked into ${hotelRooms.find(r => r.id === walkInDraft.room_id)?.name}.`);
     } catch (err: any) {
@@ -8271,6 +8272,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       alert(`✓ Group booking created — ${n} room${n > 1 ? 's' : ''} for ${groupBookingDraft.name}.`);
       setGroupBookingDraft(null);
       await fetchHotelBookings();
+      fetchBookingStats();
       markAvailabilityDirty();
     } catch (err: any) {
       alert(err?.message || 'Failed to create group booking');
@@ -8345,6 +8347,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   );
   // Phase 2 & 3 state
   const [hotelBookings, setHotelBookings] = useState<any[]>([]);
+  const [bookingStats, setBookingStats] = useState<{arr:number;inh:number;dep:number;upc:number}>({arr:0,inh:0,dep:0,upc:0});
   const [bookingViewTab, setBookingViewTab] = useState<'ARR'|'INH'|'DEP'|'UPC'|'HIS'>('INH');
   const [bookingSubTab, setBookingSubTab] = useState<'RESERVATIONS'|'GROUPS'|'ROOM_ASSIGN'>('RESERVATIONS');
   const [colWidths, setColWidths] = useState<Record<string,number>>({});
@@ -8615,6 +8618,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (!res.ok) { setMoveRoom(m => m ? { ...m, busyId: '', error: d?.error || 'Could not move the guest.' } : m); return; }
       setMoveRoom(null);
       await Promise.all([fetchHotelBookings(), fetchHotelRooms()]);
+      fetchBookingStats();
       markAvailabilityDirty();
     } catch { setMoveRoom(m => m ? { ...m, busyId: '', error: 'Could not move the guest.' } : m); }
   };
@@ -8652,6 +8656,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (!res.ok) { setUpgradeRoom(m => m ? { ...m, busyId: '', error: d?.error || 'Could not upgrade the room.' } : m); return; }
       setUpgradeRoom(null);
       await Promise.all([fetchHotelBookings(), fetchHotelRooms()]);
+      fetchBookingStats();
       markAvailabilityDirty();
     } catch { setUpgradeRoom(m => m ? { ...m, busyId: '', error: 'Could not upgrade the room.' } : m); }
   };
@@ -11804,6 +11809,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setHotelBookings(await hotelApi(path));
     } catch (err: any) { setHotelError(err.message); }
   };
+  const fetchBookingStats = async () => {
+    if (!isHotelEnabled) return;
+    try {
+      const d = await hotelApi('/bookings/stats');
+      setBookingStats({ arr: d.arr ?? 0, inh: d.inh ?? 0, dep: d.dep ?? 0, upc: d.upc ?? 0 });
+    } catch { /* non-critical — tiles degrade silently */ }
+  };
   const fetchHotelFolios = async () => {
     if (!isHotelEnabled) return;
     try { setHotelFolios(await hotelApi('/folios')); } catch (err: any) { setHotelError(err.message); }
@@ -11982,6 +11994,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     });
     await fetchHotelBookings();
     await fetchHotelRooms();
+    fetchBookingStats();
     markAvailabilityDirty();
     return result;
   };
@@ -12147,7 +12160,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'ROOM_SETUP') { fetchHotelRooms(); fetchHotelRoomTypes(); fetchRateOverrides(); }
     if (activeTab === 'SERVICES') fetchHotelServices();
     if (activeTab === 'SERVICE_REQUESTS') fetchHotelRequests();
-    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchHotelRooms(); fetchHotelSettings(); fetchTariff(); fetchPendingFolioOrders(); fetchTravelAgents(); }
+    if (activeTab === 'HOTEL_BOOKINGS') { fetchHotelBookings(); fetchBookingStats(); fetchHotelRooms(); fetchHotelSettings(); fetchTariff(); fetchPendingFolioOrders(); fetchTravelAgents(); }
     // BCG client request 8 Jun 2026 — Front Desk tab now embeds Stay View
     // (AvailabilityCalendar). The cell-click handler resolves room.base_rate
     // from hotelRooms, so we eagerly fetch rooms + bookings + tariff when
@@ -19458,10 +19471,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             />
           )}
 
-          {/* ── RESERVATIONS sub-tab ───────────────────────────────────── */}
-          {bookingSubTab === 'RESERVATIONS' && (<>
-
-          {/* ── MASTER BILLING ACCOUNT DRAWER ────────────────────────────── */}
+          {/* ── MASTER BILLING ACCOUNT DRAWER — outside sub-tab guard ──────── */}
           {masterFolioGroupId && (
             <div className="fixed inset-0 z-50 flex">
               {/* Backdrop */}
@@ -19981,6 +19991,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
           {/* ── END PHASE-3 GROUP DETAIL DRAWER ──────────────────────────── */}
 
+          {/* ── RESERVATIONS sub-tab ───────────────────────────────────── */}
+          {bookingSubTab === 'RESERVATIONS' && (<>
+
           {/* Today's Arrivals & Departures.
               Bug 5 fix — normaliseBookingDate handles both ISO strings
               and JS Date objects (the API may return either depending
@@ -19995,10 +20008,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* Journey-stage stat strip — clicking a tile switches the tab and fetches the right data */}
           <div className="grid grid-cols-4 border border-[#cc5a16]/10 rounded-3xl overflow-hidden mb-4">
             {([
-              { tab: 'ARR' as const, label: 'Arrivals today',  count: bookingTabCounts.arr, color: '#0f766e', dot: '#0f766e' },
-              { tab: 'INH' as const, label: 'In-house',        count: bookingTabCounts.inh, color: '#cc5a16', dot: '#cc5a16' },
-              { tab: 'DEP' as const, label: 'Departures today',count: bookingTabCounts.dep, color: '#b8860b', dot: '#b8860b' },
-              { tab: 'UPC' as const, label: 'Upcoming',        count: bookingTabCounts.upc, color: '#534ab7', dot: '#534ab7' },
+              { tab: 'ARR' as const, label: 'Arrivals today',  count: bookingStats.arr, color: '#0f766e', dot: '#0f766e' },
+              { tab: 'INH' as const, label: 'In-house',        count: bookingStats.inh, color: '#cc5a16', dot: '#cc5a16' },
+              { tab: 'DEP' as const, label: 'Departures today',count: bookingStats.dep, color: '#b8860b', dot: '#b8860b' },
+              { tab: 'UPC' as const, label: 'Upcoming',        count: bookingStats.upc, color: '#534ab7', dot: '#534ab7' },
             ] as { tab: 'ARR'|'INH'|'DEP'|'UPC'; label: string; count: number; color: string; dot: string }[]).map((tile, i) => (
               <button
                 key={tile.tab}

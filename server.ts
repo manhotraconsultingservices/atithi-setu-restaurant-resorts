@@ -23926,6 +23926,39 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── BOOKINGS stats — counts for KPI tiles, always unfiltered ───────────
+  app.get("/api/restaurant/:id/hotel/bookings/stats", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query(
+        `SELECT status, check_in_date, check_out_date, booking_type
+           FROM room_bookings WHERE status NOT IN ('CANCELLED')`,
+        []
+      );
+      const arr = rows.filter(b =>
+        (b.status === 'BOOKED' || b.status === 'CHECKED_IN') &&
+        String(b.check_in_date || '').slice(0, 10) === today
+      ).length;
+      const inh = rows.filter(b => b.status === 'CHECKED_IN').length;
+      const dep = rows.filter(b => {
+        const co = String(b.check_out_date || '').slice(0, 10);
+        if (co !== today) return false;
+        if (b.status === 'CHECKED_IN') return true;
+        if (b.status === 'BOOKED' && b.booking_type === 'DAY_USE') return true;
+        return false;
+      }).length;
+      const upc = rows.filter(b =>
+        b.status === 'BOOKED' && String(b.check_in_date || '').slice(0, 10) > today
+      ).length;
+      res.json({ arr, inh, dep, upc });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to compute booking stats" });
+    }
+  });
+
   // ─── BOOKINGS — list / create / cancel / check-in / check-out ────────────
   app.get("/api/restaurant/:id/hotel/bookings", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
