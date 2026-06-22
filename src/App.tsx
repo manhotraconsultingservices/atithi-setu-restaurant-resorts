@@ -7888,6 +7888,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [groupsList, setGroupsList] = useState<any[] | null>(null);
   const [groupsPanelOpen, setGroupsPanelOpen] = useState(false);
   const [groupsSearch, setGroupsSearch] = useState('');
+  const [groupsSourceFilter, setGroupsSourceFilter] = useState('');
   const [groupsSort, setGroupsSort] = useState<{col:string;dir:'asc'|'desc'}>({col:'check_in_date',dir:'asc'});
   const [groupColWidths, setGroupColWidths] = useState<Record<string,number>>({});
   const groupColWidthsRef = useRef<Record<string,number>>({});
@@ -7915,9 +7916,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       g.checked_out_count || 0,
       Number(g.total_amount || 0),
       g.group_status || '',
+      g.booking_source || 'DIRECT',
       g.invoice_number || '',
     ]);
-    const header = ['Name','Contact Name','Phone','Email','Check-in','Check-out','Total Rooms','Checked In','Checked Out','Total Amount','Status','Invoice'];
+    const header = ['Name','Contact Name','Phone','Email','Check-in','Check-out','Total Rooms','Checked In','Checked Out','Total Amount','Status','Source','Invoice'];
     const csv = [header, ...rows].map(r => r.map((v: any) => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], {type:'text/csv'});
     const url = URL.createObjectURL(blob);
@@ -19297,17 +19299,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   const toggleGroupSort = (col: string) => setGroupsSort(s => s.col === col ? {...s, dir: s.dir === 'asc' ? 'desc' : 'asc'} : {col, dir:'asc'});
                   const gArrow = (col: string) => groupsSort.col === col ? (groupsSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
                   const filtered = groupsList.filter((g: any) => {
+                    if (groupsSourceFilter && (g.booking_source||'DIRECT') !== groupsSourceFilter) return false;
                     if (!groupsSearch.trim()) return true;
                     const q = groupsSearch.trim().toLowerCase();
                     return String(g.name||'').toLowerCase().includes(q)
                       || String(g.contact_name||'').toLowerCase().includes(q)
                       || String(g.contact_phone||'').toLowerCase().includes(q)
-                      || String(g.contact_email||'').toLowerCase().includes(q);
+                      || String(g.contact_email||'').toLowerCase().includes(q)
+                      || String(g.booking_source||'').toLowerCase().includes(q);
                   });
                   const sorted = [...filtered].sort((a: any, b: any) => {
                     const dir = groupsSort.dir === 'asc' ? 1 : -1;
-                    const av = groupsSort.col === 'total' ? Number(a.total_amount||0) : groupsSort.col === 'rooms' ? Number(a.booking_count||0) : String(a[groupsSort.col]||'');
-                    const bv = groupsSort.col === 'total' ? Number(b.total_amount||0) : groupsSort.col === 'rooms' ? Number(b.booking_count||0) : String(b[groupsSort.col]||'');
+                    const av = groupsSort.col === 'total' ? Number(a.total_amount||0) : groupsSort.col === 'rooms' ? Number(a.booking_count||0) : groupsSort.col === 'booking_source' ? String(a.booking_source||'') : String(a[groupsSort.col]||'');
+                    const bv = groupsSort.col === 'total' ? Number(b.total_amount||0) : groupsSort.col === 'rooms' ? Number(b.booking_count||0) : groupsSort.col === 'booking_source' ? String(b.booking_source||'') : String(b[groupsSort.col]||'');
                     return av < bv ? -dir : av > bv ? dir : 0;
                   });
                   const thCls = 'px-3 py-3 text-left cursor-pointer select-none hover:text-violet-800 whitespace-nowrap relative text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]';
@@ -19316,10 +19320,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   );
                   return (
                     <div>
-                      <div className="px-4 py-3 border-b border-violet-50 bg-violet-50/30 flex items-center gap-3">
-                        <input type="text" placeholder="Search groups by name, contact, phone…" value={groupsSearch} onChange={e => setGroupsSearch(e.target.value)}
+                      <div className="px-4 py-3 border-b border-violet-50 bg-violet-50/30 flex items-center gap-3 flex-wrap">
+                        <input type="text" placeholder="Search groups by name, contact, phone, source…" value={groupsSearch} onChange={e => setGroupsSearch(e.target.value)}
                           className="w-full max-w-sm px-3 py-1.5 text-xs rounded-lg border border-violet-200 bg-white focus:outline-none focus:ring-1 ring-violet-400 placeholder-[#9c8e85]" />
-                        {groupsSearch && <span className="text-[10px] text-violet-600 font-semibold">{sorted.length} of {groupsList.length}</span>}
+                        <select value={groupsSourceFilter} onChange={e => setGroupsSourceFilter(e.target.value)}
+                          className="px-2 py-1.5 text-xs rounded-lg border border-violet-200 bg-white focus:outline-none focus:ring-1 ring-violet-400 text-[#3d3128]">
+                          <option value="">All Sources</option>
+                          <option value="DIRECT">🏠 Direct</option>
+                          <option value="WALK_IN">🚶 Walk-in</option>
+                          <option value="AGENT">🤝 Agent</option>
+                          <option value="BOOKING">🌐 Booking.com</option>
+                          <option value="MMT">✈️ MakeMyTrip</option>
+                          <option value="GOIBIBO">🧳 Goibibo</option>
+                          <option value="AGODA">🏨 Agoda</option>
+                          <option value="EXPEDIA">🌍 Expedia</option>
+                          <option value="AIRBNB">🏠 Airbnb</option>
+                          <option value="DIRECT_WEB">🌐 Direct (Web)</option>
+                        </select>
+                        {(groupsSearch || groupsSourceFilter) && <span className="text-[10px] text-violet-600 font-semibold">{sorted.length} of {groupsList.length}</span>}
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full text-xs min-w-[800px]">
@@ -19331,11 +19349,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <th className={cn(thCls,'text-right')} style={{width: groupColWidths['g_rooms']||undefined}} onClick={() => toggleGroupSort('rooms')}>Rooms{gArrow('rooms')}{resizeHandle('g_rooms')}</th>
                               <th className={cn(thCls,'text-right')} style={{width: groupColWidths['g_total']||undefined}} onClick={() => toggleGroupSort('total')}>Total{gArrow('total')}{resizeHandle('g_total')}</th>
                               <th className={thCls} style={{width: groupColWidths['g_status']||undefined}} onClick={() => toggleGroupSort('group_status')}>Status{gArrow('group_status')}{resizeHandle('g_status')}</th>
+                              <th className={thCls} style={{width: groupColWidths['g_source']||undefined}} onClick={() => toggleGroupSort('booking_source')}>Source{gArrow('booking_source')}{resizeHandle('g_source')}</th>
                               <th className="px-3 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Actions</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {sorted.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-xs text-[#9c8e85] italic">No groups match the search</td></tr>}
+                            {sorted.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-xs text-[#9c8e85] italic">No groups match the search</td></tr>}
                             {sorted.map((g: any) => {
                               const settled = !!g.invoice_number;
                               const hasCheckedIn = Number(g.checked_in_count || 0) > 0;
@@ -19352,12 +19371,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                       : g.group_status === 'CONFIRMED' ? <span className="text-[10px] font-bold uppercase tracking-widest bg-green-100 text-green-800 px-1.5 py-0.5 rounded">Confirmed</span>
                                       : <span className="text-[10px] font-bold uppercase tracking-widest bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">Tentative</span>}
                                   </td>
+                                  <td className="px-3 py-2.5 whitespace-nowrap">
+                                    {(() => {
+                                      const srcLabels: Record<string,string> = { DIRECT:'🏠 Direct', WALK_IN:'🚶 Walk-in', WALKIN:'🚶 Walk-in', AGENT:'🤝 Agent', BOOKING:'🌐 Booking.com', MMT:'✈️ MakeMyTrip', GOIBIBO:'🧳 Goibibo', AGODA:'🏨 Agoda', EXPEDIA:'🌍 Expedia', AIRBNB:'🏠 Airbnb', DIRECT_WEB:'🌐 Direct (Web)' };
+                                      const src = String(g.booking_source||'DIRECT').toUpperCase();
+                                      return <span className="text-[10px] text-[#6b5d52]">{srcLabels[src] || src}</span>;
+                                    })()}
+                                  </td>
                                   <td className="px-3 py-2.5 text-right">
                                     <div className="flex gap-1 justify-end flex-wrap">
                                       {!settled && g.group_status !== 'CANCELLED' && g.group_status !== 'CONFIRMED' && (
                                         <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CONFIRMED'})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); } catch (err:any) { alert(err.message); } }} className="px-2 py-1 rounded-lg bg-green-600 text-white text-[10px] font-bold hover:bg-green-700">Confirm</button>
                                       )}
-                                      {!settled && g.group_status !== 'CANCELLED' && (
+                                      {!settled && g.group_status !== 'CANCELLED' && Number(g.checked_in_count||0) === 0 && (
                                         <button onClick={async () => { const reason = prompt(`Cancel group "${g.name}"? Enter reason (optional):`); if (reason===null) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CANCELLED',reason:reason.trim()||null})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { alert(err.message); } }} className="px-2 py-1 rounded-lg border border-red-300 text-red-600 text-[10px] font-bold hover:bg-red-50">Cancel</button>
                                       )}
                                       {hasCheckedIn && (
@@ -27849,6 +27875,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </button>
                     ))}
                   </div>
+                </div>
+
+                {/* Source */}
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Booking Source</label>
+                  <select
+                    value={draft.booking_source}
+                    onChange={e => setGroupBookingDraft({ ...draft, booking_source: e.target.value })}
+                    className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 focus:ring-2 ring-[#cc5a16]/20 outline-none text-sm"
+                  >
+                    <option value="DIRECT">🏠 Direct</option>
+                    <option value="WALK_IN">🚶 Walk-in</option>
+                    <option value="AGENT">🤝 Agent / Tour Operator</option>
+                    <option value="BOOKING">🌐 Booking.com</option>
+                    <option value="MMT">✈️ MakeMyTrip</option>
+                    <option value="GOIBIBO">🧳 Goibibo</option>
+                    <option value="AGODA">🏨 Agoda</option>
+                    <option value="EXPEDIA">🌍 Expedia</option>
+                    <option value="AIRBNB">🏠 Airbnb</option>
+                    <option value="DIRECT_WEB">🌐 Direct (Website)</option>
+                  </select>
                 </div>
 
                 {/* Dates */}

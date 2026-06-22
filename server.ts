@@ -585,6 +585,8 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- GROUP-STATUS (Jun 2026): sales lifecycle — TENTATIVE (provisional hold),
     -- CONFIRMED (deposit received / contract signed), CANCELLED.
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS group_status TEXT DEFAULT 'TENTATIVE';
+    -- GROUP-SOURCE (Jun 2026): channel that originated the group booking (DIRECT, AGENT, OTA codes).
+    ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS booking_source TEXT DEFAULT 'DIRECT';
 
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
@@ -25581,8 +25583,8 @@ ${data.tenant.name}`;
              (id, name, contact_name, contact_phone, contact_email, num_rooms,
               check_in_date, check_out_date, total_amount, notes, created_by,
               advance_amount, advance_method, advance_reference, advance_recorded_at,
-              discount_type, discount_value, promo_code_id, group_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              discount_type, discount_value, promo_code_id, group_status, booking_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [groupId, String(name).trim(), contact_name, contact_phone || null,
            contact_email || null, expandedRooms.length, check_in_date, check_out_date,
            groupTotal, special_requests || null, req.user?.id || null,
@@ -25590,7 +25592,8 @@ ${data.tenant.name}`;
            advanceAmount > 0 ? advanceReference : null,
            advanceAmount > 0 ? new Date().toISOString() : null,
            discountType || null, discountValue || 0,
-           (req.body as any)?.promo_code_id || null, 'TENTATIVE']
+           (req.body as any)?.promo_code_id || null, 'TENTATIVE',
+           (req.body as any)?.booking_source || 'DIRECT']
         );
         // BCG Sprint 1 — if an advance was collected at group creation time,
         // post it to the master folio immediately so it is ledger-visible.
