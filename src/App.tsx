@@ -20424,18 +20424,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 disabled={paylinkBusy === `${b.id}|EMAIL` || !b.guest_email}
                                 onClick={() => sendPayLink(b.id, 'EMAIL')}
                                 title={b.guest_email ? `Email payment link to ${b.guest_email}` : 'No email on file — add email to booking first'}
-                                className="px-2.5 py-1.5 rounded-lg border-2 border-[#cc5a16] text-[#cc5a16] bg-white hover:bg-[#cc5a16]/10 text-[11px] font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-[#cc5a16]/30 disabled:text-[#cc5a16]/50"
+                                className="p-1.5 rounded-lg border-2 border-[#cc5a16] text-[#cc5a16] bg-white hover:bg-[#cc5a16]/10 text-base leading-none transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-[#cc5a16]/30 disabled:text-[#cc5a16]/50"
                               >
-                                {paylinkBusy === `${b.id}|EMAIL` ? '…' : '📧 Email'}
+                                {paylinkBusy === `${b.id}|EMAIL` ? '…' : '📧'}
                               </button>
                               <button
                                 type="button"
                                 disabled={paylinkBusy === `${b.id}|WHATSAPP` || !b.guest_phone}
                                 onClick={() => sendPayLink(b.id, 'WHATSAPP')}
                                 title={b.guest_phone ? `WhatsApp payment link to ${b.guest_phone}` : 'No phone on file — add phone to booking first'}
-                                className="px-2.5 py-1.5 rounded-lg border-2 border-emerald-600 text-emerald-700 bg-white hover:bg-emerald-50 text-[11px] font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-emerald-300 disabled:text-emerald-400"
+                                className="p-1.5 rounded-lg border-2 border-emerald-600 text-emerald-700 bg-white hover:bg-emerald-50 text-base leading-none transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:border-emerald-300 disabled:text-emerald-400"
                               >
-                                {paylinkBusy === `${b.id}|WHATSAPP` ? '…' : '💬 WA'}
+                                {paylinkBusy === `${b.id}|WHATSAPP` ? '…' : '💬'}
                               </button>
                             </div>
                           ) : (
