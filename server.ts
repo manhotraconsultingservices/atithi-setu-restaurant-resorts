@@ -2595,7 +2595,13 @@ async function writeGstRegisterFromFolio(
     [folioId]
   );
 
-  const settlementDate = (opts.invoiceDate || new Date().toISOString()).slice(0, 10);
+  // settled_at from PostgreSQL arrives as a Date object at runtime even
+  // though the declared type is string|null — coerce via new Date() so
+  // .toISOString() always produces a well-formed ISO-8601 string.
+  const settlementDate = (opts.invoiceDate
+    ? new Date(opts.invoiceDate as any)
+    : new Date()
+  ).toISOString().slice(0, 10);
   const period = settlementDate.slice(0, 7);
   const supplyType = opts.guestGstin ? 'B2B' : 'B2C';
 
@@ -32932,7 +32938,7 @@ ${data.tenant.name}`;
         "SELECT COUNT(*) AS cnt FROM gst_output_register WHERE folio_id = ?", [folioId]
       );
       await writeGstRegisterFromFolio(tenantDb, req.params.id, folioId, {
-        invoiceDate: folio.settled_at || new Date().toISOString().slice(0, 10),
+        invoiceDate: folio.settled_at,
         bookingId: folio.booking_id || null,
         guestGstin: null,
       });
