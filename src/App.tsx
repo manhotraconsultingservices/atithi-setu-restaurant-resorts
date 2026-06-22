@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { DataTable, exportToCsv } from './components/DataTable';
 import { SpaModule, SpaBookingPage } from './SpaViews';
 import { motion, AnimatePresence } from 'motion/react';
@@ -20562,9 +20563,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 const menuItemCls = "w-full px-4 py-2 text-left text-[12px] text-[#1a1208] hover:bg-[#faf7f2] flex items-center gap-2 whitespace-nowrap";
                                 const menuItemDestructCls = "w-full px-4 py-2 text-left text-[12px] text-red-600 hover:bg-red-50 flex items-center gap-2 whitespace-nowrap";
                                 const sep = <div className="my-1 border-t border-[#cc5a16]/10" />;
-                                return (
+                                return createPortal(
                                   <div
-                                    style={{ position: 'fixed', top: actionMenuPos?.top ?? 0, left: actionMenuPos?.left ?? 0, zIndex: 9999 }}
+                                    style={{ position: 'fixed', top: actionMenuPos?.top ?? 0, left: actionMenuPos?.left ?? 0, zIndex: 99999 }}
                                     className="bg-white rounded-xl border border-[#cc5a16]/15 shadow-2xl py-1 w-60 text-left"
                                     data-booking-action-menu
                                   >
@@ -20656,7 +20657,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         ✕ Cancel booking
                                       </button>
                                     )}
-                                  </div>
+                                  </div>,
+                                  document.body
                                 );
                               })()}
                             </div>
