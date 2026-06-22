@@ -31137,7 +31137,7 @@ ${data.tenant.name}`;
           (async () => {
             try {
               const pa: any = await tenantDb.get(
-                "SELECT commission_pct FROM partner_accounts WHERE channel = ? LIMIT 1",
+                "SELECT commission_pct FROM partner_accounts WHERE partner_ref = ? AND is_active = 1 LIMIT 1",
                 [b.booking_source]
               );
               const commPct = Number(pa?.commission_pct || 0);
