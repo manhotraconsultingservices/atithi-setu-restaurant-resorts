@@ -327,22 +327,22 @@ function bookingRoomLabel(b: any): string {
 // toggleable via the Columns chooser and persisted per-browser. `def` is the
 // out-of-box visibility. Adding a key here makes it appear in the chooser.
 const BOOKING_COL_DEFS: { key: string; label: string; def: boolean }[] = [
-  { key: 'booking_id', label: 'Booking ID', def: true  },
+  { key: 'booking_id', label: 'Booking ID', def: false },
   { key: 'room',      label: 'Room',      def: true  },
   { key: 'dates',     label: 'Dates',     def: true  },
-  { key: 'checked_in',  label: 'Checked in',  def: true  },
-  { key: 'checked_out', label: 'Checked out', def: true  },
+  { key: 'checked_in',  label: 'Checked in',  def: false },
+  { key: 'checked_out', label: 'Checked out', def: false },
   { key: 'nights',    label: 'Nights',    def: false },
   { key: 'guests',    label: 'Guests',    def: false },
   { key: 'adults',    label: 'Adults',    def: false },
   { key: 'meal_plan', label: 'Meal Plan', def: false },
   { key: 'status',    label: 'Status',    def: true  },
   { key: 'total',     label: 'Total',     def: true  },
-  { key: 'restaurant', label: 'Restaurant bill', def: true },
-  { key: 'advance',   label: 'Advance',   def: true  },
+  { key: 'restaurant', label: 'Restaurant bill', def: false },
+  { key: 'advance',   label: 'Advance',   def: false },
   { key: 'source',    label: 'Source',    def: true  },
   { key: 'created',   label: 'Created',   def: false },
-  { key: 'paylink',   label: 'Pay link',  def: true  },
+  { key: 'paylink',   label: 'Pay link',  def: false },
 ];
 
 // Location label for an order. Room-service orders store their location as
@@ -8305,6 +8305,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   );
   // Phase 2 & 3 state
   const [hotelBookings, setHotelBookings] = useState<any[]>([]);
+  const [bookingViewTab, setBookingViewTab] = useState<'ARR'|'INH'|'DEP'|'UPC'|'HIS'>('INH');
+  const [colWidths, setColWidths] = useState<Record<string,number>>({});
+  const colWidthsRef = useRef<Record<string,number>>({});
   // Reservations table — client-side sort + live filter (13 Jun 2026 fix).
   // The "All bookings" table had no sort and clipped its right-hand columns,
   // so checked-in guests were hard to locate. displayedBookings sorts +
@@ -8328,9 +8331,42 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [bookingColMenuOpen, setBookingColMenuOpen] = useState(false);
   const colOn = (k: string) => bookingCols[k] !== false;
   const displayedBookings = useMemo(() => {
+    const todayTab = new Date().toISOString().slice(0, 10);
+    let rows = hotelBookings;
+    // Tab pre-filter (primary — applied before search/source)
+    switch (bookingViewTab) {
+      case 'ARR':
+        rows = rows.filter((b: any) =>
+          (b.status === 'BOOKED' || b.status === 'CHECKED_IN') &&
+          String(b.check_in_date || '').slice(0, 10) === todayTab
+        );
+        break;
+      case 'INH':
+        rows = rows.filter((b: any) => b.status === 'CHECKED_IN');
+        break;
+      case 'DEP': {
+        rows = rows.filter((b: any) => {
+          const co = String(b.check_out_date || '').slice(0, 10);
+          if (co !== todayTab) return false;
+          if (b.status === 'CHECKED_IN') return true;
+          if (b.status === 'BOOKED' && b.booking_type === 'DAY_USE') return true;
+          return false;
+        });
+        break;
+      }
+      case 'UPC':
+        rows = rows.filter((b: any) =>
+          b.status === 'BOOKED' && String(b.check_in_date || '').slice(0, 10) > todayTab
+        );
+        break;
+      case 'HIS':
+        rows = rows.filter((b: any) =>
+          b.status === 'CHECKED_OUT' || b.status === 'CANCELLED'
+        );
+        break;
+    }
     const q = (bookingHistoryFilter.search || '').trim().toLowerCase();
     const qd = q.replace(/\D/g, '');
-    let rows = hotelBookings;
     if (q) {
       rows = rows.filter((b: any) =>
         String(b.guest_name || '').toLowerCase().includes(q) ||
@@ -8341,7 +8377,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       );
     }
     if (bookingHistoryFilter.source) {
-      rows = rows.filter((b: any) => String(b.booking_source || '') === bookingHistoryFilter.source);
+      rows = rows.filter((b: any) => {
+        const bs = String(b.booking_source || '');
+        const fs = bookingHistoryFilter.source;
+        return bs === fs || (fs === 'WALK_IN' && bs === 'WALKIN');
+      });
     }
     const dir = bookingSort.dir === 'asc' ? 1 : -1;
     const keyOf = (b: any): string | number => {
@@ -8368,7 +8408,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (av > bv) return 1 * dir;
       return 0;
     });
-  }, [hotelBookings, bookingHistoryFilter.search, bookingHistoryFilter.source, bookingSort]);
+  }, [hotelBookings, bookingHistoryFilter.search, bookingHistoryFilter.source, bookingSort, bookingViewTab]);
   // Reservation-table pagination (10 rows/page) — the list can run to hundreds
   // of rows; paginate the already-filtered/sorted set in-browser. Reset to page
   // 1 on a new search/sort; clamp when the result set shrinks.
@@ -8381,6 +8421,70 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     () => displayedBookings.slice((bookingsPage - 1) * bookingsPageSize, bookingsPage * bookingsPageSize),
     [displayedBookings, bookingsPage, bookingsPageSize],
   );
+
+  const bookingTabCounts = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const arr = hotelBookings.filter((b: any) =>
+      (b.status === 'BOOKED' || b.status === 'CHECKED_IN') &&
+      String(b.check_in_date || '').slice(0, 10) === today
+    ).length;
+    const inh = hotelBookings.filter((b: any) => b.status === 'CHECKED_IN').length;
+    const dep = hotelBookings.filter((b: any) => {
+      const co = String(b.check_out_date || '').slice(0, 10);
+      if (co !== today) return false;
+      if (b.status === 'CHECKED_IN') return true;
+      if (b.status === 'BOOKED' && b.booking_type === 'DAY_USE') return true;
+      return false;
+    }).length;
+    const upc = hotelBookings.filter((b: any) =>
+      b.status === 'BOOKED' && String(b.check_in_date || '').slice(0, 10) > today
+    ).length;
+    const his = hotelBookings.filter((b: any) =>
+      b.status === 'CHECKED_OUT' || b.status === 'CANCELLED'
+    ).length;
+    return { arr, inh, dep, upc, his };
+  }, [hotelBookings]);
+
+  const switchBookingTab = async (tab: 'ARR'|'INH'|'DEP'|'UPC'|'HIS') => {
+    const today = new Date().toISOString().slice(0, 10);
+    setBookingViewTab(tab);
+    setBookingsPage(1);
+    const params: Record<string,string> = {};
+    if (tab === 'ARR') { params.from = today; params.to = today; params.status = 'BOOKED'; }
+    else if (tab === 'INH') { params.status = 'CHECKED_IN'; }
+    else if (tab === 'DEP') { params.from = today; params.to = today; params.status = 'CHECKED_IN'; }
+    else if (tab === 'UPC') { params.status = 'BOOKED'; }
+    else if (tab === 'HIS') { params.status = 'CHECKED_OUT'; }
+    setBookingHistoryFilter(f => ({
+      ...f,
+      status: params.status || '',
+      from: params.from || '',
+      to: params.to || '',
+    }));
+    await fetchHotelBookings(params as any);
+  };
+
+  const startColResize = (key: string, e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = (e.target as HTMLElement).closest('th') as HTMLElement;
+    if (!th) return;
+    const startX = e.clientX;
+    const startW = th.offsetWidth;
+    const onMove = (ev: MouseEvent) => {
+      const newW = Math.max(60, startW + (ev.clientX - startX));
+      th.style.width = newW + 'px';
+      colWidthsRef.current[key] = newW;
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      setColWidths({ ...colWidthsRef.current });
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
   const [complianceList, setComplianceList] = useState<any[]>([]);
   const [hotelAnalytics, setHotelAnalytics] = useState<any>(null);
@@ -19826,80 +19930,65 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               in Departures with a "Check In" action that takes them
               through the normal check-in flow. CHECKED_IN day-use guests
               continue to show with a "Check Out" action. */}
-          {(() => {
-            const today = new Date().toISOString().slice(0,10);
-            // Include CHECKED_IN arrivals (not just BOOKED) so a guest the
-            // staff just checked in STAYS visible here with a "Checked in"
-            // badge — previously they vanished the instant check-in flipped
-            // the status, which read as "the guest disappeared".
-            const arrivals = hotelBookings.filter((b: any) =>
-              (b.status === 'BOOKED' || b.status === 'CHECKED_IN') &&
-              normaliseBookingDate(b.check_in_date) === today
-            );
-            const departures = hotelBookings.filter((b: any) => {
-              if (normaliseBookingDate(b.check_out_date) !== today) return false;
-              if (b.status === 'CHECKED_IN') return true;
-              // Day-use bookings that haven't been checked in yet —
-              // their entire stay is today so they DO belong in the
-              // departures list (staff needs to act on them today).
-              if (b.status === 'BOOKED' && b.booking_type === 'DAY_USE') return true;
-              return false;
-            });
-            return (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
-                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5" style={{ borderTop: '3px solid #0f766e' }}>
-                  <h3 className="text-sm font-bold uppercase tracking-widest text-[#0f766e] mb-3">Today's Arrivals · {arrivals.length}</h3>
-                  {arrivals.length === 0 ? <p className="text-sm text-[#9c8e85]">No arrivals today</p> : arrivals.map((b: any) => (
-                    <div key={b.id} className="flex items-center justify-between py-2 border-b border-[#cc5a16]/10 last:border-0">
-                      <div>
-                        <p className="font-semibold text-[#1a1208] text-sm">{b.guest_name}</p>
-                        <p className="text-xs text-[#9c8e85]">{bookingRoomLabel(b)}</p>
-                      </div>
-                      {b.status === 'CHECKED_IN'
-                        ? <span className="px-3 py-1.5 rounded-lg bg-emerald-100 text-emerald-700 text-xs font-bold inline-flex items-center gap-1">✓ Checked in</span>
-                        : <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-[#0f766e] text-white text-xs font-bold hover:bg-[#0a5853]">Check In</button>}
-                    </div>
-                  ))}
-                </div>
-                <div className="bg-white rounded-3xl border border-[#cc5a16]/10 p-5" style={{ borderTop: '3px solid #b8860b' }}>
-                  <h3 className="text-sm font-bold uppercase tracking-widest text-[#b8860b] mb-3">Today's Departures · {departures.length}</h3>
-                  {departures.length === 0 ? <p className="text-sm text-[#9c8e85]">No departures today</p> : departures.map((b: any) => {
-                    // Day-use bookings that are still BOOKED need to be
-                    // checked in first; the checkout flow handles them
-                    // after that. CHECKED_IN bookings (overnight or
-                    // day-use) go straight to the checkout modal.
-                    const isDayUseBooked = b.status === 'BOOKED' && b.booking_type === 'DAY_USE';
-                    return (
-                      <div key={b.id} className="flex items-center justify-between py-2 border-b border-[#cc5a16]/10 last:border-0">
-                        <div>
-                          <p className="font-semibold text-[#1a1208] text-sm">{b.guest_name}</p>
-                          <p className="text-xs text-[#9c8e85]">
-                            {bookingRoomLabel(b)}
-                            {isDayUseBooked && <span className="ml-2 px-1.5 py-0.5 rounded bg-[#0f766e]/10 text-[#0f766e] text-[10px] font-bold uppercase tracking-wider">Day-Use · Not Yet In</span>}
-                          </p>
-                        </div>
-                        {isDayUseBooked ? (
-                          <button
-                            onClick={() => confirmAndCheckIn(b)}
-                            className="px-3 py-1.5 rounded-lg bg-[#0f766e] text-white text-xs font-bold hover:bg-[#0a5853]"
-                          >
-                            Check In
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }}
-                            className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-xs font-bold hover:bg-[#8f6608]"
-                          >
-                            Check Out
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })()}
+          {/* Journey-stage stat strip — clicking a tile switches the tab and fetches the right data */}
+          <div className="grid grid-cols-4 border border-[#cc5a16]/10 rounded-3xl overflow-hidden mb-4">
+            {([
+              { tab: 'ARR' as const, label: 'Arrivals today',  count: bookingTabCounts.arr, color: '#0f766e', dot: '#0f766e' },
+              { tab: 'INH' as const, label: 'In-house',        count: bookingTabCounts.inh, color: '#cc5a16', dot: '#cc5a16' },
+              { tab: 'DEP' as const, label: 'Departures today',count: bookingTabCounts.dep, color: '#b8860b', dot: '#b8860b' },
+              { tab: 'UPC' as const, label: 'Upcoming',        count: bookingTabCounts.upc, color: '#534ab7', dot: '#534ab7' },
+            ] as { tab: 'ARR'|'INH'|'DEP'|'UPC'; label: string; count: number; color: string; dot: string }[]).map((tile, i) => (
+              <button
+                key={tile.tab}
+                type="button"
+                onClick={() => switchBookingTab(tile.tab)}
+                className={cn(
+                  "flex flex-col items-start px-5 py-4 transition-colors text-left",
+                  i < 3 ? "border-r border-[#cc5a16]/10" : "",
+                  bookingViewTab === tile.tab
+                    ? "bg-[#faf7f2]"
+                    : "bg-white hover:bg-[#faf7f2]/60"
+                )}
+              >
+                <span className="text-2xl font-semibold leading-tight" style={{ color: tile.color }}>{tile.count}</span>
+                <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mt-1 flex items-center gap-1">
+                  <span className="inline-block w-2 h-2 rounded-full" style={{ background: tile.dot }}></span>
+                  {tile.label}
+                </span>
+                {bookingViewTab === tile.tab && (
+                  <span className="mt-1 w-5 h-0.5 rounded-full" style={{ background: tile.color }}></span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* Journey-stage tabs */}
+          <div className="flex items-center gap-0 border border-[#cc5a16]/10 rounded-2xl overflow-hidden mb-4 bg-white">
+            {([
+              { tab: 'ARR' as const, label: 'Arrivals',  count: bookingTabCounts.arr, pill: 'bg-emerald-100 text-emerald-700' },
+              { tab: 'INH' as const, label: 'In-house',  count: bookingTabCounts.inh, pill: 'bg-amber-100 text-amber-800' },
+              { tab: 'DEP' as const, label: 'Departures',count: bookingTabCounts.dep, pill: 'bg-yellow-100 text-yellow-800' },
+              { tab: 'UPC' as const, label: 'Upcoming',  count: bookingTabCounts.upc, pill: 'bg-violet-100 text-violet-700' },
+              { tab: 'HIS' as const, label: 'History',   count: bookingTabCounts.his, pill: 'bg-stone-100 text-stone-600' },
+            ] as { tab: 'ARR'|'INH'|'DEP'|'UPC'|'HIS'; label: string; count: number; pill: string }[]).map((t, i) => (
+              <button
+                key={t.tab}
+                type="button"
+                onClick={() => switchBookingTab(t.tab)}
+                className={cn(
+                  "flex items-center gap-2 px-5 py-2.5 text-[12px] font-bold uppercase tracking-widest transition-colors whitespace-nowrap border-r border-[#cc5a16]/10 last:border-r-0",
+                  bookingViewTab === t.tab
+                    ? "bg-[#cc5a16] text-white"
+                    : "text-[#6b5d52] hover:bg-[#faf7f2]"
+                )}
+              >
+                {t.label}
+                <span className={cn("px-1.5 py-0.5 rounded-full text-[10px] font-bold",
+                  bookingViewTab === t.tab ? "bg-white/25 text-white" : t.pill
+                )}>{t.count}</span>
+              </button>
+            ))}
+          </div>
 
           {/* REQ 5 — Booking-history search bar */}
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 p-4 sm:p-5 mb-4 shadow-sm">
@@ -20007,7 +20096,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 Shows every unique booking_source in the loaded data. */}
             {hotelBookings.length > 0 && (() => {
               const sources = [...new Set((hotelBookings as any[]).map((b: any) => b.booking_source).filter(Boolean))].sort() as string[];
-              if (sources.length === 0) return null;
+              // Normalise WALKIN → WALK_IN (stored inconsistently in DB)
+              const normalisedSources = [...new Set(sources.map(s => s === 'WALKIN' ? 'WALK_IN' : s))].sort();
+              if (normalisedSources.length === 0) return null;
               return (
                 <div className="mt-3 flex flex-wrap gap-1.5 items-center">
                   <span className="text-[10px] font-bold uppercase tracking-widest text-[#9c8e85]">Source:</span>
@@ -20019,7 +20110,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         ? "bg-[#cc5a16] text-white border-[#cc5a16]"
                         : "bg-white border-[#cc5a16]/20 text-[#3d3128] hover:bg-[#faf7f2]")}
                   >All</button>
-                  {sources.map((s: string) => (
+                  {normalisedSources.map((s: string) => (
                     <button
                       key={s}
                       type="button"
@@ -20158,25 +20249,27 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <tr>
                     {/* Guest — pinned left so the row's identity never scrolls away */}
                     <th onClick={() => toggleBookingSort('guest')} title="Click to sort"
+                        style={{ position: 'relative', width: colWidths['guest'] ? colWidths['guest']+'px' : undefined }}
                         className={cn(sortableCls, 'text-left sticky left-0 z-[2] bg-[#faf7f2] shadow-[2px_0_4px_-2px_rgba(0,0,0,0.12)]')}>
                       Guest{arrow('guest')}
+                      <div onMouseDown={e => startColResize('guest', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} />
                     </th>
-                    {colOn('booking_id') && <th className="px-4 py-3 text-left">Booking ID</th>}
-                    {colOn('room')      && <th onClick={() => toggleBookingSort('room')}     title="Click to sort" className={cn(sortableCls, 'text-left')}>Room{arrow('room')}</th>}
-                    {colOn('dates')     && <th onClick={() => toggleBookingSort('check_in')} title="Click to sort" className={cn(sortableCls, 'text-left')}>Dates{arrow('check_in')}</th>}
-                    {colOn('checked_in')  && <th className="px-4 py-3 text-left whitespace-nowrap">Checked in</th>}
-                    {colOn('checked_out') && <th className="px-4 py-3 text-left whitespace-nowrap">Checked out</th>}
-                    {colOn('nights')    && <th className="px-4 py-3 text-right">Nights</th>}
-                    {colOn('guests')    && <th className="px-4 py-3 text-right">Guests</th>}
-                    {colOn('adults')    && <th className="px-4 py-3 text-right" title="Total adults (extra beyond capacity in brackets)">Adults</th>}
-                    {colOn('meal_plan') && <th className="px-4 py-3 text-left">Meal Plan</th>}
-                    {colOn('status')    && <th onClick={() => toggleBookingSort('status')} title="Click to sort" className={cn(sortableCls, 'text-left')}>Status{arrow('status')}</th>}
-                    {colOn('total')     && <th onClick={() => toggleBookingSort('total')}  title="Click to sort" className={cn(sortableCls, 'text-right')}>Total{arrow('total')}</th>}
-                    {colOn('restaurant') && <th className="text-right px-4 py-3" title="Room-service F&B for this guest — click to view / mark paid">Restaurant bill</th>}
-                    {colOn('advance')   && <th className="text-right px-4 py-3" title="Advance payments already collected">Advance</th>}
-                    {colOn('source')    && <th className="px-4 py-3 text-left">Source</th>}
-                    {colOn('created')   && <th className="px-4 py-3 text-left">Created</th>}
-                    {colOn('paylink')   && <th className="text-center px-4 py-3">Pay link</th>}
+                    {colOn('booking_id') && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['booking_id'] ? colWidths['booking_id']+'px' : undefined }}>Booking ID<div onMouseDown={e => startColResize('booking_id', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('room')      && <th onClick={() => toggleBookingSort('room')}     title="Click to sort" className={cn(sortableCls, 'text-left')} style={{ position: 'relative', width: colWidths['room'] ? colWidths['room']+'px' : undefined }}>Room{arrow('room')}<div onMouseDown={e => startColResize('room', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('dates')     && <th onClick={() => toggleBookingSort('check_in')} title="Click to sort" className={cn(sortableCls, 'text-left')} style={{ position: 'relative', width: colWidths['dates'] ? colWidths['dates']+'px' : undefined }}>Dates{arrow('check_in')}<div onMouseDown={e => startColResize('dates', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('checked_in')  && <th className="px-4 py-3 text-left whitespace-nowrap" style={{ position: 'relative', width: colWidths['checked_in'] ? colWidths['checked_in']+'px' : undefined }}>Checked in<div onMouseDown={e => startColResize('checked_in', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('checked_out') && <th className="px-4 py-3 text-left whitespace-nowrap" style={{ position: 'relative', width: colWidths['checked_out'] ? colWidths['checked_out']+'px' : undefined }}>Checked out<div onMouseDown={e => startColResize('checked_out', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('nights')    && <th className="px-4 py-3 text-right" style={{ position: 'relative', width: colWidths['nights'] ? colWidths['nights']+'px' : undefined }}>Nights<div onMouseDown={e => startColResize('nights', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('guests')    && <th className="px-4 py-3 text-right" style={{ position: 'relative', width: colWidths['guests'] ? colWidths['guests']+'px' : undefined }}>Guests<div onMouseDown={e => startColResize('guests', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('adults')    && <th className="px-4 py-3 text-right" title="Total adults (extra beyond capacity in brackets)" style={{ position: 'relative', width: colWidths['adults'] ? colWidths['adults']+'px' : undefined }}>Adults<div onMouseDown={e => startColResize('adults', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('meal_plan') && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['meal_plan'] ? colWidths['meal_plan']+'px' : undefined }}>Meal Plan<div onMouseDown={e => startColResize('meal_plan', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('status')    && <th onClick={() => toggleBookingSort('status')} title="Click to sort" className={cn(sortableCls, 'text-left')} style={{ position: 'relative', width: colWidths['status'] ? colWidths['status']+'px' : undefined }}>Status{arrow('status')}<div onMouseDown={e => startColResize('status', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('total')     && <th onClick={() => toggleBookingSort('total')}  title="Click to sort" className={cn(sortableCls, 'text-right')} style={{ position: 'relative', width: colWidths['total'] ? colWidths['total']+'px' : undefined }}>Total{arrow('total')}<div onMouseDown={e => startColResize('total', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('restaurant') && <th className="text-right px-4 py-3" title="Room-service F&B for this guest — click to view / mark paid" style={{ position: 'relative', width: colWidths['restaurant'] ? colWidths['restaurant']+'px' : undefined }}>Restaurant bill<div onMouseDown={e => startColResize('restaurant', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('advance')   && <th className="text-right px-4 py-3" title="Advance payments already collected" style={{ position: 'relative', width: colWidths['advance'] ? colWidths['advance']+'px' : undefined }}>Advance<div onMouseDown={e => startColResize('advance', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('source')    && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['source'] ? colWidths['source']+'px' : undefined }}>Source<div onMouseDown={e => startColResize('source', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('created')   && <th className="px-4 py-3 text-left" style={{ position: 'relative', width: colWidths['created'] ? colWidths['created']+'px' : undefined }}>Created<div onMouseDown={e => startColResize('created', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
+                    {colOn('paylink')   && <th className="text-center px-4 py-3" style={{ position: 'relative', width: colWidths['paylink'] ? colWidths['paylink']+'px' : undefined }}>Pay link<div onMouseDown={e => startColResize('paylink', e)} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#cc5a16]/30 select-none" style={{ position: 'absolute' }} onClick={e => e.stopPropagation()} /></th>}
                     {/* Actions — pinned right so staff never scroll to reach them */}
                     <th className="text-right px-4 py-3 sticky right-0 z-[2] bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.12)]">Actions</th>
                   </tr>
