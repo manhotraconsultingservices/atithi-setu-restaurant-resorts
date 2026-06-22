@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Atithi-Setu ERP — UAT Test Scenarios</title>
+<style>
+  :root{
+    --ink:#1a1208; --soft:#3d3128; --muted:#6b5d52; --faint:#9c8e85;
+    --brand:#cc5a16; --brand-dark:#a84612; --paper:#faf7f2; --hair:#e8dccf;
+    --pass:#15803d; --pass-bg:#dcfce7; --fail:#b91c1c; --fail-bg:#fee2e2;
+    --block:#a16207; --block-bg:#fef9c3; --na:#64748b; --na-bg:#f1f5f9;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font-family:'DM Sans',-apple-system,Segoe UI,Roboto,system-ui,sans-serif;color:var(--ink);background:#fff;line-height:1.5}
+  h1,h2,h3{font-family:Georgia,'Times New Roman',serif;margin:0}
+  a{color:var(--brand)}
+
+  /* ── Header ── */
+  header.masthead{background:linear-gradient(135deg,#1a1208,#3d3128);color:#fff;padding:28px 32px}
+  .masthead .eyebrow{font-size:11px;font-weight:800;letter-spacing:.28em;text-transform:uppercase;color:#f4b07a}
+  .masthead h1{font-size:30px;margin:6px 0 4px}
+  .masthead p{margin:0;color:#e9e2d8;font-size:13px;max-width:760px}
+  .meta-grid{display:flex;flex-wrap:wrap;gap:22px;margin-top:16px;font-size:12px;color:#cdc4b8}
+  .meta-grid b{color:#fff;display:block;font-size:13px}
+
+  .wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+
+  /* ── Sticky control bar ── */
+  .controls{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.96);backdrop-filter:blur(6px);border-bottom:1px solid var(--hair);padding:12px 0}
+  .controls-inner{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  .controls input[type=search],.controls select{padding:8px 12px;border:1px solid var(--hair);border-radius:12px;font-size:13px;font-family:inherit;background:#fff;color:var(--ink)}
+  .controls input[type=search]{flex:1;min-width:200px}
+  .btn{padding:8px 14px;border:1px solid var(--hair);border-radius:12px;background:#fff;font-size:12px;font-weight:700;cursor:pointer;color:var(--soft);font-family:inherit}
+  .btn:hover{background:var(--paper)}
+  .btn.brand{background:var(--brand);color:#fff;border-color:var(--brand)}
+  .btn.brand:hover{background:var(--brand-dark)}
+
+  /* ── Summary dashboard ── */
+  .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:18px 0}
+  .stat{background:var(--paper);border:1px solid var(--hair);border-radius:16px;padding:12px 14px}
+  .stat .n{font-size:26px;font-weight:800;font-family:Georgia,serif}
+  .stat .l{font-size:10px;font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:var(--faint)}
+  .stat.pass .n{color:var(--pass)} .stat.fail .n{color:var(--fail)}
+  .stat.block .n{color:var(--block)} .stat.na .n{color:var(--na)}
+  .progress{height:12px;border-radius:999px;background:var(--hair);overflow:hidden;margin:6px 0 22px;display:flex}
+  .progress span{height:100%}
+  .progress .p-pass{background:var(--pass)} .progress .p-fail{background:var(--fail)}
+  .progress .p-block{background:var(--block)}
+
+  /* ── Module sections ── */
+  .module{margin:26px 0 8px;border:1px solid var(--hair);border-radius:18px;overflow:hidden}
+  .module>summary{list-style:none;cursor:pointer;padding:14px 18px;background:var(--paper);display:flex;align-items:center;gap:12px;font-weight:800}
+  .module>summary::-webkit-details-marker{display:none}
+  .module>summary .chev{transition:transform .2s;color:var(--brand)}
+  .module[open]>summary .chev{transform:rotate(90deg)}
+  .module>summary .m-title{font-family:Georgia,serif;font-size:18px;color:var(--ink)}
+  .module>summary .m-count{margin-left:auto;font-size:11px;font-weight:700;color:var(--muted);background:#fff;border:1px solid var(--hair);border-radius:999px;padding:3px 10px}
+  .m-desc{font-size:12px;color:var(--muted);padding:0 18px 8px;background:var(--paper)}
+  .cases{padding:8px 14px 14px}
+
+  /* ── Test case card ── */
+  .tc{border:1px solid var(--hair);border-radius:14px;padding:14px 16px;margin:10px 0;background:#fff}
+  .tc-head{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap}
+  .tc-id{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:11px;font-weight:800;color:var(--brand);background:#fff;border:1px solid var(--brand);border-radius:8px;padding:3px 8px;white-space:nowrap}
+  .tc-title{font-weight:700;font-size:14.5px;flex:1;min-width:200px}
+  .pri{font-size:9px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;padding:3px 8px;border-radius:999px}
+  .pri.P1{background:var(--fail-bg);color:var(--fail)}
+  .pri.P2{background:var(--block-bg);color:var(--block)}
+  .pri.P3{background:var(--na-bg);color:var(--na)}
+  .tc-body{margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.tc-body{grid-template-columns:1fr}.tc-body .cols-full{grid-column:1}}
+  .lbl{font-size:10px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-bottom:4px}
+  .pre{font-size:12.5px;color:var(--muted)}
+  ol.steps{margin:0;padding-left:18px;font-size:12.5px;color:var(--soft)}
+  ol.steps li{margin:2px 0}
+  .expected{font-size:12.5px;color:var(--soft);background:var(--paper);border-left:3px solid var(--brand);padding:8px 10px;border-radius:0 8px 8px 0}
+
+  /* ── Status controls ── */
+  .tc-foot{margin-top:12px;border-top:1px dashed var(--hair);padding-top:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .status-btns{display:inline-flex;gap:4px;background:var(--paper);border:1px solid var(--hair);border-radius:10px;padding:3px}
+  .sbtn{border:none;background:transparent;font-size:11px;font-weight:800;padding:5px 10px;border-radius:7px;cursor:pointer;color:var(--muted)}
+  .sbtn.active.pass{background:var(--pass);color:#fff}
+  .sbtn.active.fail{background:var(--fail);color:#fff}
+  .sbtn.active.block{background:var(--block);color:#fff}
+  .sbtn.active.na{background:var(--na);color:#fff}
+  .tc input.note{flex:1;min-width:160px;padding:6px 10px;border:1px solid var(--hair);border-radius:9px;font-size:12px;font-family:inherit}
+  .tc.s-pass{border-color:var(--pass);box-shadow:inset 3px 0 0 var(--pass)}
+  .tc.s-fail{border-color:var(--fail);box-shadow:inset 3px 0 0 var(--fail)}
+  .tc.s-block{border-color:var(--block);box-shadow:inset 3px 0 0 var(--block)}
+
+  footer{margin:40px 0 24px;padding-top:16px;border-top:1px solid var(--hair);font-size:11px;color:var(--faint);text-align:center}
+  .hidden{display:none !important}
+  @media print{
+    .controls{position:static}.sbtn{display:none}.module{break-inside:avoid}
+    .status-btns{display:none}.btn{display:none}
+  }
+</style>
+</head>
+<body>
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">User Acceptance Testing · Business Scenario Pack</div>
+    <h1>Atithi-Setu ERP — End-to-End UAT</h1>
+    <p>Executable acceptance-test scenarios spanning every business module: authentication, navigation &amp; RBAC, restaurant POS, inventory, delivery, the full hotel PMS, HR &amp; payroll, billing, and the consolidated reporting hub. Each case lists preconditions, steps, and the expected result. Mark Pass / Fail / Blocked as you execute — progress is saved in this browser.</p>
+    <div class="meta-grid">
+      <div><b>Atithi-Setu</b>Multi-tenant Restaurant + Hotel ERP</div>
+      <div><b>erp.atithi-setu.com</b>Production environment</div>
+      <div><b>v · UAT-2026.06</b>Document version</div>
+      <div><b>2026-06-11</b>Generated</div>
+      <div><b id="caseCount">—</b>Total scenarios</div>
+    </div>
+  </div>
+</header>
+
+<div class="controls">
+  <div class="wrap controls-inner">
+    <input type="search" id="search" placeholder="Search scenarios (id, title, module)…" />
+    <select id="moduleFilter"><option value="">All modules</option></select>
+    <select id="statusFilter">
+      <option value="">All statuses</option>
+      <option value="pass">Pass</option>
+      <option value="fail">Fail</option>
+      <option value="block">Blocked</option>
+      <option value="none">Not run</option>
+    </select>
+    <button class="btn" id="expandAll">Expand all</button>
+    <button class="btn" id="collapseAll">Collapse all</button>
+    <button class="btn brand" id="exportBtn">Export results (JSON)</button>
+    <button class="btn" id="printBtn">Print / PDF</button>
+    <button class="btn" id="resetBtn">Reset</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="summary" id="summary"></div>
+  <div class="progress" id="progressBar"></div>
+  <div id="root"></div>
+  <footer>
+    Atithi-Setu ERP · UAT Business-Scenario Pack · Generated 2026-06-11. Results are stored locally in your browser (localStorage) — use “Export results” to save a signed-off copy.
+  </footer>
+</div>
+
+<script>
+/* ─────────────────────────────────────────────────────────────────────
+   UAT SCENARIO DATA
+   Each module = { id, name, scope, cases:[ {id, pri, title, pre, steps[], exp} ] }
+   pri: P1 (critical / must pass), P2 (important), P3 (nice-to-have)
+   ───────────────────────────────────────────────────────────────────── */
+const MODULES = [
+  {
+    id:'AUTH', name:'Authentication & Session', scope:'Login paths, session lifetime, logout, tenant state.',
+    cases:[
+      {id:'AUTH-01',pri:'P1',title:'Owner login with email & password',
+        pre:'Active tenant; valid owner credentials.',
+        steps:['Open the login screen.','Enter owner email + password.','Submit.'],
+        exp:'Owner is authenticated and lands on the dashboard with the left sidebar visible.'},
+      {id:'AUTH-02',pri:'P1',title:'Staff login with Login ID',
+        pre:'Staff member exists with a login_id + password and is active.',
+        steps:['Open login.','Enter staff Login ID + password.','Submit.'],
+        exp:'Staff is authenticated; sees only the tabs/modules permitted for their role.'},
+      {id:'AUTH-03',pri:'P2',title:'Phone OTP login / first-time setup',
+        pre:'Phone-based account.',
+        steps:['Choose phone login.','Enter phone, request OTP.','Enter OTP; complete setup if new.'],
+        exp:'Session established; multi-property users see a property selector.'},
+      {id:'AUTH-04',pri:'P1',title:'Invalid credentials rejected',
+        pre:'—',
+        steps:['Enter a wrong password.','Submit.'],
+        exp:'Friendly “incorrect email or password” error; no session created; no logout loop.'},
+      {id:'AUTH-05',pri:'P1',title:'Session expiry → graceful re-login',
+        pre:'Logged-in session whose token has expired (now 7-day tokens).',
+        steps:['Leave a tab idle past token expiry (or clear cookie).','Trigger any data action.'],
+        exp:'“Session expired — please sign in again” toast appears, the app returns to login (no blank/empty pages). Re-login restores full access.'},
+      {id:'AUTH-06',pri:'P1',title:'Logout clears session',
+        pre:'Logged in.',
+        steps:['Click Sign Out.'],
+        exp:'Token + role cleared; redirected to landing/login; back-navigation does not restore the session.'},
+      {id:'AUTH-07',pri:'P2',title:'Tenant subdomain login',
+        pre:'Tenant has a subdomain (e.g. <tenant>.atithi-setu.com).',
+        steps:['Open the tenant subdomain.','Log in.'],
+        exp:'Session scoped to that tenant; cross-tenant URLs are rejected (403).'},
+      {id:'AUTH-08',pri:'P1',title:'Deactivated tenant blocked',
+        pre:'Tenant set inactive by admin.',
+        steps:['Attempt to log in / use the app.'],
+        exp:'“Service inactive” screen with billing contact; data is preserved; mutations blocked (read-only / locked).'},
+      {id:'AUTH-09',pri:'P3',title:'Forgot password / reset',
+        pre:'Account with email.',
+        steps:['Use “Forgot password”.','Follow reset link / token.','Set a new password and log in.'],
+        exp:'Password updated; old password no longer works; new one logs in.'},
+    ]
+  },
+  {
+    id:'NAV', name:'Navigation & Access Control (RBAC)', scope:'Left-sidebar module nav, audience scoping, Staff Access matrix.',
+    cases:[
+      {id:'NAV-01',pri:'P1',title:'Left sidebar renders modules',
+        pre:'Owner logged in.',
+        steps:['Observe the left sidebar.'],
+        exp:'Modules show: Overview/ops, Front Desk, Restaurant, Sales & Distribution, Workforce, Administration (per property type).'},
+      {id:'NAV-02',pri:'P2',title:'Accordion — active module auto-expands',
+        pre:'On any page.',
+        steps:['Click a page in another module.','Observe the sidebar.'],
+        exp:'The module containing the active page expands; the active page is highlighted.'},
+      {id:'NAV-03',pri:'P2',title:'Collapse to icon-rail and restore',
+        pre:'Desktop width.',
+        steps:['Click the Collapse control.','Click a module icon.'],
+        exp:'Sidebar collapses to icons (labels on hover); clicking expands it back and opens that module.'},
+      {id:'NAV-04',pri:'P2',title:'Mobile navigation drawer',
+        pre:'Mobile / narrow viewport.',
+        steps:['Tap the hamburger.','Pick a page.'],
+        exp:'A slide-in drawer lists the modules; selecting a page navigates and closes the drawer.'},
+      {id:'NAV-05',pri:'P1',title:'Both-mode tenant shows both ops modules',
+        pre:'Tenant with Restaurant + Hotel enabled.',
+        steps:['Inspect sidebar.','Open a Restaurant page, then a Front Desk page.'],
+        exp:'Both Restaurant and Front Desk modules are visible together; the Command Centre / Analytics / Invoices reflect the right side per the page opened.'},
+      {id:'NAV-06',pri:'P2',title:'Restaurant-only tenant hides hotel modules',
+        pre:'Restaurant-only tenant.',
+        steps:['Inspect sidebar.'],
+        exp:'No Front Desk module; hotel-only items (Channel Manager, Direct Booking Page) are hidden.'},
+      {id:'NAV-07',pri:'P2',title:'Hotel-only tenant hides Restaurant module',
+        pre:'Hotel-only tenant.',
+        steps:['Inspect sidebar.'],
+        exp:'No Restaurant module; F&B-only pages hidden.'},
+      {id:'NAV-08',pri:'P1',title:'Staff Access — grant a tab to a role',
+        pre:'Owner; a staff role exists (e.g. FRONT_DESK).',
+        steps:['Open Administration → Staff Access.','Toggle a tab ON for the role; Save.','Log in as that role.'],
+        exp:'The role now sees exactly the granted tabs; ungranted tabs are hidden and blocked server-side (403).'},
+      {id:'NAV-09',pri:'P2',title:'Preview-as-role',
+        pre:'Owner on Staff Access.',
+        steps:['Select a role in “Preview as”.'],
+        exp:'The nav re-renders as that role would see it, without logging out.'},
+      {id:'NAV-10',pri:'P1',title:'Staff Access is owner-only',
+        pre:'Non-owner staff logged in.',
+        steps:['Look for Staff Access; attempt direct access.'],
+        exp:'Staff Access is not shown to non-owners and returns Access-Denied on direct access.'},
+    ]
+  },
+  {
+    id:'MENU', name:'Restaurant — Menu', scope:'Menu catalogue, CSV, recipes, availability.',
+    cases:[
+      {id:'MENU-01',pri:'P1',title:'Add a menu item',
+        pre:'Restaurant enabled.',
+        steps:['Menu → Add Item.','Enter name, category, price(s), dietary type.','Save.'],
+        exp:'Item appears in the grid and is available to order / invoice.'},
+      {id:'MENU-02',pri:'P2',title:'Edit & delete a menu item',
+        pre:'An item exists.',
+        steps:['Edit price/description; Save.','Delete another item.'],
+        exp:'Edits persist; deleted item disappears and is no longer orderable.'},
+      {id:'MENU-03',pri:'P2',title:'CSV import / export / template',
+        pre:'—',
+        steps:['Download template.','Export current menu.','Import a CSV with new rows (duplicates flagged).'],
+        exp:'Valid non-duplicate rows import; duplicates are flagged and skippable; counts reported.'},
+      {id:'MENU-04',pri:'P3',title:'Recipe builder links ingredients',
+        pre:'Inventory ingredients exist.',
+        steps:['Open Recipe on an item.','Add ingredients + qty per serving; Save.'],
+        exp:'Recipe saved; later orders deduct ingredient stock per the recipe.'},
+      {id:'MENU-05',pri:'P2',title:'Availability & daily-special toggles',
+        pre:'An item exists.',
+        steps:['Toggle availability off.','Mark another as daily special.'],
+        exp:'Unavailable item is hidden from ordering; daily special is badged.'},
+    ]
+  },
+  {
+    id:'ORD', name:'Restaurant — Orders & POS', scope:'QR ordering, KOT, command centre, billing.',
+    cases:[
+      {id:'ORD-01',pri:'P1',title:'Customer QR scan → place order',
+        pre:'Table QR configured; menu live.',
+        steps:['Scan the table QR.','Add items; place the order.'],
+        exp:'Order is created, appears in Command Centre / Orders, KOT routed; table marked occupied.'},
+      {id:'ORD-02',pri:'P2',title:'Waiter places order from POS',
+        pre:'Waiter logged in.',
+        steps:['Open table, add items, send.'],
+        exp:'Order recorded against the table; qty +/- controls work.'},
+      {id:'ORD-03',pri:'P1',title:'Bill request → settle → free table',
+        pre:'Open table with orders.',
+        steps:['Customer/staff requests bill.','Generate invoice; mark paid.'],
+        exp:'GST-inclusive total correct; invoice created; table frees on payment.'},
+      {id:'ORD-04',pri:'P2',title:'Command Centre live view',
+        pre:'Active tables/orders.',
+        steps:['Open Command Centre.'],
+        exp:'Live tables, revenue, call/bill requests, cloud-kitchen orders shown; ~30s auto-refresh.'},
+      {id:'ORD-05',pri:'P3',title:'Order history search/filter',
+        pre:'Past orders.',
+        steps:['Open Orders; search by customer/table/date.'],
+        exp:'Matching orders listed with correct status & totals.'},
+    ]
+  },
+  {
+    id:'INV', name:'Restaurant — Invoices', scope:'Manual & order invoices, tax, numbering, PDF.',
+    cases:[
+      {id:'INV-01',pri:'P1',title:'Generate an on-demand invoice',
+        pre:'Menu items exist; tax configured.',
+        steps:['Invoices → New; add items (type-ahead).','Apply discount / service charge.','Generate.'],
+        exp:'Totals = items − discount + service + GST; invoice saved with a number.'},
+      {id:'INV-02',pri:'P1',title:'GST auto-applies from settings',
+        pre:'tax_config set.',
+        steps:['Create an invoice without manual tax entry.'],
+        exp:'GST applied per tax_config; multi-tax rows respected; ECO-paid orders tracked separately.'},
+      {id:'INV-03',pri:'P2',title:'Invoice numbering mode',
+        pre:'Owner.',
+        steps:['Set numbering to Sequential (or Random) in Settings.','Generate two invoices.'],
+        exp:'Numbers follow the chosen scheme; sequential numbers are gap-free & unique.'},
+      {id:'INV-04',pri:'P1',title:'Invoice PDF download',
+        pre:'An invoice exists.',
+        steps:['Click PDF / download.'],
+        exp:'PDF opens with header, line items, tax, grand total, amount-in-words; no clipping; ₹/ISO currency correct.'},
+      {id:'INV-05',pri:'P2',title:'Credit note / soft-delete',
+        pre:'A settled invoice.',
+        steps:['Issue a credit note / soft-delete (admin).'],
+        exp:'Credit note references parent; revenue adjusted; original preserved for audit.'},
+    ]
+  },
+  {
+    id:'INVT', name:'Inventory & Purchasing', scope:'Ingredients, suppliers, POs, GRN, wastage, costing.',
+    cases:[
+      {id:'INVT-01',pri:'P2',title:'Ingredient & supplier master',
+        pre:'Inventory enabled.',
+        steps:['Add ingredient (unit, reorder level).','Add supplier.'],
+        exp:'Both saved and selectable in POs/recipes.'},
+      {id:'INVT-02',pri:'P1',title:'Purchase order → GRN receive',
+        pre:'Supplier + ingredients exist.',
+        steps:['Create a PO; send it.','Create a GRN; receive quantities.'],
+        exp:'Stock increments by received qty; PO marked partial/received correctly; unit conversion correct (g↔kg).'},
+      {id:'INVT-03',pri:'P2',title:'Wastage & physical count',
+        pre:'Stock on hand.',
+        steps:['Log wastage.','Start & complete a physical count.'],
+        exp:'Stock adjusts; variance (expected vs actual) computed; wastage value uses correct units.'},
+      {id:'INVT-04',pri:'P2',title:'Recipe-based deduction on sale',
+        pre:'Item has a recipe; stock present.',
+        steps:['Sell the item.'],
+        exp:'Consumption movement created; ingredient stock reduces per recipe × qty.'},
+      {id:'INVT-05',pri:'P3',title:'COGS / variance / margin insights',
+        pre:'Movement history exists.',
+        steps:['Inventory → Insights → COGS / Variance / Margin.'],
+        exp:'Reports render with date range; food-cost % and gross margin reasonable.'},
+    ]
+  },
+  {
+    id:'DEL', name:'Delivery Partners', scope:'Aggregator channels, live orders, settlements, P&L.',
+    cases:[
+      {id:'DEL-01',pri:'P2',title:'Configure a delivery channel',
+        pre:'Delivery enabled.',
+        steps:['Delivery → Channels; set platform pricing/credentials.'],
+        exp:'Channel saved; per-platform price overrides applied.'},
+      {id:'DEL-02',pri:'P2',title:'Inbound order → live feed',
+        pre:'Channel active (or mock).',
+        steps:['Receive a platform order (webhook/mock).'],
+        exp:'Order appears in Live Orders; status push on update; auto-invoice if configured.'},
+      {id:'DEL-03',pri:'P3',title:'Settlements & Channel P&L',
+        pre:'Orders + settlement file.',
+        steps:['Upload settlement; open Channel P&L.'],
+        exp:'Reconciliation matches orders; variance flagged; per-channel profitability shown.'},
+    ]
+  },
+  {
+    id:'ROOM', name:'Hotel — Rooms & Availability', scope:'Room inventory, types, rate plans, holds, availability.',
+    cases:[
+      {id:'ROOM-01',pri:'P1',title:'Room & room-type setup',
+        pre:'Hotel enabled.',
+        steps:['Create room types; add rooms with rate, capacity, floor.'],
+        exp:'Rooms grouped by category; base rate + capacity stored.'},
+      {id:'ROOM-02',pri:'P2',title:'Rate plans (weekend / season)',
+        pre:'Rooms exist.',
+        steps:['Define a weekend/season rate plan.','Create a booking spanning it.'],
+        exp:'Correct rate auto-applies per date via the rate matrix.'},
+      {id:'ROOM-03',pri:'P2',title:'Room holds (maintenance/owner/OTA)',
+        pre:'A room exists.',
+        steps:['Block a date range with a reason.'],
+        exp:'Held dates are unavailable for booking and shown on the calendar with the reason.'},
+      {id:'ROOM-04',pri:'P1',title:'Availability calendar (Stay View)',
+        pre:'Bookings + holds exist.',
+        steps:['Open the rooms × dates calendar.'],
+        exp:'Each cell shows VACANT/OCCUPIED/CLEANING/MAINTENANCE/BLOCKED/CHECKED_OUT; guest names on occupied cells; auto-refresh.'},
+      {id:'ROOM-05',pri:'P1',title:'Find Available Rooms',
+        pre:'Mixed availability.',
+        steps:['Open Find Available Rooms; set dates + guests.'],
+        exp:'Only truly-available rooms (no conflicting bookings/holds) returned; category rollup correct.'},
+    ]
+  },
+  {
+    id:'BKG', name:'Hotel — Bookings', scope:'Create / edit / cancel, business rules, group, walk-in.',
+    cases:[
+      {id:'BKG-01',pri:'P1',title:'Create an overnight booking',
+        pre:'Available room.',
+        steps:['New booking; pick room, dates, guest, rate/meal plan.','Save.'],
+        exp:'Booking created (BOOKED); total = nights × rate (+ extras/meal plan); calendar updates.'},
+      {id:'BKG-02',pri:'P2',title:'Day-use booking',
+        pre:'Day-use allowed.',
+        steps:['Create a same-day day-use booking.'],
+        exp:'Day-use handled; appears in Today’s Departures correctly.'},
+      {id:'BKG-03',pri:'P1',title:'Walk-in fast-path',
+        pre:'Front desk.',
+        steps:['Use walk-in: enter guest + room and check in on one screen.'],
+        exp:'Guest booked and checked in in a single flow; advance can be taken.'},
+      {id:'BKG-04',pri:'P2',title:'Group booking (multi-room)',
+        pre:'Multiple rooms available.',
+        steps:['Create a group booking for several rooms in one transaction.'],
+        exp:'All rooms reserved together; group is cancellable / invoiceable as one.'},
+      {id:'BKG-05',pri:'P1',title:'Cancel booking with refund policy',
+        pre:'A BOOKED reservation.',
+        steps:['Cancel; review the refund preview.','Confirm.'],
+        exp:'Status → CANCELLED with cancelled_at, reason, refund % & amount per tenant policy; room frees up.'},
+      {id:'BKG-06',pri:'P2',title:'Business-rule guards',
+        pre:'Min/max stay + date rules configured.',
+        steps:['Try a past-date booking.','Try below-min / above-max nights.','Try early check-in.'],
+        exp:'Past dates blocked; min/max enforced; early check-in requires confirm-to-override with any applicable fee.'},
+      {id:'BKG-07',pri:'P2',title:'Booking history / returning guest',
+        pre:'Guest with prior stays.',
+        steps:['Search by name/phone.'],
+        exp:'Past stays, lifetime spend, last stay surfaced (overlap search, not containment).'},
+    ]
+  },
+  {
+    id:'CHK', name:'Hotel — Check-in / Check-out', scope:'Arrival, ID, payments, checkout, balance.',
+    cases:[
+      {id:'CHK-01',pri:'P1',title:'Check-in wizard + ID gate',
+        pre:'A BOOKED reservation; phone present.',
+        steps:['Open Check-in wizard.','Upload at least one ID document.','Complete check-in.'],
+        exp:'Check-in blocked until ≥1 ID uploaded and phone present; on success status → CHECKED_IN; edits then locked.'},
+      {id:'CHK-02',pri:'P1',title:'Advance payment with comment',
+        pre:'Checking in.',
+        steps:['Record an advance (amount, method, reference).','Add a comment/note.'],
+        exp:'Advance saved as a folio payment (ADVANCE) incl. the staff comment; reflected in folio paid total.'},
+      {id:'CHK-03',pri:'P1',title:'Checkout — outstanding balance gate',
+        pre:'CHECKED_IN with an unpaid folio.',
+        steps:['Open Checkout.','Attempt to settle with a balance due.'],
+        exp:'Checkout blocked with an OUTSTANDING_BALANCE message until paid or explicitly waived.'},
+      {id:'CHK-04',pri:'P1',title:'Receive payment at checkout + comment',
+        pre:'Outstanding balance.',
+        steps:['Enter amount/method/reference + a comment.','Settle.'],
+        exp:'Payment recorded (FINAL) with the comment; outstanding updates live; checkout completes when ≤0.'},
+      {id:'CHK-05',pri:'P1',title:'Paid & Balance shown at checkout AND on invoice',
+        pre:'Folio with advance + final payments.',
+        steps:['Review the checkout panel.','Download / email the folio invoice PDF.'],
+        exp:'Checkout shows Folio total, Paid so far, Outstanding. The PDF shows “Paid” and “Balance Due” lines matching the ledger.'},
+      {id:'CHK-06',pri:'P2',title:'Discount / comp / waive at checkout',
+        pre:'Outstanding balance.',
+        steps:['Apply a discount or waive (with reason).','Settle.'],
+        exp:'Effective outstanding recomputes; waive allows checkout with audit of who/why.'},
+      {id:'CHK-07',pri:'P2',title:'Invoice auto-send on checkout',
+        pre:'Guest email/phone on file.',
+        steps:['Complete checkout.'],
+        exp:'Invoice PDF emailed/sent; payment-link/breakup correct; lock applied post-checkout.'},
+    ]
+  },
+  {
+    id:'FOL', name:'Hotel — Folios & Billing', scope:'Folio charges, F&B bridge, payments, tax, e-invoice.',
+    cases:[
+      {id:'FOL-01',pri:'P1',title:'Folio charges & grouping',
+        pre:'An open folio.',
+        steps:['View folio charges.'],
+        exp:'Room nights, F&B, services, adjustments, taxes grouped with correct subtotals & grand total.'},
+      {id:'FOL-02',pri:'P1',title:'Room-service F&B → folio',
+        pre:'In-room QR / staff add F&B.',
+        steps:['Add an F&B charge to the room folio.'],
+        exp:'Charge posts atomically to the folio with correct GST slab; appears under F&B.'},
+      {id:'FOL-03',pri:'P2',title:'Payments ledger & refunds',
+        pre:'Folio with multiple payments.',
+        steps:['Review payment history; void a payment; record a refund.'],
+        exp:'ADVANCE/INTERIM/FINAL/REFUND tracked; voided rows excluded; net paid & outstanding correct.'},
+      {id:'FOL-04',pri:'P2',title:'Round-off & multi-tax',
+        pre:'Round-off enabled / multi-tax tenant.',
+        steps:['Generate the folio invoice.'],
+        exp:'Round-off line shown when enabled; per-night GST line when stay crosses a slab boundary.'},
+      {id:'FOL-05',pri:'P3',title:'GST e-invoice (IRN)',
+        pre:'E-invoicing enabled & threshold met.',
+        steps:['Apply/generate IRN; download PDF.'],
+        exp:'IRN + signed QR rendered; “PENDING” shown until the GSP responds.'},
+      {id:'FOL-06',pri:'P2',title:'Group consolidated invoice',
+        pre:'A settled group booking.',
+        steps:['Generate the group invoice.'],
+        exp:'One invoice across rooms; discount allocation correct; emailable.'},
+    ]
+  },
+  {
+    id:'SVC', name:'Hotel — Services & Requests', scope:'Service catalogue, guest requests.',
+    cases:[
+      {id:'SVC-01',pri:'P2',title:'Service catalogue with category/role',
+        pre:'Hotel enabled.',
+        steps:['Add a service with custom category + assigned role + price.'],
+        exp:'Service saved; available to charge to a folio.'},
+      {id:'SVC-02',pri:'P2',title:'Guest service-request lifecycle',
+        pre:'A guest in-house.',
+        steps:['Raise a request; assign; resolve.'],
+        exp:'Request tracked with status & resolution time; GST follows the F&B/service slab logic.'},
+    ]
+  },
+  {
+    id:'OTA', name:'Hotel — Channel Manager / OTA', scope:'Credentials, iCal, webhooks, commission, receivables.',
+    cases:[
+      {id:'OTA-01',pri:'P2',title:'OTA credentials & room mapping',
+        pre:'Channel Manager open.',
+        steps:['Add channel credentials; map an external room to a local room/type.'],
+        exp:'Credentials encrypted at rest; mapping resolves bookings to the right room/type.'},
+      {id:'OTA-02',pri:'P2',title:'iCal export & import',
+        pre:'Bookings + an external iCal URL.',
+        steps:['Copy the export feed.','Configure an import feed; run sync.'],
+        exp:'Export includes bookings + holds (no-cache); import creates/cancels bookings on the ~30-min worker.'},
+      {id:'OTA-03',pri:'P2',title:'Inbound webhook + reconciliation',
+        pre:'Webhook configured.',
+        steps:['Send a signed webhook.','Open the reconciliation log.'],
+        exp:'HMAC verified, replay protected; daily recon shows matches/mismatches.'},
+      {id:'OTA-04',pri:'P2',title:'OTA 360° + commission',
+        pre:'Bookings across channels.',
+        steps:['Open OTA 360°; review per-channel KPIs.'],
+        exp:'Gross/net, commission %, ADR, cancellation rate, revenue share, outstanding per channel correct.'},
+      {id:'OTA-05',pri:'P2',title:'Receivables — aging, outstanding, partner payment',
+        pre:'Partner invoices exist.',
+        steps:['Open Receivables aging & Outstanding.','Record a partner payment.'],
+        exp:'Aging buckets (0-30/30-60/60-90/90+) correct; partner statement updates; outstanding reduces.'},
+    ]
+  },
+  {
+    id:'PUB', name:'Hotel — Direct Booking & Online Check-in', scope:'Public page, direct booking, pre-arrival.',
+    cases:[
+      {id:'PUB-01',pri:'P2',title:'Public booking page profile',
+        pre:'Property profile + gallery + amenities set.',
+        steps:['Open the public booking page (slug URL).'],
+        exp:'Brand theming, galleries, amenities render; categorized room search works.'},
+      {id:'PUB-02',pri:'P1',title:'Direct booking flow + payment link',
+        pre:'Public page live.',
+        steps:['Search rooms/guests/meal plan; review estimate.','Confirm; pay via UPI link.'],
+        exp:'Server-driven estimate (extras incl.) correct; booking created as DIRECT_WEB; fanned out to OTAs; confirmation shown.'},
+      {id:'PUB-03',pri:'P3',title:'Online check-in form',
+        pre:'Upcoming arrival.',
+        steps:['Open the online check-in link; submit details.'],
+        exp:'Pre-check-in data captured; pre-arrival email fires T-3 days.'},
+    ]
+  },
+  {
+    id:'CMP', name:'Hotel — Compliance & Data Privacy', scope:'Form-C, DPDP, documents.',
+    cases:[
+      {id:'CMP-01',pri:'P2',title:'Guest compliance (Form-C)',
+        pre:'Foreign guest checked in.',
+        steps:['Open Compliance; review Form-C / FRRO data.'],
+        exp:'Foreign-guest compliance records present; pending count surfaced on Command Centre.'},
+      {id:'CMP-02',pri:'P2',title:'DPDP — consent, export, delete',
+        pre:'Guest data exists.',
+        steps:['Record consent; run a data export; request deletion.'],
+        exp:'Consent logged; export produced; deletion honoured; DPO contact present.'},
+    ]
+  },
+  {
+    id:'HR', name:'HR & Payroll', scope:'Employees, salary, payroll, statutory, expenses, offers.',
+    cases:[
+      {id:'HR-01',pri:'P2',title:'Employee directory + HR fields',
+        pre:'HR & Payroll enabled.',
+        steps:['Add/edit an employee (PAN, UAN, bank, designation, joining).'],
+        exp:'HR fields saved; employee available for salary structure & payroll.'},
+      {id:'HR-02',pri:'P2',title:'Salary structure + components',
+        pre:'Employee exists.',
+        steps:['Define components; create a versioned salary structure (basic/HRA/etc.).'],
+        exp:'Structure saved with effective dates; prior version closed; live PF/ESI/PT/TDS preview shown.'},
+      {id:'HR-03',pri:'P1',title:'Payroll run lifecycle',
+        pre:'Structures in place.',
+        steps:['Create a month run.','Compute → Approve → Lock → Mark paid.'],
+        exp:'Idempotent compute (re-run safe while DRAFT); statutory amounts correct; recompute blocked after APPROVED; bank-advice CSV exports.'},
+      {id:'HR-04',pri:'P1',title:'Payslip PDF',
+        pre:'A computed payslip.',
+        steps:['Click the payslip PDF.'],
+        exp:'PDF downloads (auth-aware fetch, not a 401 link) with breakup, statutory section & net-in-words.'},
+      {id:'HR-05',pri:'P2',title:'Statutory exports (Form 16 / 24Q / EPF ECR)',
+        pre:'Payroll history.',
+        steps:['Generate Form 16, Form 24Q, and the EPF ECR file.'],
+        exp:'Form 16 & 24Q PDFs render; EPF ECR text file downloads (auth-aware) in EPFO format.'},
+      {id:'HR-06',pri:'P2',title:'Expense claim approval chain',
+        pre:'Employee + approver roles.',
+        steps:['Submit a multi-line claim with receipt.','Manager approves → HR approves → attach to payroll.'],
+        exp:'Status flows SUBMITTED→MANAGER_APPROVED→HR_APPROVED; reimbursement reflects on payroll.'},
+      {id:'HR-07',pri:'P2',title:'Offer letter generate / send / PDF',
+        pre:'Offer template exists.',
+        steps:['Create an offer (CTC, joining).','Download the PDF; send to candidate.'],
+        exp:'CTC-breakup PDF downloads (auth-aware); send emails the candidate; status updates.'},
+      {id:'HR-08',pri:'P3',title:'Employee self-service',
+        pre:'Staff login.',
+        steps:['Log in as staff; open My Payslips / My Expenses.'],
+        exp:'Staff sees only their own payslips/expenses; tampering with another id is blocked (403).'},
+      {id:'HR-09',pri:'P3',title:'Default working hours in Staff settings',
+        pre:'Staff exist.',
+        steps:['Open Staff settings; set Default Hrs.'],
+        exp:'Default hours persist per staff and feed roster/timesheet calcs.'},
+    ]
+  },
+  {
+    id:'RPT', name:'Reports & Dashboards (consolidated hub)', scope:'One hub, Front Desk vs Owner/Manager.',
+    cases:[
+      {id:'RPT-01',pri:'P1',title:'Hub renders with audience toggle',
+        pre:'Hotel enabled.',
+        steps:['Open Reports & Dashboards.','Toggle Front Desk ↔ Owner / Manager.'],
+        exp:'One page hosts all reports; toggle swaps the report set; open report resets on switch.'},
+      {id:'RPT-02',pri:'P1',title:'Front Desk operational reports',
+        pre:'Bookings/folios exist.',
+        steps:['Run Arrival, Departure, Room Status, Night Audit, Stay View for a date range.'],
+        exp:'Each renders correct rows/KPIs; CSV export matches the on-screen data.'},
+      {id:'RPT-03',pri:'P1',title:'Payment Received (daily/weekly/monthly)',
+        pre:'Folio payments exist.',
+        steps:['Open Payment Received; switch grain (daily/weekly/monthly).'],
+        exp:'Totals by period + method, guest vs OTA split, net of refunds; CSV exports.'},
+      {id:'RPT-04',pri:'P1',title:'Cancelled Reservations report',
+        pre:'A cancellation exists.',
+        steps:['Open Cancelled Reservations for a range.'],
+        exp:'Lists cancelled bookings with when/why/refund; counts, lost revenue & refunded totals correct.'},
+      {id:'RPT-05',pri:'P1',title:'Petty Cash ledger',
+        pre:'—',
+        steps:['Record a Cash-Out and a Cash-In with category + note.','Review balance.'],
+        exp:'Entries listed; opening/in/out/closing balances correct; CSV exports; owner/manager can delete.'},
+      {id:'RPT-06',pri:'P2',title:'Owner — Revenue by Room Type & Occupancy trend',
+        pre:'Settled folios + bookings.',
+        steps:['Open Revenue by Room Type.','Open Occupancy Trend for a range.'],
+        exp:'Revenue/room-nights/ADR per type correct; occupancy % per night + average correct.'},
+      {id:'RPT-07',pri:'P2',title:'Owner — Guest Directory & Purchase Spend',
+        pre:'Bookings + purchase orders.',
+        steps:['Open Guest Directory.','Open Purchase Spend.'],
+        exp:'Per-guest stays/spend/last-visit correct; PO spend by supplier + period correct (supplier names resolve).'},
+      {id:'RPT-08',pri:'P2',title:'Deep-links to full dashboards',
+        pre:'Owner view.',
+        steps:['Click Analytics & Reports / OTA 360° / Invoices cards.'],
+        exp:'Each navigates to the corresponding full dashboard; everything reachable from this one hub.'},
+    ]
+  },
+  {
+    id:'GEN', name:'Loyalty · Feedback · Notifications · Subscription · Settings', scope:'Cross-cutting tenant features.',
+    cases:[
+      {id:'GEN-01',pri:'P2',title:'Loyalty enrol & tier discount',
+        pre:'Loyalty configured.',
+        steps:['Enrol a customer; apply tier discount on a bill (restaurant or hotel folio).'],
+        exp:'Tier auto-applies; folio spend counts toward tier; near-upgrade nudges fire.'},
+      {id:'GEN-02',pri:'P3',title:'Feedback capture & reply',
+        pre:'Feedback enabled.',
+        steps:['Submit feedback; reply from the dashboard.'],
+        exp:'Rating/sentiment captured; reply recorded; auto-request + NPS work.'},
+      {id:'GEN-03',pri:'P3',title:'Notification templates',
+        pre:'Owner.',
+        steps:['Edit a notification template; trigger the event.'],
+        exp:'Template edits apply; email/WhatsApp delivered with correct content + attachments.'},
+      {id:'GEN-04',pri:'P2',title:'Subscription / billing state',
+        pre:'Tenant with a plan.',
+        steps:['Open Subscription; review plan & renewal.','(Admin) set past-due.'],
+        exp:'Plan/renewal correct; past-due enforces read-only with banner; hourly reminder fires.'},
+      {id:'GEN-05',pri:'P2',title:'Settings — tax, brand, policy, formats',
+        pre:'Owner.',
+        steps:['Change date format, GST inclusive/exclusive, occupancy policy, property type.','Save.'],
+        exp:'Settings persist and take effect app-wide (dates, tax math, booking occupancy, module visibility).'},
+    ]
+  },
+];
+
+/* ─────────────────────────────────────────────────────────────────────
+   RENDER + INTERACTIVITY
+   ───────────────────────────────────────────────────────────────────── */
+const STORE_KEY = 'atithi_uat_results_v1';
+let results = {};
+try { results = JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch(e){ results = {}; }
+const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(results)); } catch(e){} };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+const allCases = MODULES.flatMap(m => m.cases.map(c => ({...c, module:m.id, moduleName:m.name})));
+document.getElementById('caseCount').textContent = allCases.length + ' scenarios · ' + MODULES.length + ' modules';
+
+// module filter options
+const mf = document.getElementById('moduleFilter');
+MODULES.forEach(m => { const o=document.createElement('option'); o.value=m.id; o.textContent=`${m.id} — ${m.name}`; mf.appendChild(o); });
+
+function statusOf(id){ return (results[id] && results[id].status) || 'none'; }
+function noteOf(id){ return (results[id] && results[id].note) || ''; }
+
+function renderSummary(){
+  let pass=0,fail=0,block=0,none=0;
+  allCases.forEach(c=>{const s=statusOf(c.id); if(s==='pass')pass++;else if(s==='fail')fail++;else if(s==='block')block++;else none++;});
+  const total=allCases.length, done=pass+fail+block;
+  const pct = total? Math.round(done/total*100):0;
+  document.getElementById('summary').innerHTML = `
+    <div class="stat"><div class="n">${total}</div><div class="l">Total</div></div>
+    <div class="stat pass"><div class="n">${pass}</div><div class="l">Pass</div></div>
+    <div class="stat fail"><div class="n">${fail}</div><div class="l">Fail</div></div>
+    <div class="stat block"><div class="n">${block}</div><div class="l">Blocked</div></div>
+    <div class="stat na"><div class="n">${none}</div><div class="l">Not run</div></div>
+    <div class="stat"><div class="n">${pct}%</div><div class="l">Executed</div></div>`;
+  const bar=document.getElementById('progressBar');
+  bar.innerHTML = `<span class="p-pass" style="width:${pass/total*100}%"></span><span class="p-fail" style="width:${fail/total*100}%"></span><span class="p-block" style="width:${block/total*100}%"></span>`;
+}
+
+function caseHTML(c){
+  const st = statusOf(c.id);
+  const stClass = st==='pass'?'s-pass':st==='fail'?'s-fail':st==='block'?'s-block':'';
+  return `<div class="tc ${stClass}" data-id="${c.id}" data-module="${c.module}" data-status="${st}"
+            data-text="${esc((c.id+' '+c.title+' '+c.moduleName).toLowerCase())}">
+    <div class="tc-head">
+      <span class="tc-id">${c.id}</span>
+      <span class="tc-title">${esc(c.title)}</span>
+      <span class="pri ${c.pri}">${c.pri}</span>
+    </div>
+    <div class="tc-body">
+      <div>
+        <div class="lbl">Preconditions</div>
+        <div class="pre">${esc(c.pre)}</div>
+        <div class="lbl" style="margin-top:10px">Steps</div>
+        <ol class="steps">${c.steps.map(s=>`<li>${esc(s)}</li>`).join('')}</ol>
+      </div>
+      <div>
+        <div class="lbl">Expected result</div>
+        <div class="expected">${esc(c.exp)}</div>
+      </div>
+    </div>
+    <div class="tc-foot">
+      <div class="status-btns" role="group">
+        ${['pass','fail','block','na'].map(k=>{
+          const map={pass:'Pass',fail:'Fail',block:'Blocked',na:'Not run'};
+          const val = k==='na'?'none':k;
+          return `<button class="sbtn ${k} ${st===val?'active':''}" data-set="${val}">${map[k]}</button>`;
+        }).join('')}
+      </div>
+      <input class="note" type="text" placeholder="Notes / defect ref / tester…" value="${esc(noteOf(c.id))}" />
+    </div>
+  </div>`;
+}
+
+function render(){
+  const root=document.getElementById('root');
+  root.innerHTML = MODULES.map(m=>`
+    <details class="module" open data-module="${m.id}">
+      <summary>
+        <span class="chev">▶</span>
+        <span class="m-title">${m.id} · ${esc(m.name)}</span>
+        <span class="m-count">${m.cases.length} cases</span>
+      </summary>
+      <div class="m-desc">${esc(m.scope)}</div>
+      <div class="cases">${m.cases.map(c=>caseHTML({...c,module:m.id,moduleName:m.name})).join('')}</div>
+    </details>`).join('');
+  renderSummary();
+  applyFilters();
+}
+
+// event delegation for status + notes
+document.getElementById('root').addEventListener('click', e=>{
+  const b=e.target.closest('.sbtn'); if(!b) return;
+  const tc=b.closest('.tc'); const id=tc.dataset.id; const val=b.dataset.set;
+  const cur = statusOf(id);
+  const next = (cur===val)?'none':val; // toggle off if same
+  results[id] = {...(results[id]||{}), status:next}; save();
+  // update UI in place
+  tc.dataset.status=next;
+  tc.classList.remove('s-pass','s-fail','s-block');
+  if(next==='pass')tc.classList.add('s-pass'); else if(next==='fail')tc.classList.add('s-fail'); else if(next==='block')tc.classList.add('s-block');
+  tc.querySelectorAll('.sbtn').forEach(x=>x.classList.toggle('active', x.dataset.set===next));
+  renderSummary(); applyFilters();
+});
+document.getElementById('root').addEventListener('input', e=>{
+  const n=e.target.closest('input.note'); if(!n) return;
+  const id=n.closest('.tc').dataset.id;
+  results[id] = {...(results[id]||{}), note:n.value}; save();
+});
+
+// filters
+function applyFilters(){
+  const q=document.getElementById('search').value.trim().toLowerCase();
+  const mod=document.getElementById('moduleFilter').value;
+  const stat=document.getElementById('statusFilter').value;
+  document.querySelectorAll('.module').forEach(secEl=>{
+    let visible=0;
+    secEl.querySelectorAll('.tc').forEach(tc=>{
+      const okMod = !mod || tc.dataset.module===mod;
+      const okStat = !stat || tc.dataset.status===stat;
+      const okText = !q || tc.dataset.text.includes(q);
+      const show = okMod && okStat && okText;
+      tc.classList.toggle('hidden', !show);
+      if(show) visible++;
+    });
+    secEl.classList.toggle('hidden', visible===0);
+    if(visible>0 && (q||stat)) secEl.open=true;
+  });
+}
+['search','moduleFilter','statusFilter'].forEach(idd=>{
+  document.getElementById(idd).addEventListener('input', applyFilters);
+});
+
+document.getElementById('expandAll').onclick=()=>document.querySelectorAll('.module').forEach(d=>d.open=true);
+document.getElementById('collapseAll').onclick=()=>document.querySelectorAll('.module').forEach(d=>d.open=false);
+document.getElementById('printBtn').onclick=()=>window.print();
+document.getElementById('resetBtn').onclick=()=>{
+  if(confirm('Clear all UAT results stored in this browser?')){ results={}; save(); render(); }
+};
+document.getElementById('exportBtn').onclick=()=>{
+  const rows = allCases.map(c=>({
+    id:c.id, module:c.module, priority:c.pri, title:c.title,
+    status:statusOf(c.id), note:noteOf(c.id)
+  }));
+  const out = { app:'Atithi-Setu ERP', document:'UAT Business Scenarios', exported_at:new Date().toISOString(),
+                summary:{ total:rows.length,
+                  pass:rows.filter(r=>r.status==='pass').length,
+                  fail:rows.filter(r=>r.status==='fail').length,
+                  blocked:rows.filter(r=>r.status==='block').length,
+                  not_run:rows.filter(r=>r.status==='none').length },
+                results:rows };
+  const blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='atithi-uat-results.json'; a.click(); URL.revokeObjectURL(a.href);
+};
+
+render();
+</script>
+</body>
+</html>

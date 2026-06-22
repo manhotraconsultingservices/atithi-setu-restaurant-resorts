@@ -8343,6 +8343,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Phase 2 & 3 state
   const [hotelBookings, setHotelBookings] = useState<any[]>([]);
   const [bookingViewTab, setBookingViewTab] = useState<'ARR'|'INH'|'DEP'|'UPC'|'HIS'>('INH');
+  const [bookingSubTab, setBookingSubTab] = useState<'RESERVATIONS'|'GROUPS'|'ROOM_ASSIGN'>('RESERVATIONS');
   const [colWidths, setColWidths] = useState<Record<string,number>>({});
   const colWidthsRef = useRef<Record<string,number>>({});
   const [openActionMenu, setOpenActionMenu] = useState<string|null>(null);
@@ -8522,6 +8523,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   };
+
+  // Auto-load groups list whenever the GROUPS sub-tab is active and the list is stale
+  useEffect(() => {
+    if (bookingSubTab !== 'GROUPS' || groupsList !== null || groupsLoading) return;
+    setGroupsLoading(true);
+    fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : [])
+      .then((data: any[]) => setGroupsList(data))
+      .catch(() => setGroupsList([]))
+      .finally(() => setGroupsLoading(false));
+  }, [bookingSubTab, groupsList, groupsLoading]);
 
   useEffect(() => {
     if (!openActionMenu) return;
@@ -19205,57 +19217,74 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
           {bookingsView === 'LIST' && (<>
 
-          {/* ────────────────────────────────────────────────────────────────
-              P2-B-FIX-2 — Groups panel (collapsible). Lists every booking
-              group with at-a-glance status + room counts. Click a group to
-              see its rooms / settle status, with one-click actions:
-                • 📑 Download consolidated invoice
-                • 📧 Email consolidated invoice
-                • Settle Group (if any CHECKED_IN children remain)
-              Collapsed by default; lazy-fetches on first expand so tenants
-              that don't use groups pay zero network cost. */}
-          <div className="bg-white rounded-2xl border border-violet-200 shadow-sm overflow-hidden">
-            {/* Groups panel header */}
-            <div
-              className="px-5 py-3.5 cursor-pointer select-none hover:bg-violet-50/40 transition-colors flex items-center justify-between"
-              onClick={async () => {
-                const next = !groupsPanelOpen;
-                setGroupsPanelOpen(next);
-                if (next && groupsList === null) {
-                  setGroupsLoading(true);
-                  try {
-                    const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups`, { headers: { Authorization: `Bearer ${token}` } });
-                    if (res.ok) setGroupsList(await res.json()); else setGroupsList([]);
-                  } catch { setGroupsList([]); }
-                  finally { setGroupsLoading(false); }
-                }
-              }}
-            >
-              <div className="flex items-center gap-2.5">
-                <span className="text-violet-600 text-sm">📁</span>
-                <span className="font-bold text-sm text-violet-800 tracking-wide uppercase">Booking Groups</span>
-                {groupsList !== null && (
-                  <span className="text-[10px] font-bold uppercase tracking-widest bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">
-                    {groupsList.length} group{groupsList.length === 1 ? '' : 's'}
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {groupsList && groupsList.length > 0 && (
+          {/* ── Sub-tab strip: Reservations / Groups / Room Assignment ── */}
+          {(() => {
+            const today = new Date().toISOString().slice(0, 10);
+            const horizon = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+            const raCount = hotelBookings.filter((b: any) =>
+              String(b.status || '').toUpperCase() === 'BOOKED' &&
+              String(b.check_in_date || '').slice(0, 10) >= today &&
+              String(b.check_in_date || '').slice(0, 10) <= horizon
+            ).length;
+            const subTabs: { key: 'RESERVATIONS'|'GROUPS'|'ROOM_ASSIGN'; icon: string; label: string; count: number|null }[] = [
+              { key: 'RESERVATIONS', icon: '📋', label: 'Reservations', count: hotelBookings.filter((b:any) => b.status !== 'CHECKED_OUT' && b.status !== 'CANCELLED').length },
+              { key: 'GROUPS',       icon: '📁', label: 'Groups',       count: groupsList ? groupsList.length : null },
+              { key: 'ROOM_ASSIGN',  icon: '🛏',  label: 'Room Assignment', count: raCount || null },
+            ];
+            return (
+              <div className="flex items-stretch bg-white border border-[#cc5a16]/10 rounded-2xl overflow-hidden mb-4 shadow-sm">
+                {subTabs.map((tab, i) => (
                   <button
+                    key={tab.key}
                     type="button"
-                    onClick={e => { e.stopPropagation(); exportGroupsCsv(); }}
-                    className="px-2.5 py-1 rounded-lg border border-violet-200 text-violet-700 text-[10px] font-bold hover:bg-violet-50 flex items-center gap-1"
-                  >⬇ CSV</button>
-                )}
-                <ChevronDown size={15} className={cn('text-violet-400 transition-transform', !groupsPanelOpen && '-rotate-90')} />
+                    onClick={() => setBookingSubTab(tab.key)}
+                    className={cn(
+                      "flex items-center justify-center gap-2 px-6 py-3 text-[12px] font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-1",
+                      i < subTabs.length - 1 ? "border-r border-[#cc5a16]/10" : "",
+                      bookingSubTab === tab.key
+                        ? "bg-[#cc5a16] text-white"
+                        : "text-[#6b5d52] hover:bg-[#faf7f2]"
+                    )}
+                  >
+                    <span>{tab.icon}</span>
+                    <span>{tab.label}</span>
+                    {tab.count !== null && tab.count > 0 && (
+                      <span className={cn("px-1.5 py-0.5 rounded-full text-[10px] font-bold min-w-[18px] text-center",
+                        bookingSubTab === tab.key ? "bg-white/25 text-white" : "bg-[#cc5a16]/10 text-[#cc5a16]"
+                      )}>{tab.count}</span>
+                    )}
+                  </button>
+                ))}
               </div>
-            </div>
-            {groupsPanelOpen && (
-              <div className="border-t border-violet-100">
-                {groupsLoading && <p className="px-5 py-4 text-xs text-[#6b5d52] italic">Loading groups…</p>}
+            );
+          })()}
+
+          {/* ── GROUPS sub-tab ─────────────────────────────────────────── */}
+          {bookingSubTab === 'GROUPS' && (
+            <div className="space-y-4">
+              {/* Groups header with actions */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <h2 className="font-bold text-[#1a1208] text-base tracking-wide">📁 Booking Groups</h2>
+                  {groupsList !== null && (
+                    <span className="text-[10px] font-bold uppercase tracking-widest bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">
+                      {groupsList.length} group{groupsList.length === 1 ? '' : 's'}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {groupsList && groupsList.length > 0 && (
+                    <button type="button" onClick={() => exportGroupsCsv()} className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#cc5a16] text-[11px] font-bold hover:bg-[#faf7f2] flex items-center gap-1">⬇ CSV</button>
+                  )}
+                  <button type="button" onClick={() => { setGroupsLoading(true); fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.ok ? r.json() : []).then((d: any[]) => setGroupsList(d)).catch(()=>setGroupsList([])).finally(()=>setGroupsLoading(false)); }} className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2]">↻ Refresh</button>
+                  <button type="button" onClick={openGroupBookingModal} className="px-4 py-1.5 rounded-lg bg-[#cc5a16] text-white text-[11px] font-bold hover:bg-[#a84612] flex items-center gap-1"><Plus size={12}/> New Group</button>
+                </div>
+              </div>
+              {/* Groups table */}
+              <div className="bg-white rounded-2xl border border-violet-200 shadow-sm overflow-hidden">
+                {groupsLoading && <p className="px-5 py-6 text-xs text-[#6b5d52] italic text-center">Loading groups…</p>}
                 {!groupsLoading && groupsList !== null && groupsList.length === 0 && (
-                  <p className="px-5 py-4 text-xs text-[#6b5d52] italic">No booking groups yet. Use the &quot;+ Group&quot; button to create one.</p>
+                  <p className="px-5 py-6 text-xs text-[#6b5d52] italic text-center">No booking groups yet. Use &quot;New Group&quot; to create one.</p>
                 )}
                 {!groupsLoading && groupsList && groupsList.length > 0 && (() => {
                   const toggleGroupSort = (col: string) => setGroupsSort(s => s.col === col ? {...s, dir: s.dir === 'asc' ? 'desc' : 'asc'} : {col, dir:'asc'});
@@ -19270,40 +19299,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   });
                   const sorted = [...filtered].sort((a: any, b: any) => {
                     const dir = groupsSort.dir === 'asc' ? 1 : -1;
-                    const av = groupsSort.col === 'total' ? Number(a.total_amount||0)
-                      : groupsSort.col === 'rooms' ? Number(a.booking_count||0)
-                      : String(a[groupsSort.col]||'');
-                    const bv = groupsSort.col === 'total' ? Number(b.total_amount||0)
-                      : groupsSort.col === 'rooms' ? Number(b.booking_count||0)
-                      : String(b[groupsSort.col]||'');
+                    const av = groupsSort.col === 'total' ? Number(a.total_amount||0) : groupsSort.col === 'rooms' ? Number(a.booking_count||0) : String(a[groupsSort.col]||'');
+                    const bv = groupsSort.col === 'total' ? Number(b.total_amount||0) : groupsSort.col === 'rooms' ? Number(b.booking_count||0) : String(b[groupsSort.col]||'');
                     return av < bv ? -dir : av > bv ? dir : 0;
                   });
-                  const thCls = 'px-3 py-2.5 text-left cursor-pointer select-none hover:text-violet-800 whitespace-nowrap relative';
+                  const thCls = 'px-3 py-3 text-left cursor-pointer select-none hover:text-violet-800 whitespace-nowrap relative text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]';
                   const resizeHandle = (key: string) => (
-                    <div
-                      onMouseDown={e => startGroupColResize(key, e)}
-                      onClick={e => e.stopPropagation()}
-                      className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-violet-300/50 select-none"
-                    />
+                    <div onMouseDown={e => startGroupColResize(key, e)} onClick={e => e.stopPropagation()} className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-violet-300/50 select-none" />
                   );
                   return (
                     <div>
-                      {/* Search bar */}
-                      <div className="px-4 py-2.5 border-b border-violet-50 bg-violet-50/30">
-                        <input
-                          type="text"
-                          placeholder="Search groups by name, contact, phone…"
-                          value={groupsSearch}
-                          onChange={e => setGroupsSearch(e.target.value)}
-                          className="w-full max-w-xs px-3 py-1.5 text-xs rounded-lg border border-violet-200 bg-white focus:outline-none focus:ring-1 ring-violet-400 placeholder-[#9c8e85]"
-                        />
-                        {groupsSearch && (
-                          <span className="ml-2 text-[10px] text-violet-600 font-semibold">{sorted.length} of {groupsList.length} shown</span>
-                        )}
+                      <div className="px-4 py-3 border-b border-violet-50 bg-violet-50/30 flex items-center gap-3">
+                        <input type="text" placeholder="Search groups by name, contact, phone…" value={groupsSearch} onChange={e => setGroupsSearch(e.target.value)}
+                          className="w-full max-w-sm px-3 py-1.5 text-xs rounded-lg border border-violet-200 bg-white focus:outline-none focus:ring-1 ring-violet-400 placeholder-[#9c8e85]" />
+                        {groupsSearch && <span className="text-[10px] text-violet-600 font-semibold">{sorted.length} of {groupsList.length}</span>}
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full text-xs min-w-[800px]">
-                          <thead className="bg-violet-50/60 text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                          <thead className="bg-violet-50/60">
                             <tr>
                               <th className={thCls} style={{width: groupColWidths['g_name']||undefined}} onClick={() => toggleGroupSort('name')}>Name{gArrow('name')}{resizeHandle('g_name')}</th>
                               <th className={thCls} style={{width: groupColWidths['g_contact']||undefined}} onClick={() => toggleGroupSort('contact_name')}>Contact{gArrow('contact_name')}{resizeHandle('g_contact')}</th>
@@ -19311,114 +19324,44 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               <th className={cn(thCls,'text-right')} style={{width: groupColWidths['g_rooms']||undefined}} onClick={() => toggleGroupSort('rooms')}>Rooms{gArrow('rooms')}{resizeHandle('g_rooms')}</th>
                               <th className={cn(thCls,'text-right')} style={{width: groupColWidths['g_total']||undefined}} onClick={() => toggleGroupSort('total')}>Total{gArrow('total')}{resizeHandle('g_total')}</th>
                               <th className={thCls} style={{width: groupColWidths['g_status']||undefined}} onClick={() => toggleGroupSort('group_status')}>Status{gArrow('group_status')}{resizeHandle('g_status')}</th>
-                              <th className="px-3 py-2.5 text-right">Actions</th>
+                              <th className="px-3 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Actions</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {sorted.length === 0 && (
-                              <tr><td colSpan={7} className="px-4 py-4 text-center text-xs text-[#9c8e85] italic">No groups match the search</td></tr>
-                            )}
+                            {sorted.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-xs text-[#9c8e85] italic">No groups match the search</td></tr>}
                             {sorted.map((g: any) => {
                               const settled = !!g.invoice_number;
                               const hasCheckedIn = Number(g.checked_in_count || 0) > 0;
                               return (
                                 <tr key={g.id} className="border-b border-violet-50 hover:bg-violet-50/30">
                                   <td className="px-3 py-2.5 font-bold text-[#1a1208]">{g.name || '(unnamed)'}</td>
-                                  <td className="px-3 py-2.5 text-[#3d3128]">
-                                    {g.contact_name || '—'}
-                                    {(g.contact_phone || g.contact_email) && <div className="text-[10px] text-[#9c8e85]">{g.contact_phone || g.contact_email}</div>}
-                                  </td>
-                                  <td className="px-3 py-2.5 text-[#3d3128] whitespace-nowrap">
-                                    {g.check_in_date ? formatDateForTenant(g.check_in_date, restaurant?.date_format) : '—'}<br/>
-                                    <span className="text-[10px] text-[#9c8e85]">→ {g.check_out_date ? formatDateForTenant(g.check_out_date, restaurant?.date_format) : '—'}</span>
-                                  </td>
-                                  <td className="px-3 py-2.5 text-right font-mono">
-                                    {g.booking_count || 0}
-                                    <div className="text-[10px]"><span className="text-emerald-700">{g.checked_in_count||0} in</span> · <span className="text-[#9c8e85]">{g.checked_out_count||0} out</span></div>
-                                  </td>
+                                  <td className="px-3 py-2.5 text-[#3d3128]">{g.contact_name || '—'}{(g.contact_phone||g.contact_email)&&<div className="text-[10px] text-[#9c8e85]">{g.contact_phone||g.contact_email}</div>}</td>
+                                  <td className="px-3 py-2.5 text-[#3d3128] whitespace-nowrap">{g.check_in_date ? formatDateForTenant(g.check_in_date, restaurant?.date_format) : '—'}<br/><span className="text-[10px] text-[#9c8e85]">→ {g.check_out_date ? formatDateForTenant(g.check_out_date, restaurant?.date_format) : '—'}</span></td>
+                                  <td className="px-3 py-2.5 text-right font-mono">{g.booking_count||0}<div className="text-[10px]"><span className="text-emerald-700">{g.checked_in_count||0} in</span> · <span className="text-[#9c8e85]">{g.checked_out_count||0} out</span></div></td>
                                   <td className="px-3 py-2.5 text-right font-mono font-semibold">₹{Number(g.total_amount||0).toLocaleString('en-IN')}</td>
                                   <td className="px-3 py-2.5">
-                                    {settled
-                                      ? <span className="text-[10px] font-bold uppercase tracking-widest bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded">Settled · {g.invoice_number}</span>
-                                      : g.group_status === 'CANCELLED'
-                                      ? <span className="text-[10px] font-bold uppercase tracking-widest bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">Cancelled</span>
-                                      : g.group_status === 'CONFIRMED'
-                                      ? <span className="text-[10px] font-bold uppercase tracking-widest bg-green-100 text-green-800 px-1.5 py-0.5 rounded">Confirmed</span>
+                                    {settled ? <span className="text-[10px] font-bold uppercase tracking-widest bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded">Settled · {g.invoice_number}</span>
+                                      : g.group_status === 'CANCELLED' ? <span className="text-[10px] font-bold uppercase tracking-widest bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">Cancelled</span>
+                                      : g.group_status === 'CONFIRMED' ? <span className="text-[10px] font-bold uppercase tracking-widest bg-green-100 text-green-800 px-1.5 py-0.5 rounded">Confirmed</span>
                                       : <span className="text-[10px] font-bold uppercase tracking-widest bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">Tentative</span>}
                                   </td>
                                   <td className="px-3 py-2.5 text-right">
                                     <div className="flex gap-1 justify-end flex-wrap">
                                       {!settled && g.group_status !== 'CANCELLED' && g.group_status !== 'CONFIRMED' && (
-                                        <button onClick={async () => {
-                                          try {
-                                            const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ status: 'CONFIRMED' }) });
-                                            if (!res.ok) throw new Error((await res.json())?.error || 'Failed');
-                                            setGroupsList(null); setGroupsPanelOpen(false); setTimeout(() => setGroupsPanelOpen(true), 50);
-                                          } catch (err: any) { alert(err.message); }
-                                        }} className="px-2 py-1 rounded-lg bg-green-600 text-white text-[10px] font-bold hover:bg-green-700">Confirm</button>
+                                        <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CONFIRMED'})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); } catch (err:any) { alert(err.message); } }} className="px-2 py-1 rounded-lg bg-green-600 text-white text-[10px] font-bold hover:bg-green-700">Confirm</button>
                                       )}
                                       {!settled && g.group_status !== 'CANCELLED' && (
-                                        <button onClick={async () => {
-                                          const reason = prompt(`Cancel group "${g.name}"? Enter reason (optional):`);
-                                          if (reason === null) return;
-                                          try {
-                                            const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ status: 'CANCELLED', reason: reason.trim() || null }) });
-                                            if (!res.ok) throw new Error((await res.json())?.error || 'Failed');
-                                            setGroupsList(null); setGroupsPanelOpen(false); setTimeout(() => setGroupsPanelOpen(true), 50);
-                                            fetchHotelBookings();
-                                          } catch (err: any) { alert(err.message); }
-                                        }} className="px-2 py-1 rounded-lg border border-red-300 text-red-600 text-[10px] font-bold hover:bg-red-50">Cancel</button>
+                                        <button onClick={async () => { const reason = prompt(`Cancel group "${g.name}"? Enter reason (optional):`); if (reason===null) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CANCELLED',reason:reason.trim()||null})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { alert(err.message); } }} className="px-2 py-1 rounded-lg border border-red-300 text-red-600 text-[10px] font-bold hover:bg-red-50">Cancel</button>
                                       )}
                                       {hasCheckedIn && (
-                                        <button onClick={async () => {
-                                          const method = prompt(`Settle "${g.name}" (${g.checked_in_count} CHECKED_IN room${g.checked_in_count === 1 ? '' : 's'}). Payment method?`, 'CASH');
-                                          if (!method) return;
-                                          const discountStr = prompt('Group discount in ₹ (split proportionally)?', '0');
-                                          if (discountStr === null) return;
-                                          try {
-                                            const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ payment_method: method.toUpperCase(), discount: Math.max(0, Number(discountStr) || 0) }) });
-                                            const data = await res.json();
-                                            if (!res.ok) throw new Error(data?.error || 'Settle failed');
-                                            alert(`Settled. Invoice: ${data.invoice_number}\nTotal: ₹${Number(data.total_grand_total||0).toLocaleString('en-IN')}`);
-                                            setGroupsList(null); setGroupsPanelOpen(false); setTimeout(() => setGroupsPanelOpen(true), 50);
-                                            fetchHotelBookings();
-                                          } catch (err: any) { alert(err.message); }
-                                        }} className="px-2 py-1 rounded-lg bg-violet-600 text-white text-[10px] font-bold hover:bg-violet-700">Settle</button>
+                                        <button onClick={async () => { const method = prompt(`Settle "${g.name}" (${g.checked_in_count} room${g.checked_in_count===1?'':'s'}). Payment method?`,'CASH'); if (!method) return; const ds = prompt('Group discount in ₹?','0'); if (ds===null) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkout`, {method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({payment_method:method.toUpperCase(),discount:Math.max(0,Number(ds)||0)})}); const data = await res.json(); if (!res.ok) throw new Error(data?.error||'Settle failed'); alert(`Settled. Invoice: ${data.invoice_number}\nTotal: ₹${Number(data.total_grand_total||0).toLocaleString('en-IN')}`); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { alert(err.message); } }} className="px-2 py-1 rounded-lg bg-violet-600 text-white text-[10px] font-bold hover:bg-violet-700">Settle</button>
                                       )}
-                                      <button onClick={async () => {
-                                        try {
-                                          const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
-                                          if (!res.ok) { const j = await res.json().catch(()=>({})); throw new Error(j?.error||'Download failed'); }
-                                          const blob = await res.blob();
-                                          const url = URL.createObjectURL(blob);
-                                          const a = document.createElement('a'); a.href = url; a.download = `GroupInvoice-${g.id}-${(g.name||'group').replace(/[^a-z0-9_-]+/gi,'-')}.pdf`;
-                                          document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},1000);
-                                        } catch (err: any) { alert(err.message); }
-                                      }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📑 PDF</button>
-                                      <button onClick={async () => {
-                                        const to = prompt(`Email invoice for "${g.name}" to:`, g.contact_email || '');
-                                        if (!to || !to.trim()) return;
-                                        try {
-                                          const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/email-invoice`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ to: to.trim() }) });
-                                          const data = await res.json();
-                                          if (!res.ok) throw new Error(data?.error || 'Email failed');
-                                          alert(`Invoice ${data.invoice_number} sent to ${data.sent_to}`);
-                                        } catch (err: any) { alert(err.message); }
-                                      }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📧 Email</button>
-                                      <button onClick={async () => {
-                                        setMasterFolioGroupId(g.id); setMasterFolioData(null); setMasterFolioLoading(true);
-                                        setMasterFolioAddDesc(''); setMasterFolioAddAmt(''); setMasterFolioAddGst('0'); setMasterFolioAddQty('1'); setMasterFolioAddType('SERVICE');
-                                        try {
-                                          const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/master-folio`, { headers: { Authorization: `Bearer ${token}` } });
-                                          const d = await r.json();
-                                          if (!r.ok) throw new Error(d?.error || 'Load failed');
-                                          setMasterFolioData(d);
-                                        } catch (err: any) { alert(err.message); setMasterFolioGroupId(null); }
-                                        finally { setMasterFolioLoading(false); }
-                                      }} className="px-2 py-1 rounded-lg border border-emerald-400 text-emerald-700 text-[10px] font-bold hover:bg-emerald-50">🏦 Master Acct</button>
+                                      <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/invoice-pdf`,{headers:{Authorization:`Bearer ${token}`}}); if (!res.ok){const j=await res.json().catch(()=>({}));throw new Error(j?.error||'Download failed');} const blob=await res.blob(); const url=URL.createObjectURL(blob); const a=document.createElement('a');a.href=url;a.download=`GroupInvoice-${g.id}-${(g.name||'group').replace(/[^a-z0-9_-]+/gi,'-')}.pdf`;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},1000); } catch(err:any){alert(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📑 PDF</button>
+                                      <button onClick={async () => { const to = prompt(`Email invoice for "${g.name}" to:`, g.contact_email||''); if (!to||!to.trim()) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/email-invoice`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({to:to.trim()})}); const data=await res.json(); if (!res.ok) throw new Error(data?.error||'Email failed'); alert(`Invoice ${data.invoice_number} sent to ${data.sent_to}`); } catch(err:any){alert(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📧 Email</button>
+                                      <button onClick={async () => { setMasterFolioGroupId(g.id);setMasterFolioData(null);setMasterFolioLoading(true);setMasterFolioAddDesc('');setMasterFolioAddAmt('');setMasterFolioAddGst('0');setMasterFolioAddQty('1');setMasterFolioAddType('SERVICE'); try { const r=await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/master-folio`,{headers:{Authorization:`Bearer ${token}`}}); const d=await r.json(); if (!r.ok) throw new Error(d?.error||'Load failed'); setMasterFolioData(d); } catch(err:any){alert(err.message);setMasterFolioGroupId(null);} finally{setMasterFolioLoading(false);} }} className="px-2 py-1 rounded-lg border border-emerald-400 text-emerald-700 text-[10px] font-bold hover:bg-emerald-50">🏦 Master Acct</button>
                                       <button onClick={() => loadGroupDetail(g.id)} className="px-2 py-1 rounded-lg border border-indigo-300 text-indigo-700 text-[10px] font-bold hover:bg-indigo-50">📋 Detail</button>
                                       {Number(g.booking_count) > Number(g.checked_in_count) + Number(g.checked_out_count) && !g.settled_at && (
-                                        <button onClick={() => setGroupCheckInWizardTarget({ groupId: g.id, groupName: g.name })} className="px-2 py-1 rounded-lg border border-green-400 text-green-700 text-[10px] font-bold hover:bg-green-50">✓ Check In Group</button>
+                                        <button onClick={() => setGroupCheckInWizardTarget({groupId:g.id,groupName:g.name})} className="px-2 py-1 rounded-lg border border-green-400 text-green-700 text-[10px] font-bold hover:bg-green-50">✓ Check In Group</button>
                                       )}
                                     </div>
                                   </td>
@@ -19432,8 +19375,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   );
                 })()}
               </div>
-            )}
-          </div>
+            </div>
+          )}
+
+          {/* ── ROOM ASSIGNMENT sub-tab ────────────────────────────────── */}
+          {bookingSubTab === 'ROOM_ASSIGN' && (
+            <RoomAssignmentBoard
+              restaurantId={restaurantId!}
+              token={token!}
+              bookings={hotelBookings}
+              rooms={hotelRooms}
+              onChanged={() => fetchHotelBookings()}
+              initialOpen={true}
+              hideHeader={true}
+            />
+          )}
+
+          {/* ── RESERVATIONS sub-tab ───────────────────────────────────── */}
+          {bookingSubTab === 'RESERVATIONS' && (<>
 
           {/* ── GROUP CHECK-IN WIZARD ────────────────────────────────────── */}
           {groupCheckInWizardTarget && (
@@ -19966,16 +19925,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             </div>
           )}
           {/* ── END PHASE-3 GROUP DETAIL DRAWER ──────────────────────────── */}
-
-          {/* Phase 2 — Room Assignment board: reassign FLOATING upcoming
-              bookings to a different room (or lock one) before arrival. */}
-          <RoomAssignmentBoard
-            restaurantId={restaurantId!}
-            token={token!}
-            bookings={hotelBookings}
-            rooms={hotelRooms}
-            onChanged={() => fetchHotelBookings()}
-          />
 
           {/* Today's Arrivals & Departures.
               Bug 5 fix — normaliseBookingDate handles both ISO strings
@@ -20697,6 +20646,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               )}
             </>)}
           </div>
+          </>)}{/* /bookingSubTab === 'RESERVATIONS' */}
+
           </>)}{/* /bookingsView === 'LIST' */}
         </div>
       ) : activeTab === 'RESTAURANT_REPORTS' && isRestaurantEnabled ? (
@@ -34309,8 +34260,10 @@ const RoomAssignmentBoard: React.FC<{
   bookings: any[];
   rooms: any[];
   onChanged: () => void;
-}> = ({ restaurantId, token, bookings, rooms, onChanged }) => {
-  const [open, setOpen] = useState(false);
+  initialOpen?: boolean;
+  hideHeader?: boolean;
+}> = ({ restaurantId, token, bookings, rooms, onChanged, initialOpen = false, hideHeader = false }) => {
+  const [open, setOpen] = useState(initialOpen);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [raSearch, setRaSearch] = useState('');
   const [raSort, setRaSort] = useState<{col:string;dir:'asc'|'desc'}>({col:'check_in_date',dir:'asc'});
@@ -34421,6 +34374,7 @@ const RoomAssignmentBoard: React.FC<{
   return (
     <div className="bg-white rounded-3xl border border-[#cc5a16]/10 overflow-hidden shadow-sm">
       {/* Panel header */}
+      {!hideHeader && (
       <div
         className="flex items-center justify-between px-5 py-4 cursor-pointer hover:bg-[#faf7f2]/50 transition-colors"
         onClick={() => setOpen(v => !v)}
@@ -34439,8 +34393,9 @@ const RoomAssignmentBoard: React.FC<{
           <ChevronDown size={16} className={cn('text-[#9c8e85] transition-transform', !open && '-rotate-90')} />
         </div>
       </div>
-      {open && (
-        <div className="border-t border-[#cc5a16]/10">
+      )}
+      {(open || hideHeader) && (
+        <div className={hideHeader ? "" : "border-t border-[#cc5a16]/10"}>
           {/* Search bar */}
           <div className="px-5 py-2.5 border-b border-[#cc5a16]/5 bg-[#faf7f2]/40 flex items-center gap-3">
             <input
