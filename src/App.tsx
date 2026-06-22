@@ -8308,6 +8308,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [bookingViewTab, setBookingViewTab] = useState<'ARR'|'INH'|'DEP'|'UPC'|'HIS'>('INH');
   const [colWidths, setColWidths] = useState<Record<string,number>>({});
   const colWidthsRef = useRef<Record<string,number>>({});
+  const [openActionMenu, setOpenActionMenu] = useState<string|null>(null);
   // Reservations table — client-side sort + live filter (13 Jun 2026 fix).
   // The "All bookings" table had no sort and clipped its right-hand columns,
   // so checked-in guests were hard to locate. displayedBookings sorts +
@@ -8484,6 +8485,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   };
+
+  useEffect(() => {
+    if (!openActionMenu) return;
+    const close = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest('[data-booking-action-menu]')) setOpenActionMenu(null);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [openActionMenu]);
 
   const [hotelFolios, setHotelFolios] = useState<any[]>([]);
   const [complianceList, setComplianceList] = useState<any[]>([]);
@@ -20436,96 +20447,25 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           )}
                         </td>
                         )}
-                        <td className="px-4 py-3 text-right sticky right-0 z-[1] bg-white group-hover:bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.08)]">
-                          <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                            {/* UI-1 / CHK-1 — Edit button: ONLY on BOOKED rows.
-                                After check-in (CHECKED_IN/OUT/CANCELLED) the
-                                server-side Req-3 guard locks all guest-facing
-                                fields, so showing an Edit button that would
-                                always 409 is bad UX. Edits during check-in
-                                happen inside the Check-In Wizard (CHK-2).
-                                Post-checkin, only credit notes can adjust. */}
+                        <td className="px-4 py-3 text-right sticky right-0 z-[2] bg-white group-hover:bg-[#faf7f2] shadow-[-2px_0_4px_-2px_rgba(0,0,0,0.08)]">
+                          <div className="flex items-center justify-end gap-1.5" data-booking-action-menu>
+                            {/* Primary CTA — the one thing staff must do for this row */}
                             {b.status === 'BOOKED' && (
                               <button
-                                onClick={() => { setEditingBooking({ ...b }); setShowBookingModal(true); }}
-                                title="Edit booking (phone, name, dates, etc.)"
-                                className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2]"
-                              >Edit</button>
+                                onClick={() => confirmAndCheckIn(b)}
+                                className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600 whitespace-nowrap"
+                              >Check In</button>
                             )}
-                            {/* UI-2 — Docs button: focused docs modal with upload
-                                + preview. Shows live count; turns amber if 0 docs
-                                on a BOOKED row + property requires ID at check-in. */}
-                            {b.status !== 'CANCELLED' && (() => {
-                              const count = Number(b.document_count || 0);
-                              const needsDocs = hotelSettings.require_id_at_checkin !== false
-                                                && b.status === 'BOOKED'
-                                                && count === 0;
-                              return (
-                                <button
-                                  onClick={() => setDocsTargetBooking({ ...b })}
-                                  title="View / upload ID documents"
-                                  className={cn(
-                                    "px-3 py-1.5 rounded-lg text-[11px] font-bold border",
-                                    needsDocs
-                                      ? "bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100"
-                                      : "bg-white border-[#cc5a16]/20 text-[#3d3128] hover:bg-[#faf7f2]"
-                                  )}
-                                >📄 Docs {count > 0 && <span className="font-mono opacity-70">· {count}</span>}{needsDocs && <span className="ml-1">⚠</span>}</button>
-                              );
-                            })()}
-                            {b.status === 'BOOKED' && <button onClick={() => confirmAndCheckIn(b)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-[11px] font-bold hover:bg-emerald-600">Check In</button>}
-                            {b.status === 'CHECKED_IN' && <button onClick={() => openMoveRoom(b)} title="Move this guest to another room of the same category (e.g. room issue)" className="px-3 py-1.5 rounded-lg border border-[#0f766e]/30 text-[#0f766e] text-[11px] font-bold hover:bg-[#0f766e]/5">🔄 Move room</button>}
-                            {b.status === 'CHECKED_IN' && <button onClick={() => openUpgradeRoom(b)} title="Complimentary upgrade — move guest to a different/higher category room at no extra charge (original rate kept)" className="px-3 py-1.5 rounded-lg border border-violet-300 text-violet-700 text-[11px] font-bold hover:bg-violet-50">⬆ Upgrade</button>}
-                            {b.status === 'CHECKED_IN' && <button onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }} className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608]">Check Out</button>}
-                            {/* ADV-PAY: "💰 Advance" button — record a deposit against this booking at
-                                any time (pre-checkin or mid-stay). Opens the AdvancePaymentModal. */}
-                            {(b.status === 'BOOKED' || b.status === 'CHECKED_IN') && (
+                            {b.status === 'CHECKED_IN' && (
                               <button
-                                onClick={() => {
-                                  setAdvancePayTarget(b);
-                                  setAdvanceDraft({ amount: '', method: 'CASH', reference: '' });
-                                }}
-                                title="Record advance / deposit payment"
-                                className="px-3 py-1.5 rounded-lg border border-amber-400 bg-amber-50 text-amber-800 text-[11px] font-bold hover:bg-amber-100"
-                              >💰 Advance</button>
+                                onClick={() => { setCheckoutBooking(b); setShowCheckoutModal(true); }}
+                                className="px-3 py-1.5 rounded-lg bg-[#b8860b] text-white text-[11px] font-bold hover:bg-[#8f6608] whitespace-nowrap"
+                              >Check Out</button>
                             )}
-                            {/* F&B / FOLIO: "📋 Folio" button — opens the folio directly from the
-                                bookings list so staff can add F&B charges, view invoice, and
-                                print/email without navigating to the separate Folios tab. Only
-                                shows for CHECKED_IN bookings (folios are created at check-in). */}
-                            {b.status === 'CHECKED_IN' && b.open_folio_id && (
-                              <button
-                                onClick={async () => {
-                                  try { await loadFolio(b.open_folio_id); }
-                                  catch (err: any) { alert(err?.message || 'Failed to load folio'); }
-                                }}
-                                title="Open folio — view charges, add F&B, download invoice"
-                                className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/30 bg-[#faf7f2] text-[#cc5a16] text-[11px] font-bold hover:bg-[#cc5a16]/10"
-                              >📋 Folio</button>
-                            )}
-                            {(b.status === 'BOOKED') && <button onClick={() => cancelBooking(b.id)} className="px-3 py-1.5 rounded-lg bg-[#fdf0f0] text-[#c13b3b] text-[11px] font-bold hover:bg-[#c13b3b]/10">Cancel</button>}
-                            {/* P2-B-FIX (client report "clubbed group invoice"):
-                                two group-level actions, shown on every row that
-                                belongs to a group (b.group_id set). Violet to
-                                match the Group badge. These were missing from
-                                the UI entirely — the backend endpoints existed
-                                but were unreachable.
-                                  • Settle Group — only when this row is
-                                    CHECKED_IN (implies the group has at least
-                                    one settle-eligible booking). One click
-                                    settles every CHECKED_IN child in the group
-                                    against one payment method and stamps one
-                                    consolidated invoice number.
-                                  • Group Inv — downloads the consolidated PDF
-                                    (which reuses the persisted invoice number
-                                    after settlement, or stamps + persists one
-                                    on first download for pre-settle preview). */}
+                            {/* Group settle — primary group CTA, stays outside overflow */}
                             {b.group_id && b.status === 'CHECKED_IN' && (
                               <button
                                 onClick={async () => {
-                                  // P2-B-FIX-2: prompt for payment method + optional
-                                  // group-level discount, distribute proportionally
-                                  // across child folios on the server side.
                                   const method = prompt(
                                     `Settle ALL rooms in group "${b.group_name || 'this group'}" as a single invoice.\n\nEvery CHECKED_IN room will be marked CHECKED_OUT and billed under one consolidated invoice number.\n\nPayment method? (CASH / CARD / UPI / BANK_TRANSFER)`,
                                     'CASH'
@@ -20553,68 +20493,122 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   } catch (err: any) { alert(err.message); }
                                 }}
                                 title="Settle every CHECKED_IN room in this group under one invoice"
-                                className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-[11px] font-bold hover:bg-violet-700"
+                                className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-[11px] font-bold hover:bg-violet-700 whitespace-nowrap"
                               >Settle Group</button>
                             )}
-                            {b.group_id && (
+                            {/* ··· overflow menu */}
+                            <div className="relative" data-booking-action-menu>
                               <button
-                                onClick={async () => {
-                                  try {
-                                    const res = await fetch(
-                                      `/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/invoice-pdf`,
-                                      { headers: { Authorization: `Bearer ${token}` } }
-                                    );
-                                    if (!res.ok) {
-                                      const j = await res.json().catch(() => ({}));
-                                      throw new Error(j?.error || `Download failed (${res.status})`);
-                                    }
-                                    const blob = await res.blob();
-                                    const url = URL.createObjectURL(blob);
-                                    const a = document.createElement('a');
-                                    a.href = url;
-                                    a.download = `GroupInvoice-${b.group_id}-${(b.group_name || 'group').replace(/[^a-z0-9_-]+/gi, '-')}.pdf`;
-                                    document.body.appendChild(a); a.click();
-                                    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-                                  } catch (err: any) { alert(err.message); }
-                                }}
-                                title="Download one consolidated PDF for the whole group"
-                                className="px-3 py-1.5 rounded-lg border border-violet-300 text-violet-700 text-[11px] font-bold hover:bg-violet-50"
-                              >📑 Group Inv</button>
-                            )}
-                            {b.group_id && (
-                              <button
-                                onClick={async () => {
-                                  // P2-B-FIX-2: email the consolidated group invoice.
-                                  // Recipient defaults to group.contact_email; staff
-                                  // can override with prompt to send to any address.
-                                  const fallback = b.guest_email || '';
-                                  const to = prompt(
-                                    `Email the consolidated group invoice for "${b.group_name || 'this group'}" to:`,
-                                    fallback
-                                  );
-                                  if (!to || !to.trim()) return;
-                                  try {
-                                    const res = await fetch(
-                                      `/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/email-invoice`,
-                                      {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                        body: JSON.stringify({ to: to.trim() }),
-                                      }
-                                    );
-                                    const data = await res.json();
-                                    if (!res.ok) throw new Error(data?.error || `Email failed (${res.status})`);
-                                    alert(`Group invoice ${data.invoice_number} emailed to ${data.sent_to}.\nTotal: ₹${Number(data.total_amount || 0).toLocaleString('en-IN')}`);
-                                  } catch (err: any) { alert(err.message); }
-                                }}
-                                title="Email the consolidated group invoice"
-                                className="px-3 py-1.5 rounded-lg border border-violet-300 text-violet-700 text-[11px] font-bold hover:bg-violet-50"
-                              >📧 Email Group Inv</button>
-                            )}
-                            {/* Phase H1 — channel re-sync. Only shown for OTA-sourced bookings */}
-                            {b.booking_source && !['DIRECT','WALKIN',''].includes(String(b.booking_source).toUpperCase()) && (
-                              <button onClick={() => resyncBookingToChannel(b)} title="Re-sync to channel manager" className="px-3 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[11px] font-bold hover:bg-[#faf7f2]">Re-sync</button>
-                            )}
+                                type="button"
+                                onClick={() => setOpenActionMenu(openActionMenu === b.id ? null : b.id)}
+                                className="px-2.5 py-1.5 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[13px] font-bold hover:bg-[#faf7f2] leading-none select-none"
+                                title="More actions"
+                                data-booking-action-menu
+                              >···</button>
+                              {openActionMenu === b.id && (() => {
+                                const docCount = Number(b.document_count || 0);
+                                const needsDocs = hotelSettings.require_id_at_checkin !== false && b.status === 'BOOKED' && docCount === 0;
+                                const isOta = b.booking_source && !['DIRECT','WALKIN','WALK_IN',''].includes(String(b.booking_source).toUpperCase());
+                                const menuItemCls = "w-full px-4 py-2 text-left text-[12px] text-[#1a1208] hover:bg-[#faf7f2] flex items-center gap-2 whitespace-nowrap";
+                                const menuItemDestructCls = "w-full px-4 py-2 text-left text-[12px] text-red-600 hover:bg-red-50 flex items-center gap-2 whitespace-nowrap";
+                                const sep = <div className="my-1 border-t border-[#cc5a16]/10" />;
+                                return (
+                                  <div
+                                    className="absolute right-0 top-full mt-1 z-50 bg-white rounded-xl border border-[#cc5a16]/15 shadow-2xl py-1 min-w-[180px] text-left"
+                                    data-booking-action-menu
+                                  >
+                                    {/* Edit — BOOKED only */}
+                                    {b.status === 'BOOKED' && (
+                                      <button className={menuItemCls} onClick={() => { setEditingBooking({ ...b }); setShowBookingModal(true); setOpenActionMenu(null); }}>
+                                        ✏️ Edit booking
+                                      </button>
+                                    )}
+                                    {/* Documents */}
+                                    {b.status !== 'CANCELLED' && (
+                                      <button
+                                        className={cn(menuItemCls, needsDocs ? "text-amber-800 bg-amber-50 hover:bg-amber-100" : "")}
+                                        onClick={() => { setDocsTargetBooking({ ...b }); setOpenActionMenu(null); }}
+                                      >
+                                        📄 Documents{docCount > 0 ? ` (${docCount})` : ''}{needsDocs ? ' ⚠' : ''}
+                                      </button>
+                                    )}
+                                    {/* Advance payment */}
+                                    {(b.status === 'BOOKED' || b.status === 'CHECKED_IN') && (
+                                      <button className={menuItemCls} onClick={() => { setAdvancePayTarget(b); setAdvanceDraft({ amount: '', method: 'CASH', reference: '' }); setOpenActionMenu(null); }}>
+                                        💰 Record advance
+                                      </button>
+                                    )}
+                                    {/* Folio — CHECKED_IN with open folio */}
+                                    {b.status === 'CHECKED_IN' && b.open_folio_id && (
+                                      <button className={menuItemCls} onClick={async () => { setOpenActionMenu(null); try { await loadFolio(b.open_folio_id); } catch (err: any) { alert(err?.message || 'Failed to load folio'); } }}>
+                                        📋 Open folio
+                                      </button>
+                                    )}
+                                    {/* Room operations — CHECKED_IN */}
+                                    {b.status === 'CHECKED_IN' && sep}
+                                    {b.status === 'CHECKED_IN' && (
+                                      <button className={menuItemCls} onClick={() => { openMoveRoom(b); setOpenActionMenu(null); }}>
+                                        🔄 Move room
+                                      </button>
+                                    )}
+                                    {b.status === 'CHECKED_IN' && (
+                                      <button className={menuItemCls} onClick={() => { openUpgradeRoom(b); setOpenActionMenu(null); }}>
+                                        ⬆ Upgrade room
+                                      </button>
+                                    )}
+                                    {/* Group document actions */}
+                                    {b.group_id && sep}
+                                    {b.group_id && (
+                                      <button className={menuItemCls} onClick={async () => {
+                                        setOpenActionMenu(null);
+                                        try {
+                                          const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
+                                          if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || `Download failed (${res.status})`); }
+                                          const blob = await res.blob();
+                                          const url = URL.createObjectURL(blob);
+                                          const a = document.createElement('a');
+                                          a.href = url; a.download = `GroupInvoice-${b.group_id}-${(b.group_name || 'group').replace(/[^a-z0-9_-]+/gi, '-')}.pdf`;
+                                          document.body.appendChild(a); a.click();
+                                          setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+                                        } catch (err: any) { alert(err.message); }
+                                      }}>
+                                        📑 Group invoice PDF
+                                      </button>
+                                    )}
+                                    {b.group_id && (
+                                      <button className={menuItemCls} onClick={async () => {
+                                        setOpenActionMenu(null);
+                                        const fallback = b.guest_email || '';
+                                        const to = prompt(`Email the consolidated group invoice for "${b.group_name || 'this group'}" to:`, fallback);
+                                        if (!to || !to.trim()) return;
+                                        try {
+                                          const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/email-invoice`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ to: to.trim() }) });
+                                          const data = await res.json();
+                                          if (!res.ok) throw new Error(data?.error || `Email failed (${res.status})`);
+                                          alert(`Group invoice ${data.invoice_number} emailed to ${data.sent_to}.\nTotal: ₹${Number(data.total_amount || 0).toLocaleString('en-IN')}`);
+                                        } catch (err: any) { alert(err.message); }
+                                      }}>
+                                        📧 Email group invoice
+                                      </button>
+                                    )}
+                                    {/* OTA re-sync */}
+                                    {isOta && sep}
+                                    {isOta && (
+                                      <button className={menuItemCls} onClick={() => { resyncBookingToChannel(b); setOpenActionMenu(null); }}>
+                                        🔁 Re-sync to channel
+                                      </button>
+                                    )}
+                                    {/* Destructive — Cancel */}
+                                    {b.status === 'BOOKED' && sep}
+                                    {b.status === 'BOOKED' && (
+                                      <button className={menuItemDestructCls} onClick={() => { cancelBooking(b.id); setOpenActionMenu(null); }}>
+                                        ✕ Cancel booking
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                            </div>
                           </div>
                         </td>
                       </tr>
