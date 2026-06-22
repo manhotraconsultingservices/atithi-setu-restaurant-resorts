@@ -20519,7 +20519,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 return (
                                   <div
                                     style={{ position: 'fixed', top: actionMenuPos?.top ?? 0, right: actionMenuPos?.right ?? 0, zIndex: 9999 }}
-                                    className="bg-white rounded-xl border border-[#cc5a16]/15 shadow-2xl py-1 min-w-[180px] text-left"
+                                    className="bg-white rounded-xl border border-[#cc5a16]/15 shadow-2xl py-1 min-w-[220px] w-max text-left"
                                     data-booking-action-menu
                                   >
                                     {/* Edit — BOOKED only */}
