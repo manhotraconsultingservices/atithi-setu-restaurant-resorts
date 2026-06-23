@@ -9956,13 +9956,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
   useEffect(() => {
     if (!restaurantId || restaurantId === 'null' || restaurantId === 'undefined') return;
-    fetchMenu();
-    fetchReports();
+    // SPA sub-tabs don't need kitchen/restaurant-floor data. Skipping those
+    // 4 fetches per tab switch cuts ~50 requests off a full SPA navigation
+    // sweep, keeping well clear of the global 200-req/min rate limit.
+    const isSpaTab = activeTab.startsWith('SPA_');
+    if (!isSpaTab) {
+      fetchMenu();
+      fetchReports();
+      fetchTables();
+      fetchOrders();
+    }
     fetchRestaurant();
-    fetchTables();
     fetchStaff();
     fetchCustomRoles();
-    fetchOrders();
     fetchOwnerProfile();
     if (activeTab === 'FEEDBACK') fetchFeedback();
     if (activeTab === 'NOTIFICATIONS') fetchNotificationSettings();

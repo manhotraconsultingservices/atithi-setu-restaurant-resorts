@@ -5229,12 +5229,14 @@ async function startServer() {
     message: { error: "Too many OTP requests for this number. Please wait an hour." },
   });
 
-  // Global default — 200 reqs/min per IP. Real users browse far below this;
-  // bots scraping the menu hit it within seconds. Excludes /api/version and
-  // the public health endpoint so monitoring isn't tarpitted.
+  // Global default — 500 reqs/min per IP. The SPA module has 9 sub-tabs, each
+  // switching fires ~8 base fetches from the main useEffect + 1-3 component
+  // fetches. A full navigation sweep costs ~90 requests; 200 was too tight
+  // for a power user exploring the module. 500 still blocks bots effectively
+  // while giving legitimate staff sessions enough headroom.
   const globalLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 200,
+    max: 500,
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => {
