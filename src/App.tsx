@@ -12884,6 +12884,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'SPA_CLIENTS',      label: 'Clients' },
               { id: 'SPA_PACKAGES',     label: 'Packages & Memberships' },
               { id: 'SPA_REPORTS',      label: 'Spa Reports' },
+              { id: 'SPA_BILLING',      label: 'Billing & Settlements' },
               { id: 'SPA_SETTINGS',     label: 'Public Page Settings' },
             ],
           },
@@ -12897,7 +12898,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'PROCUREMENT',     label: 'Payables & Procurement' },
               { id: 'EXPENSE_JOURNAL', label: 'Expense Journal' },
               { id: 'RECEIVABLES',     label: 'OTA & Agent Receivables', requires: 'hotel' },
-              { id: 'SPA_BILLING',     label: 'Spa Billing & Settlements', requires: 'spa' },
               ...(isOwnerOrAdmin ? [
                 { id: 'ACCOUNTS_VENDOR_AGING', label: 'Vendor Aging' } as NavTab,
                 { id: 'ACCOUNTS_PNL',          label: 'P&L Report' } as NavTab,
@@ -12975,7 +12975,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
           // visibility still flows through isTabVisible (V3 fix handles it).
-          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING' || id === 'SPA_BILLING') && isOwnerOrAdmin) return true;
+          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING') && isOwnerOrAdmin) return true;
+          if (id === 'SPA_BILLING' && isSpaEnabled) return true;
           return isTabVisible(id, effectiveAllowedTabs);
         };
         // A page shows when RBAC allows it AND the tenant has the relevant
@@ -16953,9 +16954,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-4 py-2 text-right font-mono font-bold text-[#1a1208]">{fmt(f.grand_total)}</td>
                             <td className="px-4 py-2 text-[#6b5d52] text-xs capitalize">{(f.payment_method||'').toLowerCase()}</td>
                             <td className="px-4 py-2">
-                              <a href={`/api/restaurant/${restaurantId}/spa/folios/${f.id}/invoice.pdf`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs font-bold text-[#cc5a16] hover:underline whitespace-nowrap">
+                              <button onClick={async () => { try { const r = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${f.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await r.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${f.invoice_number || f.id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }} className="inline-flex items-center gap-1 text-xs font-bold text-[#cc5a16] hover:underline whitespace-nowrap cursor-pointer">
                                 <FileText size={12} /> Invoice
-                              </a>
+                              </button>
                             </td>
                           </tr>
                         ))}

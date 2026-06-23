@@ -396,7 +396,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                   {['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'check-in')}>Check-in</button>}
                   {['CHECKED_IN', 'IN_PROGRESS', 'CONFIRMED', 'BOOKED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'complete')}><Check size={12} /> Complete</button>}
                   {r.status === 'COMPLETED' && !r.folio_id && <button className={BTN_PRIMARY} onClick={() => { setCoAppt(r); setCoResult(null); setCoState({ use_package: false, apply_membership: false, tip_amount: '', payment_method: 'CASH' }); }}>Checkout</button>}
-                  {r.folio_id && <a className={BTN_GHOST} href={`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`} target="_blank" rel="noreferrer"><FileText size={12} /> Invoice</a>}
+                  {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={12} /> Invoice</button>}
                   {!['COMPLETED', 'CANCELLED', 'NO_SHOW'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
                 </div>
               ) },
@@ -471,7 +471,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                 <p className="font-bold">Invoice {coResult.invoice_number}</p>
                 <p className="text-sm text-[#6b5d52] mb-1">Total {money(coResult.folio?.grand_total)}</p>
                 <p className="text-xs text-emerald-600 mb-4">Paid in full</p>
-                <a className={BTN_PRIMARY + ' inline-flex'} href={`/api/restaurant/${restaurantId}/spa/folios/${coResult.folio?.id}/invoice.pdf`} target="_blank" rel="noreferrer"><FileText size={13} /> Download Invoice</a>
+                <button className={BTN_PRIMARY + ' inline-flex'} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${coResult.folio?.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${coResult.invoice_number || coResult.folio?.id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={13} /> Download Invoice</button>
                 <div className="mt-3"><button className={BTN_GHOST + ' mx-auto'} onClick={() => setCoAppt(null)}>Close</button></div>
               </div>
             )}
