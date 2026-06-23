@@ -35435,7 +35435,7 @@ const AvailabilityCalendarV2: React.FC<{
 
       {/* Toolbar */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 border-b border-[#cc5a16]/10 bg-[#faf7f2]">
-        <span className="text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md bg-emerald-600 text-white">Calendar V2 · beta</span>
+        <span className="text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md bg-emerald-600 text-white">Calendar</span>
         <div className="flex items-center gap-1">
           <button onClick={() => shiftStart(-7)} className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs font-bold text-[#3d3128] hover:bg-white">‹ Prev week</button>
           <button onClick={() => setStart(new Date().toISOString().slice(0,10))} className="px-2 py-1.5 rounded-lg border border-[#cc5a16]/20 text-xs font-bold text-[#3d3128] hover:bg-white">Today</button>
