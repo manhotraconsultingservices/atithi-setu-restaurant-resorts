@@ -16934,6 +16934,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <th className="text-right px-4 py-3">GST</th>
                         <th className="text-right px-4 py-3">Total</th>
                         <th className="text-left px-4 py-3">Mode</th>
+                        <th className="px-4 py-3"></th>
                       </tr></thead>
                       <tbody>
                         {(d.folios as any[]).map((f: any) => (
@@ -16945,6 +16946,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-4 py-2 text-right font-mono text-rose-600">{fmt(f.gst_amount)}</td>
                             <td className="px-4 py-2 text-right font-mono font-bold text-[#1a1208]">{fmt(f.grand_total)}</td>
                             <td className="px-4 py-2 text-[#6b5d52] text-xs capitalize">{(f.payment_method||'').toLowerCase()}</td>
+                            <td className="px-4 py-2">
+                              <a href={`/api/restaurant/${restaurantId}/spa/folios/${f.id}/invoice.pdf`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs font-bold text-[#cc5a16] hover:underline whitespace-nowrap">
+                                <FileText size={12} /> Invoice
+                              </a>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
