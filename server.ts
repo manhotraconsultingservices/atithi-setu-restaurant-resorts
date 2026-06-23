@@ -23953,7 +23953,8 @@ ${data.tenant.name}`;
       const upc = rows.filter(b =>
         b.status === 'BOOKED' && String(b.check_in_date || '').slice(0, 10) > today
       ).length;
-      res.json({ arr, inh, dep, upc });
+      const his = rows.filter(b => b.status === 'CHECKED_OUT').length;
+      res.json({ arr, inh, dep, upc, his });
     } catch (err) {
       res.status(500).json({ error: "Failed to compute booking stats" });
     }

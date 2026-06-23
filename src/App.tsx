@@ -8347,7 +8347,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   );
   // Phase 2 & 3 state
   const [hotelBookings, setHotelBookings] = useState<any[]>([]);
-  const [bookingStats, setBookingStats] = useState<{arr:number;inh:number;dep:number;upc:number}>({arr:0,inh:0,dep:0,upc:0});
+  const [bookingStats, setBookingStats] = useState<{arr:number;inh:number;dep:number;upc:number;his:number}>({arr:0,inh:0,dep:0,upc:0,his:0});
   const [bookingViewTab, setBookingViewTab] = useState<'ARR'|'INH'|'DEP'|'UPC'|'HIS'>('INH');
   const [bookingSubTab, setBookingSubTab] = useState<'RESERVATIONS'|'GROUPS'|'ROOM_ASSIGN'>('RESERVATIONS');
   const [colWidths, setColWidths] = useState<Record<string,number>>({});
@@ -11813,7 +11813,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!isHotelEnabled) return;
     try {
       const d = await hotelApi('/bookings/stats');
-      setBookingStats({ arr: d.arr ?? 0, inh: d.inh ?? 0, dep: d.dep ?? 0, upc: d.upc ?? 0 });
+      setBookingStats({ arr: d.arr ?? 0, inh: d.inh ?? 0, dep: d.dep ?? 0, upc: d.upc ?? 0, his: d.his ?? 0 });
     } catch { /* non-critical — tiles degrade silently */ }
   };
   const fetchHotelFolios = async () => {
@@ -20040,11 +20040,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* Journey-stage tabs */}
           <div className="flex items-center gap-0 border border-[#cc5a16]/10 rounded-2xl overflow-hidden mb-4 bg-white">
             {([
-              { tab: 'ARR' as const, label: 'Arrivals',  count: bookingTabCounts.arr, pill: 'bg-emerald-100 text-emerald-700' },
-              { tab: 'INH' as const, label: 'In-house',  count: bookingTabCounts.inh, pill: 'bg-amber-100 text-amber-800' },
-              { tab: 'DEP' as const, label: 'Departures',count: bookingTabCounts.dep, pill: 'bg-yellow-100 text-yellow-800' },
-              { tab: 'UPC' as const, label: 'Upcoming',  count: bookingTabCounts.upc, pill: 'bg-violet-100 text-violet-700' },
-              { tab: 'HIS' as const, label: 'History',   count: bookingTabCounts.his, pill: 'bg-stone-100 text-stone-600' },
+              { tab: 'ARR' as const, label: 'Arrivals',  count: bookingStats.arr, pill: 'bg-emerald-100 text-emerald-700' },
+              { tab: 'INH' as const, label: 'In-house',  count: bookingStats.inh, pill: 'bg-amber-100 text-amber-800' },
+              { tab: 'DEP' as const, label: 'Departures',count: bookingStats.dep, pill: 'bg-yellow-100 text-yellow-800' },
+              { tab: 'UPC' as const, label: 'Upcoming',  count: bookingStats.upc, pill: 'bg-violet-100 text-violet-700' },
+              { tab: 'HIS' as const, label: 'History',   count: bookingStats.his, pill: 'bg-stone-100 text-stone-600' },
             ] as { tab: 'ARR'|'INH'|'DEP'|'UPC'|'HIS'; label: string; count: number; pill: string }[]).map((t, i) => (
               <button
                 key={t.tab}
