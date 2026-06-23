@@ -29176,20 +29176,36 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Channel *</label>
                   <select required value={d.channel || 'BOOKING'} onChange={e => set({ channel: e.target.value })}
                     className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 ring-[#cc5a16]/20">
-                    <option value="BOOKING">Booking.com</option>
-                    <option value="MMT">MakeMyTrip / Goibibo (GoConnect)</option>
-                    <option value="AGODA">Agoda</option>
-                    <option value="EXPEDIA">Expedia</option>
+                    <option value="EGLOBE">eGlobe Solutions (Channel Manager — all OTAs)</option>
+                    <option value="BOOKING">Booking.com (direct API)</option>
+                    <option value="MMT">MakeMyTrip / Goibibo (GoConnect, direct API)</option>
+                    <option value="AGODA">Agoda (direct API)</option>
+                    <option value="EXPEDIA">Expedia (direct API)</option>
                     <option value="AIRBNB">Airbnb</option>
                     <option value="GOOGLE_HOTELS">Google Hotels (Free Booking Links)</option>
                     <option value="OTHER">Other</option>
                   </select>
                 </div>
+                {d.channel === 'EGLOBE' && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-2xl px-4 py-3 text-[10px] text-[#1a4a6f] space-y-1">
+                    <p className="font-bold">eGlobe Solutions — Channel Manager (India)</p>
+                    <p>One connection pushes availability &amp; rates to <strong>all your OTAs simultaneously</strong> — no separate Booking.com / MMT / Agoda credentials needed.</p>
+                    <p className="mt-1">Get your credentials from <strong>eGlobe Extranet → Settings → API</strong>:</p>
+                    <ul className="list-disc pl-4 space-y-0.5">
+                      <li><strong>Access Token</strong> → paste into the API Key field below</li>
+                      <li><strong>Hotel Code</strong> (numeric) → paste into Property ID below</li>
+                      <li>Leave API Secret blank (eGlobe is single-token auth)</li>
+                    </ul>
+                  </div>
+                )}
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">API Key</label>
+                  <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
+                    {d.channel === 'EGLOBE' ? 'Access Token (eGlobe Extranet → Settings → API)' : 'API Key'}
+                  </label>
                   <input type="password" autoComplete="new-password" value={d.api_key || ''} onChange={e => set({ api_key: e.target.value })}
                     placeholder="Leave blank to keep existing" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />
                 </div>
+                {d.channel !== 'EGLOBE' && (
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
                     {d.channel === 'MMT' ? 'API Secret (Client Secret)' : 'API Secret'}
@@ -29208,9 +29224,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </p>
                   )}
                 </div>
+                )}
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">
-                    {d.channel === 'MMT' ? 'MMT Hotel ID (Property ID)' : d.channel === 'GOOGLE_HOTELS' ? 'Google Hotel Center Property ID' : 'Property ID on OTA'}
+                    {d.channel === 'EGLOBE' ? 'Hotel Code (numeric, from eGlobe Extranet)' : d.channel === 'MMT' ? 'MMT Hotel ID (Property ID)' : d.channel === 'GOOGLE_HOTELS' ? 'Google Hotel Center Property ID' : 'Property ID on OTA'}
                   </label>
                   <input value={d.property_id || ''} onChange={e => set({ property_id: e.target.value })}
                     placeholder="e.g. 12345678" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20" />

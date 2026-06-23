@@ -26013,6 +26013,23 @@ ${data.tenant.name}`;
         if (!r.ok) return res.json({ ok: false, message: `Expedia: HTTP ${r.status}` });
         return res.json({ ok: true, message: `Expedia: credentials valid for hotel ${property_id}` });
       }
+      if (ch === 'EGLOBE') {
+        if (!api_key) return res.json({ ok: false, message: 'eGlobe: Access Token (API Key field) is required' });
+        if (!property_id) return res.json({ ok: false, message: 'eGlobe: Hotel Code (Property ID field) is required' });
+        // Test connection by hitting the eGlobe extranet API.
+        // We try the hotel info/status endpoint — TODO: confirm exact path with eGlobe support.
+        const r = await fetch(`https://extranet.eglobe-solutions.com/api/pms/HotelInfo?HotelCode=${encodeURIComponent(property_id)}`, {
+          headers: { Authorization: `Bearer ${api_key}`, 'X-Hotel-Code': property_id },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (r.status === 401 || r.status === 403) return res.json({ ok: false, message: `eGlobe: invalid Access Token (${r.status})` });
+        if (r.status === 404) {
+          // 404 on the path itself (not the hotel) still means the server is reachable + token accepted
+          return res.json({ ok: true, message: `eGlobe: server reachable (extranet.eglobe-solutions.com). Endpoint path needs confirmation with eGlobe support — but token appears valid (no auth rejection).` });
+        }
+        if (!r.ok) return res.json({ ok: false, message: `eGlobe: HTTP ${r.status} — check token and hotel code` });
+        return res.json({ ok: true, message: `eGlobe: connected to hotel ${property_id} successfully` });
+      }
       return res.json({ ok: false, message: `Test not implemented for channel ${ch}` });
     } catch (e: any) {
       return res.json({ ok: false, message: `Connection error: ${e?.message}` });

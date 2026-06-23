@@ -983,6 +983,181 @@ class GoogleHotelsAdapter implements ChannelAdapter {
   }
 }
 
+/**
+ * eGlobe Solutions Channel Manager adapter.
+ *
+ * eGlobe is a third-party channel manager (popular in India) that sits between
+ * the hotel PMS and 100+ OTAs.  A single ARI push to eGlobe automatically
+ * distributes availability and rates to every OTA the property is listed on
+ * (Booking.com, MakeMyTrip, Goibibo, Agoda, Expedia, etc.) — no per-OTA
+ * partnerships or separate credentials needed.
+ *
+ * Credential mapping in Channel Manager:
+ *   api_key     = Access Token  (eGlobe Extranet → Settings → API → Access Token)
+ *   property_id = Hotel Code    (eGlobe Extranet → Your hotel's numeric code, e.g. 1000122158)
+ *   api_secret  = (not used — eGlobe uses single-token auth)
+ *
+ * API base: https://extranet.eglobe-solutions.com  (confirmed — IIS/ASP.NET)
+ * Auth:     Authorization: Bearer {AccessToken}  +  X-Hotel-Code: {HotelCode}
+ *
+ * ⚠  ENDPOINT PATHS below are inferred from eGlobe's ASP.NET architecture
+ *    and documented API capabilities. Confirm the exact paths with eGlobe
+ *    support (support@eglobe-solutions.com) before going live — use the
+ *    "Test Connection" button to verify which paths respond correctly.
+ *
+ * Inbound webhooks: eGlobe sends a unified booking notification to the
+ *   registered callback URL regardless of the originating OTA.  The token in
+ *   X-Eglobe-Token / X-Access-Token should match your Access Token.
+ */
+class EglobeAdapter implements ChannelAdapter {
+  channel = 'EGLOBE';
+  private readonly BASE = 'https://extranet.eglobe-solutions.com';
+
+  isReady(c: ChannelCredentials) {
+    return !!(c.is_enabled && c.api_key && c.property_id);
+  }
+
+  private authHeaders(creds: ChannelCredentials): Record<string, string> {
+    return {
+      Authorization: `Bearer ${creds.api_key}`,
+      'Content-Type': 'application/json',
+      'X-Hotel-Code': creds.property_id!,
+    };
+  }
+
+  async pushBooking(_creds: ChannelCredentials, payload: AdapterBookingPayload): Promise<AdapterResult> {
+    // eGlobe does NOT receive outbound booking pushes from PMS.
+    // Booking flow: OTA → eGlobe → webhook to Atithi-Setu.
+    console.log(`[channel-eglobe] pushBooking no-op for ${payload.bookingId} — flow is inbound-only via webhook`);
+    return { ok: true, message: 'eGlobe: bookings flow OTA→eGlobe→webhook (no outbound push needed)' };
+  }
+
+  async pushAvailability(creds: ChannelCredentials, payloads: AdapterAvailabilityPayload[]): Promise<AdapterResult> {
+    if (!this.isReady(creds)) return { ok: false, message: 'eGlobe: Access Token (api_key) and Hotel Code (property_id) required' };
+    if (payloads.length === 0) return { ok: true, message: 'no payloads to push' };
+    const byRoom = new Map<string, AdapterAvailabilityPayload[]>();
+    for (const p of payloads) {
+      const key = p.roomName || p.roomId;
+      if (!byRoom.has(key)) byRoom.set(key, []);
+      byRoom.get(key)!.push(p);
+    }
+    const errors: string[] = [];
+    let pushed = 0;
+    for (const [roomCode, rows] of byRoom) {
+      // Availability push — TODO: confirm path with eGlobe support
+      try {
+        const res = await fetch(`${this.BASE}/api/pms/UpdateInventory`, {
+          method: 'POST',
+          headers: this.authHeaders(creds),
+          body: JSON.stringify({
+            HotelCode: creds.property_id,
+            RoomTypeCode: roomCode,
+            Inventory: rows.map(r => ({ Date: r.date, Availability: r.available ? 1 : 0 })),
+          }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!res.ok) { const t = await res.text().catch(() => ''); errors.push(`avail ${roomCode}: HTTP ${res.status} ${t.slice(0, 80)}`); }
+        else pushed += rows.length;
+      } catch (e: any) { errors.push(`avail ${roomCode}: ${e?.message}`); }
+      // Rate push — TODO: confirm path with eGlobe support
+      const rateRows = rows.filter(r => r.rate > 0);
+      if (rateRows.length > 0) {
+        try {
+          const rateRes = await fetch(`${this.BASE}/api/pms/UpdateRate`, {
+            method: 'POST',
+            headers: this.authHeaders(creds),
+            body: JSON.stringify({
+              HotelCode: creds.property_id,
+              RoomTypeCode: roomCode,
+              RatePlanCode: rows[0].rateLabel || 'BAR',
+              Rates: rateRows.map(r => ({ Date: r.date, Rate: r.rate, Currency: 'INR' })),
+            }),
+            signal: AbortSignal.timeout(15_000),
+          });
+          if (!rateRes.ok) { const t = await rateRes.text().catch(() => ''); errors.push(`rate ${roomCode}: HTTP ${rateRes.status} ${t.slice(0, 80)}`); }
+        } catch (e: any) { errors.push(`rate ${roomCode}: ${e?.message}`); }
+      }
+    }
+    if (errors.length > 0 && pushed === 0) return { ok: false, message: `eGlobe ARI push failed: ${errors.join('; ')}` };
+    if (errors.length > 0) return { ok: true, message: `eGlobe ARI partial: ${pushed} rows, errors: ${errors.join('; ')}` };
+    return { ok: true, message: `eGlobe ARI pushed ${pushed} rows for hotel ${creds.property_id} (distributes to all connected OTAs)` };
+  }
+
+  validateWebhook(creds: ChannelCredentials, headers: any, _rawBody: string, _body: any): ValidateResult {
+    // eGlobe typically passes the Access Token in X-Eglobe-Token or X-Access-Token.
+    // If neither is present, we allow through (eGlobe may rely on IP allowlist only).
+    // TODO: Confirm header name with eGlobe support and switch to HMAC if they support it.
+    const token = pickHeader(headers, 'X-Eglobe-Token') || pickHeader(headers, 'X-Access-Token');
+    if (token && token !== creds.api_key) {
+      return { ok: false, reason: 'eGlobe webhook: access token mismatch' };
+    }
+    if (!token) {
+      console.warn('[channel-eglobe] webhook missing X-Eglobe-Token — verify eGlobe webhook config includes the token header');
+    }
+    return { ok: true, timestamp: null, replay_check_skipped: true };
+  }
+
+  parseInbound(_creds: ChannelCredentials, body: any) {
+    // eGlobe delivers a unified booking envelope for all originating OTAs.
+    // TODO: Confirm field names from eGlobe's webhook documentation.
+    const bookingId = body?.BookingId || body?.booking_id || body?.ReservationId || body?.reservation_id;
+    if (!bookingId) return { ok: false, reason: 'eGlobe webhook: BookingId / ReservationId missing' };
+    const rawStatus = String(body?.Status || body?.status || '').toUpperCase();
+    const isCancelled = rawStatus === 'CANCELLED' || rawStatus === 'CANCEL';
+    const isModified  = rawStatus === 'MODIFIED'  || rawStatus === 'MODIFY';
+    return {
+      ok: true,
+      booking: {
+        bookingId: String(bookingId),
+        guestName: body?.GuestName || body?.guest_name || '',
+        guestPhone: body?.GuestPhone || body?.guest_phone || null,
+        guestEmail: body?.GuestEmail || body?.guest_email || null,
+        roomId: '',
+        externalRoomCode: String(body?.RoomTypeCode || body?.room_type_code || body?.RoomType || ''),
+        externalRatePlanCode: body?.RatePlanCode || body?.rate_plan_code || null,
+        roomName: body?.RoomTypeName || body?.room_type_name || null,
+        checkInDate: body?.CheckIn || body?.check_in || body?.ArrivalDate || '',
+        checkOutDate: body?.CheckOut || body?.check_out || body?.DepartureDate || '',
+        totalAmount: Number(body?.TotalAmount || body?.total_amount || body?.Amount || 0),
+        bookingType: 'OVERNIGHT' as const,
+        source: `EGLOBE:${body?.Channel || body?.channel || body?.OTAName || 'OTA'}`,
+        status: isCancelled ? 'CANCELLED' : 'BOOKED',
+      },
+      operation: (isCancelled ? 'CANCELLED' : isModified ? 'MODIFIED' : 'CREATED') as 'CREATED' | 'MODIFIED' | 'CANCELLED',
+    };
+  }
+
+  async pullBookings(creds: ChannelCredentials, sinceIso: string): Promise<AdapterPullResult> {
+    if (!this.isReady(creds)) return { ok: false, bookings: [], reason: 'eGlobe: access token and hotel code required' };
+    // TODO: Confirm GetBookings endpoint path with eGlobe support
+    const params = new URLSearchParams({ HotelCode: creds.property_id!, ModifiedSince: sinceIso });
+    try {
+      const res = await fetch(`${this.BASE}/api/pms/GetBookings?${params}`, {
+        headers: this.authHeaders(creds),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) return { ok: false, bookings: [], reason: `eGlobe pull failed: HTTP ${res.status}` };
+      const data: any = await res.json().catch(() => ({}));
+      const list: any[] = data?.Bookings || data?.bookings || data?.Reservations || data?.reservations || [];
+      const bookings = list.map((b: any) => ({
+        bookingId: String(b.BookingId || b.booking_id || b.ReservationId || ''),
+        guestName: b.GuestName || b.guest_name || '',
+        guestPhone: b.GuestPhone || b.guest_phone || null,
+        guestEmail: b.GuestEmail || b.guest_email || null,
+        checkInDate: b.CheckIn || b.check_in || b.ArrivalDate || '',
+        checkOutDate: b.CheckOut || b.check_out || b.DepartureDate || '',
+        externalRoomCode: String(b.RoomTypeCode || b.room_type_code || b.RoomType || ''),
+        totalAmount: Number(b.TotalAmount || b.total_amount || b.Amount || 0),
+        status: (String(b.Status || b.status || '').toUpperCase() === 'CANCELLED') ? 'CANCELLED' : 'BOOKED',
+        source: `EGLOBE:${b.Channel || b.OTAName || 'OTA'}`,
+      }));
+      return { ok: true, bookings };
+    } catch (e: any) {
+      return { ok: false, bookings: [], reason: `eGlobe pull error: ${e?.message}` };
+    }
+  }
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────
 const adapters: Record<string, ChannelAdapter> = {
   BOOKING: new BookingComAdapter(),
@@ -992,6 +1167,7 @@ const adapters: Record<string, ChannelAdapter> = {
   EXPEDIA: new ExpediaAdapter(),
   AIRBNB: new AirbnbAdapter(),
   GOOGLE_HOTELS: new GoogleHotelsAdapter(),
+  EGLOBE: new EglobeAdapter(),
   MOCK: new MockAdapter(),
 };
 
