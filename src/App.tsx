@@ -23179,7 +23179,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-3 py-3 text-right">
                               <div className="flex items-center gap-1 justify-end">
                                 <button
-                                  onClick={() => f.is_group ? setGroupDetailId(f.group_id) : loadFolio(f.id)}
+                                  onClick={() => f.is_group ? loadGroupDetail(f.group_id) : loadFolio(f.id)}
                                   className="px-2.5 py-1 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[10px] font-bold hover:bg-[#cc5a16]/10">View</button>
                                 {f.status !== 'voided' && (
                                   <button
