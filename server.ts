@@ -25960,6 +25960,65 @@ ${data.tenant.name}`;
     }
   });
 
+  // Test-connection: verifies credentials against the live OTA API without persisting them.
+  app.post("/api/restaurant/:id/hotel/channel-credentials/test", authenticate, hotelStaff, requireTabAccess('SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const { channel, api_key, api_secret, property_id } = req.body || {};
+    if (!channel || !property_id) return res.status(400).json({ ok: false, message: 'channel and property_id are required' });
+    const ch = String(channel).toUpperCase();
+    try {
+      if (ch === 'BOOKING') {
+        const auth = Buffer.from(`${api_key}:${api_secret}`).toString('base64');
+        const r = await fetch(`https://supply-xml.booking.com/hotels/xml/hotel_info?hotel_id=${encodeURIComponent(property_id)}`, {
+          headers: { Authorization: `Basic ${auth}` }, signal: AbortSignal.timeout(10_000),
+        });
+        if (r.status === 401) return res.json({ ok: false, message: 'Booking.com: invalid credentials (401)' });
+        if (r.status === 403) return res.json({ ok: false, message: 'Booking.com: API access not activated for this hotel' });
+        if (!r.ok) return res.json({ ok: false, message: `Booking.com: HTTP ${r.status}` });
+        return res.json({ ok: true, message: `Booking.com: credentials valid for hotel ${property_id}` });
+      }
+      if (ch === 'MMT' || ch === 'GOIBIBO') {
+        if (!api_key || !api_secret) return res.json({ ok: false, message: 'API Key (Client ID) and API Secret (Client Secret) are required for MMT/Goibibo' });
+        const tr = await fetch('https://connect-api.makemytrip.com/oauth/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ grant_type: 'client_credentials', client_id: api_key, client_secret: api_secret }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!tr.ok) {
+          const j = await tr.json().catch(() => ({}));
+          return res.json({ ok: false, message: `${ch}: OAuth failed — ${j?.error_description || j?.error || `HTTP ${tr.status}`}` });
+        }
+        const tok = await tr.json();
+        if (!tok.access_token) return res.json({ ok: false, message: `${ch}: OAuth response missing access_token` });
+        return res.json({ ok: true, message: `${ch}: OAuth token obtained (expires in ${tok.expires_in}s)` });
+      }
+      if (ch === 'AGODA') {
+        if (!api_key) return res.json({ ok: false, message: 'API Key is required for Agoda' });
+        const r = await fetch(`https://ycs.agoda.com/api/property/${encodeURIComponent(property_id)}`, {
+          headers: { 'X-YCS-AUTH': api_key }, signal: AbortSignal.timeout(10_000),
+        });
+        if (r.status === 401 || r.status === 403) return res.json({ ok: false, message: `Agoda: invalid API key or property not found` });
+        if (!r.ok) return res.json({ ok: false, message: `Agoda: HTTP ${r.status}` });
+        return res.json({ ok: true, message: `Agoda: credentials valid for property ${property_id}` });
+      }
+      if (ch === 'EXPEDIA') {
+        const auth = Buffer.from(`${api_key}:${api_secret}`).toString('base64');
+        const r = await fetch(`https://services.expediapartnercentral.com/eqc/hotel?hotelId=${encodeURIComponent(property_id)}`, {
+          headers: { Authorization: `Basic ${auth}` }, signal: AbortSignal.timeout(10_000),
+        });
+        if (r.status === 401) return res.json({ ok: false, message: 'Expedia: invalid credentials (401)' });
+        if (r.status === 403) return res.json({ ok: false, message: 'Expedia: EQC access not activated for this hotel' });
+        if (!r.ok) return res.json({ ok: false, message: `Expedia: HTTP ${r.status}` });
+        return res.json({ ok: true, message: `Expedia: credentials valid for hotel ${property_id}` });
+      }
+      return res.json({ ok: false, message: `Test not implemented for channel ${ch}` });
+    } catch (e: any) {
+      return res.json({ ok: false, message: `Connection error: ${e?.message}` });
+    }
+  });
+
   // ════════════════════════════════════════════════════════════════════
   // ─── PARTNER PORTAL LOGINS (owner-managed) ────────────────────────────
   // ════════════════════════════════════════════════════════════════════
@@ -41074,12 +41133,10 @@ ${data.tenant.name}`;
                     ['permanently_failed', nextCount, (result.message || 'adapter returned !ok') + ' (5 retries exhausted)', row.id]
                   );
                 } else {
+                  const nextRetryAt = new Date(Date.now() + BACKOFF_MIN[nextCount - 1] * 60 * 1000).toISOString();
                   await db.run(
-                    `UPDATE channel_sync_log
-                        SET status = 'failed', retry_count = ?, error = ?,
-                            next_retry_at = CURRENT_TIMESTAMP + INTERVAL '${BACKOFF_MIN[nextCount - 1]} minutes'
-                      WHERE id = ?`,
-                    [nextCount, result.message || 'adapter returned !ok', row.id]
+                    `UPDATE channel_sync_log SET status = 'failed', retry_count = ?, error = ?, next_retry_at = ? WHERE id = ?`,
+                    [nextCount, result.message || 'adapter returned !ok', nextRetryAt, row.id]
                   );
                 }
                 totalFailed++;
@@ -41093,12 +41150,10 @@ ${data.tenant.name}`;
                   ['permanently_failed', nextCount, String(e?.message || e).slice(0, 500) + ' (5 retries exhausted)', row.id]
                 );
               } else {
+                const nextRetryAt = new Date(Date.now() + BACKOFF_MIN[nextCount - 1] * 60 * 1000).toISOString();
                 await db.run(
-                  `UPDATE channel_sync_log
-                      SET status = 'failed', retry_count = ?, error = ?,
-                          next_retry_at = CURRENT_TIMESTAMP + INTERVAL '${BACKOFF_MIN[nextCount - 1]} minutes'
-                    WHERE id = ?`,
-                  [nextCount, String(e?.message || e).slice(0, 500), row.id]
+                  `UPDATE channel_sync_log SET status = 'failed', retry_count = ?, error = ?, next_retry_at = ? WHERE id = ?`,
+                  [nextCount, String(e?.message || e).slice(0, 500), nextRetryAt, row.id]
                 );
               }
               totalFailed++;

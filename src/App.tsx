@@ -9225,6 +9225,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // the form lets the owner enter or replace values.
   const [channelCredentials, setChannelCredentials] = useState<any[]>([]);
   const [editingChannelCred, setEditingChannelCred] = useState<any | null>(null);
+  const [channelTestResult, setChannelTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [channelTesting, setChannelTesting] = useState(false);
   // CH-2 — iCal feed state (Booking.com / Airbnb / Vrbo / Agoda
   // export-URL inbound sync; the practical OTA integration most
   // independent hotels actually use today).
@@ -11614,6 +11616,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const saveChannelCredential = async (data: any) => {
     await hotelApi('/channel-credentials', { method: 'POST', body: JSON.stringify(data) });
     await fetchChannelCredentials();
+  };
+  const testChannelCredential = async (d: any) => {
+    if (!d?.channel || !d?.property_id) { alert('Channel and Property ID are required to test'); return; }
+    setChannelTesting(true); setChannelTestResult(null);
+    try {
+      const result = await hotelApi('/channel-credentials/test', {
+        method: 'POST',
+        body: JSON.stringify({ channel: String(d.channel).toUpperCase(), api_key: d.api_key || null, api_secret: d.api_secret || null, property_id: d.property_id }),
+      });
+      setChannelTestResult(result);
+    } catch (e: any) {
+      setChannelTestResult({ ok: false, message: e?.message || 'Connection test failed' });
+    } finally { setChannelTesting(false); }
   };
   const deleteChannelCredential = async (channel: string) => {
     if (!confirm(`Remove ${channel} credentials? Inventory sync to this channel will stop.`)) return;
@@ -29139,7 +29154,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-xl font-bold font-serif text-[#1a1208]">Channel Credentials</h3>
-                <button onClick={() => setEditingChannelCred(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
+                <button onClick={() => { setEditingChannelCred(null); setChannelTestResult(null); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
               </div>
               <form onSubmit={async (e) => {
                 e.preventDefault();
@@ -29154,7 +29169,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     commission_pct: d.commission_pct == null || d.commission_pct === '' ? null : Number(d.commission_pct),
                     webhook_signing_secret: d.webhook_signing_secret || null,
                   });
-                  setEditingChannelCred(null);
+                  setEditingChannelCred(null); setChannelTestResult(null);
                 } catch (err: any) { alert(err?.message || 'Failed to save'); }
               }} className="space-y-3">
                 <div>
@@ -29216,10 +29231,19 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <input type="checkbox" checked={!!d.is_enabled} onChange={e => set({ is_enabled: e.target.checked })} className="w-4 h-4" />
                   Enable inventory sync to this channel
                 </label>
-                <div className="flex gap-2 pt-2">
-                  <button type="button" onClick={() => setEditingChannelCred(null)} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                <div className="flex gap-2 pt-2 flex-wrap">
+                  <button type="button" onClick={() => { setEditingChannelCred(null); setChannelTestResult(null); }} className="flex-1 px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Cancel</button>
+                  <button type="button" disabled={channelTesting} onClick={() => testChannelCredential(d)}
+                    className="flex-1 px-4 py-2.5 rounded-2xl border border-[#1a4a6f]/30 text-[#1a4a6f] text-sm font-bold hover:bg-blue-50 disabled:opacity-60">
+                    {channelTesting ? 'Testing…' : 'Test Connection'}
+                  </button>
                   <button type="submit" className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612]">Save</button>
                 </div>
+                {channelTestResult && (
+                  <div className={cn('mt-2 rounded-2xl px-4 py-2.5 text-xs font-bold', channelTestResult.ok ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-red-50 text-red-800 border border-red-200')}>
+                    {channelTestResult.ok ? '✓ ' : '✗ '}{channelTestResult.message}
+                  </div>
+                )}
               </form>
             </div>
           </div>

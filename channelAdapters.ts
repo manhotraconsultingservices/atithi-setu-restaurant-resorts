@@ -275,8 +275,50 @@ class BookingComAdapter implements ChannelAdapter {
   }
   async pushAvailability(creds: ChannelCredentials, payloads: AdapterAvailabilityPayload[]): Promise<AdapterResult> {
     if (!this.isReady(creds)) return { ok: false, message: 'Booking.com credentials not configured.' };
-    console.log(`[channel-bdc:stub] would push ${payloads.length} availability rows for hotel ${creds.property_id}`);
-    return { ok: true, message: 'bdc-stub: availability payload validated' };
+    if (payloads.length === 0) return { ok: true, message: 'no payloads to push' };
+    const auth = Buffer.from(`${creds.api_key}:${creds.api_secret}`).toString('base64');
+    const echoToken = `at-${Date.now()}`;
+    const ts = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+    const messages = payloads.map(p =>
+      `<AvailStatusMessage>` +
+      `<StatusApplicationControl Start="${p.date}" End="${p.date}" RatePlanCode="${p.rateLabel || 'BAR'}" InvTypeCode="${p.roomName || p.roomId}"/>` +
+      `<AvailStatus RestrictionStatus="${p.available ? 'Open' : 'Close'}"/>` +
+      `</AvailStatusMessage>`
+    ).join('');
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><OTA_HotelAvailNotifRQ xmlns="http://www.opentravel.org/OTA/2003/05" EchoToken="${echoToken}" TimeStamp="${ts}" Version="1.0"><AvailStatusMessages HotelCode="${creds.property_id}">${messages}</AvailStatusMessages></OTA_HotelAvailNotifRQ>`;
+    try {
+      const res = await fetch('https://supply-xml.booking.com/hotels/xml/', {
+        method: 'POST',
+        headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'text/xml; charset=utf-8' },
+        body: xml,
+        signal: AbortSignal.timeout(15_000),
+      });
+      const body = await res.text();
+      if (!res.ok || body.includes('<Error')) {
+        const m = body.match(/<Error[^>]*ShortText="([^"]+)"/i) || body.match(/<Error[^>]*>([^<]+)/i);
+        return { ok: false, message: `BDC avail push failed: ${m ? m[1] : `HTTP ${res.status}`}` };
+      }
+      // Rate push — OTA_HotelRateAmountNotifRQ
+      const rateRows = payloads.filter(p => p.rate > 0);
+      if (rateRows.length > 0) {
+        const rateMsgs = rateRows.map(p =>
+          `<RateAmountMessage>` +
+          `<StatusApplicationControl Start="${p.date}" End="${p.date}" RatePlanCode="${p.rateLabel || 'BAR'}" InvTypeCode="${p.roomName || p.roomId}"/>` +
+          `<Rates><Rate><BaseByGuestAmts><BaseByGuestAmt AmountAfterTax="${p.rate.toFixed(2)}" CurrencyCode="INR" NumberOfGuests="2"/></BaseByGuestAmts></Rate></Rates>` +
+          `</RateAmountMessage>`
+        ).join('');
+        const rateXml = `<?xml version="1.0" encoding="UTF-8"?><OTA_HotelRateAmountNotifRQ xmlns="http://www.opentravel.org/OTA/2003/05" EchoToken="${echoToken}-r" TimeStamp="${ts}" Version="1.0"><RateAmountMessages HotelCode="${creds.property_id}">${rateMsgs}</RateAmountMessages></OTA_HotelRateAmountNotifRQ>`;
+        await fetch('https://supply-xml.booking.com/hotels/xml/', {
+          method: 'POST',
+          headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'text/xml; charset=utf-8' },
+          body: rateXml,
+          signal: AbortSignal.timeout(15_000),
+        }).catch(() => null);
+      }
+      return { ok: true, message: `BDC ARI pushed ${payloads.length} rows for hotel ${creds.property_id}` };
+    } catch (e: any) {
+      return { ok: false, message: `BDC ARI push error: ${e?.message}` };
+    }
   }
   validateWebhook(creds: ChannelCredentials, headers: any, rawBody: string, _body: any): ValidateResult {
     const secret = creds.webhook_signing_secret || creds.api_secret;
@@ -314,10 +356,37 @@ class BookingComAdapter implements ChannelAdapter {
       reason: body.bookingId ? undefined : 'bookingId missing from BDC webhook body',
     };
   }
-  async pullBookings(creds: ChannelCredentials, _sinceIso: string): Promise<AdapterPullResult> {
+  async pullBookings(creds: ChannelCredentials, sinceIso: string): Promise<AdapterPullResult> {
     if (!this.isReady(creds)) return { ok: false, bookings: [], reason: 'Booking.com credentials not configured' };
-    // TODO(BDC): GET https://supply-xml.booking.com/hotels/xml/reservations?modify_date_from={sinceIso}
-    return { ok: true, bookings: [], stub: true, note: 'bdc-stub: awaiting partner approval' };
+    const auth = Buffer.from(`${creds.api_key}:${creds.api_secret}`).toString('base64');
+    const params = new URLSearchParams({ hotel_id: creds.property_id!, modify_date_from: sinceIso });
+    try {
+      const res = await fetch(`https://supply-xml.booking.com/hotels/xml/reservations?${params}`, {
+        headers: { Authorization: `Basic ${auth}` },
+        signal: AbortSignal.timeout(20_000),
+      });
+      const body = await res.text();
+      if (!res.ok) return { ok: false, bookings: [], reason: `BDC pull failed: HTTP ${res.status}` };
+      const bookings: any[] = [];
+      const re = /<Reservation>([\s\S]*?)<\/Reservation>/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(body)) !== null) {
+        const block = m[1];
+        const get = (tag: string) => { const r = block.match(new RegExp(`<${tag}[^>]*>([^<]+)</${tag}>`)); return r ? r[1] : ''; };
+        const status = get('Status');
+        bookings.push({
+          bookingId: get('ReservationID') || get('BookingNumber'),
+          guestName: get('GuestName') || get('FirstName'),
+          checkInDate: get('CheckInDate') || get('ArrivalDate'),
+          checkOutDate: get('CheckOutDate') || get('DepartureDate'),
+          status: (status === 'cancelled' || status === 'CANCELLED') ? 'CANCELLED' : 'BOOKED',
+          source: 'BOOKING',
+        });
+      }
+      return { ok: true, bookings };
+    } catch (e: any) {
+      return { ok: false, bookings: [], reason: `BDC pull error: ${e?.message}` };
+    }
   }
 }
 
@@ -500,9 +569,34 @@ class MakeMyTripAdapter implements ChannelAdapter {
                  : 'CREATED') as 'CREATED' | 'MODIFIED' | 'CANCELLED',
     };
   }
-  async pullBookings(creds: ChannelCredentials, _sinceIso: string): Promise<AdapterPullResult> {
+  async pullBookings(creds: ChannelCredentials, sinceIso: string): Promise<AdapterPullResult> {
     if (!this.isReady(creds)) return { ok: false, bookings: [], reason: `${this.channel} credentials not configured` };
-    return { ok: true, bookings: [], stub: true, note: `${this.channel}-stub: awaiting partner approval` };
+    const token = await this.getOAuthToken(creds);
+    if (!token) return { ok: false, bookings: [], reason: `${this.channel}: OAuth token fetch failed` };
+    const params = new URLSearchParams({ hotel_id: creds.property_id!, modified_since: sinceIso });
+    try {
+      const res = await fetch(`https://connect-api.makemytrip.com/api/v1/hotel/bookings?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) return { ok: false, bookings: [], reason: `${this.channel} pull failed: HTTP ${res.status}` };
+      const data: any = await res.json().catch(() => ({}));
+      const bookings = (data.bookings || data.data || []).map((b: any) => ({
+        bookingId: String(b.booking_id || b.id || ''),
+        guestName: b.guest_name || '',
+        guestPhone: b.guest_phone || null,
+        guestEmail: b.guest_email || null,
+        checkInDate: b.check_in || '',
+        checkOutDate: b.check_out || '',
+        externalRoomCode: String(b.room_type_code || b.room_id || ''),
+        totalAmount: Number(b.total || 0),
+        status: b.status === 'CANCELLED' ? 'CANCELLED' : 'BOOKED',
+        source: this.channel,
+      }));
+      return { ok: true, bookings };
+    } catch (e: any) {
+      return { ok: false, bookings: [], reason: `${this.channel} pull error: ${e?.message}` };
+    }
   }
 }
 
@@ -540,9 +634,46 @@ class AgodaAdapter implements ChannelAdapter {
     console.log(`[channel-agoda:stub] would push booking ${payload.bookingId}`);
     return { ok: true, message: 'agoda-stub: payload validated' };
   }
-  async pushAvailability(creds: ChannelCredentials, _payloads: AdapterAvailabilityPayload[]): Promise<AdapterResult> {
+  async pushAvailability(creds: ChannelCredentials, payloads: AdapterAvailabilityPayload[]): Promise<AdapterResult> {
     if (!this.isReady(creds)) return { ok: false, message: 'Agoda credentials not configured.' };
-    return { ok: true, message: 'agoda-stub: availability validated' };
+    if (payloads.length === 0) return { ok: true, message: 'no payloads to push' };
+    const headers = { 'X-YCS-AUTH': creds.api_key!, 'Content-Type': 'application/json' };
+    // Group by room code
+    const byRoom = new Map<string, AdapterAvailabilityPayload[]>();
+    for (const p of payloads) {
+      const key = p.roomName || p.roomId;
+      if (!byRoom.has(key)) byRoom.set(key, []);
+      byRoom.get(key)!.push(p);
+    }
+    const errors: string[] = [];
+    let pushed = 0;
+    for (const [roomCode, rows] of byRoom) {
+      try {
+        const availRes = await fetch('https://ycs.agoda.com/api/ari/availability', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ property_id: creds.property_id, room_type_id: roomCode, dates: rows.map(r => ({ date: r.date, available_rooms: r.available ? 1 : 0 })) }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!availRes.ok) { const t = await availRes.text().catch(() => ''); errors.push(`avail ${roomCode}: ${availRes.status} ${t.slice(0, 80)}`); }
+        else pushed += rows.length;
+      } catch (e: any) { errors.push(`avail ${roomCode}: ${e?.message}`); }
+      const rateRows = rows.filter(r => r.rate > 0);
+      if (rateRows.length > 0) {
+        try {
+          const rateRes = await fetch('https://ycs.agoda.com/api/ari/rates', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ property_id: creds.property_id, room_type_id: roomCode, rate_plan_id: rows[0].rateLabel || 'BAR', dates: rateRows.map(r => ({ date: r.date, rate: r.rate, currency: 'INR' })) }),
+            signal: AbortSignal.timeout(15_000),
+          });
+          if (!rateRes.ok) { const t = await rateRes.text().catch(() => ''); errors.push(`rate ${roomCode}: ${rateRes.status} ${t.slice(0, 80)}`); }
+        } catch (e: any) { errors.push(`rate ${roomCode}: ${e?.message}`); }
+      }
+    }
+    if (errors.length > 0 && pushed === 0) return { ok: false, message: `Agoda ARI push failed: ${errors.join('; ')}` };
+    if (errors.length > 0) return { ok: true, message: `Agoda ARI partial: ${pushed} rows, errors: ${errors.join('; ')}` };
+    return { ok: true, message: `Agoda ARI pushed ${pushed} rows for property ${creds.property_id}` };
   }
   validateWebhook(creds: ChannelCredentials, headers: any, rawBody: string, _body: any): ValidateResult {
     const secret = creds.webhook_signing_secret || creds.api_secret;
@@ -589,9 +720,32 @@ class AgodaAdapter implements ChannelAdapter {
       operation: (body.status === 'CANCELLED' ? 'CANCELLED' : 'CREATED') as 'CREATED' | 'MODIFIED' | 'CANCELLED',
     };
   }
-  async pullBookings(creds: ChannelCredentials, _sinceIso: string): Promise<AdapterPullResult> {
+  async pullBookings(creds: ChannelCredentials, sinceIso: string): Promise<AdapterPullResult> {
     if (!this.isReady(creds)) return { ok: false, bookings: [], reason: 'Agoda credentials not configured' };
-    return { ok: true, bookings: [], stub: true, note: 'agoda-stub: awaiting partner approval' };
+    const params = new URLSearchParams({ property_id: creds.property_id!, from: sinceIso });
+    try {
+      const res = await fetch(`https://ycs.agoda.com/api/bookings?${params}`, {
+        headers: { 'X-YCS-AUTH': creds.api_key! },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) return { ok: false, bookings: [], reason: `Agoda pull failed: HTTP ${res.status}` };
+      const data: any = await res.json().catch(() => ({}));
+      const bookings = (data.reservations || data.bookings || []).map((b: any) => ({
+        bookingId: String(b.reservation_id || b.booking_id || ''),
+        guestName: b.guest_name || '',
+        guestPhone: b.guest_phone || null,
+        guestEmail: b.guest_email || null,
+        checkInDate: b.check_in || '',
+        checkOutDate: b.check_out || '',
+        externalRoomCode: String(b.room_type || b.room_id || ''),
+        totalAmount: Number(b.total || 0),
+        status: b.status === 'CANCELLED' ? 'CANCELLED' : 'BOOKED',
+        source: 'AGODA',
+      }));
+      return { ok: true, bookings };
+    } catch (e: any) {
+      return { ok: false, bookings: [], reason: `Agoda pull error: ${e?.message}` };
+    }
   }
 }
 
@@ -617,9 +771,69 @@ class ExpediaAdapter implements ChannelAdapter {
     console.log(`[channel-expedia:stub] would push booking ${payload.bookingId}`);
     return { ok: true, message: 'expedia-stub: payload validated' };
   }
-  async pushAvailability(creds: ChannelCredentials, _payloads: AdapterAvailabilityPayload[]): Promise<AdapterResult> {
+  async pushAvailability(creds: ChannelCredentials, payloads: AdapterAvailabilityPayload[]): Promise<AdapterResult> {
     if (!this.isReady(creds)) return { ok: false, message: 'Expedia credentials not configured.' };
-    return { ok: true, message: 'expedia-stub: availability validated' };
+    if (payloads.length === 0) return { ok: true, message: 'no payloads to push' };
+    const auth = Buffer.from(`${creds.api_key}:${creds.api_secret}`).toString('base64');
+    const echoToken = `at-${Date.now()}`;
+    const ts = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+    const byRoom = new Map<string, AdapterAvailabilityPayload[]>();
+    for (const p of payloads) {
+      const key = p.roomName || p.roomId;
+      if (!byRoom.has(key)) byRoom.set(key, []);
+      byRoom.get(key)!.push(p);
+    }
+    const errors: string[] = [];
+    let pushed = 0;
+    for (const [roomCode, rows] of byRoom) {
+      const rateCode = `EXP.${rows[0].rateLabel || 'BAR'}`;
+      const availMsgs = rows.map(r =>
+        `<AvailStatusMessage>` +
+        `<StatusApplicationControl Start="${r.date}" End="${r.date}" InvTypeCode="${roomCode}" RatePlanCode="${rateCode}"/>` +
+        `<AvailStatus RestrictionStatus="${r.available ? 'Open' : 'Close'}"/>` +
+        `</AvailStatusMessage>`
+      ).join('');
+      const availXml = `<?xml version="1.0" encoding="UTF-8"?><HTNG_HotelAvailNotifRQ xmlns="http://htng.org/2009B" EchoToken="${echoToken}" TimeStamp="${ts}"><AvailStatusMessages HotelCode="${creds.property_id}">${availMsgs}</AvailStatusMessages></HTNG_HotelAvailNotifRQ>`;
+      try {
+        const res = await fetch('https://services.expediapartnercentral.com/eqc/avail', {
+          method: 'POST',
+          headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'text/xml; charset=utf-8' },
+          body: availXml,
+          signal: AbortSignal.timeout(15_000),
+        });
+        const body = await res.text();
+        if (!res.ok || body.includes('<Error')) {
+          const m = body.match(/<Error[^>]*ShortText="([^"]+)"/i) || body.match(/<Error[^>]*>([^<]+)/i);
+          errors.push(`avail ${roomCode}: ${m ? m[1] : `HTTP ${res.status}`}`);
+        } else { pushed += rows.length; }
+      } catch (e: any) { errors.push(`avail ${roomCode}: ${e?.message}`); }
+      const rateRows = rows.filter(r => r.rate > 0);
+      if (rateRows.length > 0) {
+        const rateMsgs = rateRows.map(r =>
+          `<RateAmountMessage>` +
+          `<StatusApplicationControl Start="${r.date}" End="${r.date}" InvTypeCode="${roomCode}" RatePlanCode="${rateCode}"/>` +
+          `<Rates><Rate><BaseByGuestAmts><BaseByGuestAmt AmountAfterTax="${r.rate.toFixed(2)}" CurrencyCode="INR" NumberOfGuests="2"/></BaseByGuestAmts></Rate></Rates>` +
+          `</RateAmountMessage>`
+        ).join('');
+        const rateXml = `<?xml version="1.0" encoding="UTF-8"?><HTNG_HotelRateAmountNotifRQ xmlns="http://htng.org/2009B" EchoToken="${echoToken}-r" TimeStamp="${ts}"><RateAmountMessages HotelCode="${creds.property_id}">${rateMsgs}</RateAmountMessages></HTNG_HotelRateAmountNotifRQ>`;
+        try {
+          const rRes = await fetch('https://services.expediapartnercentral.com/eqc/ar', {
+            method: 'POST',
+            headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'text/xml; charset=utf-8' },
+            body: rateXml,
+            signal: AbortSignal.timeout(15_000),
+          });
+          const rBody = await rRes.text();
+          if (!rRes.ok || rBody.includes('<Error')) {
+            const m = rBody.match(/<Error[^>]*ShortText="([^"]+)"/i) || rBody.match(/<Error[^>]*>([^<]+)/i);
+            errors.push(`rate ${roomCode}: ${m ? m[1] : `HTTP ${rRes.status}`}`);
+          }
+        } catch (e: any) { errors.push(`rate ${roomCode}: ${e?.message}`); }
+      }
+    }
+    if (errors.length > 0 && pushed === 0) return { ok: false, message: `Expedia ARI push failed: ${errors.join('; ')}` };
+    if (errors.length > 0) return { ok: true, message: `Expedia ARI partial: ${pushed} rows, errors: ${errors.join('; ')}` };
+    return { ok: true, message: `Expedia ARI pushed ${pushed} rows for hotel ${creds.property_id}` };
   }
   validateWebhook(creds: ChannelCredentials, headers: any, rawBody: string, _body: any): ValidateResult {
     const secret = creds.webhook_signing_secret || creds.api_secret;
@@ -656,9 +870,33 @@ class ExpediaAdapter implements ChannelAdapter {
       operation: (body.status === 'CANCELLED' ? 'CANCELLED' : 'CREATED') as 'CREATED' | 'MODIFIED' | 'CANCELLED',
     };
   }
-  async pullBookings(creds: ChannelCredentials, _sinceIso: string): Promise<AdapterPullResult> {
+  async pullBookings(creds: ChannelCredentials, sinceIso: string): Promise<AdapterPullResult> {
     if (!this.isReady(creds)) return { ok: false, bookings: [], reason: 'Expedia credentials not configured' };
-    return { ok: true, bookings: [], stub: true, note: 'expedia-stub: awaiting partner approval' };
+    const auth = Buffer.from(`${creds.api_key}:${creds.api_secret}`).toString('base64');
+    const params = new URLSearchParams({ hotelId: creds.property_id!, modifiedDateTimeFrom: sinceIso });
+    try {
+      const res = await fetch(`https://services.expediapartnercentral.com/eqc/booking?${params}`, {
+        headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) return { ok: false, bookings: [], reason: `Expedia pull failed: HTTP ${res.status}` };
+      const data: any = await res.json().catch(() => ({}));
+      const bookings = (data.reservations || data.bookings || []).map((b: any) => ({
+        bookingId: String(b.reservation_id || b.id || ''),
+        guestName: b.guest_name || b.guestName || '',
+        guestPhone: b.guest_phone || null,
+        guestEmail: b.guest_email || null,
+        checkInDate: b.check_in || b.checkIn || '',
+        checkOutDate: b.check_out || b.checkOut || '',
+        externalRoomCode: String(b.room_type_id || b.room_type || ''),
+        totalAmount: Number(b.total || b.amount || 0),
+        status: (b.status === 'CANCELLED' || b.cancelled) ? 'CANCELLED' : 'BOOKED',
+        source: 'EXPEDIA',
+      }));
+      return { ok: true, bookings };
+    } catch (e: any) {
+      return { ok: false, bookings: [], reason: `Expedia pull error: ${e?.message}` };
+    }
   }
 }
 
