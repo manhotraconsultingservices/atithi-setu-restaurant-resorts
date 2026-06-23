@@ -7798,6 +7798,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'CONCIERGE_FAQ'                             // hospitality Phase 4 (AI concierge)
     | 'RESTAURANT_REPORTS'                        // F&B reporting hub (separate from Hotel Reports)
     | 'EXPENSE_JOURNAL'                           // standalone Finance tab — operational expenses + petty cash
+    | 'RECEIVABLES'                               // OTA & agent receivables aging — promoted from Channel Manager
     | 'HOME'                                      // post-login launchpad (welcome + Hotel/Restaurant tiles)
   >('HOME');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
@@ -12190,6 +12191,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // Eagerly load credentials + iCal feeds + recent webhook events when
     // the tab is opened so the page renders with data, not loading spinners.
     if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); fetchTravelAgents(); fetchReceivablesAging(); fetchPartnerInvoices(); fetchOutstandingReport(); }
+    if (activeTab === 'RECEIVABLES') { fetchReceivablesAging(); fetchPartnerInvoices(); fetchTravelAgents(); }
     if (activeTab === 'FOLIOS') { fetchHotelFolios(); fetchPendingFolioOrders(); }
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
@@ -12823,11 +12825,21 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ],
           },
           {
-            id: 'SUPPLY_CHAIN', label: 'Supply Chain', icon: <Package size={16} />,
+            // Accounts = money in / money out ledger for the business owner.
+            // Procurement (AP), expenses, and OTA receivables belong here —
+            // not buried inside operational modules.
+            id: 'ACCOUNTS', label: 'Accounts', icon: <IndianRupee size={16} />,
             visible: true,
             tabs: [
-              { id: 'PROCUREMENT',     label: 'Procurement & AP' },
+              { id: 'PROCUREMENT',     label: 'Payables & Procurement' },
               { id: 'EXPENSE_JOURNAL', label: 'Expense Journal' },
+              { id: 'RECEIVABLES',     label: 'OTA & Agent Receivables', requires: 'hotel' },
+            ],
+          },
+          {
+            id: 'INVENTORY_MGR', label: 'Inventory', icon: <Package size={16} />,
+            visible: true,
+            tabs: [
               { id: 'HOTEL_INVENTORY', label: 'Hotel Inventory',   requires: 'hotel' },
               { id: 'INVENTORY',       label: 'Kitchen Inventory', requires: 'restaurant' },
               { id: 'SPA_INVENTORY',   label: 'Spa Inventory',     requires: 'spa' },
@@ -12893,7 +12905,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
           // visibility still flows through isTabVisible (V3 fix handles it).
-          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL') && isOwnerOrAdmin) return true;
+          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES') && isOwnerOrAdmin) return true;
           return isTabVisible(id, effectiveAllowedTabs);
         };
         // A page shows when RBAC allows it AND the tenant has the relevant
@@ -16409,6 +16421,126 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <ExpenseJournalView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'PROCUREMENT' ? (
         <ProcurementView restaurantId={restaurantId} token={token!} />
+      ) : activeTab === 'RECEIVABLES' && isHotelEnabled ? (
+        /* ══ OTA & AGENT RECEIVABLES — Accounts module entry point ══
+           Financial aging view for the business owner / accountant.
+           Full partner management (invoices, travel agent CRUD) lives
+           in Channel Manager; this page surfaces the numbers. */
+        <div className="space-y-5">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">💳 OTA &amp; Agent Receivables</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">Outstanding amounts owed by OTAs and travel agents, aged by collection bucket.</p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={autoGenerateInvoices}
+                disabled={autoGeneratingInvoices}
+                className="px-3 py-1.5 rounded-xl bg-rose-600 text-white text-xs font-bold hover:bg-rose-700 disabled:opacity-50"
+                title="Aggregate last month's checked-out OTA bookings into one invoice per channel. Idempotent."
+              >{autoGeneratingInvoices ? 'Generating…' : '⚡ Auto-generate last month'}</button>
+              <button
+                onClick={() => {
+                  if (!receivablesAging?.partners?.length) { alert('Nothing to export yet.'); return; }
+                  const headers = ['Partner Type','Partner Code','Partner Name','Invoice Count','Current (<30d)','30-60d','60-90d','90+d','Total Owed (INR)','Oldest Due'];
+                  const rows = receivablesAging.partners.map((p: any) => [p.partner_type, p.partner_code, p.partner_name || '', p.invoice_count, p.current, p.b30_60, p.b60_90, p.b90_plus, p.total, p.oldest_due || '']);
+                  const t = receivablesAging.totals || {};
+                  rows.push(['','','TOTAL', receivablesAging.invoice_count || 0, t.current||0, t.b30_60||0, t.b60_90||0, t.b90_plus||0, t.total||0, '']);
+                  const esc = (v: any) => { const s = String(v??''); return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; };
+                  const csv = [headers,...rows].map(r=>r.map(esc).join(',')).join('\n');
+                  const blob = new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'});
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a'); a.href=url; a.download=`receivables-aging-${receivablesAging.as_of||new Date().toISOString().slice(0,10)}.csv`;
+                  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+                }}
+                className="px-3 py-1.5 rounded-xl bg-white border border-rose-300 text-rose-700 text-xs font-bold hover:bg-rose-50"
+              >📥 Export CSV</button>
+              <button onClick={() => { fetchReceivablesAging(); fetchPartnerInvoices(); }} className="text-[10px] font-bold text-[#3d3128] hover:underline">↻ Refresh</button>
+              <button onClick={() => setActiveTab('CHANNEL_MANAGER')} className="text-[10px] font-bold text-indigo-600 hover:underline">Manage partner accounts →</button>
+            </div>
+          </div>
+          {!receivablesAging ? (
+            <p className="text-sm text-[#9c8e85] italic">Loading aging report…</p>
+          ) : (receivablesAging.invoice_count || 0) === 0 ? (
+            <div className="bg-white rounded-2xl p-8 border border-rose-100 text-center">
+              <p className="text-sm text-[#6b5d52] mb-2">No open invoices yet.</p>
+              <p className="text-xs text-[#9c8e85]">Click <strong>"Auto-generate last month"</strong> above to roll checked-out OTA bookings into one invoice per channel.</p>
+            </div>
+          ) : (() => {
+            const t = receivablesAging.totals || {};
+            const fmt = (n: number) => `₹${Math.round(Number(n||0)).toLocaleString('en-IN')}`;
+            const overdueTotal = (t.b30_60||0)+(t.b60_90||0)+(t.b90_plus||0);
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  <div className="bg-white rounded-2xl p-4 border border-rose-100 shadow-sm">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">Total Outstanding</p>
+                    <p className="text-2xl font-bold text-[#1a1208] mt-1">{fmt(t.total)}</p>
+                    <p className="text-[10px] text-[#6b5d52]">{receivablesAging.invoice_count} invoice{receivablesAging.invoice_count===1?'':'s'}</p>
+                  </div>
+                  <div className="bg-emerald-50 rounded-2xl p-4 border border-emerald-100">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-900">Current (&lt;30d)</p>
+                    <p className="text-xl font-bold text-emerald-700 mt-1">{fmt(t.current)}</p>
+                  </div>
+                  <div className="bg-amber-50 rounded-2xl p-4 border border-amber-100">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-amber-900">30–60 days</p>
+                    <p className="text-xl font-bold text-amber-700 mt-1">{fmt(t.b30_60)}</p>
+                  </div>
+                  <div className="bg-orange-50 rounded-2xl p-4 border border-orange-100">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-orange-900">60–90 days</p>
+                    <p className="text-xl font-bold text-orange-700 mt-1">{fmt(t.b60_90)}</p>
+                  </div>
+                  <div className="bg-rose-100 rounded-2xl p-4 border border-rose-200">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-rose-900">90+ days overdue</p>
+                    <p className="text-xl font-bold text-rose-700 mt-1">{fmt(t.b90_plus)}</p>
+                  </div>
+                </div>
+                {overdueTotal > 0 && (
+                  <div className="bg-rose-50 border border-rose-200 rounded-2xl px-4 py-2.5 text-sm text-rose-800 font-medium">
+                    ⚠️ {fmt(overdueTotal)} is overdue (&gt;30 days). Chase OTAs now — delays compound.
+                  </div>
+                )}
+                <div className="bg-white rounded-2xl border border-[#e8dccf] overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse">
+                      <thead>
+                        <tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                          <th className="text-left px-4 py-2.5">Partner</th>
+                          <th className="text-right px-4 py-2.5">Invoices</th>
+                          <th className="text-right px-4 py-2.5">Current</th>
+                          <th className="text-right px-4 py-2.5">30–60d</th>
+                          <th className="text-right px-4 py-2.5">60–90d</th>
+                          <th className="text-right px-4 py-2.5">90+d</th>
+                          <th className="text-right px-4 py-2.5 font-bold">Total</th>
+                          <th className="text-center px-4 py-2.5">Statement</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {receivablesAging.partners.map((p: any) => (
+                          <tr key={p.partner_code} className="border-t border-[#e8e0d6] hover:bg-[#faf7f2]">
+                            <td className="px-4 py-2.5">
+                              <div className="font-bold text-[#1a1208]">{p.partner_name || p.partner_code}</div>
+                              <div className="text-[10px] text-[#9c8e85] uppercase">{p.partner_type}</div>
+                            </td>
+                            <td className="px-4 py-2.5 text-right text-[#6b5d52]">{p.invoice_count}</td>
+                            <td className="px-4 py-2.5 text-right text-emerald-700">{fmt(p.current)}</td>
+                            <td className="px-4 py-2.5 text-right text-amber-700">{fmt(p.b30_60)}</td>
+                            <td className="px-4 py-2.5 text-right text-orange-700">{fmt(p.b60_90)}</td>
+                            <td className="px-4 py-2.5 text-right text-rose-700 font-semibold">{fmt(p.b90_plus)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold text-[#1a1208]">{fmt(p.total)}</td>
+                            <td className="px-4 py-2.5 text-center">
+                              <button onClick={() => openPartnerStatement(p.partner_type, p.partner_code)} className="text-[10px] font-bold text-rose-700 hover:underline">View</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
       ) : activeTab === 'REPORTS' ? (
         // Hotel-mode owners get hotel-focused KPIs (occupancy, ADR,
         // RevPAR, ancillary, guest rating) instead of restaurant
