@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { DataTable, exportToCsv } from './components/DataTable';
+import { useToast } from './components/Toast';
+import { useConfirm } from './components/ConfirmDialog';
+import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -8331,6 +8334,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   useEffect(() => {
     try { localStorage.setItem('atithi_room_view_mode', roomViewMode); } catch {}
   }, [roomViewMode]);
+
+  const toast = useToast();
+  const showConfirm = useConfirm();
+  const promptPayment = usePaymentDialog();
 
   // FRONT-OFFICE-REPORTS (client request 7 Jun 2026): four classic
   // front-office reports (Arrival / Departure / Room Status / Night
@@ -17287,18 +17294,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </button>
                   <button
                     onClick={async () => {
-                      const newPass = prompt(`Set new password for ${s.name}:`);
-                      if (!newPass) return;
+                      const result = await promptPayment({ title: `Reset password — ${s.name}`, fields: [{ name: 'password', label: 'New password', type: 'password', required: true }], confirmLabel: 'Update Password' });
+                      if (!result) return;
                       const res = await fetch(`/api/owner/staff/${s.id}/reset-password`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                        body: JSON.stringify({ newPassword: newPass })
+                        body: JSON.stringify({ newPassword: result.password })
                       });
-                      if (res.ok) alert(`✓ Password updated for ${s.name}`);
-                      else {
-                        const d = await res.json().catch(() => ({}));
-                        alert(d.error || 'Failed to reset password');
-                      }
+                      if (res.ok) toast.success(`Password updated for ${s.name}`);
+                      else { const d = await res.json().catch(() => ({})); toast.error(d.error || 'Failed to reset password'); }
                     }}
                     className="text-[11px] font-bold uppercase tracking-widest text-[#1a1208] border-2 border-[#cc5a16]/20 rounded-xl py-2 hover:bg-[#cc5a16]/5 transition-colors">
                     🔑 Reset Pwd
@@ -17356,15 +17360,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                       {s.is_active ? 'Deactivate' : 'Activate'}
                                     </button>
                                     <button onClick={async () => {
-                                      const newPass = prompt(`Set new password for ${s.name}:`);
-                                      if (!newPass) return;
+                                      const result = await promptPayment({ title: `Reset password — ${s.name}`, fields: [{ name: 'password', label: 'New password', type: 'password', required: true }], confirmLabel: 'Update Password' });
+                                      if (!result) return;
                                       const res = await fetch(`/api/owner/staff/${s.id}/reset-password`, {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                                        body: JSON.stringify({ newPassword: newPass })
+                                        body: JSON.stringify({ newPassword: result.password })
                                       });
-                                      if (res.ok) alert(`✓ Password updated for ${s.name}`);
-                                      else { const d = await res.json().catch(() => ({})); alert(d.error || 'Failed to reset password'); }
+                                      if (res.ok) toast.success(`Password updated for ${s.name}`);
+                                      else { const d = await res.json().catch(() => ({})); toast.error(d.error || 'Failed to reset password'); }
                                     }} className="text-[11px] font-bold px-2.5 py-1 rounded-lg border-2 border-[#cc5a16]/20 hover:bg-[#cc5a16]/5 transition-colors">🔑 Pwd</button>
                                     <button onClick={() => removeStaff(s.id)} className="text-red-400 hover:text-red-600 p-1 transition-colors"><Trash2 size={15} /></button>
                                   </div>
@@ -20025,10 +20029,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CONFIRMED'})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); } catch (err:any) { alert(err.message); } }} className="px-2 py-1 rounded-lg bg-green-600 text-white text-[10px] font-bold hover:bg-green-700">Confirm</button>
                                       )}
                                       {!settled && g.group_status !== 'CANCELLED' && Number(g.checked_in_count||0) === 0 && (
-                                        <button onClick={async () => { const reason = prompt(`Cancel group "${g.name}"? Enter reason (optional):`); if (reason===null) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CANCELLED',reason:reason.trim()||null})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { alert(err.message); } }} className="px-2 py-1 rounded-lg border border-red-300 text-red-600 text-[10px] font-bold hover:bg-red-50">Cancel</button>
+                                        <button onClick={async () => { const cr = await promptPayment({ title: `Cancel group "${g.name}"?`, fields: [{ name: 'reason', label: 'Reason (optional)', type: 'text', placeholder: 'e.g. guest request' }], confirmLabel: 'Cancel Group' }); if (!cr) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CANCELLED',reason:cr.reason?.trim()||null})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { toast.error(err.message); } }} className="px-2 py-1 rounded-lg border border-red-300 text-red-600 text-[10px] font-bold hover:bg-red-50">Cancel</button>
                                       )}
                                       {hasCheckedIn && (
-                                        <button onClick={async () => { const method = prompt(`Settle "${g.name}" (${g.checked_in_count} room${g.checked_in_count===1?'':'s'}). Payment method?`,'CASH'); if (!method) return; const ds = prompt('Group discount in ₹?','0'); if (ds===null) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkout`, {method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({payment_method:method.toUpperCase(),discount:Math.max(0,Number(ds)||0)})}); const data = await res.json(); if (!res.ok) throw new Error(data?.error||'Settle failed'); alert(`Settled. Invoice: ${data.invoice_number}\nTotal: ₹${Number(data.total_grand_total||0).toLocaleString('en-IN')}`); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { alert(err.message); } }} className="px-2 py-1 rounded-lg bg-violet-600 text-white text-[10px] font-bold hover:bg-violet-700">Settle</button>
+                                        <button onClick={async () => { const sr = await promptPayment({ title: `Settle group "${g.name}"`, body: `${g.checked_in_count} room${g.checked_in_count===1?'':'s'} — choose payment method and optional discount`, fields: [{ name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'},{value:'BANK_TRANSFER',label:'Bank Transfer'}], defaultValue: 'CASH' }, { name: 'discount', label: 'Group discount (₹)', type: 'number', placeholder: '0', defaultValue: '0' }], confirmLabel: 'Settle & Checkout' }); if (!sr) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkout`, {method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({payment_method:sr.method.toUpperCase(),discount:Math.max(0,Number(sr.discount)||0)})}); const data = await res.json(); if (!res.ok) throw new Error(data?.error||'Settle failed'); toast.success(`Settled — Invoice ${data.invoice_number}, ₹${Number(data.total_grand_total||0).toLocaleString('en-IN')}`); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { toast.error(err.message); } }} className="px-2 py-1 rounded-lg bg-violet-600 text-white text-[10px] font-bold hover:bg-violet-700">Settle</button>
                                       )}
                                       <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/invoice-pdf`,{headers:{Authorization:`Bearer ${token}`}}); if (!res.ok){const j=await res.json().catch(()=>({}));throw new Error(j?.error||'Download failed');} const blob=await res.blob(); const url=URL.createObjectURL(blob); const a=document.createElement('a');a.href=url;a.download=`GroupInvoice-${g.id}-${(g.name||'group').replace(/[^a-z0-9_-]+/gi,'-')}.pdf`;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},1000); } catch(err:any){alert(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📑 PDF</button>
                                       <button onClick={async () => { const to = prompt(`Email invoice for "${g.name}" to:`, g.contact_email||''); if (!to||!to.trim()) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/email-invoice`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({to:to.trim()})}); const data=await res.json(); if (!res.ok) throw new Error(data?.error||'Email failed'); alert(`Invoice ${data.invoice_number} sent to ${data.sent_to}`); } catch(err:any){alert(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📧 Email</button>
@@ -31917,20 +31921,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'settled' && (
                   <button
                     onClick={async () => {
-                      const reason = prompt('Reason for credit note (optional):', 'Refund');
-                      if (reason === null) return;
+                      const cnr = await promptPayment({ title: 'Generate credit note', fields: [{ name: 'reason', label: 'Reason', type: 'text', placeholder: 'Refund / cancellation', defaultValue: 'Refund' }], confirmLabel: 'Generate' });
+                      if (!cnr) return;
                       try {
                         const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/credit-note`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                          body: JSON.stringify({ reason: reason || 'Refund / cancellation' }),
+                          body: JSON.stringify({ reason: cnr.reason || 'Refund / cancellation' }),
                         });
                         const body = await res.json();
                         if (!res.ok) throw new Error(body.error || 'Failed');
-                        alert(`✅ Credit note ${body.id} created. Refresh folios to view.`);
+                        toast.success(`Credit note ${body.id} created`);
                         await fetchHotelFolios();
                         setViewFolio(null);
-                      } catch (err: any) { alert(err.message); }
+                      } catch (err: any) { toast.error(err.message); }
                     }}
                     className="flex-1 min-w-[140px] px-4 py-2.5 rounded-2xl border-2 border-[#c13b3b] text-[#c13b3b] text-sm font-bold hover:bg-[#fdf0f0] flex items-center justify-center gap-2"
                   ><RefreshCw size={14}/> Generate Credit Note</button>
@@ -38522,6 +38526,8 @@ const PendingRoomOrdersAlert: React.FC<{
   const [busyId, setBusyId] = useState<string | null>(null);
   const [picks, setPicks] = useState<Record<string, string>>({});
   const [error, setError] = useState('');
+  const toast = useToast();
+  const promptPayment = usePaymentDialog();
 
   if (!orders || orders.length === 0) return null;
 
@@ -38562,9 +38568,9 @@ const PendingRoomOrdersAlert: React.FC<{
   const deliverOrder = async (order: any, paidInRoom: boolean) => {
     let method = 'CASH';
     if (paidInRoom) {
-      const m = window.prompt('Guest paid in the room — payment method? (CASH / UPI / CARD)', 'CASH');
-      if (m == null) return;   // cancelled
-      method = (m || 'CASH').toUpperCase();
+      const pr = await promptPayment({ title: 'Guest paid in room', fields: [{ name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'}], defaultValue: 'CASH' }], confirmLabel: 'Mark paid' });
+      if (!pr) return;
+      method = pr.method;
     }
     setError(''); setBusyId(order.id);
     try {
