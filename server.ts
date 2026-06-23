@@ -28234,6 +28234,40 @@ ${data.tenant.name}`;
     }
   });
 
+  // Public restaurant menu page — no auth required.
+  app.get("/api/public/restaurant/:id/menu-page", async (req: Request, res: Response) => {
+    try {
+      const id = req.params.id;
+      const row: any = await centralDb.get(
+        "SELECT name, city, state, phone, logo_url, cover_image_url, currency_symbol FROM restaurants WHERE id = ? AND is_active = 1 AND access_revoked = 0",
+        [id]
+      );
+      if (!row) return res.status(404).json({ error: "Restaurant not found" });
+      const db = await getTenantDb(id);
+      const items: any[] = await db.query(
+        "SELECT name, category, description, price, dietary_type, image_url FROM menu WHERE is_available = 1 ORDER BY category, name"
+      ).catch(() => []);
+      const categories: Record<string, any[]> = {};
+      for (const item of items) {
+        const cat = item.category || "Other";
+        if (!categories[cat]) categories[cat] = [];
+        categories[cat].push(item);
+      }
+      res.json({
+        name: row.name,
+        city: row.city || "",
+        state: row.state || "",
+        phone: row.phone || "",
+        logo_url: row.logo_url || "",
+        cover_image_url: row.cover_image_url || "",
+        currency_symbol: row.currency_symbol || "₹",
+        categories,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to load menu page" });
+    }
+  });
+
   // Hotel info card for the landing page.
   app.get("/api/public/restaurant/:id/hotel", async (req: Request, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);

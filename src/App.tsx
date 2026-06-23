@@ -518,6 +518,9 @@ export default function App() {
     if (segs[0] === 'spa' && segs[1]) {
       return { kind: 'spa' as const, tenantId: segs[1] };
     }
+    if (segs[0] === 'menu' && segs[1]) {
+      return { kind: 'menu' as const, tenantId: segs[1] };
+    }
     return null;
   })();
   if (publicGuestPath?.kind === 'checkin') {
@@ -528,6 +531,9 @@ export default function App() {
   }
   if (publicGuestPath?.kind === 'spa') {
     return <SpaBookingPage tenantId={publicGuestPath.tenantId} />;
+  }
+  if (publicGuestPath?.kind === 'menu') {
+    return <PublicRestaurantPage tenantId={publicGuestPath.tenantId} />;
   }
 
   const [role, setRole] = useState<UserRole | null>(localStorage.getItem('role') as UserRole);
@@ -39902,7 +39908,8 @@ function HotelHomeLaunchpad({
         {(() => {
           const origin = window.location.origin;
           const links: { label: string; url: string; color: string }[] = [];
-          if (isHotelEnabled && bookingSlug) links.push({ label: 'Hotel booking', url: `${origin}/book/${bookingSlug}`, color: '#cc5a16' });
+          if (isHotelEnabled) links.push({ label: 'Hotel booking', url: `${origin}/book/${bookingSlug || restaurantId}`, color: '#cc5a16' });
+          if (isRestaurantEnabled) links.push({ label: 'Restaurant menu', url: `${origin}/menu/${restaurantId}`, color: '#0f6e56' });
           if (isSpaEnabled) links.push({ label: 'Spa booking', url: `${origin}/spa/${restaurantId}`, color: '#7e5792' });
           if (links.length === 0) return null;
           return (
@@ -61172,6 +61179,138 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
           </form>
         </div>
         <p className="text-center text-[10px] text-[#9c8e85] mt-3">Powered by Atithi-Setu</p>
+      </div>
+    </div>
+  );
+}
+
+/* ─── PublicRestaurantPage — public route /menu/:tenantId ────────────
+   Customer-facing restaurant page: shows the menu grouped by category
+   with an "Order Now" link into the QR ordering flow.                  */
+function PublicRestaurantPage({ tenantId }: { tenantId: string }) {
+  const [info, setInfo] = useState<any>(null);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    fetch(`/api/public/restaurant/${encodeURIComponent(tenantId)}/menu-page`)
+      .then(r => r.ok ? r.json() : r.json().then((e: any) => Promise.reject(e?.error || 'Not found')))
+      .then(setInfo)
+      .catch((e: any) => setErr(String(e)));
+  }, [tenantId]);
+
+  if (err) return (
+    <div className="min-h-screen flex items-center justify-center bg-[#fdf6ee]">
+      <div className="text-center p-8">
+        <Utensils size={48} className="mx-auto mb-4 text-[#d4b483]" />
+        <p className="text-[#6b5d52] text-lg">Restaurant not found.</p>
+      </div>
+    </div>
+  );
+
+  if (!info) return (
+    <div className="min-h-screen flex items-center justify-center bg-[#fdf6ee]">
+      <div className="animate-spin w-8 h-8 border-4 border-[#0f6e56] border-t-transparent rounded-full" />
+    </div>
+  );
+
+  const sym = info.currency_symbol || '₹';
+  const categories: Record<string, any[]> = info.categories || {};
+  const catNames = Object.keys(categories);
+  const orderUrl = `${window.location.origin}/?r=${encodeURIComponent(tenantId)}`;
+
+  return (
+    <div className="min-h-screen bg-[#fdf6ee]">
+      {/* Header */}
+      <div className="bg-white border-b border-[#e8ddd0] sticky top-0 z-10">
+        <div className="max-w-2xl mx-auto px-4 py-3 flex items-center gap-3">
+          {info.logo_url ? (
+            <img src={info.logo_url} alt="" className="w-10 h-10 rounded-xl object-cover border border-[#e8ddd0]" />
+          ) : (
+            <div className="w-10 h-10 rounded-xl bg-[#e1f5ee] flex items-center justify-center">
+              <Utensils size={20} className="text-[#0f6e56]" />
+            </div>
+          )}
+          <div className="flex-1 min-w-0">
+            <h1 className="font-bold font-serif text-[#1a1208] text-lg leading-tight truncate">{info.name}</h1>
+            {(info.city || info.state) && (
+              <p className="text-[11px] text-[#9c8e85]">{[info.city, info.state].filter(Boolean).join(', ')}</p>
+            )}
+          </div>
+          <a href={orderUrl}
+            className="shrink-0 bg-[#0f6e56] text-white text-sm font-bold px-4 py-2 rounded-xl hover:bg-[#0a5a46] transition-colors flex items-center gap-1.5">
+            <ShoppingCart size={15} /> Order
+          </a>
+        </div>
+      </div>
+
+      {/* Cover image */}
+      {info.cover_image_url && (
+        <div className="w-full h-40 overflow-hidden">
+          <img src={info.cover_image_url} alt="" className="w-full h-full object-cover" />
+        </div>
+      )}
+
+      {/* Menu */}
+      <div className="max-w-2xl mx-auto px-4 py-6 space-y-8">
+        {catNames.length === 0 ? (
+          <div className="text-center py-12 text-[#9c8e85]">
+            <Utensils size={36} className="mx-auto mb-3 opacity-40" />
+            <p>Menu coming soon</p>
+          </div>
+        ) : catNames.map(cat => (
+          <div key={cat}>
+            <h2 className="text-xs font-bold uppercase tracking-[0.15em] text-[#0f6e56] mb-3">{cat}</h2>
+            <div className="space-y-3">
+              {categories[cat].map((item: any, i: number) => (
+                <div key={i} className="bg-white rounded-2xl p-4 flex gap-3 items-start border border-[#f0e8de]">
+                  {item.image_url && (
+                    <img src={item.image_url} alt="" className="w-16 h-16 rounded-xl object-cover shrink-0 border border-[#e8ddd0]" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        {item.dietary_type === 'VEG' && (
+                          <span className="w-4 h-4 rounded-sm border-2 border-green-600 flex items-center justify-center shrink-0">
+                            <span className="w-2 h-2 rounded-full bg-green-600" />
+                          </span>
+                        )}
+                        {item.dietary_type === 'NON_VEG' && (
+                          <span className="w-4 h-4 rounded-sm border-2 border-red-600 flex items-center justify-center shrink-0">
+                            <span className="w-2 h-2 rounded-full bg-red-600" />
+                          </span>
+                        )}
+                        <span className="font-semibold text-[#1a1208] text-sm">{item.name}</span>
+                      </div>
+                      <span className="text-sm font-bold text-[#0f6e56] shrink-0">
+                        {item.price > 0 ? `${sym}${Number(item.price).toLocaleString('en-IN')}` : 'Price on request'}
+                      </span>
+                    </div>
+                    {item.description && (
+                      <p className="text-[11px] text-[#9c8e85] mt-1 line-clamp-2">{item.description}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+
+        {/* Order CTA */}
+        {catNames.length > 0 && (
+          <div className="text-center pt-4">
+            <a href={orderUrl}
+              className="inline-flex items-center gap-2 bg-[#0f6e56] text-white font-bold px-8 py-3.5 rounded-2xl hover:bg-[#0a5a46] transition-colors text-sm shadow-md">
+              <ShoppingCart size={16} /> Order Online
+            </a>
+          </div>
+        )}
+
+        {info.phone && (
+          <p className="text-center text-[11px] text-[#9c8e85]">
+            Call us: <a href={`tel:${info.phone}`} className="text-[#0f6e56] font-semibold">{info.phone}</a>
+          </p>
+        )}
+        <p className="text-center text-[10px] text-[#c9bdb3]">Powered by Atithi-Setu</p>
       </div>
     </div>
   );
