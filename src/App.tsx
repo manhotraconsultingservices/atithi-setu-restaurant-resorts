@@ -8378,7 +8378,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [bookingColMenuOpen, setBookingColMenuOpen] = useState(false);
   const colOn = (k: string) => bookingCols[k] !== false;
   const displayedBookings = useMemo(() => {
-    const todayTab = new Date().toISOString().slice(0, 10);
+    // IST local date — booking dates are stored in IST; UTC would give yesterday
+    // before 05:30 IST, causing ARR/DEP tabs to appear empty early morning.
+    const todayTab = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     let rows = hotelBookings;
     // Tab pre-filter (primary — applied before search/source)
     switch (bookingViewTab) {

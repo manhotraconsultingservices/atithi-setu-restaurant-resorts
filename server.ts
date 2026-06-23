@@ -23931,7 +23931,10 @@ ${data.tenant.name}`;
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
-      const today = new Date().toISOString().slice(0, 10);
+      // Use IST (Asia/Kolkata = UTC+5:30) for "today" so stats match the dates
+      // users enter in the UI, which are always IST local dates. Raw UTC would
+      // show yesterday before 05:30 IST, causing ARR/DEP tiles to read 0.
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
       const db = await getTenantDb(req.params.id);
       const rows: any[] = await db.query(
         `SELECT status, check_in_date, check_out_date, booking_type
