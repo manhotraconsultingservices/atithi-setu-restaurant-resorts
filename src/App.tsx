@@ -7803,6 +7803,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'ACCOUNTS_CASHFLOW'                         // Cash flow — cash in vs out
     | 'ACCOUNTS_GST'                              // GST tax ledger — output vs ITC
     | 'ACCOUNTS_VENDOR_AGING'                     // Vendor aging — what we owe suppliers
+    | 'SPA_BILLING'                               // Spa settlement ledger in Accounts context
     | 'HOME'                                      // post-login launchpad (welcome + Hotel/Restaurant tiles)
   >('HOME');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
@@ -9340,6 +9341,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [gstLedgerData, setGstLedgerData] = useState<any>(null);
   const [gstMonth, setGstMonth] = useState(new Date().toISOString().slice(0,7));
   const [vendorAgingData, setVendorAgingData] = useState<any>(null);
+  const [spaBillingData, setSpaBillingData] = useState<any>(null);
+  const [spaBillingRange, setSpaBillingRange] = useState({ from: new Date().toISOString().slice(0,7)+'-01', to: new Date().toISOString().slice(0,10) });
   // Outstanding-payments report (per-booking, sortable + filterable).
   // Populated by the new /reports/outstanding-payments endpoint.
   const [outstandingReport, setOutstandingReport] = useState<any>(null);
@@ -9402,6 +9405,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     try {
       const r = await fetch(`/api/restaurant/${restaurantId}/reports/vendor-aging`, { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) setVendorAgingData(await r.json());
+    } catch { /* silent */ }
+  };
+  const fetchSpaBilling = async (from?: string, to?: string) => {
+    const f = from || spaBillingRange.from;
+    const t = to   || spaBillingRange.to;
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/accounts/spa-billing?from=${f}&to=${t}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) setSpaBillingData(await r.json());
     } catch { /* silent */ }
   };
   const fetchReceivablesAging = async () => {
@@ -12237,6 +12248,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (activeTab === 'ACCOUNTS_CASHFLOW')      { fetchCashFlow(); }
     if (activeTab === 'ACCOUNTS_GST')           { fetchGstLedger(); }
     if (activeTab === 'ACCOUNTS_VENDOR_AGING')  { fetchVendorAging(); }
+    if (activeTab === 'SPA_BILLING')            { fetchSpaBilling(); }
     if (activeTab === 'FOLIOS') { fetchHotelFolios(); fetchPendingFolioOrders(); }
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
@@ -12879,6 +12891,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'PROCUREMENT',     label: 'Payables & Procurement' },
               { id: 'EXPENSE_JOURNAL', label: 'Expense Journal' },
               { id: 'RECEIVABLES',     label: 'OTA & Agent Receivables', requires: 'hotel' },
+              { id: 'SPA_BILLING',     label: 'Spa Billing & Settlements', requires: 'spa' },
               ...(isOwnerOrAdmin ? [
                 { id: 'ACCOUNTS_VENDOR_AGING', label: 'Vendor Aging' } as NavTab,
                 { id: 'ACCOUNTS_PNL',          label: 'P&L Report' } as NavTab,
@@ -12956,7 +12969,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
           // visibility still flows through isTabVisible (V3 fix handles it).
-          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING') && isOwnerOrAdmin) return true;
+          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING' || id === 'SPA_BILLING') && isOwnerOrAdmin) return true;
           return isTabVisible(id, effectiveAllowedTabs);
         };
         // A page shows when RBAC allows it AND the tenant has the relevant
@@ -16679,9 +16692,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             const fmt = (n: number) => `₹${Math.round(Number(n||0)).toLocaleString('en-IN')}`;
             const pct = (n: number, base: number) => base > 0 ? `${((n/base)*100).toFixed(1)}%` : '—';
             const rows: [string,number,string?,boolean?][] = [
-              ['Hotel Room Revenue',    rev.hotel_room   || 0, undefined, false],
-              ['Spa Revenue',           rev.spa          || 0, undefined, false],
-              ['Restaurant Revenue',    rev.restaurant   || 0, undefined, false],
+              ...(isHotelEnabled      ? [['Hotel Room Revenue', rev.hotel_room  || 0, undefined, false] as [string,number,string?,boolean?]] : []),
+              ...(isSpaEnabled        ? [['Spa Revenue',        rev.spa         || 0, undefined, false] as [string,number,string?,boolean?]] : []),
+              ...(isRestaurantEnabled ? [['Restaurant Revenue', rev.restaurant  || 0, undefined, false] as [string,number,string?,boolean?]] : []),
               ['TOTAL REVENUE',         rev.total        || 0, undefined, true],
               ['Cost of Goods (Procurement)', -(cogs.procurement||0), undefined, false],
               ['GROSS PROFIT',          d.gross_profit   || 0, pct(d.gross_profit||0, rev.total||0), true],
@@ -16752,23 +16765,43 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <div className="bg-white rounded-2xl border border-[#e8dccf] overflow-hidden">
                     <div className="px-4 py-2.5 bg-emerald-50 border-b border-emerald-100"><p className="text-xs font-bold text-emerald-900 uppercase tracking-widest">Cash Inflows</p></div>
                     <table className="w-full text-sm"><tbody>
-                      {(d.inflows||[]).map((row: any) => (
-                        <tr key={row.category} className="border-t border-[#f0ebe4]">
-                          <td className="px-4 py-2 text-[#3d3128]">{row.category}</td>
-                          <td className="px-4 py-2 text-right font-mono font-bold text-emerald-700">{fmt(row.amount)}</td>
-                        </tr>
-                      ))}
+                      {(d.inflows||[]).filter((row: any) => {
+                        if (row.category === 'hotel_collections' && !isHotelEnabled) return false;
+                        if (row.category === 'spa_collections'   && !isSpaEnabled) return false;
+                        if (row.category === 'restaurant_cash'   && !isRestaurantEnabled) return false;
+                        return true;
+                      }).map((row: any) => {
+                        const labels: Record<string,string> = {
+                          hotel_collections: 'Hotel Collections',
+                          spa_collections:   'Spa & Wellness',
+                          restaurant_cash:   'Restaurant Sales',
+                          refunds_out:       'Refunds Issued',
+                        };
+                        return (
+                          <tr key={row.category} className="border-t border-[#f0ebe4]">
+                            <td className="px-4 py-2 text-[#3d3128]">{labels[row.category] || row.category}</td>
+                            <td className="px-4 py-2 text-right font-mono font-bold text-emerald-700">{fmt(row.amount)}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody></table>
                   </div>
                   <div className="bg-white rounded-2xl border border-[#e8dccf] overflow-hidden">
                     <div className="px-4 py-2.5 bg-rose-50 border-b border-rose-100"><p className="text-xs font-bold text-rose-900 uppercase tracking-widest">Cash Outflows</p></div>
                     <table className="w-full text-sm"><tbody>
-                      {(d.outflows||[]).map((row: any) => (
-                        <tr key={row.category} className="border-t border-[#f0ebe4]">
-                          <td className="px-4 py-2 text-[#3d3128]">{row.category}</td>
-                          <td className="px-4 py-2 text-right font-mono font-bold text-rose-700">{fmt(row.amount)}</td>
-                        </tr>
-                      ))}
+                      {(d.outflows||[]).map((row: any) => {
+                        const labels: Record<string,string> = {
+                          procurement_paid: 'Supplier Payments',
+                          opex_paid:        'Operating Expenses',
+                          payroll_paid:     'Payroll',
+                        };
+                        return (
+                          <tr key={row.category} className="border-t border-[#f0ebe4]">
+                            <td className="px-4 py-2 text-[#3d3128]">{labels[row.category] || row.category}</td>
+                            <td className="px-4 py-2 text-right font-mono font-bold text-rose-700">{fmt(row.amount)}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody></table>
                   </div>
                 </div>
@@ -16827,9 +16860,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <p className="text-[9px] font-bold uppercase tracking-widest text-rose-900">Output GST (Collected)</p>
                     <p className="text-2xl font-bold text-rose-700 mt-2">{fmt(out.total||0)}</p>
                     <div className="mt-2 space-y-1 text-xs text-[#6b5d52]">
-                      {out.hotel  > 0 && <div className="flex justify-between"><span>Hotel rooms</span><span className="font-mono">{fmt(out.hotel)}</span></div>}
-                      {out.spa    > 0 && <div className="flex justify-between"><span>Spa</span><span className="font-mono">{fmt(out.spa)}</span></div>}
-                      {out.restaurant > 0 && <div className="flex justify-between"><span>Restaurant</span><span className="font-mono">{fmt(out.restaurant)}</span></div>}
+                      {isHotelEnabled      && out.hotel       > 0 && <div className="flex justify-between"><span>Hotel rooms</span><span className="font-mono">{fmt(out.hotel)}</span></div>}
+                      {isSpaEnabled        && out.spa         > 0 && <div className="flex justify-between"><span>Spa</span><span className="font-mono">{fmt(out.spa)}</span></div>}
+                      {isRestaurantEnabled && out.restaurant  > 0 && <div className="flex justify-between"><span>Restaurant</span><span className="font-mono">{fmt(out.restaurant)}</span></div>}
                     </div>
                   </div>
                   <div className="bg-emerald-50 rounded-2xl p-4 border border-emerald-100">
@@ -16848,6 +16881,76 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <div className="bg-[#faf7f2] rounded-2xl border border-[#e8dccf] px-5 py-3 text-xs text-[#6b5d52]">
                   <strong>GSTR-3B guidance:</strong> Output {fmt(out.total||0)} &minus; ITC {fmt(itc.total||0)} = Net payable {fmt(liability)}. File by 20th of next month.
                 </div>
+              </div>
+            );
+          })()}
+        </div>
+      ) : activeTab === 'SPA_BILLING' ? (
+        <div className="space-y-5">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Spa Billing &amp; Settlements</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">Settled spa appointments with tax collected — accounting view of Spa &amp; Wellness revenue.</p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input type="date" value={spaBillingRange.from} onChange={e => setSpaBillingRange(p=>({...p,from:e.target.value}))} className="text-xs border border-[#e8dccf] rounded-lg px-2 py-1.5" />
+              <span className="text-xs text-[#9c8e85]">to</span>
+              <input type="date" value={spaBillingRange.to} onChange={e => setSpaBillingRange(p=>({...p,to:e.target.value}))} className="text-xs border border-[#e8dccf] rounded-lg px-2 py-1.5" />
+              <button onClick={() => fetchSpaBilling(spaBillingRange.from, spaBillingRange.to)} className="px-3 py-1.5 rounded-lg bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#b34e13]">Run</button>
+              <button onClick={() => fetchSpaBilling()} className="text-[10px] font-bold text-[#3d3128] hover:underline">Refresh</button>
+            </div>
+          </div>
+          {!spaBillingData ? (
+            <p className="text-sm text-[#9c8e85] italic">Select a period and click Run.</p>
+          ) : (() => {
+            const d = spaBillingData;
+            const s = d.summary || {};
+            const fmt = (n: number) => `₹${Math.round(Number(n||0)).toLocaleString('en-IN')}`;
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {[
+                    { label: 'Appointments Billed', val: Number(s.appointment_count||0).toLocaleString('en-IN'), accent: 'text-[#cc5a16]' },
+                    { label: 'Net Revenue',         val: fmt(s.total_net||0),      accent: 'text-emerald-700' },
+                    { label: 'GST Collected',       val: fmt(s.gst_collected||0),  accent: 'text-rose-700' },
+                    { label: 'Total Settled',       val: fmt(s.total_settled||0),  accent: 'text-indigo-700' },
+                  ].map(({ label, val, accent }) => (
+                    <div key={label} className="bg-white rounded-2xl border border-[#e8dccf] p-4">
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">{label}</p>
+                      <p className={`text-2xl font-bold mt-1 ${accent}`}>{val}</p>
+                    </div>
+                  ))}
+                </div>
+                {(d.folios||[]).length === 0 ? (
+                  <p className="text-sm text-[#9c8e85] italic">No settled spa appointments in this period.</p>
+                ) : (
+                  <div className="bg-white rounded-2xl border border-[#e8dccf] overflow-hidden">
+                    <table className="w-full text-sm border-collapse">
+                      <thead><tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                        <th className="text-left px-4 py-3">Date</th>
+                        <th className="text-left px-4 py-3">Client</th>
+                        <th className="text-left px-4 py-3">Service</th>
+                        <th className="text-right px-4 py-3">Net</th>
+                        <th className="text-right px-4 py-3">GST</th>
+                        <th className="text-right px-4 py-3">Total</th>
+                        <th className="text-left px-4 py-3">Mode</th>
+                      </tr></thead>
+                      <tbody>
+                        {(d.folios as any[]).map((f: any) => (
+                          <tr key={f.id} className="border-t border-[#f0ebe4] hover:bg-[#faf7f2]">
+                            <td className="px-4 py-2 text-[#6b5d52] font-mono text-xs">{f.settled_at ? new Date(f.settled_at).toLocaleDateString('en-IN') : '—'}</td>
+                            <td className="px-4 py-2 text-[#1a1208]">{f.client_name}</td>
+                            <td className="px-4 py-2 text-[#3d3128]">{f.service_name}</td>
+                            <td className="px-4 py-2 text-right font-mono text-[#1a1208]">{fmt(f.subtotal)}</td>
+                            <td className="px-4 py-2 text-right font-mono text-rose-600">{fmt(f.gst_amount)}</td>
+                            <td className="px-4 py-2 text-right font-mono font-bold text-[#1a1208]">{fmt(f.grand_total)}</td>
+                            <td className="px-4 py-2 text-[#6b5d52] text-xs capitalize">{(f.payment_method||'').toLowerCase()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             );
           })()}

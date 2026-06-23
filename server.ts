@@ -26926,9 +26926,10 @@ ${data.tenant.name}`;
       const f = from || new Date().toISOString().slice(0, 7) + '-01';
       const t = to   || new Date().toISOString().slice(0, 10);
 
-      const [hotelIn, hotelRefund, restCash, procPaid, opexPaid, payrollPaid,
+      const [hotelIn, spaIn, hotelRefund, restCash, procPaid, opexPaid, payrollPaid,
              dailyHotel, dailyRest, dailyProcOut, dailyOpex, dailyPayroll] = await Promise.all([
-        db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM folio_payments WHERE is_voided=0 AND payment_type != 'REFUND' AND DATE(recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND (fl.folio_kind IS NULL OR fl.folio_kind='HOTEL') AND DATE(fp.recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(fp.amount), 0) AS val FROM folio_payments fp LEFT JOIN folios fl ON fl.id=fp.folio_id WHERE fp.is_voided=0 AND fp.payment_type != 'REFUND' AND fl.folio_kind='SPA' AND DATE(fp.recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM folio_payments WHERE is_voided=0 AND payment_type='REFUND' AND DATE(recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(total_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
         db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM supplier_payments WHERE DATE(payment_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
@@ -26943,13 +26944,14 @@ ${data.tenant.name}`;
 
       const round = (n: number) => Math.round(Number(n) * 100) / 100;
       const hotel_collections = round(Number((hotelIn as any)?.val || 0));
+      const spa_collections   = round(Number((spaIn as any)?.val || 0));
       const refunds_out       = round(Number((hotelRefund as any)?.val || 0));
       const restaurant_cash   = round(Number((restCash as any)?.val || 0));
       const procurement_paid  = round(Number((procPaid as any)?.val || 0));
       const opex_paid         = round(Number((opexPaid as any)?.val || 0));
       const payroll_paid      = round(Number((payrollPaid as any)?.val || 0));
 
-      const net_cash_in  = round(hotel_collections + restaurant_cash - refunds_out);
+      const net_cash_in  = round(hotel_collections + spa_collections + restaurant_cash - refunds_out);
       const net_cash_out = round(procurement_paid + opex_paid + payroll_paid);
       const net_position = round(net_cash_in - net_cash_out);
 
@@ -26989,8 +26991,9 @@ ${data.tenant.name}`;
         summary: { cash_in: net_cash_in, cash_out: net_cash_out, net: net_position },
         inflows: [
           { category: 'hotel_collections', amount: hotel_collections },
+          { category: 'spa_collections',   amount: spa_collections },
           { category: 'restaurant_cash',   amount: restaurant_cash },
-          { category: 'refunds_out',        amount: refunds_out },
+          { category: 'refunds_out',       amount: refunds_out },
         ],
         outflows: [
           { category: 'procurement_paid', amount: procurement_paid },
@@ -27097,6 +27100,62 @@ ${data.tenant.name}`;
           b60_90:   round(totals.b60_90),   b90_plus: round(totals.b90_plus),
           total:    round(totals.total),
         },
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── SPA BILLING (Accounts module) ────────────────────────────────────────
+  app.get("/api/restaurant/:id/accounts/spa-billing", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as any;
+      const f = from || new Date().toISOString().slice(0, 7) + '-01';
+      const t = to   || new Date().toISOString().slice(0, 10);
+
+      const [summary, folios] = await Promise.all([
+        db.get(`
+          SELECT COUNT(*) AS appointment_count,
+                 COALESCE(SUM(subtotal), 0) AS total_net,
+                 COALESCE(SUM(gst_amount), 0) AS gst_collected,
+                 COALESCE(SUM(grand_total), 0) AS total_settled
+          FROM folios
+          WHERE folio_kind='SPA' AND status='closed'
+            AND DATE(settled_at) BETWEEN ? AND ?
+        `, [f, t]).catch(() => ({ appointment_count: 0, total_net: 0, gst_collected: 0, total_settled: 0 })),
+        db.query(`
+          SELECT f.id, f.settled_at, f.subtotal, f.gst_amount, f.grand_total,
+                 f.payment_method,
+                 sa.client_name, sa.client_phone, sa.service_name
+          FROM folios f
+          LEFT JOIN spa_appointments sa ON sa.id = f.appointment_id
+          WHERE f.folio_kind='SPA' AND f.status='closed'
+            AND DATE(f.settled_at) BETWEEN ? AND ?
+          ORDER BY f.settled_at DESC
+          LIMIT 200
+        `, [f, t]).catch(() => []),
+      ]);
+
+      const round = (n: number) => Math.round(Number(n) * 100) / 100;
+      const s = summary as any;
+      res.json({
+        period: { from: f, to: t },
+        summary: {
+          appointment_count: Number(s?.appointment_count || 0),
+          total_net:    round(Number(s?.total_net || 0)),
+          gst_collected: round(Number(s?.gst_collected || 0)),
+          total_settled: round(Number(s?.total_settled || 0)),
+        },
+        folios: (folios as any[]).map(r => ({
+          id:             r.id,
+          settled_at:     r.settled_at,
+          client_name:    r.client_name  || '—',
+          client_phone:   r.client_phone || '',
+          service_name:   r.service_name || '—',
+          subtotal:       round(Number(r.subtotal  || 0)),
+          gst_amount:     round(Number(r.gst_amount || 0)),
+          grand_total:    round(Number(r.grand_total || 0)),
+          payment_method: r.payment_method || '',
+        })),
       });
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
