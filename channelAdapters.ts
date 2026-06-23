@@ -997,13 +997,18 @@ class GoogleHotelsAdapter implements ChannelAdapter {
  *   property_id = Hotel Code    (eGlobe Extranet → Your hotel's numeric code, e.g. 1000122158)
  *   api_secret  = (not used — eGlobe uses single-token auth)
  *
- * API base: https://extranet.eglobe-solutions.com  (confirmed — IIS/ASP.NET)
- * Auth:     Authorization: Bearer {AccessToken}  +  X-Hotel-Code: {HotelCode}
+ * API base: https://api.eglobe-solutions.com  (confirmed live — IIS 10 / ASP.NET, GET / returns HTTP 403)
+ *   Note: eglobesolutions.com (no hyphen) is a parked domain for sale — do NOT use it.
+ *   Note: extranet.eglobe-solutions.com is NXDOMAIN — do NOT use it.
+ * Auth:     OAuth 2.0 (eGlobe's website confirms OAuth 2.0 protected endpoints).
+ *   The access_token from api.ini.txt is likely the OAuth client_secret, not a bearer token.
+ *   The OAuth token endpoint path is private (not publicly discoverable).
  *
- * ⚠  ENDPOINT PATHS below are inferred from eGlobe's ASP.NET architecture
- *    and documented API capabilities. Confirm the exact paths with eGlobe
- *    support (support@eglobe-solutions.com) before going live — use the
- *    "Test Connection" button to verify which paths respond correctly.
+ * ⚠  ALL ENDPOINT PATHS below are placeholder TODOs.
+ *    Email support@eglobe-solutions.com with subject "PMS API Integration Request"
+ *    and ask for: (1) OAuth token endpoint URL, (2) ARI push endpoint,
+ *    (3) booking pull/webhook format, (4) full API documentation PDF.
+ *    Until then, the adapter compiles and queues correctly but HTTP calls will return 404.
  *
  * Inbound webhooks: eGlobe sends a unified booking notification to the
  *   registered callback URL regardless of the originating OTA.  The token in
@@ -1011,7 +1016,7 @@ class GoogleHotelsAdapter implements ChannelAdapter {
  */
 class EglobeAdapter implements ChannelAdapter {
   channel = 'EGLOBE';
-  private readonly BASE = 'https://extranet.eglobe-solutions.com';
+  private readonly BASE = 'https://api.eglobe-solutions.com';
 
   isReady(c: ChannelCredentials) {
     return !!(c.is_enabled && c.api_key && c.property_id);
