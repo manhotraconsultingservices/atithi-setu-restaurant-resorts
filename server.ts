@@ -26876,6 +26876,231 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 
+  // ─── P&L REPORT ────────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/reports/pnl", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as any;
+      const f = from || new Date().toISOString().slice(0, 7) + '-01';
+      const t = to   || new Date().toISOString().slice(0, 10);
+
+      const [hotelFolio, spaFolio, restaurantOrders, procurement, petty, payroll] = await Promise.all([
+        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='closed' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(grand_total - gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(total_amount - gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(total_net), 0) AS val FROM payroll_runs WHERE status IN ('APPROVED','LOCKED','PAID') AND period_start >= ? AND period_end <= ?`, [f, t]).catch(() => ({ val: 0 })),
+      ]);
+
+      const round = (n: number) => Math.round(Number(n) * 100) / 100;
+      const hotel_room_revenue  = round(Number((hotelFolio as any)?.val || 0));
+      const spa_revenue         = round(Number((spaFolio as any)?.val || 0));
+      const restaurant_revenue  = round(Number((restaurantOrders as any)?.val || 0));
+      const procurement_cost    = round(Number((procurement as any)?.val || 0));
+      const expense_opex        = round(Number((petty as any)?.val || 0));
+      const payroll_cost        = round(Number((payroll as any)?.val || 0));
+
+      const total_revenue = round(hotel_room_revenue + spa_revenue + restaurant_revenue);
+      const total_cogs    = procurement_cost;
+      const gross_profit  = round(total_revenue - total_cogs);
+      const total_opex    = round(expense_opex + payroll_cost);
+      const ebitda        = round(gross_profit - total_opex);
+
+      res.json({
+        period: { from: f, to: t },
+        revenue: { hotel_room: hotel_room_revenue, spa: spa_revenue, restaurant: restaurant_revenue, total: total_revenue },
+        cogs: { procurement: procurement_cost, total: total_cogs },
+        gross_profit,
+        opex: { expenses: expense_opex, payroll: payroll_cost, total: total_opex },
+        ebitda,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── CASH FLOW REPORT ──────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/reports/cash-flow", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as any;
+      const f = from || new Date().toISOString().slice(0, 7) + '-01';
+      const t = to   || new Date().toISOString().slice(0, 10);
+
+      const [hotelIn, hotelRefund, restCash, procPaid, opexPaid, payrollPaid,
+             dailyHotel, dailyRest, dailyProcOut, dailyOpex, dailyPayroll] = await Promise.all([
+        db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM folio_payments WHERE is_voided=0 AND payment_type != 'REFUND' AND DATE(recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM folio_payments WHERE is_voided=0 AND payment_type='REFUND' AND DATE(recorded_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(total_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM supplier_payments WHERE DATE(payment_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(amount), 0) AS val FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(total_net), 0) AS val FROM payroll_runs WHERE status='PAID' AND DATE(paid_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.query(`SELECT DATE(recorded_at) AS dt, COALESCE(SUM(CASE WHEN payment_type!='REFUND' THEN amount ELSE 0 END),0) AS cash_in, COALESCE(SUM(CASE WHEN payment_type='REFUND' THEN amount ELSE 0 END),0) AS cash_out FROM folio_payments WHERE is_voided=0 AND DATE(recorded_at) BETWEEN ? AND ? GROUP BY DATE(recorded_at)`, [f, t]).catch(() => []),
+        db.query(`SELECT DATE(created_at) AS dt, COALESCE(SUM(total_amount),0) AS cash_in FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at)`, [f, t]).catch(() => []),
+        db.query(`SELECT DATE(payment_date) AS dt, COALESCE(SUM(amount),0) AS cash_out FROM supplier_payments WHERE DATE(payment_date) BETWEEN ? AND ? GROUP BY DATE(payment_date)`, [f, t]).catch(() => []),
+        db.query(`SELECT DATE(entry_date) AS dt, COALESCE(SUM(amount),0) AS cash_out FROM petty_cash WHERE direction='OUT' AND DATE(entry_date) BETWEEN ? AND ? GROUP BY DATE(entry_date)`, [f, t]).catch(() => []),
+        db.query(`SELECT DATE(paid_at) AS dt, COALESCE(SUM(total_net),0) AS cash_out FROM payroll_runs WHERE status='PAID' AND DATE(paid_at) BETWEEN ? AND ? GROUP BY DATE(paid_at)`, [f, t]).catch(() => []),
+      ]);
+
+      const round = (n: number) => Math.round(Number(n) * 100) / 100;
+      const hotel_collections = round(Number((hotelIn as any)?.val || 0));
+      const refunds_out       = round(Number((hotelRefund as any)?.val || 0));
+      const restaurant_cash   = round(Number((restCash as any)?.val || 0));
+      const procurement_paid  = round(Number((procPaid as any)?.val || 0));
+      const opex_paid         = round(Number((opexPaid as any)?.val || 0));
+      const payroll_paid      = round(Number((payrollPaid as any)?.val || 0));
+
+      const net_cash_in  = round(hotel_collections + restaurant_cash - refunds_out);
+      const net_cash_out = round(procurement_paid + opex_paid + payroll_paid);
+      const net_position = round(net_cash_in - net_cash_out);
+
+      // Merge daily rows into a map
+      const dailyMap: Record<string, { in: number; out: number }> = {};
+      const ensureDay = (dt: string) => { if (!dailyMap[dt]) dailyMap[dt] = { in: 0, out: 0 }; };
+      for (const row of (dailyHotel as any[])) {
+        ensureDay(row.dt);
+        dailyMap[row.dt].in  += Number(row.cash_in  || 0);
+        dailyMap[row.dt].out += Number(row.cash_out || 0);
+      }
+      for (const row of (dailyRest as any[])) {
+        ensureDay(row.dt);
+        dailyMap[row.dt].in += Number(row.cash_in || 0);
+      }
+      for (const row of (dailyProcOut as any[])) {
+        ensureDay(row.dt);
+        dailyMap[row.dt].out += Number(row.cash_out || 0);
+      }
+      for (const row of (dailyOpex as any[])) {
+        ensureDay(row.dt);
+        dailyMap[row.dt].out += Number(row.cash_out || 0);
+      }
+      for (const row of (dailyPayroll as any[])) {
+        ensureDay(row.dt);
+        dailyMap[row.dt].out += Number(row.cash_out || 0);
+      }
+      const daily = Object.keys(dailyMap).sort().map(dt => ({
+        date: dt,
+        in:   round(dailyMap[dt].in),
+        out:  round(dailyMap[dt].out),
+        net:  round(dailyMap[dt].in - dailyMap[dt].out),
+      }));
+
+      res.json({
+        period: { from: f, to: t },
+        summary: { cash_in: net_cash_in, cash_out: net_cash_out, net: net_position },
+        inflows: [
+          { category: 'hotel_collections', amount: hotel_collections },
+          { category: 'restaurant_cash',   amount: restaurant_cash },
+          { category: 'refunds_out',        amount: refunds_out },
+        ],
+        outflows: [
+          { category: 'procurement_paid', amount: procurement_paid },
+          { category: 'opex_paid',        amount: opex_paid },
+          { category: 'payroll_paid',     amount: payroll_paid },
+        ],
+        daily,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── GST LEDGER REPORT ─────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/reports/gst-ledger", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const month = (req.query.month as string) || new Date().toISOString().slice(0, 7);
+      const f = month + '-01';
+      const t = month + '-31';
+
+      const [hotelGst, spaGst, restaurantGst, procItc] = await Promise.all([
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='HOTEL' AND status='closed' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM folios WHERE folio_kind='SPA'   AND status='closed' AND DATE(settled_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM orders WHERE payment_status='PAID' AND deleted_at IS NULL AND DATE(created_at) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+        db.get(`SELECT COALESCE(SUM(gst_amount), 0) AS val FROM supplier_invoices WHERE DATE(invoice_date) BETWEEN ? AND ?`, [f, t]).catch(() => ({ val: 0 })),
+      ]);
+
+      const round = (n: number) => Math.round(Number(n) * 100) / 100;
+      const hotel_gst      = round(Number((hotelGst as any)?.val || 0));
+      const spa_gst        = round(Number((spaGst as any)?.val || 0));
+      const restaurant_gst = round(Number((restaurantGst as any)?.val || 0));
+      const procurement_itc = round(Number((procItc as any)?.val || 0));
+
+      const total_output  = round(hotel_gst + spa_gst + restaurant_gst);
+      const total_itc     = procurement_itc;
+      const net_liability = round(total_output - total_itc);
+
+      res.json({
+        month,
+        output: { hotel: hotel_gst, spa: spa_gst, restaurant: restaurant_gst, total: total_output },
+        itc: { procurement: procurement_itc, total: total_itc },
+        net_liability,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  // ─── VENDOR AGING REPORT ───────────────────────────────────────────────
+  app.get("/api/restaurant/:id/reports/vendor-aging", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const db = await getTenantDb(req.params.id);
+      const invoices: any[] = await db.query(
+        `SELECT si.id, si.supplier_id, s.name AS supplier_name,
+                si.invoice_date, si.due_date, si.outstanding_amount, si.gst_amount
+           FROM supplier_invoices si
+           LEFT JOIN suppliers s ON s.id = si.supplier_id
+          WHERE si.outstanding_amount > 0
+            AND si.status != 'PAID'
+          ORDER BY si.due_date ASC NULLS LAST`
+      ).catch(() => []);
+
+      const today = new Date();
+      const as_of = today.toISOString().slice(0, 10);
+      const vendors: Record<string | number, any> = {};
+      let totals = { current: 0, b30_60: 0, b60_90: 0, b90_plus: 0, total: 0 };
+
+      for (const inv of invoices) {
+        const invDate = inv.invoice_date ? new Date(inv.invoice_date) : today;
+        const daysAge = Math.floor((today.getTime() - invDate.getTime()) / 86400000);
+        const out = Number(inv.outstanding_amount || 0);
+        const key = inv.supplier_id ?? inv.supplier_name ?? 'unknown';
+        if (!vendors[key]) {
+          vendors[key] = {
+            supplier_id: inv.supplier_id,
+            supplier_name: inv.supplier_name || null,
+            invoice_count: 0,
+            current: 0, b30_60: 0, b60_90: 0, b90_plus: 0, total: 0,
+            oldest_invoice_date: inv.invoice_date,
+          };
+        }
+        const v = vendors[key];
+        if (daysAge < 30)       { v.current  += out; totals.current  += out; }
+        else if (daysAge < 60)  { v.b30_60   += out; totals.b30_60   += out; }
+        else if (daysAge < 90)  { v.b60_90   += out; totals.b60_90   += out; }
+        else                    { v.b90_plus += out; totals.b90_plus += out; }
+        v.total += out; totals.total += out;
+        v.invoice_count += 1;
+        if (inv.invoice_date && (!v.oldest_invoice_date || inv.invoice_date < v.oldest_invoice_date)) {
+          v.oldest_invoice_date = inv.invoice_date;
+        }
+      }
+
+      const round = (n: number) => Math.round(Number(n) * 100) / 100;
+      const vendorArr = Object.values(vendors).sort((a: any, b: any) => b.total - a.total).map((v: any) => ({
+        ...v,
+        current:  round(v.current),  b30_60:  round(v.b30_60),
+        b60_90:   round(v.b60_90),   b90_plus: round(v.b90_plus),
+        total:    round(v.total),
+      }));
+
+      res.json({
+        as_of,
+        vendors: vendorArr,
+        totals: {
+          current:  round(totals.current),  b30_60:  round(totals.b30_60),
+          b60_90:   round(totals.b60_90),   b90_plus: round(totals.b90_plus),
+          total:    round(totals.total),
+        },
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
   // Per-partner statement: bookings + invoices + payments + running balance.
   app.get("/api/restaurant/:id/hotel/reports/partner-statement", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);

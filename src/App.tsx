@@ -7799,6 +7799,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'RESTAURANT_REPORTS'                        // F&B reporting hub (separate from Hotel Reports)
     | 'EXPENSE_JOURNAL'                           // standalone Finance tab — operational expenses + petty cash
     | 'RECEIVABLES'                               // OTA & agent receivables aging — promoted from Channel Manager
+    | 'ACCOUNTS_PNL'                              // P&L report — revenue vs costs
+    | 'ACCOUNTS_CASHFLOW'                         // Cash flow — cash in vs out
+    | 'ACCOUNTS_GST'                              // GST tax ledger — output vs ITC
+    | 'ACCOUNTS_VENDOR_AGING'                     // Vendor aging — what we owe suppliers
     | 'HOME'                                      // post-login launchpad (welcome + Hotel/Restaurant tiles)
   >('HOME');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
@@ -9328,6 +9332,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [travelAgents, setTravelAgents] = useState<any[]>([]);
   const [editingAgent, setEditingAgent] = useState<any | null>(null);
   const [receivablesAging, setReceivablesAging] = useState<any>(null);
+  // Accounts financial reports state
+  const [accountsPnlData, setAccountsPnlData] = useState<any>(null);
+  const [accountsPnlRange, setAccountsPnlRange] = useState({ from: new Date().toISOString().slice(0,7)+'-01', to: new Date().toISOString().slice(0,10) });
+  const [cashFlowData, setCashFlowData] = useState<any>(null);
+  const [cashFlowRange, setCashFlowRange] = useState({ from: new Date().toISOString().slice(0,7)+'-01', to: new Date().toISOString().slice(0,10) });
+  const [gstLedgerData, setGstLedgerData] = useState<any>(null);
+  const [gstMonth, setGstMonth] = useState(new Date().toISOString().slice(0,7));
+  const [vendorAgingData, setVendorAgingData] = useState<any>(null);
   // Outstanding-payments report (per-booking, sortable + filterable).
   // Populated by the new /reports/outstanding-payments endpoint.
   const [outstandingReport, setOutstandingReport] = useState<any>(null);
@@ -9362,6 +9374,35 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!window.confirm('Deactivate this travel agent? Existing bookings stay intact.')) return;
     try { await hotelApi(`/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchTravelAgents(); }
     catch (e: any) { alert(e?.message || 'Failed to delete agent'); }
+  };
+  const fetchAccountsPnl = async (from?: string, to?: string) => {
+    const f = from || accountsPnlRange.from;
+    const t = to   || accountsPnlRange.to;
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/reports/pnl?from=${f}&to=${t}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) setAccountsPnlData(await r.json());
+    } catch { /* silent */ }
+  };
+  const fetchCashFlow = async (from?: string, to?: string) => {
+    const f = from || cashFlowRange.from;
+    const t = to   || cashFlowRange.to;
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/reports/cash-flow?from=${f}&to=${t}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) setCashFlowData(await r.json());
+    } catch { /* silent */ }
+  };
+  const fetchGstLedger = async (month?: string) => {
+    const m = month || gstMonth;
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/reports/gst-ledger?month=${m}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) setGstLedgerData(await r.json());
+    } catch { /* silent */ }
+  };
+  const fetchVendorAging = async () => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/reports/vendor-aging`, { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) setVendorAgingData(await r.json());
+    } catch { /* silent */ }
   };
   const fetchReceivablesAging = async () => {
     if (!isHotelEnabled) return;
@@ -12192,6 +12233,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // the tab is opened so the page renders with data, not loading spinners.
     if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); fetchTravelAgents(); fetchReceivablesAging(); fetchPartnerInvoices(); fetchOutstandingReport(); }
     if (activeTab === 'RECEIVABLES') { fetchReceivablesAging(); fetchPartnerInvoices(); fetchTravelAgents(); }
+    if (activeTab === 'ACCOUNTS_PNL')          { fetchAccountsPnl(); }
+    if (activeTab === 'ACCOUNTS_CASHFLOW')      { fetchCashFlow(); }
+    if (activeTab === 'ACCOUNTS_GST')           { fetchGstLedger(); }
+    if (activeTab === 'ACCOUNTS_VENDOR_AGING')  { fetchVendorAging(); }
     if (activeTab === 'FOLIOS') { fetchHotelFolios(); fetchPendingFolioOrders(); }
     if (activeTab === 'COMPLIANCE') fetchComplianceList();
     if (activeTab === 'CONCIERGE_FAQ') fetchHotelFaqs();
@@ -12834,6 +12879,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'PROCUREMENT',     label: 'Payables & Procurement' },
               { id: 'EXPENSE_JOURNAL', label: 'Expense Journal' },
               { id: 'RECEIVABLES',     label: 'OTA & Agent Receivables', requires: 'hotel' },
+              ...(isOwnerOrAdmin ? [
+                { id: 'ACCOUNTS_VENDOR_AGING', label: 'Vendor Aging' } as NavTab,
+                { id: 'ACCOUNTS_PNL',          label: 'P&L Report' } as NavTab,
+                { id: 'ACCOUNTS_CASHFLOW',     label: 'Cash Flow' } as NavTab,
+                { id: 'ACCOUNTS_GST',          label: 'GST Ledger' } as NavTab,
+              ] : []),
             ],
           },
           {
@@ -12905,7 +12956,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
           // visibility still flows through isTabVisible (V3 fix handles it).
-          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES') && isOwnerOrAdmin) return true;
+          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING') && isOwnerOrAdmin) return true;
           return isTabVisible(id, effectiveAllowedTabs);
         };
         // A page shows when RBAC allows it AND the tenant has the relevant
@@ -16536,6 +16587,266 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </tbody>
                     </table>
                   </div>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      ) : activeTab === 'ACCOUNTS_VENDOR_AGING' ? (
+        <div className="space-y-5">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Vendor Aging</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">Outstanding amounts owed to suppliers, aged by invoice date.</p>
+            </div>
+            <button onClick={fetchVendorAging} className="text-[10px] font-bold text-[#3d3128] hover:underline">Refresh</button>
+          </div>
+          {!vendorAgingData ? (
+            <p className="text-sm text-[#9c8e85] italic">Loading vendor aging...</p>
+          ) : !(vendorAgingData.vendors?.length) ? (
+            <div className="bg-white rounded-2xl p-8 border border-[#e8dccf] text-center">
+              <p className="text-sm text-[#6b5d52]">No outstanding payables.</p>
+            </div>
+          ) : (() => {
+            const t = vendorAgingData.totals || {};
+            const fmt = (n: number) => `₹${Math.round(Number(n||0)).toLocaleString('en-IN')}`;
+            const overdueTotal = (t.b30_60||0)+(t.b60_90||0)+(t.b90_plus||0);
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  {[['Total Payable', t.total, 'bg-white border-[#e8dccf] text-[#1a1208]'],['Current (<30d)', t.current, 'bg-emerald-50 border-emerald-100 text-emerald-700'],['30–60 days', t.b30_60, 'bg-amber-50 border-amber-100 text-amber-700'],['60–90 days', t.b60_90, 'bg-orange-50 border-orange-100 text-orange-700'],['90+ days', t.b90_plus, 'bg-rose-100 border-rose-200 text-rose-700']].map(([label, val, cls]: any[]) => (
+                    <div key={label as string} className={`rounded-2xl p-4 border ${cls}`}>
+                      <p className="text-[9px] font-bold uppercase tracking-widest opacity-70">{label}</p>
+                      <p className="text-xl font-bold mt-1">{fmt(val)}</p>
+                    </div>
+                  ))}
+                </div>
+                {overdueTotal > 0 && <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-2.5 text-sm text-amber-800 font-medium">{fmt(overdueTotal)} overdue to suppliers. Pay oldest first to protect credit terms.</div>}
+                <div className="bg-white rounded-2xl border border-[#e8dccf] overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse">
+                      <thead><tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                        <th className="text-left px-4 py-2.5">Supplier</th>
+                        <th className="text-right px-4 py-2.5">Invoices</th>
+                        <th className="text-right px-4 py-2.5">Current</th>
+                        <th className="text-right px-4 py-2.5">30–60d</th>
+                        <th className="text-right px-4 py-2.5">60–90d</th>
+                        <th className="text-right px-4 py-2.5">90+d</th>
+                        <th className="text-right px-4 py-2.5 font-bold">Total Owed</th>
+                      </tr></thead>
+                      <tbody>
+                        {vendorAgingData.vendors.map((v: any) => (
+                          <tr key={v.supplier_id} className="border-t border-[#e8e0d6] hover:bg-[#faf7f2]">
+                            <td className="px-4 py-2.5 font-bold text-[#1a1208]">{v.supplier_name || v.supplier_id}</td>
+                            <td className="px-4 py-2.5 text-right text-[#6b5d52]">{v.invoice_count}</td>
+                            <td className="px-4 py-2.5 text-right text-emerald-700">{fmt(v.current)}</td>
+                            <td className="px-4 py-2.5 text-right text-amber-700">{fmt(v.b30_60)}</td>
+                            <td className="px-4 py-2.5 text-right text-orange-700">{fmt(v.b60_90)}</td>
+                            <td className="px-4 py-2.5 text-right text-rose-700 font-semibold">{fmt(v.b90_plus)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold text-[#1a1208]">{fmt(v.total)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      ) : activeTab === 'ACCOUNTS_PNL' ? (
+        <div className="space-y-5">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">P&amp;L Report</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">Revenue vs. costs for the selected period. Accrual basis &mdash; recognised when earned/incurred.</p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input type="date" value={accountsPnlRange.from} onChange={e => setAccountsPnlRange(p=>({...p,from:e.target.value}))} className="text-xs border border-[#e8dccf] rounded-lg px-2 py-1.5" />
+              <span className="text-xs text-[#9c8e85]">to</span>
+              <input type="date" value={accountsPnlRange.to} onChange={e => setAccountsPnlRange(p=>({...p,to:e.target.value}))} className="text-xs border border-[#e8dccf] rounded-lg px-2 py-1.5" />
+              <button onClick={() => fetchAccountsPnl(accountsPnlRange.from, accountsPnlRange.to)} className="px-3 py-1.5 rounded-lg bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#b34e13]">Run</button>
+              <button onClick={() => fetchAccountsPnl()} className="text-[10px] font-bold text-[#3d3128] hover:underline">Refresh</button>
+            </div>
+          </div>
+          {!accountsPnlData ? (
+            <p className="text-sm text-[#9c8e85] italic">Select a period and click Run.</p>
+          ) : (() => {
+            const d = accountsPnlData;
+            const rev = d.revenue || {};
+            const cogs = d.cogs || {};
+            const opex = d.opex || {};
+            const fmt = (n: number) => `₹${Math.round(Number(n||0)).toLocaleString('en-IN')}`;
+            const pct = (n: number, base: number) => base > 0 ? `${((n/base)*100).toFixed(1)}%` : '—';
+            const rows: [string,number,string?,boolean?][] = [
+              ['Hotel Room Revenue',    rev.hotel_room   || 0, undefined, false],
+              ['Spa Revenue',           rev.spa          || 0, undefined, false],
+              ['Restaurant Revenue',    rev.restaurant   || 0, undefined, false],
+              ['TOTAL REVENUE',         rev.total        || 0, undefined, true],
+              ['Cost of Goods (Procurement)', -(cogs.procurement||0), undefined, false],
+              ['GROSS PROFIT',          d.gross_profit   || 0, pct(d.gross_profit||0, rev.total||0), true],
+              ['Operating Expenses',    -(opex.expenses  || 0), undefined, false],
+              ['Payroll',               -(opex.payroll   || 0), undefined, false],
+              ['EBITDA',                d.ebitda         || 0, pct(d.ebitda||0, rev.total||0), true],
+            ];
+            return (
+              <div className="bg-white rounded-2xl border border-[#e8dccf] overflow-hidden">
+                <table className="w-full text-sm border-collapse">
+                  <thead><tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                    <th className="text-left px-5 py-3">Line Item</th>
+                    <th className="text-right px-5 py-3">Amount</th>
+                    <th className="text-right px-5 py-3">% of Revenue</th>
+                  </tr></thead>
+                  <tbody>
+                    {rows.map(([label, val, margin, isBold]) => (
+                      <tr key={label as string} className={`border-t border-[#f0ebe4] ${isBold ? 'bg-[#faf7f2]' : 'hover:bg-[#faf7f2]'}`}>
+                        <td className={`px-5 py-2.5 ${isBold ? 'font-bold text-[#1a1208]' : 'text-[#3d3128]'}`}>{label}</td>
+                        <td className={`px-5 py-2.5 text-right font-mono ${isBold ? 'font-bold' : ''} ${(val as number) < 0 ? 'text-rose-700' : (val as number) > 0 ? 'text-[#1a1208]' : 'text-[#9c8e85]'}`}>{fmt(val as number)}</td>
+                        <td className="px-5 py-2.5 text-right text-[#9c8e85] font-mono text-[11px]">{(margin as string) || (isBold ? pct(val as number, rev.total||0) : '—')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
+        </div>
+      ) : activeTab === 'ACCOUNTS_CASHFLOW' ? (
+        <div className="space-y-5">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Cash Flow</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">Cash actually received and paid out. Cash basis &mdash; when money moved, not when earned.</p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input type="date" value={cashFlowRange.from} onChange={e => setCashFlowRange(p=>({...p,from:e.target.value}))} className="text-xs border border-[#e8dccf] rounded-lg px-2 py-1.5" />
+              <span className="text-xs text-[#9c8e85]">to</span>
+              <input type="date" value={cashFlowRange.to} onChange={e => setCashFlowRange(p=>({...p,to:e.target.value}))} className="text-xs border border-[#e8dccf] rounded-lg px-2 py-1.5" />
+              <button onClick={() => fetchCashFlow(cashFlowRange.from, cashFlowRange.to)} className="px-3 py-1.5 rounded-lg bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#b34e13]">Run</button>
+              <button onClick={() => fetchCashFlow()} className="text-[10px] font-bold text-[#3d3128] hover:underline">Refresh</button>
+            </div>
+          </div>
+          {!cashFlowData ? (
+            <p className="text-sm text-[#9c8e85] italic">Select a period and click Run.</p>
+          ) : (() => {
+            const d = cashFlowData;
+            const s = d.summary || {};
+            const fmt = (n: number) => `₹${Math.round(Number(n||0)).toLocaleString('en-IN')}`;
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-emerald-50 rounded-2xl p-4 border border-emerald-100 text-center">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-900">Cash In</p>
+                    <p className="text-2xl font-bold text-emerald-700 mt-1">{fmt(s.cash_in||0)}</p>
+                  </div>
+                  <div className="bg-rose-50 rounded-2xl p-4 border border-rose-100 text-center">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-rose-900">Cash Out</p>
+                    <p className="text-2xl font-bold text-rose-700 mt-1">{fmt(s.cash_out||0)}</p>
+                  </div>
+                  <div className={`rounded-2xl p-4 border text-center ${(s.net||0) >= 0 ? 'bg-indigo-50 border-indigo-100' : 'bg-rose-100 border-rose-200'}`}>
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-indigo-900">Net Position</p>
+                    <p className={`text-2xl font-bold mt-1 ${(s.net||0) >= 0 ? 'text-indigo-700' : 'text-rose-700'}`}>{fmt(s.net||0)}</p>
+                  </div>
+                </div>
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div className="bg-white rounded-2xl border border-[#e8dccf] overflow-hidden">
+                    <div className="px-4 py-2.5 bg-emerald-50 border-b border-emerald-100"><p className="text-xs font-bold text-emerald-900 uppercase tracking-widest">Cash Inflows</p></div>
+                    <table className="w-full text-sm"><tbody>
+                      {(d.inflows||[]).map((row: any) => (
+                        <tr key={row.category} className="border-t border-[#f0ebe4]">
+                          <td className="px-4 py-2 text-[#3d3128]">{row.category}</td>
+                          <td className="px-4 py-2 text-right font-mono font-bold text-emerald-700">{fmt(row.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody></table>
+                  </div>
+                  <div className="bg-white rounded-2xl border border-[#e8dccf] overflow-hidden">
+                    <div className="px-4 py-2.5 bg-rose-50 border-b border-rose-100"><p className="text-xs font-bold text-rose-900 uppercase tracking-widest">Cash Outflows</p></div>
+                    <table className="w-full text-sm"><tbody>
+                      {(d.outflows||[]).map((row: any) => (
+                        <tr key={row.category} className="border-t border-[#f0ebe4]">
+                          <td className="px-4 py-2 text-[#3d3128]">{row.category}</td>
+                          <td className="px-4 py-2 text-right font-mono font-bold text-rose-700">{fmt(row.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody></table>
+                  </div>
+                </div>
+                {(d.daily||[]).length > 0 && (
+                  <div className="bg-white rounded-2xl border border-[#e8dccf] overflow-hidden">
+                    <div className="px-4 py-2.5 bg-[#faf7f2] border-b border-[#e8dccf]"><p className="text-xs font-bold text-[#3d3128] uppercase tracking-widest">Daily Breakdown</p></div>
+                    <div className="overflow-x-auto"><table className="w-full text-sm border-collapse">
+                      <thead><tr className="bg-[#faf7f2] text-[#6b5d52] text-xs uppercase tracking-wider">
+                        <th className="text-left px-4 py-2">Date</th>
+                        <th className="text-right px-4 py-2">In</th>
+                        <th className="text-right px-4 py-2">Out</th>
+                        <th className="text-right px-4 py-2 font-bold">Net</th>
+                      </tr></thead>
+                      <tbody>
+                        {d.daily.map((r: any) => (
+                          <tr key={r.date} className="border-t border-[#f0ebe4] hover:bg-[#faf7f2]">
+                            <td className="px-4 py-1.5 font-mono text-xs text-[#6b5d52]">{r.date}</td>
+                            <td className="px-4 py-1.5 text-right text-emerald-700 font-mono text-xs">{fmt(r.in)}</td>
+                            <td className="px-4 py-1.5 text-right text-rose-700 font-mono text-xs">{fmt(r.out)}</td>
+                            <td className={`px-4 py-1.5 text-right font-mono text-xs font-bold ${r.net >= 0 ? 'text-indigo-700' : 'text-rose-700'}`}>{fmt(r.net)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table></div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      ) : activeTab === 'ACCOUNTS_GST' ? (
+        <div className="space-y-5">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">GST Ledger</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">Output GST collected minus Input Tax Credit (ITC). Net = what you owe GSTN this month.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <input type="month" value={gstMonth} onChange={e => setGstMonth(e.target.value)} className="text-xs border border-[#e8dccf] rounded-lg px-2 py-1.5" />
+              <button onClick={() => fetchGstLedger(gstMonth)} className="px-3 py-1.5 rounded-lg bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#b34e13]">Load</button>
+              <button onClick={() => fetchGstLedger()} className="text-[10px] font-bold text-[#3d3128] hover:underline">Refresh</button>
+            </div>
+          </div>
+          {!gstLedgerData ? (
+            <p className="text-sm text-[#9c8e85] italic">Select a month and click Load.</p>
+          ) : (() => {
+            const d = gstLedgerData;
+            const out = d.output || {};
+            const itc = d.itc || {};
+            const fmt = (n: number) => `₹${Math.round(Number(n||0)).toLocaleString('en-IN')}`;
+            const liability = d.net_liability || 0;
+            return (
+              <div className="space-y-4">
+                <div className="grid md:grid-cols-3 gap-4">
+                  <div className="bg-rose-50 rounded-2xl p-4 border border-rose-100">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-rose-900">Output GST (Collected)</p>
+                    <p className="text-2xl font-bold text-rose-700 mt-2">{fmt(out.total||0)}</p>
+                    <div className="mt-2 space-y-1 text-xs text-[#6b5d52]">
+                      {out.hotel  > 0 && <div className="flex justify-between"><span>Hotel rooms</span><span className="font-mono">{fmt(out.hotel)}</span></div>}
+                      {out.spa    > 0 && <div className="flex justify-between"><span>Spa</span><span className="font-mono">{fmt(out.spa)}</span></div>}
+                      {out.restaurant > 0 && <div className="flex justify-between"><span>Restaurant</span><span className="font-mono">{fmt(out.restaurant)}</span></div>}
+                    </div>
+                  </div>
+                  <div className="bg-emerald-50 rounded-2xl p-4 border border-emerald-100">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-900">Input Tax Credit (ITC)</p>
+                    <p className="text-2xl font-bold text-emerald-700 mt-2">{fmt(itc.total||0)}</p>
+                    <div className="mt-2 space-y-1 text-xs text-[#6b5d52]">
+                      {itc.procurement > 0 && <div className="flex justify-between"><span>Procurement</span><span className="font-mono">{fmt(itc.procurement)}</span></div>}
+                    </div>
+                  </div>
+                  <div className={`rounded-2xl p-4 border ${liability > 0 ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50 border-emerald-100'}`}>
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-[#6b5d52]">Net GST Liability</p>
+                    <p className={`text-2xl font-bold mt-2 ${liability > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>{fmt(liability)}</p>
+                    <p className="text-xs text-[#9c8e85] mt-1">{liability > 0 ? 'Amount to pay GSTN' : 'Credit available'}</p>
+                  </div>
+                </div>
+                <div className="bg-[#faf7f2] rounded-2xl border border-[#e8dccf] px-5 py-3 text-xs text-[#6b5d52]">
+                  <strong>GSTR-3B guidance:</strong> Output {fmt(out.total||0)} &minus; ITC {fmt(itc.total||0)} = Net payable {fmt(liability)}. File by 20th of next month.
                 </div>
               </div>
             );
