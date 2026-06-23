@@ -95,3 +95,12 @@ h1, h2, h3, h4 {
   50%      { opacity: 0.4; }
 }
 .alert-title-pulse { animation: alert-title-flash 1s ease-in-out infinite; }
+
+/* Toast slide-in from right */
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateX(1.5rem); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.toast-slide-in {
+  animation: toast-slide-in 0.2s ease-out both;
+}
