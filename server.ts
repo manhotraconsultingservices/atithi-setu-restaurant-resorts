@@ -32670,75 +32670,84 @@ ${data.tenant.name}`;
         return res.json(await tenantDb.query(sql, params));
       }
 
-      // Full list — collapse group folios into one row per group so the
-      // list shows ONE entry per group (not one per room).
-      const indivParams: any[] = [];
-      let indivWhere = `WHERE f.group_id IS NULL`;
-      if (status) { indivWhere += ` AND f.status = ?`; indivParams.push(status); }
+      // Full list — fetch all folios enriched with group metadata, then
+      // collapse group folios into ONE row per group in JS.
+      // Individual room folios link to a group via room_bookings.group_id
+      // (NOT via folios.group_id, which is only set on the master folio).
+      // We use COALESCE(b.group_id, f.group_id) to catch both.
+      const rows: any[] = await tenantDb.query(
+        `SELECT f.id, f.booking_id, f.room_id, f.status, f.folio_kind,
+                COALESCE(f.subtotal,0)    AS subtotal,
+                COALESCE(f.gst_amount,0)  AS gst_amount,
+                COALESCE(f.grand_total,0) AS grand_total,
+                f.payment_method, f.settled_at, f.invoice_number, f.created_at,
+                b.guest_name, b.check_in_date, b.check_out_date,
+                b.actual_checkin_at, b.actual_checkout_at,
+                r.name AS room_name, r.room_number,
+                COALESCE(b.group_id, f.group_id) AS group_id,
+                g.name            AS group_name,
+                g.invoice_number  AS group_invoice_number,
+                g.payment_method  AS group_payment_method,
+                g.settled_at      AS group_settled_at,
+                g.check_in_date   AS group_check_in_date,
+                g.check_out_date  AS group_check_out_date
+         FROM folios f
+         LEFT JOIN room_bookings b      ON b.id = f.booking_id
+         LEFT JOIN rooms r              ON r.id = f.room_id
+         LEFT JOIN room_booking_groups g ON g.id = COALESCE(b.group_id, f.group_id)
+         ORDER BY f.created_at DESC`,
+        []
+      );
 
-      const [indivRows, grpRows]: [any[], any[]] = await Promise.all([
-        tenantDb.query(
-          `SELECT f.id, f.booking_id, f.room_id, f.status, f.folio_kind,
-                  COALESCE(f.subtotal,0) AS subtotal,
-                  COALESCE(f.gst_amount,0) AS gst_amount,
-                  COALESCE(f.grand_total,0) AS grand_total,
-                  f.payment_method, f.settled_at, f.invoice_number, f.created_at,
-                  b.guest_name, b.check_in_date, b.check_out_date,
-                  b.actual_checkin_at, b.actual_checkout_at,
-                  r.name AS room_name,
-                  0 AS is_group, NULL AS group_id
-           FROM folios f
-           LEFT JOIN room_bookings b ON b.id = f.booking_id
-           LEFT JOIN rooms r ON r.id = f.room_id
-           ${indivWhere}`,
-          indivParams
-        ),
-        tenantDb.query(
-          `SELECT
-             g.id AS id,
-             NULL AS booking_id,
-             NULL AS room_id,
-             CASE
-               WHEN COUNT(f.id) = SUM(CASE WHEN f.status = 'settled' THEN 1 ELSE 0 END) THEN 'settled'
-               WHEN SUM(CASE WHEN f.status = 'open' THEN 1 ELSE 0 END) > 0 THEN 'open'
-               ELSE 'voided'
-             END AS status,
-             'HOTEL' AS folio_kind,
-             COALESCE(SUM(f.subtotal),0) AS subtotal,
-             COALESCE(SUM(f.gst_amount),0) AS gst_amount,
-             COALESCE(SUM(f.grand_total),0) AS grand_total,
-             g.payment_method, g.settled_at, g.invoice_number, g.created_at,
-             g.name AS guest_name,
-             g.check_in_date, g.check_out_date,
-             NULL AS actual_checkin_at, NULL AS actual_checkout_at,
-             (SELECT GROUP_CONCAT(
-                COALESCE(r2.name, b2.room_id) ||
-                  CASE WHEN COALESCE(r2.room_number,'') != ''
-                       THEN ' #' || r2.room_number ELSE '' END,
-                ', '
-              )
-              FROM room_bookings b2
-              LEFT JOIN rooms r2 ON r2.id = b2.room_id
-              WHERE b2.group_id = g.id AND b2.status != 'CANCELLED'
-             ) AS room_name,
-             1 AS is_group,
-             g.id AS group_id
-           FROM room_booking_groups g
-           JOIN folios f ON f.group_id = g.id
-           GROUP BY g.id`,
-          []
-        ),
-      ]);
+      // Collapse: non-group → individual rows; group → one merged row per group
+      const groupMap = new Map<string, any>();
+      const result: any[] = [];
 
-      // Filter group rows by status (if requested) after aggregation
-      const filteredGrp = status
-        ? grpRows.filter((r: any) => r.status === status)
-        : grpRows;
+      for (const row of rows) {
+        if (!row.group_id) {
+          result.push({ ...row, is_group: 0 });
+          continue;
+        }
+        if (!groupMap.has(row.group_id)) {
+          groupMap.set(row.group_id, {
+            id: row.group_id, group_id: row.group_id, is_group: 1,
+            guest_name:     row.group_name || row.guest_name,
+            check_in_date:  row.group_check_in_date  || row.check_in_date,
+            check_out_date: row.group_check_out_date || row.check_out_date,
+            actual_checkin_at: null, actual_checkout_at: null,
+            invoice_number: row.group_invoice_number || row.invoice_number,
+            payment_method: row.group_payment_method || row.payment_method,
+            settled_at:     row.group_settled_at     || row.settled_at,
+            created_at: row.created_at, folio_kind: 'HOTEL',
+            subtotal: 0, gst_amount: 0, grand_total: 0,
+            _rooms: new Set<string>(), _statuses: [] as string[],
+          });
+        }
+        const grp = groupMap.get(row.group_id)!;
+        grp.subtotal    += Number(row.subtotal    || 0);
+        grp.gst_amount  += Number(row.gst_amount  || 0);
+        grp.grand_total += Number(row.grand_total || 0);
+        if (row.room_name) {
+          grp._rooms.add(row.room_name + (row.room_number ? ` #${row.room_number}` : ''));
+        }
+        grp._statuses.push(row.status);
+        if (row.created_at < grp.created_at) grp.created_at = row.created_at;
+      }
 
-      const all = [...indivRows, ...filteredGrp].sort((a: any, b: any) =>
+      for (const [, grp] of groupMap) {
+        grp.room_name = Array.from(grp._rooms).join(', ');
+        const st: string[] = grp._statuses;
+        grp.status = st.every((s: string) => s === 'settled') ? 'settled'
+                   : st.some((s: string) => s === 'open')     ? 'open'
+                   : 'voided';
+        delete grp._rooms; delete grp._statuses;
+        result.push(grp);
+      }
+
+      result.sort((a: any, b: any) =>
         String(b.created_at || '').localeCompare(String(a.created_at || ''))
       );
-      res.json(all);
+      res.json(result);
     } catch (err) {
       res.status(500).json({ error: "Failed to fetch folios" });
     }
