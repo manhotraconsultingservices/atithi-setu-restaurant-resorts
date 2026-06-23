@@ -11832,6 +11832,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err: any) { alert(err?.message || 'Failed to download invoice'); }
   };
+  const openGroupPdf = async (groupId: string) => {
+    try {
+      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupId}/invoice-pdf`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error || `Failed (HTTP ${res.status})`); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err: any) { alert(err?.message || 'Failed to download group invoice'); }
+  };
   // RS-FIX — room-service orders the kitchen received but couldn't auto-bill
   // to a folio. Silent on failure (it only drives a badge, never blocks).
   const fetchPendingFolioOrders = async () => {
@@ -23361,9 +23373,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         {sorted.length === 0 ? (
                           <tr><td colSpan={11} className="px-4 py-12 text-center text-sm text-[#9c8e85] italic">No folios match the current filters.</td></tr>
                         ) : sorted.map((f: any) => (
-                          <tr key={f.id} className="border-t border-[#cc5a16]/5 hover:bg-[#faf7f2]/50 transition-colors">
-                            <td className="px-3 py-3 font-semibold text-[#1a1208]">{f.guest_name || '—'}</td>
-                            <td className="px-3 py-3 text-[#3d3128]">{f.room_name || f.room_id || '—'}</td>
+                          <tr key={f.is_group ? `grp-${f.group_id}` : f.id} className="border-t border-[#cc5a16]/5 hover:bg-[#faf7f2]/50 transition-colors">
+                            <td className="px-3 py-3 font-semibold text-[#1a1208]">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span>{f.guest_name || '—'}</span>
+                                {!!f.is_group && (
+                                  <span className="text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-md bg-violet-100 text-violet-700 border border-violet-200">Group</span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-3 py-3 text-[#3d3128] max-w-[180px]">
+                              <span className="block truncate" title={f.room_name || f.room_id || '—'}>{f.room_name || f.room_id || '—'}</span>
+                            </td>
                             <td className="px-3 py-3 text-xs text-[#3d3128] whitespace-nowrap">
                               <div>{f.check_in_date ? formatDateForTenant(f.check_in_date, restaurant?.date_format) : '—'}{f.actual_checkin_at && <span className="text-[10px] text-[#9c8e85] ml-1">{new Date(f.actual_checkin_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'})}</span>}</div>
                               <div className="text-[10px] text-[#9c8e85]">{f.check_out_date ? formatDateForTenant(f.check_out_date, restaurant?.date_format) : '—'}{f.actual_checkout_at && <span className="ml-1">{new Date(f.actual_checkout_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'})}</span>}</div>
@@ -23379,10 +23400,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-3 py-3 text-xs text-[#9c8e85] whitespace-nowrap">{f.settled_at ? String(f.settled_at).slice(0,16).replace('T',' ') : '—'}</td>
                             <td className="px-3 py-3 text-right">
                               <div className="flex items-center gap-1 justify-end">
-                                <button onClick={() => loadFolio(f.id)}
+                                <button
+                                  onClick={() => f.is_group ? setGroupDetailId(f.group_id) : loadFolio(f.id)}
                                   className="px-2.5 py-1 rounded-lg bg-[#faf7f2] text-[#3d3128] text-[10px] font-bold hover:bg-[#cc5a16]/10">View</button>
                                 {f.status !== 'voided' && (
-                                  <button onClick={() => openFolioPdf(f.id)}
+                                  <button
+                                    onClick={() => f.is_group ? openGroupPdf(f.group_id) : openFolioPdf(f.id)}
                                     className="px-2.5 py-1 rounded-lg border border-[#cc5a16]/20 text-[#3d3128] text-[10px] font-bold hover:bg-[#faf7f2] flex items-center gap-1">
                                     <Eye size={11} /> PDF
                                   </button>
