@@ -104,3 +104,12 @@ h1, h2, h3, h4 {
 .toast-slide-in {
   animation: toast-slide-in 0.2s ease-out both;
 }
+
+/* Folio slide-over — slides in from the right */
+@keyframes folio-slide-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+.folio-slide-in {
+  animation: folio-slide-in 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+}

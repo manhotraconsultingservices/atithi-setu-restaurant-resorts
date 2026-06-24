@@ -8712,6 +8712,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [checkoutPayment, setCheckoutPayment] = useState<'CASH'|'CARD'|'UPI'|'BANK'>('CASH');
   const [checkoutDiscount, setCheckoutDiscount] = useState(0);
   const [viewFolio, setViewFolio] = useState<any>(null);
+  const [folioSlideBooking, setFolioSlideBooking] = useState<any>(null);
   // Sprint RS — F&B charge modal state (phone-in room service, minibar, banquet)
   const [fnbChargeFolio, setFnbChargeFolio] = useState<any>(null);
   // RS-FIX — unbilled room-service orders (folio_post_status='PENDING_MANUAL')
@@ -20679,7 +20680,22 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <tr key={b.id} className="group border-t border-[#cc5a16]/10 hover:bg-[#faf7f2]">
                         <td className="px-4 py-3 sticky left-0 z-[1] bg-white group-hover:bg-[#faf7f2] shadow-[2px_0_4px_-2px_rgba(0,0,0,0.08)]">
                           <div className="font-semibold text-[#1a1208] flex items-center gap-1.5 flex-wrap">
-                            {b.guest_name}
+                            {(b.status === 'CHECKED_IN' && b.open_folio_id) || b.status === 'BOOKED' ? (
+                              <button
+                                type="button"
+                                title={b.status === 'CHECKED_IN' ? 'View guest bill' : 'No charges yet — bill opens at check-in'}
+                                onClick={async () => {
+                                  if (b.status === 'CHECKED_IN' && b.open_folio_id) {
+                                    try { await loadFolio(b.open_folio_id); } catch (err: any) { toast.error(err?.message || 'Failed to load folio'); }
+                                  } else {
+                                    setFolioSlideBooking(b);
+                                  }
+                                }}
+                                className="hover:underline underline-offset-2 decoration-[#cc5a16]/60 text-left"
+                              >{b.guest_name}</button>
+                            ) : (
+                              <span>{b.guest_name}</span>
+                            )}
                             {b.group_id && (
                               <span
                                 className="inline-block text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-violet-100 text-violet-800"
@@ -31704,33 +31720,96 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       )}
 
       {/* ═════════ Folio viewer modal ═════════ */}
-      {viewFolio && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setViewFolio(null)}>
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl p-7 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h3 className="text-xl font-bold font-serif text-[#1a1208]">Folio · {viewFolio.id}</h3>
-                <p className="text-xs text-[#6b5d52] mt-0.5">
-                  {viewFolio.guest_name || '—'} · {viewFolio.room_name || viewFolio.room_id}
-                  {viewFolio.status === 'settled' && viewFolio.settled_at ? ` · Settled ${new Date(viewFolio.settled_at).toLocaleDateString('en-IN')}` : ''}
-                </p>
-                {(viewFolio.check_in_date || viewFolio.check_out_date) && (
-                  <p className="text-[10px] text-[#9c8e85] mt-1 font-mono">
-                    {viewFolio.check_in_date && <>
-                      CI: {formatDateForTenant(viewFolio.check_in_date, restaurant?.date_format)}
-                      {viewFolio.actual_checkin_at && <span className="ml-1">{new Date(viewFolio.actual_checkin_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
-                    </>}
-                    {viewFolio.check_in_date && viewFolio.check_out_date && <span className="mx-1">→</span>}
-                    {viewFolio.check_out_date && <>
-                      CO: {formatDateForTenant(viewFolio.check_out_date, restaurant?.date_format)}
-                      {viewFolio.actual_checkout_at && <span className="ml-1 text-[#cc5a16]/70">{new Date(viewFolio.actual_checkout_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
-                    </>}
+      {(viewFolio || folioSlideBooking) && (
+        <div className="fixed inset-0 z-50" onClick={() => { setViewFolio(null); setFolioSlideBooking(null); }}>
+          <div className="absolute inset-0 bg-black/30" />
+          <div className="absolute inset-y-0 right-0 w-[520px] max-w-full bg-white shadow-2xl flex flex-col folio-slide-in" onClick={e => e.stopPropagation()}>
+
+            {viewFolio ? (<>
+            {/* ── Header ─────────────────────────────────────────────── */}
+            <div className="flex-none px-6 pt-5 pb-4 border-b border-[#cc5a16]/10">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] mb-0.5">Guest Bill</div>
+                  <h3 className="text-xl font-bold font-serif text-[#1a1208] truncate">{viewFolio.guest_name || '—'}</h3>
+                  <p className="text-xs text-[#6b5d52] mt-0.5">
+                    {viewFolio.room_name || viewFolio.room_id}
+                    {viewFolio.status === 'settled' && viewFolio.settled_at ? ` · Settled ${new Date(viewFolio.settled_at).toLocaleDateString('en-IN')}` : ''}
                   </p>
+                  {(viewFolio.check_in_date || viewFolio.check_out_date) && (
+                    <p className="text-[10px] text-[#9c8e85] mt-1 font-mono">
+                      {viewFolio.check_in_date && <>
+                        CI: {formatDateForTenant(viewFolio.check_in_date, restaurant?.date_format)}
+                        {viewFolio.actual_checkin_at && <span className="ml-1">{new Date(viewFolio.actual_checkin_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
+                      </>}
+                      {viewFolio.check_in_date && viewFolio.check_out_date && <span className="mx-1">→</span>}
+                      {viewFolio.check_out_date && <>
+                        CO: {formatDateForTenant(viewFolio.check_out_date, restaurant?.date_format)}
+                        {viewFolio.actual_checkout_at && <span className="ml-1 text-[#cc5a16]/70">{new Date(viewFolio.actual_checkout_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}</span>}
+                      </>}
+                    </p>
+                  )}
+                </div>
+                <button onClick={() => setViewFolio(null)} className="flex-none p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] mt-0.5"><X size={18} /></button>
+              </div>
+              {/* Inline action strip */}
+              <div className="flex gap-2 mt-4 flex-wrap">
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
+                      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
+                      printPdfBlob(await res.blob());
+                    } catch (err: any) { toast.error(err.message); }
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-[#cc5a16]/20 text-[#cc5a16] text-xs font-bold hover:bg-[#cc5a16]/5"
+                ><Printer size={13}/> Print</button>
+                <button
+                  onClick={async () => {
+                    const r = await promptPayment({ title: 'Email guest bill', fields: [{ name: 'to', label: 'Email address', type: 'text', required: true, defaultValue: viewFolio.guest_email || '' }], confirmLabel: 'Send' });
+                    if (!r) return;
+                    try {
+                      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/email-invoice`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                        body: JSON.stringify({ to: r.to.trim() }),
+                      });
+                      const body = await res.json();
+                      if (!res.ok) throw new Error(body.error || 'Failed');
+                      toast.success(`Invoice ${body.invoice_number} emailed to ${body.sent_to}`);
+                    } catch (err: any) { toast.error(err.message); }
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-[#1e3a5f]/20 text-[#1e3a5f] text-xs font-bold hover:bg-[#1e3a5f]/5"
+                ><Mail size={13}/> Email</button>
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
+                      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
+                      const blob = await res.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      const safeName = String(viewFolio.guest_name || 'guest').replace(/\s+/g, '-');
+                      a.download = `${viewFolio.doc_type === 'CREDIT_NOTE' ? 'CreditNote' : 'Invoice'}-${viewFolio.id}-${safeName}.pdf`;
+                      document.body.appendChild(a); a.click();
+                      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+                    } catch (err: any) { toast.error(err.message); }
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612]"
+                ><Download size={13}/> Download</button>
+                {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'open' && (
+                  <button
+                    onClick={() => setFnbChargeFolio(viewFolio)}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700"
+                  ><ChefHat size={13}/> Add F&amp;B</button>
                 )}
               </div>
-              <button onClick={() => setViewFolio(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
             </div>
-            <div className="bg-[#faf7f2] rounded-2xl p-4 mb-4">
+
+            {/* ── Scrollable body ────────────────────────────────────── */}
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              <div className="bg-[#faf7f2] rounded-2xl p-4">
               <table className="w-full text-sm">
                 <thead className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
                   <tr>
@@ -31754,149 +31833,96 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   ))}
                 </tbody>
               </table>
-            </div>
-            <div className="space-y-1 text-sm">
-              <div className="flex justify-between"><span className="text-[#6b5d52]">Subtotal</span><span className="font-mono">₹{Number(viewFolio.subtotal).toLocaleString('en-IN')}</span></div>
-              <div className="flex justify-between"><span className="text-[#6b5d52]">GST</span><span className="font-mono">₹{Number(viewFolio.gst_amount).toLocaleString('en-IN')}</span></div>
-              {viewFolio.discount > 0 && <div className="flex justify-between text-rose-600"><span>Discount</span><span className="font-mono">−₹{Number(viewFolio.discount).toLocaleString('en-IN')}</span></div>}
-              <div className="flex justify-between text-lg font-bold pt-2 border-t border-[#cc5a16]/10 text-[#1a1208]"><span>Grand Total</span><span className="font-mono text-[#cc5a16]">₹{Number(viewFolio.grand_total).toLocaleString('en-IN')}</span></div>
-              {/* Advance / paid (DEDUCTED) + outstanding, so the folio shows the full money picture. */}
-              {Number(viewFolio.amount_paid || 0) > 0 && (
-                <div className="flex justify-between text-emerald-700"><span>Advance / Paid</span><span className="font-mono">−₹{Number(viewFolio.amount_paid).toLocaleString('en-IN')}</span></div>
-              )}
-              {Number(viewFolio.amount_refunded || 0) > 0 && (
-                <div className="flex justify-between text-[#6b5d52]"><span>Refunded</span><span className="font-mono">+₹{Number(viewFolio.amount_refunded).toLocaleString('en-IN')}</span></div>
-              )}
-              {(() => {
-                const out = Number(viewFolio.outstanding != null ? viewFolio.outstanding : viewFolio.grand_total);
-                const cls = out > 0.01 ? 'text-rose-700' : 'text-emerald-700';
-                return (
-                  <div className="flex justify-between text-base font-bold pt-2 border-t border-[#cc5a16]/10">
-                    <span className={cls}>Outstanding</span>
-                    <span className={cn('font-mono', cls)}>₹{out.toLocaleString('en-IN')}</span>
-                  </div>
-                );
-              })()}
-            </div>
-            {/* Payment / advance ledger — every advance the guest paid, with
-                date + time (IST) and method. Multiple payments → multiple rows. */}
-            {Array.isArray(viewFolio.payments) && viewFolio.payments.length > 0 && (
-              <div className="mt-4 bg-[#faf7f2] rounded-2xl p-4">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Payments received ({viewFolio.payments.length})</p>
-                <table className="w-full text-xs">
-                  <thead className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">
-                    <tr><th className="text-left py-1">When (IST)</th><th className="text-left py-1">Type</th><th className="text-left py-1">Method</th><th className="text-right py-1">Amount</th></tr>
-                  </thead>
-                  <tbody>
-                    {viewFolio.payments.map((p: any) => (
-                      <tr key={p.id} className="border-t border-[#cc5a16]/10">
-                        <td className="py-1.5 whitespace-nowrap">{p.recorded_at ? new Date(p.recorded_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '—'}</td>
-                        <td className="py-1.5">
-                          <span className={cn('px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase',
-                            p.payment_type === 'REFUND' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700')}>
-                            {p.payment_type === 'ADVANCE' ? 'Advance' : (p.payment_type || 'Payment')}
-                          </span>
-                        </td>
-                        <td className="py-1.5 text-[#6b5d52]">{(p.payment_method || '—').replace(/_/g, ' ')}{p.reference_number ? ` · ${p.reference_number}` : ''}</td>
-                        <td className={cn('py-1.5 text-right font-mono font-semibold', p.payment_type === 'REFUND' ? 'text-rose-700' : 'text-emerald-700')}>
-                          {p.payment_type === 'REFUND' ? '+' : '−'}₹{Number(p.amount || 0).toLocaleString('en-IN')}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
               </div>
-            )}
-            <div className="mt-5 space-y-2">
-              {/* Row 1 — Close / Print / Download */}
-              <div className="flex gap-2 flex-wrap">
-                <button onClick={() => setViewFolio(null)} className="flex-1 min-w-[110px] px-4 py-2.5 rounded-2xl border border-[#cc5a16]/20 text-[#3d3128] text-sm font-bold hover:bg-[#faf7f2]">Close</button>
-                <button
-                  onClick={async () => {
-                    try {
-                      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
-                      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
-                      const blob = await res.blob();
-                      printPdfBlob(blob);
-                    } catch (err: any) { toast.error(err.message); }
-                  }}
-                  className="flex-1 min-w-[110px] px-4 py-2.5 rounded-2xl border-2 border-[#cc5a16] text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5 flex items-center justify-center gap-2"
-                ><Printer size={14}/> Print</button>
-                <button
-                  onClick={async () => {
-                    try {
-                      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/invoice-pdf`, { headers: { Authorization: `Bearer ${token}` } });
-                      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
-                      const blob = await res.blob();
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement('a');
-                      a.href = url;
-                      const safeName = String(viewFolio.guest_name || 'guest').replace(/\s+/g, '-');
-                      a.download = `${viewFolio.doc_type === 'CREDIT_NOTE' ? 'CreditNote' : 'Invoice'}-${viewFolio.id}-${safeName}.pdf`;
-                      document.body.appendChild(a); a.click();
-                      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-                    } catch (err: any) { toast.error(err.message); }
-                  }}
-                  className="flex-1 min-w-[110px] px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] flex items-center justify-center gap-2"
-                ><Download size={14}/> Download PDF</button>
+              <div className="space-y-1 text-sm">
+                <div className="flex justify-between"><span className="text-[#6b5d52]">Subtotal</span><span className="font-mono">₹{Number(viewFolio.subtotal).toLocaleString('en-IN')}</span></div>
+                <div className="flex justify-between"><span className="text-[#6b5d52]">GST</span><span className="font-mono">₹{Number(viewFolio.gst_amount).toLocaleString('en-IN')}</span></div>
+                {viewFolio.discount > 0 && <div className="flex justify-between text-rose-600"><span>Discount</span><span className="font-mono">−₹{Number(viewFolio.discount).toLocaleString('en-IN')}</span></div>}
+                <div className="flex justify-between text-lg font-bold pt-2 border-t border-[#cc5a16]/10 text-[#1a1208]"><span>Grand Total</span><span className="font-mono text-[#cc5a16]">₹{Number(viewFolio.grand_total).toLocaleString('en-IN')}</span></div>
+                {Number(viewFolio.amount_paid || 0) > 0 && (
+                  <div className="flex justify-between text-emerald-700"><span>Advance / Paid</span><span className="font-mono">−₹{Number(viewFolio.amount_paid).toLocaleString('en-IN')}</span></div>
+                )}
+                {Number(viewFolio.amount_refunded || 0) > 0 && (
+                  <div className="flex justify-between text-[#6b5d52]"><span>Refunded</span><span className="font-mono">+₹{Number(viewFolio.amount_refunded).toLocaleString('en-IN')}</span></div>
+                )}
+                {(() => {
+                  const out = Number(viewFolio.outstanding != null ? viewFolio.outstanding : viewFolio.grand_total);
+                  const cls = out > 0.01 ? 'text-rose-700' : 'text-emerald-700';
+                  return (
+                    <div className="flex justify-between text-base font-bold pt-2 border-t border-[#cc5a16]/10">
+                      <span className={cls}>Outstanding</span>
+                      <span className={cn('font-mono', cls)}>₹{out.toLocaleString('en-IN')}</span>
+                    </div>
+                  );
+                })()}
               </div>
-              {/* Row 2 — Email / Credit Note */}
-              <div className="flex gap-2 flex-wrap">
+              {Array.isArray(viewFolio.payments) && viewFolio.payments.length > 0 && (
+                <div className="bg-[#faf7f2] rounded-2xl p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-2">Payments received ({viewFolio.payments.length})</p>
+                  <table className="w-full text-xs">
+                    <thead className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">
+                      <tr><th className="text-left py-1">When (IST)</th><th className="text-left py-1">Type</th><th className="text-left py-1">Method</th><th className="text-right py-1">Amount</th></tr>
+                    </thead>
+                    <tbody>
+                      {viewFolio.payments.map((p: any) => (
+                        <tr key={p.id} className="border-t border-[#cc5a16]/10">
+                          <td className="py-1.5 whitespace-nowrap">{p.recorded_at ? new Date(p.recorded_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '—'}</td>
+                          <td className="py-1.5">
+                            <span className={cn('px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase',
+                              p.payment_type === 'REFUND' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700')}>
+                              {p.payment_type === 'ADVANCE' ? 'Advance' : (p.payment_type || 'Payment')}
+                            </span>
+                          </td>
+                          <td className="py-1.5 text-[#6b5d52]">{(p.payment_method || '—').replace(/_/g, ' ')}{p.reference_number ? ` · ${p.reference_number}` : ''}</td>
+                          <td className={cn('py-1.5 text-right font-mono font-semibold', p.payment_type === 'REFUND' ? 'text-rose-700' : 'text-emerald-700')}>
+                            {p.payment_type === 'REFUND' ? '+' : '−'}₹{Number(p.amount || 0).toLocaleString('en-IN')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'settled' && (
                 <button
                   onClick={async () => {
-                    const r = await promptPayment({ title: 'Email guest bill', fields: [{ name: 'to', label: 'Email address', type: 'text', required: true, defaultValue: viewFolio.guest_email || '' }], confirmLabel: 'Send' });
-                    if (!r) return;
+                    const cnr = await promptPayment({ title: 'Generate credit note', fields: [{ name: 'reason', label: 'Reason', type: 'text', placeholder: 'Refund / cancellation', defaultValue: 'Refund' }], confirmLabel: 'Generate' });
+                    if (!cnr) return;
                     try {
-                      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/email-invoice`, {
+                      const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/credit-note`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ to: r.to.trim() }),
+                        body: JSON.stringify({ reason: cnr.reason || 'Refund / cancellation' }),
                       });
                       const body = await res.json();
                       if (!res.ok) throw new Error(body.error || 'Failed');
-                      toast.success(`Invoice ${body.invoice_number} emailed to ${body.sent_to}`);
+                      toast.success(`Credit note ${body.id} created`);
+                      await fetchHotelFolios();
+                      setViewFolio(null);
                     } catch (err: any) { toast.error(err.message); }
                   }}
-                  className="flex-1 min-w-[140px] px-4 py-2.5 rounded-2xl bg-[#1e3a5f] text-white text-sm font-bold hover:bg-[#152a47] flex items-center justify-center gap-2"
-                ><Mail size={14}/> Email Invoice</button>
-                {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'settled' && (
-                  <button
-                    onClick={async () => {
-                      const cnr = await promptPayment({ title: 'Generate credit note', fields: [{ name: 'reason', label: 'Reason', type: 'text', placeholder: 'Refund / cancellation', defaultValue: 'Refund' }], confirmLabel: 'Generate' });
-                      if (!cnr) return;
-                      try {
-                        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/credit-note`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                          body: JSON.stringify({ reason: cnr.reason || 'Refund / cancellation' }),
-                        });
-                        const body = await res.json();
-                        if (!res.ok) throw new Error(body.error || 'Failed');
-                        toast.success(`Credit note ${body.id} created`);
-                        await fetchHotelFolios();
-                        setViewFolio(null);
-                      } catch (err: any) { toast.error(err.message); }
-                    }}
-                    className="flex-1 min-w-[140px] px-4 py-2.5 rounded-2xl border-2 border-[#c13b3b] text-[#c13b3b] text-sm font-bold hover:bg-[#fdf0f0] flex items-center justify-center gap-2"
-                  ><RefreshCw size={14}/> Generate Credit Note</button>
-                )}
-              </div>
-
-              {/* Sprint RS — Staff-side "Add F&B charge" (open folios only) */}
-              {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'open' && (
-                <div className="pt-2">
-                  <button
-                    onClick={() => setFnbChargeFolio(viewFolio)}
-                    className="w-full px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 flex items-center justify-center gap-2"
-                  >
-                    <ChefHat size={14}/> Add F&amp;B Charge to Folio
-                  </button>
-                  <p className="text-[10px] text-[#9c8e85] mt-1.5 text-center italic">
-                    For phone-in room service, minibar restock, banquet overage, etc. Charge is posted as an itemized entry on the folio.
-                  </p>
-                </div>
+                  className="w-full px-4 py-2.5 rounded-2xl border-2 border-[#c13b3b] text-[#c13b3b] text-sm font-bold hover:bg-[#fdf0f0] flex items-center justify-center gap-2"
+                ><RefreshCw size={14}/> Generate Credit Note</button>
               )}
             </div>
+            </>) : (<>
+            {/* ── BOOKED empty state ─────────────────────────────────── */}
+            <div className="flex-none px-6 pt-5 pb-4 border-b border-[#cc5a16]/10 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-[#cc5a16] mb-0.5">Guest Bill</div>
+                <h3 className="text-xl font-bold font-serif text-[#1a1208] truncate">{folioSlideBooking?.guest_name || '—'}</h3>
+                <p className="text-xs text-[#6b5d52] mt-0.5">{folioSlideBooking?.room_name || folioSlideBooking?.room_id} · Upcoming</p>
+              </div>
+              <button onClick={() => setFolioSlideBooking(null)} className="flex-none p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] mt-0.5"><X size={18} /></button>
+            </div>
+            <div className="flex-1 flex flex-col items-center justify-center p-10 text-center">
+              <div className="w-16 h-16 rounded-full bg-[#faf7f2] flex items-center justify-center mb-5">
+                <Receipt size={28} className="text-[#cc5a16]/40" />
+              </div>
+              <h4 className="font-serif text-lg font-bold text-[#1a1208] mb-2">No charges yet</h4>
+              <p className="text-sm text-[#6b5d52] max-w-xs">The guest bill opens automatically at check-in. You can collect an advance through the booking detail.</p>
+            </div>
+            </>)}
           </div>
         </div>
       )}
