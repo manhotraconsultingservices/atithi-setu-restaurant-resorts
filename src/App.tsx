@@ -18730,14 +18730,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               // (so their invoices stay intact). Either way it vanishes from
               // every selector. Refetch so the list reflects the DB truth.
               const deleteMealPlan = async (m: any) => {
-                const reply = prompt(
-                  `Permanently delete "${m.code} · ${m.name}"?\n\n` +
-                  `It is removed from the system entirely, including its tariff-matrix and extra-person rate cells. ` +
-                  `If any past booking used this plan it will be archived instead (kept so those invoices stay readable).\n\n` +
-                  `To confirm, type DELETE:`
-                );
-                if (reply == null) return;
-                if (String(reply).trim().toUpperCase() !== 'DELETE') {
+                const r = await promptPayment({
+                  title: `Delete meal plan "${m.code}"?`,
+                  body: `Permanently removes it from all tariff matrices. Historical bookings using this plan stay readable.`,
+                  fields: [{ name: 'confirm', label: 'Type DELETE to confirm', type: 'text', required: true }],
+                  confirmLabel: 'Delete',
+                });
+                if (!r) return;
+                if (r.confirm.trim().toUpperCase() !== 'DELETE') {
                   toast.error('Not deleted — confirmation text did not match.');
                   return;
                 }
@@ -18952,18 +18952,15 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                           <div className="inline-flex items-center gap-1.5">
                                           <button
                                             type="button"
-                                            onClick={() => {
-                                              // BCG Phase 4.6 — stronger confirm. Owner must
-                                              // type the code to archive an existing plan, so
-                                              // accidental misclicks can't silently disappear
-                                              // user data (the original bug).
-                                              const reply = prompt(
-                                                `Archive "${m.code} · ${m.name}"?\n\n` +
-                                                `Historical bookings using this plan stay readable. The plan disappears from new booking forms + the tariff matrix until you click Restore.\n\n` +
-                                                `To confirm, type the plan code below (e.g. "${m.code}"):`
-                                              );
-                                              if (reply == null) return; // cancel
-                                              if (String(reply).trim().toUpperCase() !== String(m.code).trim().toUpperCase()) {
+                                            onClick={async () => {
+                                              const r = await promptPayment({
+                                                title: `Archive meal plan "${m.code}"?`,
+                                                body: `Historical bookings stay readable. The plan disappears from new forms until restored.`,
+                                                fields: [{ name: 'code', label: `Type ${m.code} to confirm`, type: 'text', required: true }],
+                                                confirmLabel: 'Archive',
+                                              });
+                                              if (!r) return;
+                                              if (r.code.trim().toUpperCase() !== String(m.code).trim().toUpperCase()) {
                                                 toast.error(`Code didn't match "${m.code}" — nothing changed.`);
                                                 return;
                                               }
@@ -20042,7 +20039,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         <button onClick={async () => { const sr = await promptPayment({ title: `Settle group "${g.name}"`, body: `${g.checked_in_count} room${g.checked_in_count===1?'':'s'} — choose payment method and optional discount`, fields: [{ name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'},{value:'BANK_TRANSFER',label:'Bank Transfer'}], defaultValue: 'CASH' }, { name: 'discount', label: 'Group discount (₹)', type: 'number', placeholder: '0', defaultValue: '0' }], confirmLabel: 'Settle & Checkout' }); if (!sr) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkout`, {method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({payment_method:sr.method.toUpperCase(),discount:Math.max(0,Number(sr.discount)||0)})}); const data = await res.json(); if (!res.ok) throw new Error(data?.error||'Settle failed'); toast.success(`Settled — Invoice ${data.invoice_number}, ₹${Number(data.total_grand_total||0).toLocaleString('en-IN')}`); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { toast.error(err.message); } }} className="px-2 py-1 rounded-lg bg-violet-600 text-white text-[10px] font-bold hover:bg-violet-700">Settle</button>
                                       )}
                                       <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/invoice-pdf`,{headers:{Authorization:`Bearer ${token}`}}); if (!res.ok){const j=await res.json().catch(()=>({}));throw new Error(j?.error||'Download failed');} const blob=await res.blob(); const url=URL.createObjectURL(blob); const a=document.createElement('a');a.href=url;a.download=`GroupInvoice-${g.id}-${(g.name||'group').replace(/[^a-z0-9_-]+/gi,'-')}.pdf`;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},1000); } catch(err:any){toast.error(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📑 PDF</button>
-                                      <button onClick={async () => { const to = prompt(`Email invoice for "${g.name}" to:`, g.contact_email||''); if (!to||!to.trim()) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/email-invoice`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({to:to.trim()})}); const data=await res.json(); if (!res.ok) throw new Error(data?.error||'Email failed'); toast.success(`Invoice ${data.invoice_number} sent to ${data.sent_to}`); } catch(err:any){toast.error(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📧 Email</button>
+                                      <button onClick={async () => { const r = await promptPayment({ title: `Email invoice for "${g.name}"`, fields: [{ name: 'to', label: 'Email address', type: 'text', required: true, defaultValue: g.contact_email||'' }], confirmLabel: 'Send' }); if (!r) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/email-invoice`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({to:r.to.trim()})}); const data=await res.json(); if (!res.ok) throw new Error(data?.error||'Email failed'); toast.success(`Invoice ${data.invoice_number} sent to ${data.sent_to}`); } catch(err:any){toast.error(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📧 Email</button>
                                       <button onClick={async () => { setMasterFolioGroupId(g.id);setMasterFolioData(null);setMasterFolioLoading(true);setMasterFolioAddDesc('');setMasterFolioAddAmt('');setMasterFolioAddGst('0');setMasterFolioAddQty('1');setMasterFolioAddType('SERVICE'); try { const r=await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/master-folio`,{headers:{Authorization:`Bearer ${token}`}}); const d=await r.json(); if (!r.ok) throw new Error(d?.error||'Load failed'); setMasterFolioData(d); } catch(err:any){toast.error(err.message);setMasterFolioGroupId(null);} finally{setMasterFolioLoading(false);} }} className="px-2 py-1 rounded-lg border border-emerald-400 text-emerald-700 text-[10px] font-bold hover:bg-emerald-50">🏦 Master Acct</button>
                                       <button onClick={() => loadGroupDetail(g.id)} className="px-2 py-1 rounded-lg border border-indigo-300 text-indigo-700 text-[10px] font-bold hover:bg-indigo-50">📋 Detail</button>
                                       {Number(g.booking_count) > Number(g.checked_in_count) + Number(g.checked_out_count) && !g.settled_at && (
@@ -20897,24 +20894,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             {b.group_id && b.status === 'CHECKED_IN' && (
                               <button
                                 onClick={async () => {
-                                  const method = prompt(
-                                    `Settle ALL rooms in group "${b.group_name || 'this group'}" as a single invoice.\n\nEvery CHECKED_IN room will be marked CHECKED_OUT and billed under one consolidated invoice number.\n\nPayment method? (CASH / CARD / UPI / BANK_TRANSFER)`,
-                                    'CASH'
-                                  );
-                                  if (!method) return;
-                                  const discountStr = prompt(
-                                    `Optional group-level discount in ₹ (split proportionally across rooms by subtotal).\n\nLeave 0 if no group discount.`,
-                                    '0'
-                                  );
-                                  if (discountStr === null) return;
-                                  const groupDiscount = Math.max(0, Number(discountStr) || 0);
+                                  const r = await promptPayment({
+                                    title: `Settle group "${b.group_name || 'group'}"`,
+                                    body: 'Every CHECKED_IN room will be checked out and billed as one consolidated invoice.',
+                                    fields: [
+                                      { name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'},{value:'BANK_TRANSFER',label:'Bank Transfer'}], defaultValue: 'CASH' },
+                                      { name: 'discount', label: 'Group discount (₹)', type: 'number', placeholder: '0', defaultValue: '0' },
+                                    ],
+                                    confirmLabel: 'Settle & Checkout',
+                                  });
+                                  if (!r) return;
+                                  const groupDiscount = Math.max(0, Number(r.discount) || 0);
                                   try {
                                     const res = await fetch(
                                       `/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/checkout`,
                                       {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                        body: JSON.stringify({ payment_method: method.toUpperCase(), discount: groupDiscount }),
+                                        body: JSON.stringify({ payment_method: r.method.toUpperCase(), discount: groupDiscount }),
                                       }
                                     );
                                     const data = await res.json();
@@ -21019,11 +21016,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     {b.group_id && (
                                       <button className={menuItemCls} onClick={async () => {
                                         setOpenActionMenu(null);
-                                        const fallback = b.guest_email || '';
-                                        const to = prompt(`Email the consolidated group invoice for "${b.group_name || 'this group'}" to:`, fallback);
-                                        if (!to || !to.trim()) return;
+                                        const r = await promptPayment({ title: `Email group invoice for "${b.group_name || 'group'}"`, fields: [{ name: 'to', label: 'Email address', type: 'text', required: true, defaultValue: b.guest_email || '' }], confirmLabel: 'Send' });
+                                        if (!r) return;
                                         try {
-                                          const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/email-invoice`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ to: to.trim() }) });
+                                          const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/email-invoice`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ to: r.to.trim() }) });
                                           const data = await res.json();
                                           if (!res.ok) throw new Error(data?.error || `Email failed (${res.status})`);
                                           toast.success(`Group invoice ${data.invoice_number} emailed to ${data.sent_to}.`);
@@ -31909,14 +31905,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="flex gap-2 flex-wrap">
                 <button
                   onClick={async () => {
-                    const defaultEmail = viewFolio.guest_email || '';
-                    const toEmail = prompt('Send invoice to (email):', defaultEmail);
-                    if (!toEmail || !toEmail.trim()) return;
+                    const r = await promptPayment({ title: 'Email guest bill', fields: [{ name: 'to', label: 'Email address', type: 'text', required: true, defaultValue: viewFolio.guest_email || '' }], confirmLabel: 'Send' });
+                    if (!r) return;
                     try {
                       const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/email-invoice`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                        body: JSON.stringify({ to: toEmail.trim() }),
+                        body: JSON.stringify({ to: r.to.trim() }),
                       });
                       const body = await res.json();
                       if (!res.ok) throw new Error(body.error || 'Failed');
@@ -38980,6 +38975,8 @@ const RestaurantBillModal: React.FC<{
   onClose: () => void;
   onChanged: () => void | Promise<void>;
 }> = ({ booking, restaurant, restaurantId, token, onClose, onChanged }) => {
+  const toast = useToast();
+  const promptPayment = usePaymentDialog();
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -39013,14 +39010,14 @@ const RestaurantBillModal: React.FC<{
   };
 
   const markPaid = async () => {
-    const m = window.prompt('Guest paid the restaurant bill — payment method? (CASH / UPI / CARD)', 'CASH');
-    if (m == null) return;
+    const r = await promptPayment({ title: 'Mark restaurant bill paid', fields: [{ name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'}], defaultValue: 'CASH' }], confirmLabel: 'Mark Paid' });
+    if (!r) return;
     setBusy(true); setError('');
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings/${booking.id}/restaurant-bill/mark-paid`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ payment_method: (m || 'CASH').toUpperCase() }),
+        body: JSON.stringify({ payment_method: r.method.toUpperCase() }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d?.error || `Failed (${res.status})`);
@@ -39111,6 +39108,7 @@ const CheckoutModal: React.FC<{
   onPendingReconciled?: () => void | Promise<void>;
 }> = ({ booking, restaurant, restaurantId, token, fetchFolioOutstanding, hotelApi, onClose, onSettled, loyaltyBanner, lateFeeBanner, pendingRoomOrders = [], onPendingReconciled }) => {
   const toast = useToast();
+  const promptPayment = usePaymentDialog();
   const [data, setData] = useState<any | null>(null);
   // ROBUST F&B-AT-CHECKOUT (17 Jun 2026) — the guest's restaurant bill, fetched
   // from /bookings/:id/restaurant-bill. That query matches CHARGE_TO_ROOM orders
@@ -39169,9 +39167,9 @@ const CheckoutModal: React.FC<{
   const reconcilePending = async (order: any, paidInRoom: boolean) => {
     let method = 'CASH';
     if (paidInRoom) {
-      const m = window.prompt('Guest paid in the room — payment method? (CASH / UPI / CARD)', 'CASH');
-      if (m == null) return;   // cancelled
-      method = (m || 'CASH').toUpperCase();
+      const r = await promptPayment({ title: 'Guest paid in room', fields: [{ name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'}], defaultValue: 'CASH' }], confirmLabel: 'Confirm' });
+      if (!r) return;
+      method = r.method.toUpperCase();
     }
     setPendingBusyId(order.id);
     try {
@@ -46722,6 +46720,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 function SuperAdminDashboard({ token }: { token: string }) {
   const toast = useToast();
   const showConfirm = useConfirm();
+  const promptPayment = usePaymentDialog();
   const [restaurants, setRestaurants] = useState<any[]>([]);
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -46927,8 +46926,9 @@ function SuperAdminDashboard({ token }: { token: string }) {
     }
   };
   const revokeTenantAccess = async (tenantId: string, tenantName: string) => {
-    const reason = prompt(`Revoke access for ${tenantName}?\n\nReason (shown to tenant):`, 'Subscription payment overdue');
-    if (reason === null) return;
+    const r = await promptPayment({ title: `Revoke access for ${tenantName}?`, fields: [{ name: 'reason', label: 'Reason (shown to tenant)', type: 'text', required: true, defaultValue: 'Subscription payment overdue' }], confirmLabel: 'Revoke Access' });
+    if (!r) return;
+    const reason = r.reason;
     try {
       const res = await fetch(`/api/admin/tenants/${tenantId}/revoke-access`, {
         method: 'POST',
@@ -47398,12 +47398,14 @@ function SuperAdminDashboard({ token }: { token: string }) {
   };
 
   const resetPassword = async (restaurantId: string) => {
-    const newPass = prompt("Enter new password for Owner:");
+    const r = await promptPayment({ title: 'Reset Owner password', fields: [{ name: 'pass', label: 'New password', type: 'password', required: true }], confirmLabel: 'Reset Password' });
+    if (!r) return;
+    const newPass = r.pass;
     if (newPass) {
       try {
         const res = await fetch('/api/admin/reset-owner-password', {
           method: 'POST',
-          headers: { 
+          headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${token}`
           },
@@ -47454,7 +47456,9 @@ function SuperAdminDashboard({ token }: { token: string }) {
   };
 
   const resetInternalUserPassword = async (userId: string) => {
-    const newPass = prompt("Enter new password for Internal User:");
+    const r = await promptPayment({ title: 'Reset Internal User password', fields: [{ name: 'pass', label: 'New password', type: 'password', required: true }], confirmLabel: 'Reset Password' });
+    if (!r) return;
+    const newPass = r.pass;
     if (newPass) {
       try {
         const res = await fetch('/api/admin/reset-internal-user-password', {
