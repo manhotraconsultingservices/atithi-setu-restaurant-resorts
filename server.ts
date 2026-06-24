@@ -4186,6 +4186,52 @@ async function settleFolioForBooking(
       [new Date().toISOString(), paymentMethod, folio.id]);
   }
   const settled = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+
+  // Post double-entry GL for folio settlement (idempotent — skips if already posted)
+  if (!waive && settled?.status === 'settled') {
+    try {
+      const journalRef = `FOLIO-${folio.id}`;
+      const already = await tenantDb.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
+      if (!already) {
+        const entryDate = (settled.settled_at || new Date().toISOString()).slice(0, 10);
+        const subtotal  = Number(settled.subtotal  || 0);
+        const gstAmt    = Number(settled.gst_amount || 0);
+        const discount  = Number(settled.discount  || 0);
+        const grandTotal = Number(settled.grand_total || 0);
+        const cgst = +(gstAmt / 2).toFixed(2);
+        const sgst = gstAmt - cgst;
+        const payments: any[] = await tenantDb.query(
+          "SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0", [folio.id]);
+        const advances = payments.filter((p: any) => p.payment_type === 'ADVANCE');
+        const advTotal  = advances.reduce((s: number, p: any) => s + Number(p.amount), 0);
+        const nonAdv    = payments.filter((p: any) => p.payment_type !== 'ADVANCE');
+        const glLines: GlLine[] = [];
+        if (subtotal + gstAmt > 0) {
+          glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: subtotal + gstAmt - discount, cr_amount: 0, narration: `Guest bill ${folio.id}` });
+          glLines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: subtotal, narration: `Revenue folio ${folio.id}` });
+          if (discount > 0) glLines.push({ account_code: '4900', account_name: 'Other Income', dr_amount: discount, cr_amount: 0, narration: `Discount folio ${folio.id}` });
+          if (cgst > 0) glLines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: cgst, narration: `CGST folio ${folio.id}` });
+          if (sgst > 0) glLines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: sgst, narration: `SGST folio ${folio.id}` });
+        }
+        if (advTotal > 0) {
+          const applied = Math.min(advTotal, grandTotal);
+          glLines.push({ account_code: '2100', account_name: 'Advances from Guests', dr_amount: applied, cr_amount: 0, narration: `Advance applied ${folio.id}` });
+          glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: applied, narration: `Advance applied ${folio.id}` });
+        }
+        for (const p of nonAdv) {
+          const amt = Number(p.amount);
+          if (amt <= 0) continue;
+          const cashAcct = _glAccountForPaymentMethod(p.payment_method);
+          glLines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amt, cr_amount: 0, narration: `${p.payment_method} ${folio.id}` });
+          glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
+        }
+        await _postGlEntries(tenantDb, restaurantId, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null);
+      }
+    } catch (glErr) {
+      console.error('[GL] folio settlement error:', glErr);
+    }
+  }
+
   // Caller reads .loyalty when present to fire the loyalty hook and to
   // include a banner field in the API response. Stored only on the
   // returned object — not persisted as a column (the discount itself is
@@ -4193,6 +4239,115 @@ async function settleFolioForBooking(
   if (appliedLoyalty) (settled as any).loyalty = appliedLoyalty;
   return settled;
 }
+
+// ─── Minimum Viable Accounting — GL helpers ──────────────────────────────────
+
+interface GlLine {
+  account_code: string;
+  account_name: string;
+  dr_amount: number;
+  cr_amount: number;
+  narration?: string;
+  cost_centre?: string;
+}
+
+function _glAccountForPaymentMethod(method: string): { code: string; name: string } {
+  return String(method || '').toUpperCase() === 'CASH'
+    ? { code: '1000', name: 'Cash in Hand' }
+    : { code: '1010', name: 'Bank — Main Account' };
+}
+
+function _glAccountForEntryType(entryType: string): { code: string; name: string } {
+  const t = String(entryType || '').toUpperCase();
+  if (t === 'F_AND_B_REVENUE')        return { code: '4010', name: 'F&B Revenue' };
+  if (t === 'SERVICE_CHARGE_REVENUE') return { code: '4020', name: 'Service Charge Revenue' };
+  if (t === 'ANCILLARY_REVENUE')      return { code: '4030', name: 'Ancillary Revenue' };
+  if (t === 'SPA_REVENUE')            return { code: '4040', name: 'Spa Revenue' };
+  return { code: '4000', name: 'Room Revenue' };
+}
+
+function _glAccountForExpenseCategory(category: string): { code: string; name: string } {
+  const c = String(category || '').toUpperCase();
+  if (/FOOD|F&B|BEVER|GROCERY|PROVISION|CONSUMABLE/.test(c)) return { code: '5000', name: 'Cost of F&B Consumed' };
+  if (/SALARY|WAGE|STAFF/.test(c))                           return { code: '5100', name: 'Salaries & Wages' };
+  if (/HOUSEKEEP|LAUNDRY|LINEN|CLEANING/.test(c))           return { code: '5200', name: 'Housekeeping & Laundry Expenses' };
+  if (/REPAIR|MAINT/.test(c))                               return { code: '5300', name: 'Repairs & Maintenance' };
+  if (/ELECTRIC|POWER|FUEL|DIESEL/.test(c))                 return { code: '5400', name: 'Electricity & Power' };
+  if (/WATER|UTILITY/.test(c))                              return { code: '5410', name: 'Water & Utilities' };
+  if (/INTERNET|TELECOM|PHONE|MOBILE/.test(c))              return { code: '5420', name: 'Internet & Telecom' };
+  if (/MARKET|ADVERTIS|PROMO/.test(c))                      return { code: '5600', name: 'Marketing & Advertising' };
+  if (/OFFICE|STATIONAR|ADMIN/.test(c))                     return { code: '5700', name: 'Administrative & Office Expenses' };
+  if (/PROFESSIONAL|CONSULTANT|AUDIT/.test(c))              return { code: '5900', name: 'Professional Fees' };
+  if (/LEGAL/.test(c))                                      return { code: '5910', name: 'Legal & Compliance Fees' };
+  return { code: '5800', name: 'Petty Cash Expenses' };
+}
+
+function _glAccountForSupplierInvoice(module: string, notes: string): { code: string; name: string } {
+  const m = String(module || '').toUpperCase();
+  const n = String(notes || '').toUpperCase();
+  if (/F&B|FOOD|BEVER|PROVISION/.test(n) || m === 'RESTAURANT') return { code: '5000', name: 'Cost of F&B Consumed' };
+  if (/HOUSEKEEP|LAUNDRY/.test(n))    return { code: '5200', name: 'Housekeeping & Laundry Expenses' };
+  if (/REPAIR|MAINT/.test(n))         return { code: '5300', name: 'Repairs & Maintenance' };
+  if (/ELECTRIC|POWER/.test(n))       return { code: '5400', name: 'Electricity & Power' };
+  if (/MARKET|ADVERTIS/.test(n))      return { code: '5600', name: 'Marketing & Advertising' };
+  if (/PROFESSIONAL|CONSULT/.test(n)) return { code: '5900', name: 'Professional Fees' };
+  return { code: '6000', name: 'Miscellaneous Expenses' };
+}
+
+function _tdsForSupplierPayment(tdsCategory: string, gross: number): {
+  section: string; rate: number; amount: number; nature: string; accountCode: string; accountName: string;
+} | null {
+  const cat = String(tdsCategory || 'NIL').toUpperCase();
+  if (cat === 'NIL' || gross < 30000) return null;
+  const rate = (cat === 'COMPANY' || cat === 'PARTNERSHIP') ? 2.0 : 1.0;
+  const amount = Math.round(gross * rate) / 100;
+  return { section: '194C', rate, amount, nature: 'Contractor payment', accountCode: '2300', accountName: 'TDS Payable — Sec 194C' };
+}
+
+function _glCurrentQuarter(): string {
+  const now = new Date();
+  const m = now.getMonth() + 1;
+  const y = now.getFullYear();
+  if (m >= 4 && m <= 6)   return `Q1-${y}`;
+  if (m >= 7 && m <= 9)   return `Q2-${y}`;
+  if (m >= 10 && m <= 12) return `Q3-${y}`;
+  return `Q4-${y - 1}`;
+}
+
+async function _postGlEntries(
+  db: any,
+  restaurantId: string,
+  journalRef: string,
+  entryDate: string,
+  sourceType: string,
+  sourceId: string | null,
+  lines: GlLine[],
+  postedBy: string | null,
+): Promise<void> {
+  const totalDr = lines.reduce((s, l) => s + (l.dr_amount || 0), 0);
+  const totalCr = lines.reduce((s, l) => s + (l.cr_amount || 0), 0);
+  if (Math.abs(totalDr - totalCr) > 0.02) {
+    console.warn(`[GL] Unbalanced journal ${journalRef}: Dr=${totalDr.toFixed(2)} Cr=${totalCr.toFixed(2)} — skipping`);
+    return;
+  }
+  for (const line of lines) {
+    if ((line.dr_amount || 0) === 0 && (line.cr_amount || 0) === 0) continue;
+    const id = `GL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    await db.run(
+      `INSERT INTO gl_entries
+         (id, restaurant_id, journal_ref, entry_date, account_code, account_name,
+          dr_amount, cr_amount, narration, source_type, source_id, cost_centre, posted_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, restaurantId, journalRef, entryDate,
+       line.account_code, line.account_name,
+       +(line.dr_amount || 0).toFixed(2), +(line.cr_amount || 0).toFixed(2),
+       line.narration || null, sourceType, sourceId || null,
+       line.cost_centre || null, postedBy || null]
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Seed defaults into the tenant's services table if it's empty.
 async function seedDefaultServices(tenantDb: DbInterface): Promise<number> {
@@ -14030,6 +14185,20 @@ You can also view all your payslips in the employee portal.
         return res.status(409).json({ error: 'Approval race lost', claim: fresh });
       }
       const claim = await db.get("SELECT * FROM expense_claims WHERE id = ?", [req.params.claimId]);
+      // GL: Dr Expense account, Cr Salaries & Wages Payable (at final HR approval only)
+      if (claim?.status === 'HR_APPROVED') {
+        try {
+          const expAcct = _glAccountForExpenseCategory(claim.category || claim.expense_type || '');
+          const amt = Number(claim.amount || 0);
+          if (amt > 0) {
+            const today = new Date().toISOString().slice(0, 10);
+            await _postGlEntries(db, req.params.id, `EXP-${req.params.claimId}`, today, 'EXPENSE_CLAIM', req.params.claimId, [
+              { account_code: expAcct.code, account_name: expAcct.name, dr_amount: amt, cr_amount: 0, narration: claim.description || 'Expense claim' },
+              { account_code: '2400', account_name: 'Salaries & Wages Payable', dr_amount: 0, cr_amount: amt, narration: claim.description || 'Expense claim' },
+            ], req.user?.id || req.user?.email || null);
+          }
+        } catch (glErr) { console.error('[GL] expense claim error:', glErr); }
+      }
       res.json({ claim });
     } catch (err: any) {
       console.error('hr/expenses approve error:', err);
@@ -19655,6 +19824,20 @@ ${data.tenant.name}`;
          due_date || null, po_id || null, grn_id || null, module || 'RESTAURANT',
          sub, gst, total, outstanding, notes || null, (req as any).user?.email || (req as any).user?.id]
       );
+      // GL: Dr Expense + ITC Receivable, Cr Accounts Payable
+      try {
+        const expAcct = _glAccountForSupplierInvoice(module || '', notes || '');
+        const invDate = (invoice_date || new Date().toISOString().slice(0, 10)) as string;
+        const cgst = +(Number(gst) / 2).toFixed(2);
+        const sgst = Number(gst) - cgst;
+        const glLines: GlLine[] = [
+          { account_code: expAcct.code, account_name: expAcct.name, dr_amount: Number(sub), cr_amount: 0, narration: `Invoice ${invoice_number || id}` },
+        ];
+        if (cgst > 0) glLines.push({ account_code: '1300', account_name: 'ITC Receivable — CGST', dr_amount: cgst, cr_amount: 0, narration: `ITC CGST ${id}` });
+        if (sgst > 0) glLines.push({ account_code: '1310', account_name: 'ITC Receivable — SGST', dr_amount: sgst, cr_amount: 0, narration: `ITC SGST ${id}` });
+        glLines.push({ account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: 0, cr_amount: Number(total), narration: `AP invoice ${id}` });
+        await _postGlEntries(db, req.params.id, `SI-${id}`, invDate as string, 'SUPPLIER_INVOICE', id, glLines, (req as any).user?.email || (req as any).user?.id);
+      } catch (glErr) { console.error('[GL] supplier invoice error:', glErr); }
       const created: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [id]);
       res.status(201).json(created);
     } catch (err: any) {
@@ -19751,6 +19934,29 @@ ${data.tenant.name}`;
         "UPDATE supplier_invoices SET paid_amount = ?, outstanding_amount = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         [newPaid, newOutstanding, newStatus, inv.id]
       );
+      // GL: Dr AP, Cr Cash/Bank; create TDS payable ledger entry if applicable
+      try {
+        const payDate = (payment_date || new Date().toISOString().slice(0, 10)) as string;
+        const cashAcct = _glAccountForPaymentMethod(payment_method || 'BANK');
+        await _postGlEntries(db, req.params.id, `SP-${pid}`, payDate, 'SUPPLIER_PAYMENT', pid, [
+          { account_code: '2000', account_name: 'Accounts Payable — Suppliers', dr_amount: payAmt, cr_amount: 0, narration: `Payment to supplier ${inv.supplier_id}` },
+          { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: 0, cr_amount: payAmt, narration: `Payment to supplier ${inv.supplier_id}` },
+        ], (req as any).user?.email || (req as any).user?.id);
+        // TDS compliance record
+        const sup: any = await db.get("SELECT tds_category, pan FROM suppliers WHERE id = ?", [inv.supplier_id]);
+        const tds = _tdsForSupplierPayment(sup?.tds_category || 'NIL', payAmt);
+        if (tds) {
+          const tdsId = `TDS-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+          await db.run(
+            `INSERT INTO tds_payable_ledger
+               (id, restaurant_id, supplier_id, supplier_name, supplier_pan, payment_id, payment_date,
+                gross_amount, tds_section, tds_rate, tds_amount, nature_of_payment, quarter)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [tdsId, req.params.id, inv.supplier_id, inv.supplier_name || 'Supplier', sup?.pan || null,
+             pid, payDate, payAmt, tds.section, tds.rate, tds.amount, tds.nature, _glCurrentQuarter()]
+          );
+        }
+      } catch (glErr) { console.error('[GL] supplier payment error:', glErr); }
       const updatedInv: any = await db.get("SELECT si.*, s.name AS supplier_name FROM supplier_invoices si LEFT JOIN suppliers s ON s.id = si.supplier_id WHERE si.id = ?", [inv.id]);
       res.status(201).json({ payment_id: pid, invoice: updatedInv });
     } catch (err: any) {
@@ -24731,6 +24937,20 @@ ${data.tenant.name}`;
         [id, entry_date, direction, req.body?.category || null, amount, req.body?.notes || null,
          req.user?.id || req.user?.email || null, module]
       );
+      // GL: Dr Expense / Cr Cash for OUT; Dr Cash / Cr Other Income for IN
+      try {
+        const expAcct = _glAccountForExpenseCategory(req.body?.category || '');
+        const lines: GlLine[] = direction === 'OUT'
+          ? [
+              { account_code: expAcct.code, account_name: expAcct.name, dr_amount: amount, cr_amount: 0, narration: req.body?.notes || 'Petty cash expense' },
+              { account_code: '1000', account_name: 'Cash in Hand', dr_amount: 0, cr_amount: amount, narration: req.body?.notes || 'Petty cash expense' },
+            ]
+          : [
+              { account_code: '1000', account_name: 'Cash in Hand', dr_amount: amount, cr_amount: 0, narration: req.body?.notes || 'Petty cash receipt' },
+              { account_code: '4900', account_name: 'Other Income', dr_amount: 0, cr_amount: amount, narration: req.body?.notes || 'Petty cash receipt' },
+            ];
+        await _postGlEntries(tenantDb, req.params.id, `PC-${id}`, entry_date, 'PETTY_CASH', id, lines, req.user?.id || req.user?.email || null);
+      } catch (glErr) { console.error('[GL] petty cash error:', glErr); }
       res.json({ success: true, id });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to record petty cash entry" });
@@ -33602,6 +33822,18 @@ ${data.tenant.name}`;
         recordedBy: req.user?.id || req.user?.email || null,
         notes: req.body?.notes || null,
       });
+      // GL: Dr Cash/Bank, Cr Advances from Guests (advance receipt liability)
+      if (type === 'ADVANCE') {
+        try {
+          const cashAcct = _glAccountForPaymentMethod(method);
+          const today = new Date().toISOString().slice(0, 10);
+          await _postGlEntries(tenantDb, req.params.id, `ADV-${(payment as any).id}`, today,
+            'FOLIO_ADVANCE', (payment as any).id, [
+              { account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amount, cr_amount: 0, narration: `Advance: folio ${req.params.folioId}` },
+              { account_code: '2100', account_name: 'Advances from Guests', dr_amount: 0, cr_amount: amount, narration: `Advance: folio ${req.params.folioId}` },
+            ], req.user?.id || req.user?.email || null);
+        } catch (glErr) { console.error('[GL] advance payment error:', glErr); }
+      }
       // Return the updated outstanding so the UI can update without
       // a second round-trip.
       const outstanding = await getFolioOutstanding(tenantDb, req.params.folioId);
@@ -42129,6 +42361,125 @@ ${data.tenant.name}`;
       console.error("List sync-jobs error:", err);
       res.status(500).json({ error: "Failed to list sync jobs" });
     }
+  });
+
+  // ─── Accounting API endpoints ───────────────────────────────────────────────
+
+  const _acctOwnerOnly = (req: AuthRequest, res: Response): boolean => {
+    const role = String(req.user?.role || '');
+    if (!['OWNER','SUPER_ADMIN','CTO'].includes(role)) { res.status(403).json({ error: 'Forbidden' }); return false; }
+    return true;
+  };
+
+  app.get("/api/restaurant/:id/accounting/chart-of-accounts", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM chart_of_accounts WHERE is_active = 1 ORDER BY display_order, code", []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.get("/api/restaurant/:id/accounting/gl-entries", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to, account, source_type } = req.query as Record<string, string>;
+      const params: any[] = [req.params.id];
+      const clauses: string[] = ['restaurant_id = ?'];
+      if (from)        { clauses.push('entry_date >= ?'); params.push(from); }
+      if (to)          { clauses.push('entry_date <= ?'); params.push(to); }
+      if (account)     { clauses.push('account_code = ?'); params.push(account); }
+      if (source_type) { clauses.push('source_type = ?'); params.push(source_type); }
+      const rows = await db.query(
+        `SELECT * FROM gl_entries WHERE ${clauses.join(' AND ')} AND is_reversed = 0
+         ORDER BY entry_date DESC, created_at DESC LIMIT 2000`,
+        params
+      );
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.get("/api/restaurant/:id/accounting/trial-balance", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { from, to } = req.query as Record<string, string>;
+      const params: any[] = [req.params.id];
+      const dateClauses: string[] = [];
+      if (from) { dateClauses.push('g.entry_date >= ?'); params.push(from); }
+      if (to)   { dateClauses.push('g.entry_date <= ?'); params.push(to); }
+      const dateWhere = dateClauses.length ? `AND ${dateClauses.join(' AND ')}` : '';
+      const rows = await db.query(
+        `SELECT g.account_code, g.account_name,
+                COALESCE(c.type, 'UNKNOWN') AS account_type,
+                COALESCE(c.display_order, 999) AS display_order,
+                SUM(g.dr_amount) AS dr_total,
+                SUM(g.cr_amount) AS cr_total
+         FROM gl_entries g
+         LEFT JOIN chart_of_accounts c ON c.code = g.account_code
+         WHERE g.restaurant_id = ? ${dateWhere} AND g.is_reversed = 0
+         GROUP BY g.account_code, g.account_name
+         HAVING dr_total > 0 OR cr_total > 0
+         ORDER BY display_order, g.account_code`,
+        params
+      );
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.post("/api/restaurant/:id/accounting/journal-entries", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { entry_date, narration, lines } = req.body;
+      if (!Array.isArray(lines) || lines.length < 2) return res.status(400).json({ error: 'At least 2 lines required' });
+      const glLines: GlLine[] = lines.map((l: any) => ({
+        account_code: String(l.account_code || ''),
+        account_name: String(l.account_name || l.account_code || ''),
+        dr_amount: Number(l.dr_amount || 0),
+        cr_amount: Number(l.cr_amount || 0),
+        narration: narration || l.narration,
+      }));
+      const seq = await getNextTenantSequence(db, 'journal');
+      const journalRef = `MJ-${new Date().getFullYear()}-${String(seq).padStart(4, '0')}`;
+      const date = String(entry_date || new Date().toISOString().slice(0, 10));
+      await _postGlEntries(db, req.params.id, journalRef, date, 'MANUAL_JOURNAL', null, glLines,
+        req.user?.id || (req.user as any)?.email || null);
+      res.status(201).json({ journal_ref: journalRef, lines: glLines.length });
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.get("/api/restaurant/:id/accounting/tds-payable", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { status } = req.query as Record<string, string>;
+      const params: any[] = [req.params.id];
+      let where = 'restaurant_id = ?';
+      if (status) { where += ' AND status = ?'; params.push(status); }
+      const rows = await db.query(
+        `SELECT * FROM tds_payable_ledger WHERE ${where} ORDER BY payment_date DESC`, params);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
+  });
+
+  app.patch("/api/restaurant/:id/accounting/tds-payable/:tdsId", authenticate, async (req: AuthRequest, res: Response) => {
+    if (!_acctOwnerOnly(req, res)) return;
+    try {
+      const db = await getTenantDb(req.params.id);
+      const { challan_number, challan_date, bsr_code, status } = req.body;
+      await db.run(
+        `UPDATE tds_payable_ledger SET
+           challan_number = ?, challan_date = ?, bsr_code = ?,
+           status = COALESCE(?, status)
+         WHERE id = ? AND restaurant_id = ?`,
+        [challan_number || null, challan_date || null, bsr_code || null,
+         status || null, req.params.tdsId, req.params.id]
+      );
+      const row = await db.get("SELECT * FROM tds_payable_ledger WHERE id = ?", [req.params.tdsId]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: err?.message }); }
   });
 }
 

@@ -2460,6 +2460,129 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
     );
   `).catch(() => {});
 
+  // ── Minimum Viable Accounting — Phase 1 schema ──────────────────────────
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS chart_of_accounts (
+      code          TEXT    PRIMARY KEY,
+      name          TEXT    NOT NULL,
+      type          TEXT    NOT NULL,
+      sub_type      TEXT,
+      parent_code   TEXT,
+      is_system     INTEGER NOT NULL DEFAULT 1,
+      is_active     INTEGER NOT NULL DEFAULT 1,
+      display_order INTEGER NOT NULL DEFAULT 0,
+      created_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_coa_type ON chart_of_accounts (type);
+
+    CREATE TABLE IF NOT EXISTS gl_entries (
+      id                   TEXT PRIMARY KEY,
+      restaurant_id        TEXT NOT NULL,
+      journal_ref          TEXT NOT NULL,
+      entry_date           TEXT NOT NULL,
+      account_code         TEXT NOT NULL,
+      account_name         TEXT NOT NULL,
+      dr_amount            REAL NOT NULL DEFAULT 0,
+      cr_amount            REAL NOT NULL DEFAULT 0,
+      narration            TEXT,
+      source_type          TEXT NOT NULL,
+      source_id            TEXT,
+      cost_centre          TEXT,
+      posted_by            TEXT,
+      created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      is_reversed          INTEGER NOT NULL DEFAULT 0,
+      reversal_journal_ref TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_gl_res_date ON gl_entries (restaurant_id, entry_date);
+    CREATE INDEX IF NOT EXISTS idx_gl_journal   ON gl_entries (journal_ref);
+    CREATE INDEX IF NOT EXISTS idx_gl_account   ON gl_entries (restaurant_id, account_code);
+    CREATE INDEX IF NOT EXISTS idx_gl_source    ON gl_entries (source_type, source_id);
+
+    CREATE TABLE IF NOT EXISTS tds_payable_ledger (
+      id                TEXT PRIMARY KEY,
+      restaurant_id     TEXT NOT NULL,
+      supplier_id       TEXT NOT NULL,
+      supplier_name     TEXT NOT NULL,
+      supplier_pan      TEXT,
+      payment_id        TEXT NOT NULL,
+      payment_date      TEXT NOT NULL,
+      gross_amount      REAL NOT NULL,
+      tds_section       TEXT NOT NULL,
+      tds_rate          REAL NOT NULL,
+      tds_amount        REAL NOT NULL,
+      nature_of_payment TEXT,
+      challan_number    TEXT,
+      challan_date      TEXT,
+      bsr_code          TEXT,
+      quarter           TEXT,
+      status            TEXT NOT NULL DEFAULT 'PENDING',
+      created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_tds_res_status ON tds_payable_ledger (restaurant_id, status);
+    CREATE INDEX IF NOT EXISTS idx_tds_quarter     ON tds_payable_ledger (restaurant_id, quarter);
+  `).catch(() => {});
+
+  // Seed standard chart of accounts — Indian hotel/restaurant context.
+  // INSERT OR IGNORE is safe for re-init; existing customisations are preserved.
+  const _coaSeed: [string, string, string, number][] = [
+    ['1000','Cash in Hand','ASSET',0],
+    ['1010','Bank — Main Account','ASSET',10],
+    ['1020','Bank — OTA Receivable','ASSET',20],
+    ['1100','Accounts Receivable — Guests','ASSET',30],
+    ['1110','Accounts Receivable — OTA Channels','ASSET',40],
+    ['1200','Advance to Suppliers','ASSET',50],
+    ['1300','ITC Receivable — CGST','ASSET',60],
+    ['1310','ITC Receivable — SGST','ASSET',70],
+    ['1320','ITC Receivable — IGST','ASSET',80],
+    ['1500','Prepaid Expenses','ASSET',90],
+    ['1600','Inventory — F&B Stock','ASSET',100],
+    ['1610','Inventory — Housekeeping & Amenities','ASSET',110],
+    ['2000','Accounts Payable — Suppliers','LIABILITY',200],
+    ['2100','Advances from Guests','LIABILITY',210],
+    ['2200','GST Payable — CGST','LIABILITY',220],
+    ['2210','GST Payable — SGST','LIABILITY',230],
+    ['2220','GST Payable — IGST','LIABILITY',240],
+    ['2300','TDS Payable — Sec 194C','LIABILITY',250],
+    ['2310','TDS Payable — Sec 194J','LIABILITY',260],
+    ['2320','TDS Payable — Sec 194H','LIABILITY',270],
+    ['2400','Salaries & Wages Payable','LIABILITY',280],
+    ['2500','EPF Payable','LIABILITY',290],
+    ['2510','ESI Payable','LIABILITY',300],
+    ['2520','Professional Tax Payable','LIABILITY',310],
+    ['2600','OTA Commissions Payable','LIABILITY',320],
+    ['3000','Owner Capital','EQUITY',400],
+    ['3100','Retained Earnings','EQUITY',410],
+    ['4000','Room Revenue','REVENUE',500],
+    ['4010','F&B Revenue','REVENUE',510],
+    ['4020','Service Charge Revenue','REVENUE',520],
+    ['4030','Ancillary Revenue','REVENUE',530],
+    ['4040','Spa Revenue','REVENUE',540],
+    ['4050','Banquet & Events Revenue','REVENUE',550],
+    ['4900','Other Income','REVENUE',570],
+    ['5000','Cost of F&B Consumed','EXPENSE',600],
+    ['5100','Salaries & Wages','EXPENSE',610],
+    ['5110','EPF — Employer Contribution','EXPENSE',620],
+    ['5120','ESI — Employer Contribution','EXPENSE',630],
+    ['5200','Housekeeping & Laundry Expenses','EXPENSE',640],
+    ['5300','Repairs & Maintenance','EXPENSE',650],
+    ['5400','Electricity & Power','EXPENSE',660],
+    ['5410','Water & Utilities','EXPENSE',670],
+    ['5420','Internet & Telecom','EXPENSE',680],
+    ['5500','OTA Commission Expense','EXPENSE',690],
+    ['5600','Marketing & Advertising','EXPENSE',700],
+    ['5700','Administrative & Office Expenses','EXPENSE',710],
+    ['5800','Petty Cash Expenses','EXPENSE',720],
+    ['5900','Professional Fees','EXPENSE',730],
+    ['5910','Legal & Compliance Fees','EXPENSE',740],
+    ['6000','Miscellaneous Expenses','EXPENSE',750],
+  ];
+  for (const [code, name, type, display_order] of _coaSeed) {
+    await db.run(
+      `INSERT OR IGNORE INTO chart_of_accounts (code, name, type, display_order) VALUES (?, ?, ?, ?)`,
+      [code, name, type, display_order]
+    ).catch(() => {});
+  }
+
   // Cache stores the init promise (set by getTenantDb above); we return
   // the resolved DbInterface here. No need to re-cache.
   return db;

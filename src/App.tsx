@@ -7799,6 +7799,373 @@ function SettlementUploadForm({
   );
 }
 
+function AccountingView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  type SubTab = 'TRIAL' | 'GL' | 'TDS' | 'JOURNAL';
+  const [acctTab, setAcctTab] = useState<SubTab>('TRIAL');
+  const [coa, setCoa] = useState<any[]>([]);
+  const [glEntries, setGlEntries] = useState<any[]>([]);
+  const [trialBalance, setTrialBalance] = useState<any[]>([]);
+  const [tdsRows, setTdsRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const nowD = new Date();
+  const fyStart = nowD.getMonth() >= 3 ? `${nowD.getFullYear()}-04-01` : `${nowD.getFullYear() - 1}-04-01`;
+  const todayStr = nowD.toISOString().slice(0, 10);
+  const monthStart = new Date(nowD.getFullYear(), nowD.getMonth(), 1).toISOString().slice(0, 10);
+
+  const [tbFrom, setTbFrom] = useState(fyStart);
+  const [tbTo, setTbTo] = useState(todayStr);
+  const [glFrom, setGlFrom] = useState(monthStart);
+  const [glTo, setGlTo] = useState(todayStr);
+  const [glAccount, setGlAccount] = useState('');
+  const [glSource, setGlSource] = useState('');
+  const [tdsStatus, setTdsStatus] = useState<'PENDING' | 'DEPOSITED' | ''>('PENDING');
+  const [challanEdits, setChallanEdits] = useState<Record<string, { challan_number: string; challan_date: string; bsr_code: string }>>({});
+
+  const emptyMjLine = () => ({ account_code: '', account_name: '', dr: '', cr: '' });
+  const [mjDate, setMjDate] = useState(todayStr);
+  const [mjNarr, setMjNarr] = useState('');
+  const [mjLines, setMjLines] = useState([emptyMjLine(), emptyMjLine()]);
+  const [mjMsg, setMjMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [mjSaving, setMjSaving] = useState(false);
+
+  const acctApi = useCallback((path: string, opts?: RequestInit) =>
+    fetch(`/api/restaurant/${restaurantId}${path}`, {
+      ...opts,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(opts?.headers ?? {}) },
+    }).then(r => r.json()), [restaurantId, token]);
+
+  useEffect(() => {
+    acctApi('/accounting/chart-of-accounts').then(d => { if (Array.isArray(d)) setCoa(d); }).catch(() => {});
+  }, [acctApi]);
+
+  const loadTrial = useCallback(() => {
+    setLoading(true);
+    acctApi(`/accounting/trial-balance?from=${tbFrom}&to=${tbTo}`)
+      .then(d => { if (Array.isArray(d)) setTrialBalance(d); })
+      .finally(() => setLoading(false));
+  }, [acctApi, tbFrom, tbTo]);
+
+  const loadGl = useCallback(() => {
+    setLoading(true);
+    const p = new URLSearchParams({ from: glFrom, to: glTo });
+    if (glAccount) p.set('account', glAccount);
+    if (glSource) p.set('source_type', glSource);
+    acctApi(`/accounting/gl-entries?${p}`)
+      .then(d => { if (Array.isArray(d)) setGlEntries(d); })
+      .finally(() => setLoading(false));
+  }, [acctApi, glFrom, glTo, glAccount, glSource]);
+
+  const loadTds = useCallback(() => {
+    setLoading(true);
+    acctApi(`/accounting/tds-payable${tdsStatus ? `?status=${tdsStatus}` : ''}`)
+      .then(d => { if (Array.isArray(d)) setTdsRows(d); })
+      .finally(() => setLoading(false));
+  }, [acctApi, tdsStatus]);
+
+  useEffect(() => { if (acctTab === 'TRIAL') loadTrial(); }, [acctTab, loadTrial]);
+  useEffect(() => { if (acctTab === 'GL') loadGl(); }, [acctTab, loadGl]);
+  useEffect(() => { if (acctTab === 'TDS') loadTds(); }, [acctTab, loadTds]);
+
+  const fmtAmt = (n: number | null | undefined) =>
+    n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const typeGroups: Record<string, any[]> = {};
+  for (const row of trialBalance) {
+    const t = String(row.account_type || 'UNKNOWN');
+    if (!typeGroups[t]) typeGroups[t] = [];
+    typeGroups[t].push(row);
+  }
+  const TYPE_ORDER = ['ASSET', 'LIABILITY', 'EQUITY', 'REVENUE', 'EXPENSE', 'UNKNOWN'];
+  const trialDrTotal = trialBalance.reduce((s, r) => s + Number(r.dr_total || 0), 0);
+  const trialCrTotal = trialBalance.reduce((s, r) => s + Number(r.cr_total || 0), 0);
+
+  const mjTotalDr = mjLines.reduce((s, l) => s + (parseFloat(l.dr) || 0), 0);
+  const mjTotalCr = mjLines.reduce((s, l) => s + (parseFloat(l.cr) || 0), 0);
+  const mjBalanced = Math.abs(mjTotalDr - mjTotalCr) < 0.01 && mjTotalDr > 0;
+
+  const submitMj = async () => {
+    if (!mjBalanced) return;
+    const lines = mjLines
+      .filter(l => l.account_code && ((parseFloat(l.dr) || 0) > 0 || (parseFloat(l.cr) || 0) > 0))
+      .map(l => ({ account_code: l.account_code, account_name: l.account_name, dr_amount: parseFloat(l.dr) || 0, cr_amount: parseFloat(l.cr) || 0 }));
+    if (lines.length < 2) { setMjMsg({ type: 'err', text: 'At least 2 lines with amounts required' }); return; }
+    setMjSaving(true);
+    try {
+      const res = await acctApi('/accounting/journal-entries', { method: 'POST', body: JSON.stringify({ entry_date: mjDate, narration: mjNarr, lines }) });
+      if (res.error) setMjMsg({ type: 'err', text: res.error });
+      else { setMjMsg({ type: 'ok', text: `Journal ${res.journal_ref} posted` }); setMjLines([emptyMjLine(), emptyMjLine()]); setMjNarr(''); }
+    } catch { setMjMsg({ type: 'err', text: 'Failed to post journal' }); }
+    finally { setMjSaving(false); }
+  };
+
+  const AC_INPUT = 'text-sm border border-[#d4c4a8] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#a0522d]';
+  const AC_BTN = 'px-3 py-1.5 bg-[#a0522d] text-white text-sm rounded hover:bg-[#8b4513] disabled:opacity-40';
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Ledger &amp; Books</h2>
+        <p className="text-sm text-[#6b5d52] mt-1">Double-entry GL · Trial balance · TDS tracker · Manual journals</p>
+      </div>
+
+      <div className="flex gap-0 border-b border-[#e8ded0]">
+        {(['TRIAL', 'GL', 'TDS', 'JOURNAL'] as SubTab[]).map(t => (
+          <button key={t} onClick={() => setAcctTab(t)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${acctTab === t ? 'border-[#a0522d] text-[#a0522d]' : 'border-transparent text-[#6b5d52] hover:text-[#a0522d]'}`}>
+            {t === 'TRIAL' ? 'Trial Balance' : t === 'GL' ? 'GL Ledger' : t === 'TDS' ? 'TDS Tracker' : 'Manual Entry'}
+          </button>
+        ))}
+      </div>
+
+      {loading && <p className="text-sm text-[#6b5d52] animate-pulse">Loading...</p>}
+
+      {acctTab === 'TRIAL' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-[#6b5d52]">From</label>
+            <input type="date" value={tbFrom} onChange={e => setTbFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <label className="text-xs text-[#6b5d52]">To</label>
+            <input type="date" value={tbTo} onChange={e => setTbTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <button onClick={loadTrial} className={AC_BTN}>Refresh</button>
+          </div>
+          {trialBalance.length === 0 && !loading ? (
+            <p className="text-sm text-[#6b5d52] italic">No GL entries for this period. Settle a folio or record a supplier payment first.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+              <table className="w-full text-sm border-collapse">
+                <thead><tr className="bg-[#f5f0e8] text-left">
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Code</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Account</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Type</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Dr Total</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Cr Total</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Balance</th>
+                </tr></thead>
+                <tbody>
+                  {TYPE_ORDER.filter(t => typeGroups[t]?.length).flatMap(type => [
+                    <tr key={`hdr-${type}`}><td colSpan={6} className="px-3 py-1 text-xs font-bold text-[#a0522d] bg-[#faf7f2] uppercase tracking-wide">{type}</td></tr>,
+                    ...typeGroups[type].map((row: any) => {
+                      const dr = Number(row.dr_total || 0), cr = Number(row.cr_total || 0);
+                      const debitNormal = ['ASSET', 'EXPENSE'].includes(type);
+                      const bal = debitNormal ? dr - cr : cr - dr;
+                      return (
+                        <tr key={row.account_code} className="border-t border-[#f0e8d8] hover:bg-[#fdf8f0]">
+                          <td className="px-3 py-2 font-mono text-xs text-[#6b5d52]">{row.account_code}</td>
+                          <td className="px-3 py-2 text-[#1a1208]">{row.account_name}</td>
+                          <td className="px-3 py-2 text-xs text-[#6b5d52]">{type}</td>
+                          <td className="px-3 py-2 text-right font-mono">{dr > 0 ? fmtAmt(dr) : '—'}</td>
+                          <td className="px-3 py-2 text-right font-mono">{cr > 0 ? fmtAmt(cr) : '—'}</td>
+                          <td className={`px-3 py-2 text-right font-mono font-semibold ${bal > 0.01 ? 'text-emerald-700' : bal < -0.01 ? 'text-red-600' : 'text-[#6b5d52]'}`}>
+                            {fmtAmt(Math.abs(bal))}{Math.abs(bal) > 0.01 ? (debitNormal ? (bal > 0 ? ' Dr' : ' Cr') : (bal > 0 ? ' Cr' : ' Dr')) : ''}
+                          </td>
+                        </tr>
+                      );
+                    }),
+                  ])}
+                  <tr className="border-t-2 border-[#a0522d] bg-[#f5f0e8] font-bold">
+                    <td colSpan={3} className="px-3 py-2 text-[#1a1208]">Grand Total</td>
+                    <td className="px-3 py-2 text-right font-mono">{fmtAmt(trialDrTotal)}</td>
+                    <td className="px-3 py-2 text-right font-mono">{fmtAmt(trialCrTotal)}</td>
+                    <td className={`px-3 py-2 text-right text-xs font-semibold ${Math.abs(trialDrTotal - trialCrTotal) < 0.05 ? 'text-emerald-700' : 'text-red-600'}`}>
+                      {Math.abs(trialDrTotal - trialCrTotal) < 0.05 ? '✓ Balanced' : `Off ${fmtAmt(Math.abs(trialDrTotal - trialCrTotal))}`}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {acctTab === 'GL' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <input type="date" value={glFrom} onChange={e => setGlFrom(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <span className="text-xs text-[#6b5d52]">to</span>
+            <input type="date" value={glTo} onChange={e => setGlTo(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+            <input placeholder="Account code" value={glAccount} onChange={e => setGlAccount(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white w-28" />
+            <select value={glSource} onChange={e => setGlSource(e.target.value)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
+              <option value="">All sources</option>
+              {['FOLIO_SETTLEMENT','FOLIO_ADVANCE','PETTY_CASH','EXPENSE_CLAIM','SUPPLIER_INVOICE','SUPPLIER_PAYMENT','MANUAL_JOURNAL'].map(s => (
+                <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
+              ))}
+            </select>
+            <button onClick={loadGl} className={AC_BTN}>Apply</button>
+          </div>
+          {glEntries.length === 0 && !loading ? (
+            <p className="text-sm text-[#6b5d52] italic">No entries for the selected filters.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+              <table className="w-full text-sm border-collapse">
+                <thead><tr className="bg-[#f5f0e8] text-left">
+                  <th className="px-3 py-2 font-semibold text-[#1a1208] whitespace-nowrap">Date</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Journal</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Account</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Narration</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Source</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Dr</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Cr</th>
+                </tr></thead>
+                <tbody>
+                  {glEntries.map((e: any, i: number) => (
+                    <tr key={e.id || i} className="border-t border-[#f0e8d8] hover:bg-[#fdf8f0]">
+                      <td className="px-3 py-2 whitespace-nowrap text-[#6b5d52]">{e.entry_date}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-[#6b5d52] whitespace-nowrap">{e.journal_ref}</td>
+                      <td className="px-3 py-2"><span className="font-mono text-xs text-[#6b5d52]">{e.account_code}</span><span className="ml-1.5 text-[#1a1208]">{e.account_name}</span></td>
+                      <td className="px-3 py-2 text-[#6b5d52] text-xs max-w-[12rem] truncate">{e.narration || '—'}</td>
+                      <td className="px-3 py-2"><span className="text-xs bg-[#f0e8d8] text-[#6b5d52] rounded px-1.5 py-0.5 whitespace-nowrap">{e.source_type}</span></td>
+                      <td className="px-3 py-2 text-right font-mono">{Number(e.dr_amount) > 0 ? fmtAmt(e.dr_amount) : '—'}</td>
+                      <td className="px-3 py-2 text-right font-mono">{Number(e.cr_amount) > 0 ? fmtAmt(e.cr_amount) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="px-3 py-2 text-xs text-[#6b5d52]">{glEntries.length} entries</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {acctTab === 'TDS' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <select value={tdsStatus} onChange={e => setTdsStatus(e.target.value as any)} className="text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
+              <option value="">All</option>
+              <option value="PENDING">Pending</option>
+              <option value="DEPOSITED">Deposited</option>
+            </select>
+            <button onClick={loadTds} className={AC_BTN}>Refresh</button>
+          </div>
+          {tdsRows.length === 0 && !loading ? (
+            <p className="text-sm text-[#6b5d52] italic">No TDS entries. TDS is auto-computed when paying suppliers whose TDS category is set to COMPANY, PARTNERSHIP, or INDIVIDUAL.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+              <table className="w-full text-sm border-collapse">
+                <thead><tr className="bg-[#f5f0e8] text-left">
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Date</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Supplier</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Section</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Gross</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">Rate</th>
+                  <th className="px-3 py-2 text-right font-semibold text-[#1a1208]">TDS</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Qtr</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Status</th>
+                  <th className="px-3 py-2 font-semibold text-[#1a1208]">Challan</th>
+                </tr></thead>
+                <tbody>
+                  {tdsRows.map((row: any) => {
+                    const edit = challanEdits[row.id] ?? { challan_number: row.challan_number ?? '', challan_date: row.challan_date ?? '', bsr_code: row.bsr_code ?? '' };
+                    const saveC = async () => {
+                      await acctApi(`/accounting/tds-payable/${row.id}`, { method: 'PATCH', body: JSON.stringify({ ...edit, status: 'DEPOSITED' }) }).catch(() => {});
+                      loadTds();
+                      setChallanEdits(p => { const n = { ...p }; delete n[row.id]; return n; });
+                    };
+                    return (
+                      <tr key={row.id} className="border-t border-[#f0e8d8] hover:bg-[#fdf8f0]">
+                        <td className="px-3 py-2 whitespace-nowrap text-[#6b5d52]">{row.payment_date}</td>
+                        <td className="px-3 py-2"><div className="font-medium text-[#1a1208]">{row.supplier_name}</div><div className="text-xs text-[#6b5d52]">{row.supplier_pan ?? 'PAN N/A'}</div></td>
+                        <td className="px-3 py-2 font-mono text-xs">{row.tds_section}</td>
+                        <td className="px-3 py-2 text-right font-mono">{fmtAmt(row.gross_amount)}</td>
+                        <td className="px-3 py-2 text-right text-[#6b5d52]">{row.tds_rate}%</td>
+                        <td className="px-3 py-2 text-right font-mono font-semibold text-red-700">{fmtAmt(row.tds_amount)}</td>
+                        <td className="px-3 py-2 text-xs">{row.quarter ?? '—'}</td>
+                        <td className="px-3 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${row.status === 'DEPOSITED' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{row.status}</span></td>
+                        <td className="px-3 py-2 min-w-[9rem]">
+                          {row.status === 'DEPOSITED' ? (
+                            <div className="text-xs text-[#6b5d52] space-y-0.5"><div>{row.challan_number}</div><div>{row.challan_date}</div><div className="font-mono">{row.bsr_code}</div></div>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              <input placeholder="Challan no." value={edit.challan_number} onChange={e => setChallanEdits(p => ({ ...p, [row.id]: { ...edit, challan_number: e.target.value } }))} className="text-xs border border-[#d4c4a8] rounded px-1 py-0.5 w-24" />
+                              <input type="date" value={edit.challan_date} onChange={e => setChallanEdits(p => ({ ...p, [row.id]: { ...edit, challan_date: e.target.value } }))} className="text-xs border border-[#d4c4a8] rounded px-1 py-0.5 w-28" />
+                              <input placeholder="BSR code" value={edit.bsr_code} onChange={e => setChallanEdits(p => ({ ...p, [row.id]: { ...edit, bsr_code: e.target.value } }))} className="text-xs border border-[#d4c4a8] rounded px-1 py-0.5 w-24" />
+                              {edit.challan_number && <button onClick={saveC} className="text-xs bg-emerald-600 text-white rounded px-1.5 py-0.5 hover:bg-emerald-700 w-fit">Mark Deposited</button>}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {acctTab === 'JOURNAL' && (
+        <div className="space-y-4 max-w-2xl">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-[#6b5d52] mb-1">Entry Date</label>
+              <input type="date" value={mjDate} onChange={e => setMjDate(e.target.value)} className={AC_INPUT + ' w-full'} />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-[#6b5d52] mb-1">Narration</label>
+              <input placeholder="Describe this journal entry..." value={mjNarr} onChange={e => setMjNarr(e.target.value)} className={AC_INPUT + ' w-full'} />
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-[#e8ded0]">
+            <table className="w-full text-sm border-collapse">
+              <thead><tr className="bg-[#f5f0e8] text-left">
+                <th className="px-3 py-2 font-semibold text-[#1a1208]">Account</th>
+                <th className="px-3 py-2 text-right font-semibold text-[#1a1208] w-28">Debit (Dr)</th>
+                <th className="px-3 py-2 text-right font-semibold text-[#1a1208] w-28">Credit (Cr)</th>
+                <th className="px-3 py-2 w-6"></th>
+              </tr></thead>
+              <tbody>
+                {mjLines.map((line, i) => (
+                  <tr key={i} className="border-t border-[#f0e8d8]">
+                    <td className="px-3 py-1.5">
+                      <select value={line.account_code}
+                        onChange={e => { const a = coa.find(x => x.code === e.target.value); setMjLines(ls => ls.map((l, j) => j === i ? { ...l, account_code: e.target.value, account_name: a?.name ?? '' } : l)); }}
+                        className="w-full text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white">
+                        <option value="">Select account...</option>
+                        {['ASSET', 'LIABILITY', 'EQUITY', 'REVENUE', 'EXPENSE'].map(t => (
+                          <optgroup key={t} label={t}>
+                            {coa.filter(a => a.type === t).map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <input type="number" min="0" step="0.01" placeholder="0.00" value={line.dr}
+                        onChange={e => setMjLines(ls => ls.map((l, j) => j === i ? { ...l, dr: e.target.value, cr: e.target.value ? '' : l.cr } : l))}
+                        className="w-full text-right text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <input type="number" min="0" step="0.01" placeholder="0.00" value={line.cr}
+                        onChange={e => setMjLines(ls => ls.map((l, j) => j === i ? { ...l, cr: e.target.value, dr: e.target.value ? '' : l.dr } : l))}
+                        className="w-full text-right text-sm border border-[#d4c4a8] rounded px-2 py-1 bg-white" />
+                    </td>
+                    <td className="px-3 py-1.5">{mjLines.length > 2 && <button onClick={() => setMjLines(ls => ls.filter((_, j) => j !== i))} className="text-red-400 hover:text-red-600 text-xs font-bold">✕</button>}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="bg-[#faf7f2] border-t border-[#e8ded0]">
+                  <td className="px-3 py-2 text-xs font-bold text-[#6b5d52]">Totals</td>
+                  <td className="px-3 py-2 text-right font-mono font-bold">{fmtAmt(mjTotalDr)}</td>
+                  <td className="px-3 py-2 text-right font-mono font-bold">{fmtAmt(mjTotalCr)}</td>
+                  <td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          <div className="flex items-center gap-3 flex-wrap">
+            <button onClick={() => setMjLines(ls => [...ls, emptyMjLine()])} className="text-sm text-[#a0522d] hover:underline">+ Add line</button>
+            {mjTotalDr > 0 && !mjBalanced && <span className="text-xs text-red-600">Unbalanced by {fmtAmt(Math.abs(mjTotalDr - mjTotalCr))}</span>}
+          </div>
+          {mjMsg && <div className={`text-sm px-3 py-2 rounded border ${mjMsg.type === 'ok' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-600 border-red-200'}`}>{mjMsg.text}</div>}
+          <button onClick={submitMj} disabled={!mjBalanced || mjSaving} className={AC_BTN}>
+            {mjSaving ? 'Posting...' : 'Post Journal Entry'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restaurantId: string, token: string, onRestaurantUpdate: (name: string) => void }) {
   const [activeTab, setActiveTab] = useState<
     | 'MENU' | 'REPORTS' | 'QR' | 'STAFF' | 'STAFF_ACCESS' | 'SETTINGS'
@@ -7822,6 +8189,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'ACCOUNTS_GST'                              // GST tax ledger — output vs ITC
     | 'ACCOUNTS_VENDOR_AGING'                     // Vendor aging — what we owe suppliers
     | 'SPA_BILLING'                               // Spa settlement ledger in Accounts context
+    | 'ACCOUNTING'                                // Double-entry GL · trial balance · TDS tracker
     | 'HOME'                                      // post-login launchpad (welcome + Hotel/Restaurant tiles)
   >('HOME');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
@@ -12934,6 +13302,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 { id: 'ACCOUNTS_PNL',          label: 'P&L Report' } as NavTab,
                 { id: 'ACCOUNTS_CASHFLOW',     label: 'Cash Flow' } as NavTab,
                 { id: 'ACCOUNTS_GST',          label: 'GST Ledger' } as NavTab,
+                { id: 'ACCOUNTING',            label: 'Ledger & Books' } as NavTab,
               ] : []),
             ],
           },
@@ -13006,7 +13375,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           // the V3 permission marker was rolled out. Owners always see them so
           // they are never locked out by a stale permission save. Staff
           // visibility still flows through isTabVisible (V3 fix handles it).
-          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING') && isOwnerOrAdmin) return true;
+          if ((id === 'PROCUREMENT' || id === 'EXPENSE_JOURNAL' || id === 'RECEIVABLES' || id === 'ACCOUNTS_PNL' || id === 'ACCOUNTS_CASHFLOW' || id === 'ACCOUNTS_GST' || id === 'ACCOUNTS_VENDOR_AGING' || id === 'ACCOUNTING') && isOwnerOrAdmin) return true;
           if (id === 'SPA_BILLING' && isSpaEnabled) return true;
           return isTabVisible(id, effectiveAllowedTabs);
         };
@@ -16999,6 +17368,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             );
           })()}
         </div>
+      ) : activeTab === 'ACCOUNTING' ? (
+        <div className="p-1"><AccountingView restaurantId={restaurantId} token={token!} /></div>
       ) : activeTab === 'REPORTS' ? (
         // Hotel-mode owners get hotel-focused KPIs (occupancy, ADR,
         // RevPAR, ancillary, guest rating) instead of restaurant
