@@ -12796,7 +12796,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {({
             MONITOR: 'Command Centre', REPORTS: 'Analytics & Reports', INVOICES: 'Invoices',
             MENU: 'Menu', INVENTORY: 'Inventory', DELIVERY: 'Delivery Partners', QR: 'QR & Tables', BOOKINGS: 'Table Bookings', ORDERS: 'Orders', RESTAURANT_REPORTS: 'Restaurant Reports',
-            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Folios & Settlement', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
+            HOTEL_BOOKINGS: 'Reservations', ROOMS: 'Room Availability', ROOM_SETUP: 'Room Setup', FRONT_OFFICE_REPORTS: 'Hotel Reports', SERVICE_REQUESTS: 'Guest Requests', SERVICES: 'Service Catalogue', FOLIOS: 'Guest Bills', COMPLIANCE: 'Guest Compliance', CONCIERGE_FAQ: 'Concierge',
             CHANNEL_MANAGER: 'Channel Manager', PUBLIC_BOOKING_PAGE: 'Direct Booking Page', LOYALTY: 'Loyalty', FEEDBACK: 'Guest Feedback',
             SPA_CALENDAR: 'Appt. Calendar', SPA_APPOINTMENTS: 'Appointments', SPA_CATALOG: 'Service Menu', SPA_RESOURCES: 'Therapists & Cabins', SPA_CLIENTS: 'Clients', SPA_PACKAGES: 'Packages', SPA_REPORTS: 'Spa Reports', SPA_INVENTORY: 'Spa Inventory', SPA_SETTINGS: 'Spa Page Settings',
             STAFF: 'Staff Directory', ATTENDANCE: 'Attendance', ROSTER: 'Roster', TIMESHEET: 'Timesheet', HR_PAYROLL: 'HR & Payroll',
@@ -12886,7 +12886,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'FRONT_OFFICE_REPORTS', label: 'Hotel Reports' },
               { id: 'SERVICE_REQUESTS',     label: 'Guest Requests' },
               { id: 'SERVICES',             label: 'Service Catalogue' },
-              { id: 'FOLIOS',               label: 'Folios & Settlement' },
+              { id: 'FOLIOS',               label: 'Guest Bills' },
               { id: 'COMPLIANCE',           label: 'Guest Compliance' },
               { id: 'CONCIERGE_FAQ',        label: 'Concierge' },
             ],
@@ -20100,7 +20100,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
                     {/* Room subtotals */}
                     <div className="px-6 pt-5 pb-3">
-                      <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Room Folios</p>
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500 mb-2">Room Bills</p>
                       {masterFolioData.bookings?.length === 0 ? (
                         <p className="text-xs text-gray-400 italic">No room bookings in this group.</p>
                       ) : (
@@ -20111,7 +20111,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 <th className="text-left px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">Room</th>
                                 <th className="text-left px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">Guest</th>
                                 <th className="text-center px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">Status</th>
-                                <th className="text-right px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">Folio Total</th>
+                                <th className="text-right px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-gray-500">Bill Total</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100">
@@ -20286,7 +20286,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       {masterFolioData.bookings?.some((b: any) => masterFolioData.roomEntries?.[b.id]?.length > 0) && (
                         <div className="px-6 pb-4 border-t border-dashed border-gray-200 pt-4">
                           <p className="text-[11px] font-bold uppercase tracking-widest text-blue-700 mb-2">Transfer Charge from Room</p>
-                          <p className="text-[10px] text-gray-400 mb-3">Move an individual room-folio line to the master account (e.g. banquet billed to wrong folio).</p>
+                          <p className="text-[10px] text-gray-400 mb-3">Move an individual room-bill line to the master account (e.g. banquet billed to wrong bill).</p>
                           {masterFolioData.bookings.map((b: any) => {
                             const rEntries: any[] = (masterFolioData.roomEntries?.[b.id] || []).filter((e: any) => !e.transferred_from_folio_id);
                             if (rEntries.length === 0) return null;
@@ -20341,7 +20341,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         return (
                           <div className="flex items-end justify-between">
                             <div className="space-y-0.5 text-xs text-gray-500">
-                              <div className="flex gap-6"><span>Room folios</span><span className="font-mono text-gray-700">₹{roomTotal.toLocaleString('en-IN')}</span></div>
+                              <div className="flex gap-6"><span>Room bills</span><span className="font-mono text-gray-700">₹{roomTotal.toLocaleString('en-IN')}</span></div>
                               <div className="flex gap-4"><span>Master account</span><span className="font-mono text-emerald-700 font-semibold">₹{masterTotal.toLocaleString('en-IN')}</span></div>
                             </div>
                             <div className="text-right">
@@ -21387,7 +21387,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           : kind === 'ota-inventory' ? `OTA Inventory · ${foDateFrom}${foDateFrom === foDateTo ? '' : ` → ${foDateTo}`}`
                           : kind === 'gst-register' ? `GST Output Register · ${foDateFrom.slice(0, 7)}`
                           : kind === 'ota-commissions' ? `OTA Commission Ledger · ${foDateFrom.slice(0, 7)}`
-                          : `Night Audit · ${data.as_of || foDateTo}`;
+                          : `End-of-day summary · ${data.as_of || foDateTo}`;
               const toneClasses: Record<string, { bg: string; head: string; text: string; border: string }> = {
                 emerald: { bg: 'bg-emerald-50',  head: 'bg-emerald-100', text: 'text-emerald-900', border: 'border-emerald-200' },
                 amber:   { bg: 'bg-amber-50',    head: 'bg-amber-100',   text: 'text-amber-900',   border: 'border-amber-200'   },
@@ -21855,7 +21855,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         <span className="text-sm font-bold text-amber-900">Departure</span>
                         {foLoading === 'departures' ? <span className="text-[10px] text-amber-700">Loading…</span> : <Eye size={14} className="text-amber-700" />}
                       </div>
-                      <p className="text-[10px] text-amber-800 leading-snug">Check-outs between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Folio status included.</p>
+                      <p className="text-[10px] text-amber-800 leading-snug">Check-outs between <strong>{foDateFrom}</strong> and <strong>{foDateTo}</strong>. Bill status included.</p>
                     </button>
 
                     <button
@@ -21882,7 +21882,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                           : "bg-violet-50 border-violet-200 hover:border-violet-400 hover:bg-violet-100")}
                     >
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-sm font-bold text-violet-900">Night Audit</span>
+                        <span className="text-sm font-bold text-violet-900">End-of-day summary</span>
                         {foLoading === 'night-audit' ? <span className="text-[10px] text-violet-700">Loading…</span> : <Eye size={14} className="text-violet-700" />}
                       </div>
                       <p className="text-[10px] text-violet-800 leading-snug">End-of-day rollup for <strong>{foDateTo}</strong>. KPIs + 3 lists.</p>
@@ -23533,8 +23533,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           {/* Header */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 flex-wrap">
             <div>
-              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Folios & Settlement</h2>
-              <p className="text-sm text-[#6b5d52] mt-1">Per-booking ledgers — charges, payments, and invoices in one view.</p>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">Guest Bills</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">Per-booking bills — charges, payments, and invoices in one view.</p>
             </div>
             <div className="flex items-center gap-2">
               <button type="button" onClick={() => fetchHotelFolios()}
@@ -23664,7 +23664,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </span>
                 </div>
                 {hotelFolios.length === 0 ? (
-                  <div className="p-12 text-center text-sm text-[#6b5d52]">No folios yet. Folios are created automatically on check-in.</div>
+                  <div className="p-12 text-center text-sm text-[#6b5d52]">No guest bills yet. Bills are created automatically at check-in.</div>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm min-w-[1000px]">
@@ -23685,7 +23685,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       </thead>
                       <tbody>
                         {sorted.length === 0 ? (
-                          <tr><td colSpan={11} className="px-4 py-12 text-center text-sm text-[#9c8e85] italic">No folios match the current filters.</td></tr>
+                          <tr><td colSpan={11} className="px-4 py-12 text-center text-sm text-[#9c8e85] italic">No guest bills match the current filters.</td></tr>
                         ) : sorted.map((f: any) => (
                           <tr key={f.is_group ? `grp-${f.group_id}` : f.id} className="border-t border-[#cc5a16]/5 hover:bg-[#faf7f2]/50 transition-colors">
                             <td className="px-3 py-3 font-semibold text-[#1a1208]">
@@ -23929,10 +23929,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'HOTEL_BOOKINGS',    label: 'Hotel Bookings',          description: 'Create/edit bookings, check-in, check-out, cancellations, calendar.', hotelOnly: true },
               { id: 'SERVICES',          label: 'Hotel Services',          description: 'Configure room-service offerings (Extra towels, AC repair, etc.) and pricing.', hotelOnly: true },
               { id: 'SERVICE_REQUESTS',  label: 'Service Requests',        description: 'Live queue of guest requests — housekeeping / maintenance acknowledge here.', hotelOnly: true },
-              { id: 'FOLIOS',            label: 'Folios / Hotel Bills',    description: 'View / settle folios, add F&B charges, apply promos, credit notes.', hotelOnly: true },
+              { id: 'FOLIOS',            label: 'Guest Bills',             description: 'View / settle guest bills, add F&B charges, apply promos, credit notes.', hotelOnly: true },
               { id: 'COMPLIANCE',        label: 'Compliance (Form-C)',     description: 'Form-C / FRRO for foreign guests, statutory compliance audit.', hotelOnly: true },
               { id: 'CONCIERGE_FAQ',     label: 'Concierge FAQ',           description: 'Wi-fi passwords, restaurant timings — answers the guest AI chatbot serves.', hotelOnly: true },
-              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk Reports',  description: 'Live Stay View + Arrival / Departure / Room Status / Night Audit reports for any date range. CSV download.', hotelOnly: true },
+              { id: 'FRONT_OFFICE_REPORTS', label: 'Front Desk Reports',  description: 'Live Stay View + Arrival / Departure / Room Status / End-of-day summary reports for any date range. CSV download.', hotelOnly: true },
               { id: 'CHANNEL_MANAGER',      label: 'Channel Manager',      description: 'OTA integrations: API credentials, iCal feeds (Booking.com/Airbnb/Vrbo/Agoda/MMT/Goibibo), inbound webhook log, room-code mappings.', hotelOnly: true },
               { id: 'PUBLIC_BOOKING_PAGE',  label: 'Public Booking Page',  description: 'Customer-facing direct-booking page: hero, photo galleries, amenities, slug URL, cancellation policy. 0% commission channel.', hotelOnly: true },
               { id: 'HOTEL_INVENTORY',      label: 'Hotel Inventory',       description: 'Housekeeping consumables, amenities, linen — stock levels, movements, low-stock alerts.', hotelOnly: true },
@@ -23952,7 +23952,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // tenants; restaurant-only roles are hidden for hotel-only tenants.
             const ALL_MANAGED_ROLES: { id: string; label: string; hint: string; hotelOnly?: boolean; restaurantOnly?: boolean }[] = [
               { id: 'MANAGER',      label: 'Manager',      hint: 'Senior staff — typically full operational access' },
-              { id: 'FRONT_DESK',   label: 'Front Desk',   hint: 'Receptionist — bookings, folios, guest services',  hotelOnly: true },
+              { id: 'FRONT_DESK',   label: 'Front Desk',   hint: 'Receptionist — bookings, guest bills, guest services',  hotelOnly: true },
               { id: 'CONCIERGE',    label: 'Concierge',    hint: 'Guest service coordinator',                         hotelOnly: true },
               { id: 'CASHIER',      label: 'Cashier',      hint: 'Orders + invoices, no settings',                    restaurantOnly: true },
               { id: 'WAITER',       label: 'Waiter',       hint: 'Table orders, KOT',                                 restaurantOnly: true },
@@ -31061,7 +31061,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         } catch {}
                       }}
                       className="flex-1 px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-[12px] font-bold hover:bg-[#a84612]"
-                    >Open Folio</button>
+                    >View Bill</button>
                     <button
                       type="button"
                       onClick={() => { navigator.clipboard?.writeText(String(bd.id)).catch(()=>{}); }}
@@ -38969,7 +38969,7 @@ const RestaurantBillModal: React.FC<{
   };
   const STATE_BADGE: Record<string, { label: string; cls: string }> = {
     PAID_IN_ROOM:      { label: 'Paid in room',     cls: 'bg-emerald-50 text-emerald-700' },
-    POSTED:            { label: 'On room folio',    cls: 'bg-sky-50 text-sky-700' },
+    POSTED:            { label: 'Added to room bill', cls: 'bg-sky-50 text-sky-700' },
     PENDING_MANUAL:    { label: 'Unbilled',         cls: 'bg-amber-50 text-amber-700' },
     AWAITING_DELIVERY: { label: 'Awaiting delivery', cls: 'bg-amber-50 text-amber-700' },
   };
