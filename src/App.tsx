@@ -504,6 +504,7 @@ interface TenantInfo {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const toast = useToast();
   // ─── Sprint D1 / P2-F — public guest routes ────────────────────────
   // Two unauth'd guest surfaces match by URL path BEFORE any of the
   // auth / dashboard flow even mounts. Avoids the login redirect /
@@ -1013,7 +1014,7 @@ export default function App() {
         throw new Error("Received non-JSON response from server");
       }
     } catch (err: any) {
-      alert(err.message || "Error validating Restaurant ID. Please try again later.");
+      toast.error(err.message || "Error validating Restaurant ID. Please try again later.");
     } finally {
       setIsVerifying(false);
     }
@@ -1052,7 +1053,7 @@ export default function App() {
         throw new Error("Received non-JSON response from server");
       }
     } catch (err: any) {
-      alert(err.message);
+      toast.error(err.message);
     } finally {
       setIsLoggingIn(false);
     }
@@ -3856,6 +3857,7 @@ const INDIAN_STATES: Record<string, string[]> = {
 };
 
 function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'LOGIN' | 'REGISTER', onSuccess: (token: string, rId: string, role: UserRole, name: string) => void, onSwitch: () => void, onBack: () => void, initialRole?: UserRole }) {
+  const toast = useToast();
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -3938,7 +3940,7 @@ function AuthView({ mode, onSuccess, onSwitch, onBack, initialRole }: { mode: 'L
         throw new Error("Received non-JSON response from server");
       }
     } catch (err: any) {
-      alert(err.message);
+      toast.error(err.message);
     } finally {
       setLoading(false);
     }
@@ -4248,6 +4250,7 @@ const getDaysInMonth = (monthStr: string) => {
 };
 
 function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, token: string, restaurantId: string }) {
+  const toast = useToast();
   const [logs, setLogs] = useState<any[]>([]);
   const [stats, setStats] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -4523,12 +4526,12 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         fetchLogs();
-        alert('Attendance logged successfully!');
+        toast.success('Attendance logged successfully!');
       } else {
-        alert(data.error || 'Failed to log attendance. Please try again.');
+        toast.error(data.error || 'Failed to log attendance. Please try again.');
       }
     } catch (err) {
-      alert('Network error. Please check your connection and try again.');
+      toast.error('Network error. Please check your connection and try again.');
     } finally {
       setSubmitting(false);
     }
@@ -4552,12 +4555,12 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
       fetchLogs();
       setSelectedDays([]);
       if (failed > 0) {
-        alert(`${selectedDays.length - failed} days saved. ${failed} failed — please retry.`);
+        toast.error(`${selectedDays.length - failed} days saved. ${failed} failed — please retry.`);
       } else {
-        alert(`Attendance logged for ${selectedDays.length} days!`);
+        toast.success(`Attendance logged for ${selectedDays.length} days!`);
       }
     } catch (err) {
-      alert('Network error. Please check your connection and try again.');
+      toast.error('Network error. Please check your connection and try again.');
     } finally {
       setSubmitting(false);
     }
@@ -4578,7 +4581,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
         fetchStats();
       }
     } catch (err) {
-      alert('Failed to update status');
+      toast.error('Failed to update status');
     }
   };
 
@@ -4597,7 +4600,7 @@ function AttendanceManagement({ role, token, restaurantId }: { role: UserRole, t
         fetchStats();
       }
     } catch (err) {
-      alert('Failed to update default hours');
+      toast.error('Failed to update default hours');
     }
   };
 
@@ -6208,6 +6211,7 @@ function NotificationTemplateEditor({ templates, onSave }: { templates: any[]; o
 // Covers hotel supplies: linen, toiletries, housekeeping consumables, F&B staples.
 // Sub-tabs: Items | Low Stock | Movements | Quick Setup
 function HotelInventoryView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   type HTab = 'ITEMS' | 'LOW_STOCK' | 'MOVEMENTS' | 'SETUP';
   const [tab, setTab] = useState<HTab>('ITEMS');
@@ -6284,14 +6288,14 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
       else await api('/hotel-inventory', { method: 'POST', body: JSON.stringify(body) });
       setShowForm(false);
       await load();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
     finally { setSaving(false); }
   };
 
   const deleteItem = async (id: string) => {
     if (!await showConfirm({ title: 'Remove this item?', danger: true })) return;
     try { await api(`/hotel-inventory/${id}`, { method: 'DELETE' }); await load(); }
-    catch (e: any) { alert(e.message); }
+    catch (e: any) { toast.error(e.message); }
   };
 
   const openAdj = (it: any) => {
@@ -6306,7 +6310,7 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
       await api(`/hotel-inventory/${adjItem.id}/stock`, { method: 'POST', body: JSON.stringify({ ...adjForm, quantity: Number(adjForm.quantity), unit_price: adjForm.unit_price ? Number(adjForm.unit_price) : null }) });
       setAdjItem(null);
       await load();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
     finally { setAdjSaving(false); }
   };
 
@@ -6348,7 +6352,7 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
       setSeeded(true);
       await load();
       setTab('ITEMS');
-    } catch (e: any) { alert('Setup failed: ' + e.message); }
+    } catch (e: any) { toast.error('Setup failed: ' + e.message); }
     finally { setSeedLoading(false); }
   };
 
@@ -6716,6 +6720,7 @@ function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, o
   items: any[]; restaurantId: string; token: string;
   onCreate: (p: any) => void; onDelete: (id: string) => void; onRefresh: () => void;
 }) {
+  const toast = useToast();
   const [form, setForm] = useState({ name: '', category: '', unit: 'unit', current_stock_qty: '', par_level: '', reorder_point: '', default_unit_price: '' });
   const [stockModal, setStockModal] = useState<any | null>(null);
   const [stockForm, setStockForm] = useState({ movement_type: 'RECEIVE', quantity: '', unit_price: '', notes: '', movement_date: new Date().toISOString().slice(0, 10) });
@@ -6738,7 +6743,7 @@ function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, o
   const submitStock = async () => {
     if (!stockModal) return;
     const qty = Number(stockForm.quantity);
-    if (!(Math.abs(qty) > 0)) { alert('Enter a valid quantity'); return; }
+    if (!(Math.abs(qty) > 0)) { toast.error('Enter a valid quantity'); return; }
     setStockSaving(true);
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/hotel-inventory/${stockModal.id}/stock`, {
@@ -6755,7 +6760,7 @@ function HotelInventoryPanel({ items, restaurantId, token, onCreate, onDelete, o
         setMovements(prev => ({ ...prev, [stockModal.id]: Array.isArray(d2) ? d2 : [] }));
       }
       onRefresh();
-    } catch (e: any) { alert('Failed: ' + (e?.message || 'error')); }
+    } catch (e: any) { toast.error('Failed: ' + (e?.message || 'error')); }
     finally { setStockSaving(false); }
   };
 
@@ -8097,11 +8102,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const submitWalkIn = async () => {
     if (!walkInDraft) return;
     if (!walkInDraft.guest_name.trim()) {
-      alert('Guest name is required for walk-in.');
+      toast.error('Guest name is required for walk-in.');
       return;
     }
     if (!walkInDraft.room_id) {
-      alert('Pick a room before submitting.');
+      toast.error('Pick a room before submitting.');
       return;
     }
     // WALK-IN-FIX (client report 7 Jun 2026): the server's check-in
@@ -8111,7 +8116,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // create a stray booking that then can't be checked in.
     const requireDocs = hotelSettings.require_id_at_checkin !== false;
     if (requireDocs && !walkInDraft.id_doc) {
-      alert('ID proof is required to check this guest in. Please attach a photo or scan of their Aadhaar / Passport / Driving Licence to continue.');
+      toast.error('ID proof is required to check this guest in. Please attach a photo or scan of their Aadhaar / Passport / Driving Licence to continue.');
       return;
     }
     setWalkInDraft({ ...walkInDraft, saving: true });
@@ -8174,7 +8179,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       await fetchHotelBookings();
       fetchBookingStats();
       markAvailabilityDirty();
-      alert(`✓ Walk-in complete — ${walkInDraft.guest_name} checked into ${hotelRooms.find(r => r.id === walkInDraft.room_id)?.name}.`);
+      toast.success(`Walk-in complete — ${walkInDraft.guest_name} checked into ${hotelRooms.find(r => r.id === walkInDraft.room_id)?.name}.`);
     } catch (err: any) {
       // WALK-IN-FIX: if the booking was created but a subsequent step
       // (doc upload or check-in) failed, leave the booking in BOOKED
@@ -8185,7 +8190,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const tail = createdBookingId
         ? `\n\nThe booking was created (${createdBookingId}). Open it from the Bookings list to upload the ID and complete check-in.`
         : '';
-      alert((err?.message || 'Walk-in failed') + tail);
+      toast.error((err?.message || 'Walk-in failed') + tail);
       setWalkInDraft(d => d ? { ...d, saving: false } : d);
     }
   };
@@ -8251,7 +8256,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const submitGroupBooking = async () => {
     if (!groupBookingDraft) return;
     if (!groupBookingDraft.rooms.some(r => r.qty > 0)) {
-      alert('Enter at least one room in the block.');
+      toast.error('Enter at least one room in the block.');
       return;
     }
     setGroupBookingDraft({ ...groupBookingDraft, saving: true });
@@ -8288,13 +8293,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       };
       const result = await hotelApi('/bookings/group', { method: 'POST', body: JSON.stringify(payload) });
       const n = result?.bookings?.length || groupBookingDraft.rooms.filter(r => r.qty > 0).reduce((s, r) => s + r.qty, 0);
-      alert(`✓ Group booking created — ${n} room${n > 1 ? 's' : ''} for ${groupBookingDraft.name}.`);
+      toast.success(`Group booking created — ${n} room${n > 1 ? 's' : ''} for ${groupBookingDraft.name}.`);
       setGroupBookingDraft(null);
       await fetchHotelBookings();
       fetchBookingStats();
       markAvailabilityDirty();
     } catch (err: any) {
-      alert(err?.message || 'Failed to create group booking');
+      toast.error(err?.message || 'Failed to create group booking');
       setGroupBookingDraft(d => d ? { ...d, saving: false } : d);
     }
   };
@@ -9291,12 +9296,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       await hotelApi(`/rate-plans`, { method: 'PUT', body: JSON.stringify({ rate_plans: [plan] }) });
       setEditingRatePlan(null);
       await fetchRatePlans();
-    } catch (e: any) { alert(e?.message || 'Failed to save rate plan'); }
+    } catch (e: any) { toast.error(e?.message || 'Failed to save rate plan'); }
   };
   const deleteRatePlan = async (id: string) => {
     if (!await showConfirm({ title: 'Deactivate this rate plan?', body: 'Existing bookings stay intact.' })) return;
     try { await hotelApi(`/rate-plans/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchRatePlans(); }
-    catch (e: any) { alert(e?.message || 'Failed to delete rate plan'); }
+    catch (e: any) { toast.error(e?.message || 'Failed to delete rate plan'); }
   };
   const fetchChannelSyncQueue = async () => {
     if (!isHotelEnabled) return;
@@ -9307,12 +9312,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
   const retrySyncQueueRow = async (rowId: string) => {
     try { await hotelApi(`/channel-sync-queue/${encodeURIComponent(rowId)}/retry`, { method: 'POST' }); await fetchChannelSyncQueue(); }
-    catch (e: any) { alert(e?.message || 'Retry failed'); }
+    catch (e: any) { toast.error(e?.message || 'Retry failed'); }
   };
   const dismissSyncQueueRow = async (rowId: string) => {
     if (!await showConfirm({ title: 'Dismiss this queued sync?', body: 'It will not retry automatically.' })) return;
     try { await hotelApi(`/channel-sync-queue/${encodeURIComponent(rowId)}/dismiss`, { method: 'POST' }); await fetchChannelSyncQueue(); }
-    catch (e: any) { alert(e?.message || 'Dismiss failed'); }
+    catch (e: any) { toast.error(e?.message || 'Dismiss failed'); }
   };
   const fetchReconciliationReports = async () => {
     if (!isHotelEnabled) return;
@@ -9325,7 +9330,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (!await showConfirm({ title: 'Run reconciliation now?', body: 'This pulls the last 24h of bookings from all enabled OTA channels.' })) return;
     setReconciliationRunning(true);
     try { await hotelApi('/channel-reconciliation-reports/run', { method: 'POST' }); await fetchReconciliationReports(); }
-    catch (e: any) { alert(e?.message || 'Reconciliation failed'); }
+    catch (e: any) { toast.error(e?.message || 'Reconciliation failed'); }
     finally { setReconciliationRunning(false); }
   };
   const fetchChannelSecurityConfig = async () => {
@@ -9390,12 +9395,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       await hotelApi(`/agents/${encodeURIComponent(a.id || 'new')}`, { method: 'PUT', body: JSON.stringify(a) });
       setEditingAgent(null);
       await fetchTravelAgents();
-    } catch (e: any) { alert(e?.message || 'Failed to save agent'); }
+    } catch (e: any) { toast.error(e?.message || 'Failed to save agent'); }
   };
   const deleteTravelAgent = async (id: string) => {
     if (!await showConfirm({ title: 'Deactivate this travel agent?', body: 'Existing bookings stay intact.' })) return;
     try { await hotelApi(`/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchTravelAgents(); }
-    catch (e: any) { alert(e?.message || 'Failed to delete agent'); }
+    catch (e: any) { toast.error(e?.message || 'Failed to delete agent'); }
   };
   const fetchAccountsPnl = async (from?: string, to?: string) => {
     const f = from || accountsPnlRange.from;
@@ -9507,7 +9512,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const res = await hotelApi(`/reports/partner-statement?partner_type=${encodeURIComponent(partnerType)}&partner_code=${encodeURIComponent(partnerCode)}`);
       setPartnerStatement(res);
     } catch (e: any) {
-      alert(e?.message || 'Failed to load statement');
+      toast.error(e?.message || 'Failed to load statement');
       setPartnerStatement(null);
     } finally { setStatementLoading(false); }
   };
@@ -9521,17 +9526,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (partnerStatement?.partner) {
         await openPartnerStatement(partnerStatement.partner.type, partnerStatement.partner.code);
       }
-    } catch (e: any) { alert(e?.message || 'Failed to record payment'); }
+    } catch (e: any) { toast.error(e?.message || 'Failed to record payment'); }
   };
   const autoGenerateInvoices = async () => {
     if (!await showConfirm({ title: 'Auto-generate OTA invoices for last month?', body: 'Generates from checked-out bookings. Idempotent — re-running refreshes amounts.' })) return;
     setAutoGeneratingInvoices(true);
     try {
       const res = await hotelApi('/partner-invoices/auto-generate', { method: 'POST', body: JSON.stringify({ month_offset: 1 }) });
-      alert(`Generated ${res?.generated?.length || 0} invoice(s) for period ${res?.period?.start} → ${res?.period?.end}.`);
+      toast.success(`Generated ${res?.generated?.length || 0} invoice(s) for period ${res?.period?.start} → ${res?.period?.end}.`);
       await fetchPartnerInvoices();
       await fetchReceivablesAging();
-    } catch (e: any) { alert(e?.message || 'Auto-generate failed'); }
+    } catch (e: any) { toast.error(e?.message || 'Auto-generate failed'); }
     finally { setAutoGeneratingInvoices(false); }
   };
 
@@ -10020,7 +10025,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setProfileSaved(true);
       setTimeout(() => setProfileSaved(false), 3000);
     } catch (err: any) {
-      alert(err.message);
+      toast.error(err.message);
     } finally {
       setProfileSaving(false);
     }
@@ -10236,7 +10241,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         body: JSON.stringify({ restaurantId })
       });
       if (res.ok) {
-        alert("Feedback request sent to customer!");
+        toast.success("Feedback request sent to customer!");
         fetchOrders();
       }
     } catch (err) {
@@ -10339,9 +10344,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const contentType = res.headers.get("content-type");
         if (contentType && contentType.indexOf("application/json") !== -1) {
           const data = await res.json();
-          alert(data.error || "Failed to add staff");
+          toast.error(data.error || "Failed to add staff");
         } else {
-          alert("Failed to add staff: " + (await res.text()));
+          toast.error("Failed to add staff: " + (await res.text()));
         }
       }
     } catch (err) {
@@ -10374,7 +10379,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        return alert(d.error || `Failed to ${verb} staff`);
+        toast.error(d.error || `Failed to ${verb} staff`); return;
       }
       fetchStaff();
     } catch (err) {
@@ -10405,7 +10410,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         phone:    r.phone.trim()    || null,
         email:    r.email.trim()    || null,
       }));
-    if (rows.length === 0) return alert('Fill at least one row (name + role required)');
+    if (rows.length === 0) { toast.error('Fill at least one row (name + role required)'); return; }
     try {
       const res = await fetch('/api/owner/staff/bulk', {
         method: 'POST',
@@ -10413,11 +10418,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         body: JSON.stringify({ rows }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) return alert(data.error || 'Bulk add failed');
+      if (!res.ok) { toast.error(data.error || 'Bulk add failed'); return; }
       const errMsg = (data.errors || []).length
         ? `\n\nSkipped:\n${data.errors.map((e: any) => `Row ${e.row}: ${e.error}`).join('\n')}`
         : '';
-      alert(`✓ Added ${data.created_count} staff member${data.created_count !== 1 ? 's' : ''}.${errMsg}`);
+      toast.success(`Added ${data.created_count} staff member${data.created_count !== 1 ? 's' : ''}.${errMsg}`);
       setIsBulkAddingStaff(false);
       setBulkRows([
         { name: '', role: 'MANAGER', loginId: '', password: '', phone: '', email: '' },
@@ -10844,7 +10849,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       if (r.ok) {
         await fetchInventoryDashboard();
-        alert('Forecasts refreshed');
+        toast.success('Forecasts refreshed');
       }
     } catch (e) { console.error('recomputeForecasts', e); }
   };
@@ -10946,7 +10951,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const handleIngredientsCsvFile = async (file: File) => {
     const text = await file.text();
     const { rows } = parseCsv(text);
-    if (rows.length === 0) { alert('No rows found in CSV'); return; }
+    if (rows.length === 0) { toast.error('No rows found in CSV'); return; }
     const existingNames = new Set(inventoryIngredients.map((i: any) => String(i.name).toLowerCase()));
     const previewRows = rows
       .filter(r => r.name && r.name.trim())
@@ -10955,13 +10960,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         _isDuplicate: existingNames.has(String(r.name).toLowerCase()),
         _selected: !existingNames.has(String(r.name).toLowerCase()),
       }));
-    if (previewRows.length === 0) { alert('No valid rows (need at least a name column)'); return; }
+    if (previewRows.length === 0) { toast.error('No valid rows (need at least a name column)'); return; }
     setInvCsvImport({ entity: 'ingredients', rows: previewRows, importing: false });
   };
   const handleSuppliersCsvFile = async (file: File) => {
     const text = await file.text();
     const { rows } = parseCsv(text);
-    if (rows.length === 0) { alert('No rows found in CSV'); return; }
+    if (rows.length === 0) { toast.error('No rows found in CSV'); return; }
     const existingNames = new Set(inventorySuppliers.map((s: any) => String(s.name).toLowerCase()));
     const previewRows = rows
       .filter(r => r.name && r.name.trim())
@@ -10970,13 +10975,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         _isDuplicate: existingNames.has(String(r.name).toLowerCase()),
         _selected: !existingNames.has(String(r.name).toLowerCase()),
       }));
-    if (previewRows.length === 0) { alert('No valid rows (need at least a name column)'); return; }
+    if (previewRows.length === 0) { toast.error('No valid rows (need at least a name column)'); return; }
     setInvCsvImport({ entity: 'suppliers', rows: previewRows, importing: false });
   };
   const confirmInventoryCsvImport = async () => {
     if (!invCsvImport) return;
     const toImport = invCsvImport.rows.filter(r => r._selected && !r._isDuplicate);
-    if (toImport.length === 0) { alert('No items selected'); return; }
+    if (toImport.length === 0) { toast.error('No items selected'); return; }
     setInvCsvImport({ ...invCsvImport, importing: true });
     let ok = 0, failed = 0;
     for (const r of toImport) {
@@ -11016,7 +11021,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     setInvCsvImport(null);
     if (invCsvImport.entity === 'ingredients') fetchInventoryIngredients();
     else fetchInventorySuppliers();
-    alert(`Import complete — ${ok} added, ${failed} failed`);
+    toast.success(`Import complete — ${ok} added, ${failed} failed`);
   };
 
   // ── Tier-2/3 Insights + Settings fetchers ──────────────────────────────
@@ -11408,7 +11413,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setHotelSettingsSaved(true);
       setTimeout(() => setHotelSettingsSaved(false), 2000);
     } catch (err: any) {
-      alert(err?.message || 'Failed to save hotel settings');
+      toast.error(err?.message || 'Failed to save hotel settings');
     } finally {
       setHotelSettingsSaving(false);
     }
@@ -11473,7 +11478,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setPropertyProfileSaved(true);
       setTimeout(() => setPropertyProfileSaved(false), 2500);
     } catch (err: any) {
-      alert(err?.message || 'Save failed');
+      toast.error(err?.message || 'Save failed');
     } finally { setPropertyProfileSaving(false); }
   };
   // Upload helpers — uses the hotel-scoped image upload endpoint.
@@ -11498,12 +11503,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const url = await uploadImage(file);
       await hotelApi('/property-gallery', { method: 'POST', body: JSON.stringify({ image_url: url, display_order: propertyGallery.length }) });
       await fetchPropertyGallery();
-    } catch (e: any) { alert(e?.message || 'Upload failed'); }
+    } catch (e: any) { toast.error(e?.message || 'Upload failed'); }
   };
   const deletePropertyGalleryImage = async (id: string) => {
     if (!await showConfirm({ title: 'Remove this photo from the public gallery?', danger: true })) return;
     try { await hotelApi(`/property-gallery/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchPropertyGallery(); }
-    catch (e: any) { alert(e?.message || 'Delete failed'); }
+    catch (e: any) { toast.error(e?.message || 'Delete failed'); }
   };
   const addRoomTypeGalleryImage = async (typeId: string, file: File) => {
     try {
@@ -11511,12 +11516,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const existing = roomTypeGalleries[typeId] || [];
       await hotelApi(`/room-types/${encodeURIComponent(typeId)}/gallery`, { method: 'POST', body: JSON.stringify({ image_url: url, display_order: existing.length }) });
       await fetchRoomTypeGallery(typeId);
-    } catch (e: any) { alert(e?.message || 'Upload failed'); }
+    } catch (e: any) { toast.error(e?.message || 'Upload failed'); }
   };
   const deleteRoomTypeGalleryImage = async (typeId: string, imageId: string) => {
     if (!await showConfirm({ title: 'Remove this photo from the category gallery?', danger: true })) return;
     try { await hotelApi(`/room-types/${encodeURIComponent(typeId)}/gallery/${encodeURIComponent(imageId)}`, { method: 'DELETE' }); await fetchRoomTypeGallery(typeId); }
-    catch (e: any) { alert(e?.message || 'Delete failed'); }
+    catch (e: any) { toast.error(e?.message || 'Delete failed'); }
   };
 
   const toggleHotelModule = async (enabled: boolean) => {
@@ -11561,7 +11566,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setFindRoomsResults(Array.isArray(data?.rooms) ? data.rooms : []);
       setFindRoomsCategories(Array.isArray(data?.categories) ? data.categories : []);
     } catch (err: any) {
-      alert(err?.message || 'Search failed');
+      toast.error(err?.message || 'Search failed');
     } finally {
       setFindRoomsLoading(false);
     }
@@ -11629,7 +11634,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchChannelCredentials();
   };
   const testChannelCredential = async (d: any) => {
-    if (!d?.channel || !d?.property_id) { alert('Channel and Property ID are required to test'); return; }
+    if (!d?.channel || !d?.property_id) { toast.error('Channel and Property ID are required to test'); return; }
     setChannelTesting(true); setChannelTestResult(null);
     try {
       const result = await hotelApi('/channel-credentials/test', {
@@ -11665,10 +11670,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     setSyncingIcalFeedId(id);
     try {
       const r = await hotelApi(`/ical-feeds/${id}/sync`, { method: 'POST' });
-      alert(`Sync complete · imported ${r?.imported ?? 0} · skipped ${r?.skipped ?? 0} · failed ${r?.failed ?? 0}`);
+      toast.success(`Sync complete · imported ${r?.imported ?? 0} · skipped ${r?.skipped ?? 0} · failed ${r?.failed ?? 0}`);
       await fetchIcalFeeds();
     } catch (e: any) {
-      alert(e?.message || 'Sync failed');
+      toast.error(e?.message || 'Sync failed');
     } finally {
       setSyncingIcalFeedId(null);
     }
@@ -11720,7 +11725,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setStaffAccessSaved(true);
       setTimeout(() => setStaffAccessSaved(false), 3000);
     } catch (err: any) {
-      alert(err?.message || 'Failed to save Staff Access');
+      toast.error(err?.message || 'Failed to save Staff Access');
     } finally {
       setStaffAccessSaving(false);
     }
@@ -11776,12 +11781,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || 'Copy failed');
-      alert(`✓ Copied ${data.copied || 0} role permission rows from "${sourceName}".`);
+      toast.success(`Copied ${data.copied || 0} role permission rows from "${sourceName}".`);
       await fetchStaffAccess();
       await fetchPermAuditLog();
       setCopyFromTenant('');
     } catch (err: any) {
-      alert(err?.message || 'Failed to copy permissions');
+      toast.error(err?.message || 'Failed to copy permissions');
     }
   };
   const fetchHotelServices = async () => {
@@ -11811,7 +11816,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const submitRoomHold = async () => {
     if (!blockingRoom?.id) return;
     if (!holdForm.start_date || !holdForm.end_date) {
-      alert('Pick start and end dates first.');
+      toast.error('Pick start and end dates first.');
       return;
     }
     setHoldSubmitting(true);
@@ -11830,7 +11835,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       await fetchRoomHolds(blockingRoom.id);
       markAvailabilityDirty();
     } catch (err: any) {
-      alert(err?.message || 'Failed to create hold');
+      toast.error(err?.message || 'Failed to create hold');
     } finally {
       setHoldSubmitting(false);
     }
@@ -11842,7 +11847,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       if (blockingRoom?.id) await fetchRoomHolds(blockingRoom.id);
       markAvailabilityDirty();
     } catch (err: any) {
-      alert(err?.message || 'Failed to lift hold');
+      toast.error(err?.message || 'Failed to lift hold');
     }
   };
 
@@ -11918,24 +11923,24 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${folioId}/invoice-pdf`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error || `Failed (HTTP ${res.status})`); return; }
+      if (!res.ok) { const b = await res.json().catch(() => ({})); toast.error(b.error || `Failed (HTTP ${res.status})`); return; }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank', 'noopener,noreferrer');
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (err: any) { alert(err?.message || 'Failed to download invoice'); }
+    } catch (err: any) { toast.error(err?.message || 'Failed to download invoice'); }
   };
   const openGroupPdf = async (groupId: string) => {
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupId}/invoice-pdf`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error || `Failed (HTTP ${res.status})`); return; }
+      if (!res.ok) { const b = await res.json().catch(() => ({})); toast.error(b.error || `Failed (HTTP ${res.status})`); return; }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank', 'noopener,noreferrer');
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (err: any) { alert(err?.message || 'Failed to download group invoice'); }
+    } catch (err: any) { toast.error(err?.message || 'Failed to download group invoice'); }
   };
   // RS-FIX — room-service orders the kitchen received but couldn't auto-bill
   // to a folio. Silent on failure (it only drives a badge, never blocks).
@@ -12030,7 +12035,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     if (result?.perk?.applies) {
       const icon = result.perk.type === 'BIRTHDAY' ? '🎂' : '💐';
       const label = result.perk.type === 'BIRTHDAY' ? 'Birthday' : 'Anniversary';
-      alert(`${icon} ${label} perk\n\n${result.perk.message}\n\nThe guest has been notified. Consider sending a complimentary perk (cake, fruit basket, free upgrade).`);
+      toast.info(`${label} perk — ${result.perk.message}`);
     }
     return result;
   };
@@ -12148,7 +12153,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       await fetchHotelBookings();
       markAvailabilityDirty();
     } catch (err: any) {
-      alert(err?.message || 'Failed to cancel booking');
+      toast.error(err?.message || 'Failed to cancel booking');
     } finally {
       setCancelSubmitting(false);
     }
@@ -12184,9 +12189,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       );
       const sym = (restaurant as any)?.currency_symbol || '₹';
       const target = channel === 'EMAIL' ? r.guest_email : r.guest_phone;
-      alert(`✓ Payment link sent via ${channel} to ${target}\n\nAmount: ${sym}${Number(r.amount || 0).toLocaleString('en-IN')}\n${r.upi_link ? 'UPI link included in the message.' : 'No UPI VPA configured — guest will pay at the front desk.'}`);
+      toast.success(`Payment link sent via ${channel} to ${target}. Amount: ${sym}${Number(r.amount || 0).toLocaleString('en-IN')}`);
     } catch (e: any) {
-      alert(e?.message || 'Failed to send payment link');
+      toast.error(e?.message || 'Failed to send payment link');
     } finally { setPaylinkBusy(null); }
   };
 
@@ -12202,16 +12207,16 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const label = status === 'skipped_direct'
         ? `${booking.guest_name || 'Booking'} is a direct booking — no OTA to re-sync.`
         : `Re-sync queued for ${booking.guest_name || 'booking'} (channel: ${result?.latest?.channel || 'unknown'}).`;
-      alert(label);
+      toast.info(label);
     } catch (err: any) {
-      alert(err?.message || 'Failed to re-sync');
+      toast.error(err?.message || 'Failed to re-sync');
     }
   };
   const loadFolio = async (folioId: string) => {
     try {
       const folio = await hotelApi(`/folios/${folioId}`);
       setViewFolio(folio);
-    } catch (err: any) { alert(err.message); }
+    } catch (err: any) { toast.error(err.message); }
   };
   const draftFormC = async (bookingId: string) => {
     await hotelApi(`/compliance/form-c/${bookingId}`, { method: 'POST', body: JSON.stringify({}) });
@@ -12237,7 +12242,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
       await fetchComplianceList();
     } catch (err: any) {
-      alert(err.message || 'Failed to download Form-C PDF');
+      toast.error(err.message || 'Failed to download Form-C PDF');
     }
   };
 
@@ -12331,7 +12336,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         const errBody = await res.json().catch(() => ({}));
         const msg = errBody?.error || "Failed to update settings";
         setSettingsSaveStatus('error');
-        alert(msg);
+        toast.error(msg);
         // Reset status after a moment so the button comes back to "Save Settings"
         setTimeout(() => setSettingsSaveStatus('idle'), 2500);
         throw new Error(msg);
@@ -12479,7 +12484,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } else {
       const errorData = await res.json();
       console.error("Failed to add menu item:", errorData.error);
-      alert(`Failed to add item: ${errorData.error}`);
+      toast.error(`Failed to add item: ${errorData.error}`);
     }
   };
 
@@ -12610,7 +12615,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     reader.onload = (e) => {
       const text = e.target?.result as string;
       const lines = text.split('\n').filter(l => l.trim());
-      if (lines.length < 2) { alert('CSV file appears empty or has no data rows.'); return; }
+      if (lines.length < 2) { toast.error('CSV file appears empty or has no data rows.'); return; }
       const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g,'').trim().toLowerCase());
       const rows: any[] = [];
       for (let i = 1; i < lines.length; i++) {
@@ -12633,7 +12638,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         );
         rows.push({ ...row, _isDuplicate: isDup, _selected: !isDup });
       }
-      if (rows.length === 0) { alert('No valid rows found in CSV.'); return; }
+      if (rows.length === 0) { toast.error('No valid rows found in CSV.'); return; }
       setCsvPreviewRows(rows);
     };
     reader.readAsText(file);
@@ -12643,7 +12648,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const handleCsvImport = async () => {
     if (!csvPreviewRows) return;
     const toImport = csvPreviewRows.filter(r => r._selected && !r._isDuplicate);
-    if (toImport.length === 0) { alert('No items selected for import.'); return; }
+    if (toImport.length === 0) { toast.error('No items selected for import.'); return; }
     setCsvImporting(true);
     let imported = 0, failed = 0;
     for (const row of toImport) {
@@ -12664,7 +12669,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     setCsvImporting(false);
     setCsvPreviewRows(null);
     fetchMenu();
-    alert(`Import complete: ${imported} added${failed > 0 ? `, ${failed} failed` : ''}.`);
+    toast.success(`Import complete: ${imported} added${failed > 0 ? `, ${failed} failed` : ''}.`);
   };
 
   // ── Recipe CSV Template / Export / Import ────────────────────────────────
@@ -12688,9 +12693,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       const r = await fetch(`/api/restaurant/${restaurantId}/recipes`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
-      if (!r.ok) { alert('Failed to fetch recipes'); return; }
+      if (!r.ok) { toast.error('Failed to fetch recipes'); return; }
       const rows: any[] = await r.json();
-      if (rows.length === 0) { alert('No recipes to export — define some recipes first.'); return; }
+      if (rows.length === 0) { toast.info('No recipes to export — define some recipes first.'); return; }
       const header = ['menu_item_name', 'ingredient_name', 'qty_per_serving', 'unit', 'size_variant', 'notes'];
       const csvRows = rows.map(r => [
         r.menu_item_name || '',
@@ -12702,13 +12707,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       ]);
       downloadCsv(`recipes_${restaurantId}_${new Date().toISOString().slice(0,10)}.csv`, header, csvRows);
     } catch (e) {
-      alert('Recipe export failed: ' + (e as any).message);
+      toast.error('Recipe export failed: ' + (e as any).message);
     }
   };
   const handleRecipeCsvFile = async (file: File) => {
     const text = await file.text();
     const { rows } = parseCsv(text);
-    if (rows.length === 0) { alert('No rows found in CSV'); return; }
+    if (rows.length === 0) { toast.error('No rows found in CSV'); return; }
 
     // Group by menu_item_name (case-insensitive)
     const groups: Record<string, any[]> = {};
@@ -12718,7 +12723,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       (groups[key] = groups[key] || []).push(r);
     }
     const totalGroups = Object.keys(groups).length;
-    if (totalGroups === 0) { alert('No rows with menu_item_name + ingredient_name found.'); return; }
+    if (totalGroups === 0) { toast.error('No rows with menu_item_name + ingredient_name found.'); return; }
 
     // Pre-flight ingredient fetch (resolve names → ids)
     if (inventoryIngredients.length === 0) await fetchInventoryIngredients();
@@ -12757,13 +12762,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
       });
       if (r.ok) saved++; else failed++;
     }
-    alert(
-      `Recipe import complete:\n` +
-      `✓ ${saved} menu items got recipes saved\n` +
-      `${skippedMenu > 0 ? `⏭ ${skippedMenu} menu item names not found\n` : ''}` +
-      `${skippedItems > 0 ? `⏭ ${skippedItems} ingredient names not found across rows\n` : ''}` +
-      `${failed > 0 ? `⚠ ${failed} failed\n` : ''}` +
-      `\nTip: ingredient + menu item names must match exactly (case-insensitive).`
+    toast.success(
+      `Recipe import complete: ${saved} saved` +
+      `${skippedMenu > 0 ? `, ${skippedMenu} menu items not found` : ''}` +
+      `${skippedItems > 0 ? `, ${skippedItems} ingredients not found` : ''}` +
+      `${failed > 0 ? `, ${failed} failed` : ''}.`
     );
   };
 
@@ -12777,8 +12780,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         body: JSON.stringify({ name: item.name, category: item.category, dietary_type: item.dietary_type })
       });
       if (res.ok) fetchMenu();
-      else alert('Image generation failed. Please try again.');
-    } catch { alert('Network error during image generation.'); }
+      else toast.error('Image generation failed. Please try again.');
+    } catch { toast.error('Network error during image generation.'); }
     setGeneratingImageId(null);
   };
 
@@ -13585,7 +13588,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     restaurantId={restaurantId}
                     token={token}
                     menuItemId={editingItem.id}
-                    onError={(msg) => alert(msg)}
+                    onError={(msg) => toast.error(msg)}
                   />
 
                   <div className="pt-4 flex gap-4">
@@ -13881,7 +13884,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                       <button
                                         onClick={() => {
                                           // Pre-fill PO modal with this ingredient
-                                          if (inventorySuppliers.length === 0) { alert('Add suppliers first'); return; }
+                                          if (inventorySuppliers.length === 0) { toast.error('Add suppliers first'); return; }
                                           setInventorySubTab('PURCHASE_ORDERS');
                                           setCreatingPO(true);
                                         }}
@@ -14541,7 +14544,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </button>
                   <button
                     onClick={async () => {
-                      if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
+                      if (inventorySuppliers.length === 0) { toast.error('Add at least one supplier first'); return; }
                       try {
                         const res = await fetch(`/api/restaurant/${restaurantId}/inventory/smart-po-preview`, {
                           method: 'POST',
@@ -14550,12 +14553,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         });
                         const data = await res.json();
                         if (!data.groups || data.groups.length === 0) {
-                          alert('No items below reorder point — nothing to suggest right now.');
+                          toast.info('No items below reorder point — nothing to suggest right now.');
                           return;
                         }
                         setSmartPoPreview(data.groups);
                       } catch (e: any) {
-                        alert(e.message || 'Failed to generate smart PO preview');
+                        toast.error(e.message || 'Failed to generate smart PO preview');
                       }
                     }}
                     className="bg-white text-[#cc5a16] border-2 border-[#cc5a16] px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#cc5a16]/5 transition-all"
@@ -14565,8 +14568,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </button>
                   <button
                     onClick={() => {
-                      if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
-                      if (inventoryIngredients.length === 0) { alert('Add at least one ingredient first'); return; }
+                      if (inventorySuppliers.length === 0) { toast.error('Add at least one supplier first'); return; }
+                      if (inventoryIngredients.length === 0) { toast.error('Add at least one ingredient first'); return; }
                       setCreatingPO(true);
                     }}
                     className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
@@ -14759,7 +14762,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </button>
                   <button
                     onClick={() => {
-                      if (inventorySuppliers.length === 0) { alert('Add at least one supplier first'); return; }
+                      if (inventorySuppliers.length === 0) { toast.error('Add at least one supplier first'); return; }
                       setCreatingGRN({});
                     }}
                     className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
@@ -14892,7 +14895,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </p>
                 <button
                   onClick={() => {
-                    if (inventoryIngredients.length === 0) { alert('Add at least one ingredient first'); return; }
+                    if (inventoryIngredients.length === 0) { toast.error('Add at least one ingredient first'); return; }
                     setLoggingWastage(true);
                   }}
                   className="bg-[#cc5a16] text-white px-5 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 hover:bg-[#a84612] transition-all"
@@ -15044,7 +15047,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 </p>
                 <button
                   onClick={async () => {
-                    if (inventoryIngredients.length === 0) { alert('Add at least one ingredient first'); return; }
+                    if (inventoryIngredients.length === 0) { toast.error('Add at least one ingredient first'); return; }
                     if (inventoryCounts.some((c: any) => c.status === 'IN_PROGRESS')) {
                       if (!await showConfirm({ title: 'Start a new count?', body: 'A count is already in progress. Starting a new one will replace it.' })) return;
                     }
@@ -15227,7 +15230,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 setSmartPoSubmitting(false);
                 setSmartPoPreview(null);
                 fetchInventoryPOs();
-                alert(`Smart PO complete — ${created} draft PO${created !== 1 ? 's' : ''} created${failed ? `, ${failed} failed` : ''}.`);
+                toast.success(`Smart PO complete — ${created} draft PO${created !== 1 ? 's' : ''} created${failed ? `, ${failed} failed` : ''}.`);
               }}
             />
           )}
@@ -16018,7 +16021,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       fetchStorageLocations();
                     }}
                     onDelete={async (id) => {
-                      if (id === 'LOC-MAIN') return alert("Can't delete the default Main location.");
+                      if (id === 'LOC-MAIN') { toast.error("Can't delete the default Main location."); return; }
                       if (!await showConfirm({ title: 'Remove this location?', danger: true })) return;
                       await fetch(`/api/storage-locations/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
                       fetchStorageLocations();
@@ -16107,7 +16110,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       channel={c}
                       onSave={async (patch) => {
                         const r = await saveChannelSettings(c.channel, patch);
-                        if (!r.ok) alert(r.error);
+                        if (!r.ok) toast.error(r.error);
                         return r.ok;
                       }}
                       onConfigure={() => setCredentialsModalChannel(c.channel)}
@@ -16538,7 +16541,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               >{autoGeneratingInvoices ? 'Generating…' : '⚡ Auto-generate last month'}</button>
               <button
                 onClick={() => {
-                  if (!receivablesAging?.partners?.length) { alert('Nothing to export yet.'); return; }
+                  if (!receivablesAging?.partners?.length) { toast.info('Nothing to export yet.'); return; }
                   const headers = ['Partner Type','Partner Code','Partner Name','Invoice Count','Current (<30d)','30-60d','60-90d','90+d','Total Owed (INR)','Oldest Due'];
                   const rows = receivablesAging.partners.map((p: any) => [p.partner_type, p.partner_code, p.partner_name || '', p.invoice_count, p.current, p.b30_60, p.b60_90, p.b90_plus, p.total, p.oldest_due || '']);
                   const t = receivablesAging.totals || {};
@@ -16980,7 +16983,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-4 py-2 text-right font-mono font-bold text-[#1a1208]">{fmt(f.grand_total)}</td>
                             <td className="px-4 py-2 text-[#6b5d52] text-xs capitalize">{(f.payment_method||'').toLowerCase()}</td>
                             <td className="px-4 py-2">
-                              <button onClick={async () => { try { const r = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${f.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await r.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${f.invoice_number || f.id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }} className="inline-flex items-center gap-1 text-xs font-bold text-[#cc5a16] hover:underline whitespace-nowrap cursor-pointer">
+                              <button onClick={async () => { try { const r = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${f.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await r.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${f.invoice_number || f.id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { toast.error(err.message); } }} className="inline-flex items-center gap-1 text-xs font-bold text-[#cc5a16] hover:underline whitespace-nowrap cursor-pointer">
                                 <FileText size={12} /> Invoice
                               </button>
                             </td>
@@ -17426,7 +17429,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       });
                       setEditingStaff(null);
                       fetchStaff();
-                    } catch (err: any) { alert(err.message); }
+                    } catch (err: any) { toast.error(err.message); }
                   }}
                   className="space-y-3"
                 >
@@ -18610,7 +18613,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   await hotelApi('/tariff/model', { method: 'PATCH', body: JSON.stringify({ tariff_model: newModel }) });
                   setTariffData(prev => ({ ...prev, tariff_model: newModel }));
                 } catch (err: any) {
-                  alert('Could not change tariff model: ' + (err?.message || 'unknown error'));
+                  toast.error('Could not change tariff model: ' + (err?.message || 'unknown error'));
                 }
               };
               const saveTariffs = async () => {
@@ -18618,18 +18621,18 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   await hotelApi('/tariff/room-tariffs', { method: 'PUT', body: JSON.stringify({ room_tariffs: tariff.room_tariffs }) });
                   await hotelApi('/tariff/extra-person-charges', { method: 'PUT', body: JSON.stringify({ extra_person_charges: tariff.extra_person_charges }) });
                   await fetchTariff();
-                  alert('Tariff matrix saved.');
+                  toast.success('Tariff matrix saved.');
                 } catch (err: any) {
-                  alert('Save failed: ' + (err?.message || 'unknown error'));
+                  toast.error('Save failed: ' + (err?.message || 'unknown error'));
                 }
               };
               const savePeriods = async () => {
                 try {
                   await hotelApi('/tariff/season-periods', { method: 'PUT', body: JSON.stringify({ periods: tariff.season_periods }) });
                   await fetchTariff();
-                  alert('Season periods saved.');
+                  toast.success('Season periods saved.');
                 } catch (err: any) {
-                  alert('Save failed: ' + (err?.message || 'unknown error'));
+                  toast.error('Save failed: ' + (err?.message || 'unknown error'));
                 }
               };
               // BCG Tariff Phase 4 (7 Jun 2026) — owner-editable meal plans.
@@ -18644,7 +18647,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   !String(m.code || '').trim() || !String(m.name || '').trim()
                 );
                 if (bad) {
-                  alert('Every meal plan needs a code (e.g. EP) and a name (e.g. European Plan). Please fill the blank rows or remove them.');
+                  toast.error('Every meal plan needs a code (e.g. EP) and a name (e.g. European Plan). Please fill the blank rows or remove them.');
                   return;
                 }
                 // Duplicate-code guard. Codes are user-facing on the
@@ -18652,7 +18655,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 const codes = (tariff.meal_plans || []).map((m: any) => String(m.code || '').trim().toUpperCase());
                 const dup = codes.find((c: string, i: number) => codes.indexOf(c) !== i);
                 if (dup) {
-                  alert(`Meal plan code "${dup}" appears more than once. Codes must be unique.`);
+                  toast.error(`Meal plan code "${dup}" appears more than once. Codes must be unique.`);
                   return;
                 }
                 try {
@@ -18676,9 +18679,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   const errMsg = (resp?.errors || []).length > 0
                     ? `\n${resp.errors.length} row(s) failed: ${resp.errors.map((e: any) => e.error).join('; ')}`
                     : '';
-                  alert(`Meal plans saved (${resp?.count || 0} stored).${skipMsg}${errMsg}`);
+                  toast.success(`Meal plans saved (${resp?.count || 0} stored).${skipMsg}${errMsg}`);
                 } catch (err: any) {
-                  alert('Save failed: ' + (err?.message || 'unknown error'));
+                  toast.error('Save failed: ' + (err?.message || 'unknown error'));
                 }
               };
               const addMealPlan = () => {
@@ -18735,17 +18738,17 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 );
                 if (reply == null) return;
                 if (String(reply).trim().toUpperCase() !== 'DELETE') {
-                  alert('Not deleted — confirmation text did not match.');
+                  toast.error('Not deleted — confirmation text did not match.');
                   return;
                 }
                 try {
                   const resp: any = await hotelApi(`/tariff/meal-plans/${m.id}`, { method: 'DELETE' });
                   await fetchTariff();
-                  alert(resp?.archived ? (resp.error || 'Plan archived.') : `"${m.code}" permanently deleted.`);
+                  toast.success(resp?.archived ? (resp.error || 'Plan archived.') : `"${m.code}" permanently deleted.`);
                 } catch (err: any) {
                   // 409 = referenced by bookings → server archived it instead.
                   await fetchTariff();
-                  alert(err?.message || 'Delete failed.');
+                  toast.error(err?.message || 'Delete failed.');
                 }
               };
 
@@ -18961,11 +18964,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                               );
                                               if (reply == null) return; // cancel
                                               if (String(reply).trim().toUpperCase() !== String(m.code).trim().toUpperCase()) {
-                                                alert(`Code didn't match "${m.code}" — nothing changed.`);
+                                                toast.error(`Code didn't match "${m.code}" — nothing changed.`);
                                                 return;
                                               }
                                               removeMealPlan(m.id);
-                                              alert(`"${m.code}" moved to Archived. Click Save Meal Plans to persist, or Restore to undo.`);
+                                              toast.info(`"${m.code}" moved to Archived. Click Save Meal Plans to persist, or Restore to undo.`);
                                             }}
                                             title="Hide from booking forms (keeps history); can be restored"
                                             className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-md bg-[#faf7f2] text-[#c13b3b] hover:bg-red-50 border border-red-200"
@@ -20030,7 +20033,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <td className="px-3 py-2.5 text-right">
                                     <div className="flex gap-1 justify-end flex-wrap">
                                       {!settled && g.group_status !== 'CANCELLED' && g.group_status !== 'CONFIRMED' && (
-                                        <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CONFIRMED'})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); } catch (err:any) { alert(err.message); } }} className="px-2 py-1 rounded-lg bg-green-600 text-white text-[10px] font-bold hover:bg-green-700">Confirm</button>
+                                        <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CONFIRMED'})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); } catch (err:any) { toast.error(err.message); } }} className="px-2 py-1 rounded-lg bg-green-600 text-white text-[10px] font-bold hover:bg-green-700">Confirm</button>
                                       )}
                                       {!settled && g.group_status !== 'CANCELLED' && Number(g.checked_in_count||0) === 0 && (
                                         <button onClick={async () => { const cr = await promptPayment({ title: `Cancel group "${g.name}"?`, fields: [{ name: 'reason', label: 'Reason (optional)', type: 'text', placeholder: 'e.g. guest request' }], confirmLabel: 'Cancel Group' }); if (!cr) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/status`, {method:'PATCH',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({status:'CANCELLED',reason:cr.reason?.trim()||null})}); if (!res.ok) throw new Error((await res.json())?.error||'Failed'); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { toast.error(err.message); } }} className="px-2 py-1 rounded-lg border border-red-300 text-red-600 text-[10px] font-bold hover:bg-red-50">Cancel</button>
@@ -20038,9 +20041,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                       {hasCheckedIn && (
                                         <button onClick={async () => { const sr = await promptPayment({ title: `Settle group "${g.name}"`, body: `${g.checked_in_count} room${g.checked_in_count===1?'':'s'} — choose payment method and optional discount`, fields: [{ name: 'method', label: 'Payment method', type: 'select', required: true, options: [{value:'CASH',label:'Cash'},{value:'UPI',label:'UPI'},{value:'CARD',label:'Card'},{value:'BANK_TRANSFER',label:'Bank Transfer'}], defaultValue: 'CASH' }, { name: 'discount', label: 'Group discount (₹)', type: 'number', placeholder: '0', defaultValue: '0' }], confirmLabel: 'Settle & Checkout' }); if (!sr) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/checkout`, {method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({payment_method:sr.method.toUpperCase(),discount:Math.max(0,Number(sr.discount)||0)})}); const data = await res.json(); if (!res.ok) throw new Error(data?.error||'Settle failed'); toast.success(`Settled — Invoice ${data.invoice_number}, ₹${Number(data.total_grand_total||0).toLocaleString('en-IN')}`); setGroupsList(null); fetchHotelBookings(); } catch (err:any) { toast.error(err.message); } }} className="px-2 py-1 rounded-lg bg-violet-600 text-white text-[10px] font-bold hover:bg-violet-700">Settle</button>
                                       )}
-                                      <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/invoice-pdf`,{headers:{Authorization:`Bearer ${token}`}}); if (!res.ok){const j=await res.json().catch(()=>({}));throw new Error(j?.error||'Download failed');} const blob=await res.blob(); const url=URL.createObjectURL(blob); const a=document.createElement('a');a.href=url;a.download=`GroupInvoice-${g.id}-${(g.name||'group').replace(/[^a-z0-9_-]+/gi,'-')}.pdf`;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},1000); } catch(err:any){alert(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📑 PDF</button>
-                                      <button onClick={async () => { const to = prompt(`Email invoice for "${g.name}" to:`, g.contact_email||''); if (!to||!to.trim()) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/email-invoice`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({to:to.trim()})}); const data=await res.json(); if (!res.ok) throw new Error(data?.error||'Email failed'); alert(`Invoice ${data.invoice_number} sent to ${data.sent_to}`); } catch(err:any){alert(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📧 Email</button>
-                                      <button onClick={async () => { setMasterFolioGroupId(g.id);setMasterFolioData(null);setMasterFolioLoading(true);setMasterFolioAddDesc('');setMasterFolioAddAmt('');setMasterFolioAddGst('0');setMasterFolioAddQty('1');setMasterFolioAddType('SERVICE'); try { const r=await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/master-folio`,{headers:{Authorization:`Bearer ${token}`}}); const d=await r.json(); if (!r.ok) throw new Error(d?.error||'Load failed'); setMasterFolioData(d); } catch(err:any){alert(err.message);setMasterFolioGroupId(null);} finally{setMasterFolioLoading(false);} }} className="px-2 py-1 rounded-lg border border-emerald-400 text-emerald-700 text-[10px] font-bold hover:bg-emerald-50">🏦 Master Acct</button>
+                                      <button onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/invoice-pdf`,{headers:{Authorization:`Bearer ${token}`}}); if (!res.ok){const j=await res.json().catch(()=>({}));throw new Error(j?.error||'Download failed');} const blob=await res.blob(); const url=URL.createObjectURL(blob); const a=document.createElement('a');a.href=url;a.download=`GroupInvoice-${g.id}-${(g.name||'group').replace(/[^a-z0-9_-]+/gi,'-')}.pdf`;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},1000); } catch(err:any){toast.error(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📑 PDF</button>
+                                      <button onClick={async () => { const to = prompt(`Email invoice for "${g.name}" to:`, g.contact_email||''); if (!to||!to.trim()) return; try { const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/email-invoice`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({to:to.trim()})}); const data=await res.json(); if (!res.ok) throw new Error(data?.error||'Email failed'); toast.success(`Invoice ${data.invoice_number} sent to ${data.sent_to}`); } catch(err:any){toast.error(err.message);} }} className="px-2 py-1 rounded-lg border border-violet-300 text-violet-700 text-[10px] font-bold hover:bg-violet-50">📧 Email</button>
+                                      <button onClick={async () => { setMasterFolioGroupId(g.id);setMasterFolioData(null);setMasterFolioLoading(true);setMasterFolioAddDesc('');setMasterFolioAddAmt('');setMasterFolioAddGst('0');setMasterFolioAddQty('1');setMasterFolioAddType('SERVICE'); try { const r=await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${g.id}/master-folio`,{headers:{Authorization:`Bearer ${token}`}}); const d=await r.json(); if (!r.ok) throw new Error(d?.error||'Load failed'); setMasterFolioData(d); } catch(err:any){toast.error(err.message);setMasterFolioGroupId(null);} finally{setMasterFolioLoading(false);} }} className="px-2 py-1 rounded-lg border border-emerald-400 text-emerald-700 text-[10px] font-bold hover:bg-emerald-50">🏦 Master Acct</button>
                                       <button onClick={() => loadGroupDetail(g.id)} className="px-2 py-1 rounded-lg border border-indigo-300 text-indigo-700 text-[10px] font-bold hover:bg-indigo-50">📋 Detail</button>
                                       {Number(g.booking_count) > Number(g.checked_in_count) + Number(g.checked_out_count) && !g.settled_at && (
                                         <button onClick={() => setGroupCheckInWizardTarget({groupId:g.id,groupName:g.name})} className="px-2 py-1 rounded-lg border border-green-400 text-green-700 text-[10px] font-bold hover:bg-green-50">✓ Check In Group</button>
@@ -20186,7 +20189,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                             entries: prev.entries.filter((x: any) => x.id !== e.id),
                                             folio: { ...prev.folio, subtotal: d.subtotal, gst_amount: d.gst, grand_total: d.grand_total },
                                           }));
-                                        } catch (err: any) { alert(err.message); }
+                                        } catch (err: any) { toast.error(err.message); }
                                       }}
                                       className="text-red-500 hover:text-red-700 text-[10px] font-bold px-1"
                                     >✕</button>
@@ -20268,7 +20271,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               const d2 = await r2.json();
                               if (r2.ok) setMasterFolioData(d2);
                               setMasterFolioAddDesc(''); setMasterFolioAddAmt(''); setMasterFolioAddQty('1');
-                            } catch (err: any) { alert(err.message); }
+                            } catch (err: any) { toast.error(err.message); }
                             finally { setMasterFolioSaving(false); }
                           }}
                           className={cn('w-full py-2 rounded-xl text-xs font-bold transition-colors',
@@ -20313,7 +20316,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                                   const r2 = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${masterFolioGroupId}/master-folio`, { headers: { Authorization: `Bearer ${token}` } });
                                                   const d2 = await r2.json();
                                                   if (r2.ok) setMasterFolioData(d2);
-                                                } catch (err: any) { alert(err.message); }
+                                                } catch (err: any) { toast.error(err.message); }
                                               }}
                                               className="text-[9px] font-bold text-blue-600 hover:text-blue-800 border border-blue-200 rounded px-1.5 py-0.5 hover:bg-blue-50"
                                             >→ Master</button>
@@ -20916,9 +20919,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     );
                                     const data = await res.json();
                                     if (!res.ok) throw new Error(data?.error || `Settle failed (${res.status})`);
-                                    alert(`Group settled.\nInvoice: ${data.invoice_number}\nRooms settled: ${data.settled?.length || 0}\nSkipped: ${data.skipped?.length || 0}\nTotal: ₹${Number(data.total_grand_total || 0).toLocaleString('en-IN')}${groupDiscount > 0 ? `\n(₹${groupDiscount.toFixed(2)} discount allocated across rooms)` : ''}`);
+                                    toast.success('Group settled. Invoice: ' + data.invoice_number);
                                     fetchHotelBookings();
-                                  } catch (err: any) { alert(err.message); }
+                                  } catch (err: any) { toast.error(err.message); }
                                 }}
                                 title="Settle every CHECKED_IN room in this group under one invoice"
                                 className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-[11px] font-bold hover:bg-violet-700 whitespace-nowrap"
@@ -20978,7 +20981,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     )}
                                     {/* Folio — CHECKED_IN with open folio */}
                                     {b.status === 'CHECKED_IN' && b.open_folio_id && (
-                                      <button className={menuItemCls} onClick={async () => { setOpenActionMenu(null); try { await loadFolio(b.open_folio_id); } catch (err: any) { alert(err?.message || 'Failed to load folio'); } }}>
+                                      <button className={menuItemCls} onClick={async () => { setOpenActionMenu(null); try { await loadFolio(b.open_folio_id); } catch (err: any) { toast.error(err?.message || 'Failed to load folio'); } }}>
                                         📋 Open folio
                                       </button>
                                     )}
@@ -21008,7 +21011,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                           a.href = url; a.download = `GroupInvoice-${b.group_id}-${(b.group_name || 'group').replace(/[^a-z0-9_-]+/gi, '-')}.pdf`;
                                           document.body.appendChild(a); a.click();
                                           setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-                                        } catch (err: any) { alert(err.message); }
+                                        } catch (err: any) { toast.error(err.message); }
                                       }}>
                                         📑 Group invoice PDF
                                       </button>
@@ -21023,8 +21026,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                           const res = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${b.group_id}/email-invoice`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ to: to.trim() }) });
                                           const data = await res.json();
                                           if (!res.ok) throw new Error(data?.error || `Email failed (${res.status})`);
-                                          alert(`Group invoice ${data.invoice_number} emailed to ${data.sent_to}.\nTotal: ₹${Number(data.total_amount || 0).toLocaleString('en-IN')}`);
-                                        } catch (err: any) { alert(err.message); }
+                                          toast.success(`Group invoice ${data.invoice_number} emailed to ${data.sent_to}.`);
+                                        } catch (err: any) { toast.error(err.message); }
                                       }}>
                                         📧 Email group invoice
                                       </button>
@@ -21193,7 +21196,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 const data: any = await hotelApi(url);
                 setFoActiveReport({ kind, data, loadedAt: Date.now() });
               } catch (err: any) {
-                alert('Report failed: ' + (err?.message || 'unknown error'));
+                toast.error('Report failed: ' + (err?.message || 'unknown error'));
               } finally {
                 setFoLoading(null);
               }
@@ -21225,7 +21228,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               const m = otaInventoryMatrix(foActiveReport.data);
               const esc = (s: any) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
               const w = window.open('', '_blank');
-              if (!w) { alert('Pop-up blocked — allow pop-ups for this site to print.'); return; }
+              if (!w) { toast.error('Pop-up blocked — allow pop-ups for this site to print.'); return; }
               const head = m.dates.map(d => `<th>${esc(fmtDateCol(d))}</th>`).join('');
               const body = m.rows.map(r =>
                 `<tr><td class="t">${esc(r.name)}</td><td>${r.sellable}</td>${
@@ -22531,7 +22534,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     aging payload. Owner downloads to share with accountant. */}
                 <button
                   onClick={() => {
-                    if (!receivablesAging?.partners?.length) { alert('Nothing to export yet.'); return; }
+                    if (!receivablesAging?.partners?.length) { toast.info('Nothing to export yet.'); return; }
                     const headers = ['Partner Type','Partner Code','Partner Name','Invoice Count','Current (<30d)','30-60d','60-90d','90+d','Total Owed (INR)','Oldest Due'];
                     const rows = receivablesAging.partners.map((p: any) => [
                       p.partner_type, p.partner_code, p.partner_name || '',
@@ -22677,7 +22680,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
-                    if (!outstandingReport?.rows?.length) { alert('Nothing to export yet.'); return; }
+                    if (!outstandingReport?.rows?.length) { toast.info('Nothing to export yet.'); return; }
                     // Apply current filters + sort to the CSV so what
                     // the user sees on screen is what they download.
                     const rows = applyOutstandingFiltersAndSort();
@@ -23175,7 +23178,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     onClick={() => {
                       const url = `${window.location.origin}/api/restaurant/${restaurantId}/hotel/ical/property.ics`;
                       navigator.clipboard.writeText(url);
-                      alert('Property iCal URL copied.');
+                      toast.info('Property iCal URL copied.');
                     }}
                     className="text-[10px] font-bold text-[#cc5a16] hover:underline whitespace-nowrap"
                   >Copy</button>
@@ -24345,7 +24348,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       className="flex-1 bg-[#faf7f2] border-none rounded-2xl px-3 py-2 text-sm font-mono outline-none focus:ring-2 ring-[#cc5a16]/20"
                     />
                     {propertyProfile.booking_slug && (
-                      <button type="button" onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/book/${propertyProfile.booking_slug}`); alert('Copied!'); }} className="px-3 py-2 rounded-xl bg-[#faf7f2] text-xs font-bold hover:bg-[#f0e6d6]">📋 Copy link</button>
+                      <button type="button" onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/book/${propertyProfile.booking_slug}`); toast.info('Copied!'); }} className="px-3 py-2 rounded-xl bg-[#faf7f2] text-xs font-bold hover:bg-[#f0e6d6]">📋 Copy link</button>
                     )}
                   </div>
                   <p className="text-[10px] text-[#9c8e85] mt-1">Lowercase letters, digits, dashes. 3-50 chars. Must be unique across all Atithi-Setu properties.</p>
@@ -24358,7 +24361,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <img src={propertyProfile.hero_image_url} alt="hero" className="w-32 h-20 object-cover rounded-xl shadow-sm" />
                     )}
                     <input type="file" accept="image/*"
-                      onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; try { const url = await uploadImage(f); setPropertyProfile({ ...propertyProfile, hero_image_url: url }); } catch (err: any) { alert(err?.message || 'Upload failed'); } }}
+                      onChange={async (e) => { const f = e.target.files?.[0]; if (!f) return; try { const url = await uploadImage(f); setPropertyProfile({ ...propertyProfile, hero_image_url: url }); } catch (err: any) { toast.error(err?.message || 'Upload failed'); } }}
                       className="text-xs text-[#6b5d52] file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-[#cc5a16] file:text-white file:font-bold file:cursor-pointer" />
                     {propertyProfile.hero_image_url && (
                       <button onClick={() => setPropertyProfile({ ...propertyProfile, hero_image_url: '' })} className="text-[10px] text-red-600 hover:underline">Remove</button>
@@ -24879,7 +24882,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     {propertyProfile.booking_slug && (
                       <button
                         type="button"
-                        onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/book/${propertyProfile.booking_slug}`); alert('Copied!'); }}
+                        onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/book/${propertyProfile.booking_slug}`); toast.info('Copied!'); }}
                         className="px-3 py-2 rounded-xl bg-[#faf7f2] text-xs font-bold hover:bg-[#f0e6d6]"
                       >📋 Copy link</button>
                     )}
@@ -24899,7 +24902,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       onChange={async (e) => {
                         const f = e.target.files?.[0]; if (!f) return;
                         try { const url = await uploadImage(f); setPropertyProfile({ ...propertyProfile, hero_image_url: url }); }
-                        catch (err: any) { alert(err?.message || 'Upload failed'); }
+                        catch (err: any) { toast.error(err?.message || 'Upload failed'); }
                       }}
                       className="text-xs text-[#6b5d52] file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-[#cc5a16] file:text-white file:font-bold file:cursor-pointer"
                     />
@@ -25614,7 +25617,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   onChange={async (e) => {
                     const file = e.target.files?.[0];
                     if (!file) return;
-                    if (file.size > 2 * 1024 * 1024) { alert('Logo must be under 2 MB'); return; }
+                    if (file.size > 2 * 1024 * 1024) { toast.error('Logo must be under 2 MB'); return; }
                     const fd = new FormData();
                     fd.append('logo', file);
                     try {
@@ -25626,7 +25629,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const data = await res.json();
                       if (!res.ok) throw new Error(data.error || 'Upload failed');
                       await fetchRestaurant();
-                    } catch (err: any) { alert(err.message || 'Failed'); }
+                    } catch (err: any) { toast.error(err.message || 'Failed'); }
                     e.target.value = '';  // reset so the same file can be reselected
                   }}
                 />
@@ -25649,7 +25652,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                         });
                         if (!res.ok) throw new Error('Failed');
                         await fetchRestaurant();
-                      } catch (err: any) { alert(err.message); }
+                      } catch (err: any) { toast.error(err.message); }
                     }}
                     className="ml-2 px-4 py-2 rounded-2xl border border-[#c13b3b]/30 text-[#c13b3b] text-xs font-bold hover:bg-[#fdf0f0]"
                   >
@@ -29078,7 +29081,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
               <form onSubmit={async (e) => {
                 e.preventDefault();
-                if (!d.label || !d.multiplier) { alert('Label and multiplier are required.'); return; }
+                if (!d.label || !d.multiplier) { toast.error('Label and multiplier are required.'); return; }
                 try {
                   await saveYieldRule({
                     label: d.label, multiplier: Number(d.multiplier),
@@ -29090,7 +29093,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     priority: Number(d.priority) || 0,
                   });
                   setEditingYieldRule(null);
-                } catch (err: any) { alert(err?.message || 'Failed to save'); }
+                } catch (err: any) { toast.error(err?.message || 'Failed to save'); }
               }} className="space-y-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Label *</label>
@@ -29166,7 +29169,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
               <form onSubmit={async (e) => {
                 e.preventDefault();
-                if (!d.channel) { alert('Channel name is required.'); return; }
+                if (!d.channel) { toast.error('Channel name is required.'); return; }
                 try {
                   await saveChannelCredential({
                     channel: String(d.channel).toUpperCase().trim(),
@@ -29178,7 +29181,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     webhook_signing_secret: d.webhook_signing_secret || null,
                   });
                   setEditingChannelCred(null); setChannelTestResult(null);
-                } catch (err: any) { alert(err?.message || 'Failed to save'); }
+                } catch (err: any) { toast.error(err?.message || 'Failed to save'); }
               }} className="space-y-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Channel *</label>
@@ -29286,7 +29289,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <h3 className="text-xl font-bold font-serif text-[#1a1208]">{d.id ? 'Edit travel agent' : 'Add travel agent'}</h3>
                 <button onClick={() => setEditingAgent(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
               </div>
-              <form onSubmit={(e) => { e.preventDefault(); if (!d.name) { alert('Name is required.'); return; } saveTravelAgent(d); }} className="space-y-3">
+              <form onSubmit={(e) => { e.preventDefault(); if (!d.name) { toast.error('Name is required.'); return; } saveTravelAgent(d); }} className="space-y-3">
                 <div className="grid grid-cols-2 gap-3">
                   <div className="col-span-2">
                     <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Name *</label>
@@ -29527,7 +29530,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <button onClick={() => setRecordingPaymentFor(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
               </div>
               <p className="text-xs text-[#6b5d52] mb-3">From <strong>{d.partner_name || d.partner_code}</strong> ({d.partner_type})</p>
-              <form onSubmit={(e) => { e.preventDefault(); if (!d.amount_received || Number(d.amount_received) <= 0) { alert('Amount must be greater than 0.'); return; } recordPayment(d); }} className="space-y-3">
+              <form onSubmit={(e) => { e.preventDefault(); if (!d.amount_received || Number(d.amount_received) <= 0) { toast.error('Amount must be greater than 0.'); return; } recordPayment(d); }} className="space-y-3">
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Payment date *</label>
@@ -29585,7 +29588,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 <h3 className="text-xl font-bold font-serif text-[#1a1208]">{d.id ? 'Edit Rate Plan' : 'Add Rate Plan'}</h3>
                 <button onClick={() => setEditingRatePlan(null)} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18} /></button>
               </div>
-              <form onSubmit={(e) => { e.preventDefault(); if (!d.code || !d.name) { alert('Code and name are required.'); return; } const code = String(d.code).toUpperCase().trim(); saveRatePlan({ ...d, id: d.id || code, code, name: String(d.name).trim() }); }} className="space-y-3">
+              <form onSubmit={(e) => { e.preventDefault(); if (!d.code || !d.name) { toast.error('Code and name are required.'); return; } const code = String(d.code).toUpperCase().trim(); saveRatePlan({ ...d, id: d.id || code, code, name: String(d.name).trim() }); }} className="space-y-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Code * <span className="text-[#9c8e85] font-normal">(BAR / NRF / LSTAY / MEMBER / custom)</span></label>
                   <input required disabled={!!d.id} value={d.code || ''} onChange={e => set({ code: e.target.value.toUpperCase() })}
@@ -29654,7 +29657,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
               <form onSubmit={async (e) => {
                 e.preventDefault();
-                if (!d.url || !d.scope_id) { alert('Room and URL are required.'); return; }
+                if (!d.url || !d.scope_id) { toast.error('Room and URL are required.'); return; }
                 try {
                   await saveIcalFeed({
                     scope: 'ROOM',
@@ -29665,7 +29668,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     is_enabled: d.is_enabled ? 1 : 0,
                   });
                   setEditingIcalFeed(null);
-                } catch (err: any) { alert(err?.message || 'Failed to save'); }
+                } catch (err: any) { toast.error(err?.message || 'Failed to save'); }
               }} className="space-y-3">
                 <p className="text-[11px] text-[#6b5d52] bg-[#faf7f2] rounded-xl px-3 py-2">
                   Find the iCal export URL in your OTA's calendar settings.
@@ -29750,7 +29753,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 onSubmit={async (e) => {
                   e.preventDefault();
                   if (!draft.scope_id || !draft.start_date || !draft.end_date || !draft.rate) {
-                    alert('Scope, dates and rate are required.');
+                    toast.error('Scope, dates and rate are required.');
                     return;
                   }
                   try {
@@ -29766,7 +29769,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     });
                     setEditingRateOverride(null);
                   } catch (err: any) {
-                    alert(err?.message || 'Failed to save rate plan');
+                    toast.error(err?.message || 'Failed to save rate plan');
                   }
                 }}
                 className="space-y-3"
@@ -29917,7 +29920,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     capacity: Number(editingRoomType.capacity) || 2,
                   });
                   setEditingRoomType(null);
-                } catch (err: any) { alert(err?.message || 'Failed to save'); }
+                } catch (err: any) { toast.error(err?.message || 'Failed to save'); }
               }}
               className="space-y-3"
             >
@@ -31502,7 +31505,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               <h3 className="text-xl font-bold font-serif text-[#1a1208]">{editingFaq.id ? 'Edit FAQ' : 'Add FAQ'}</h3>
               <button onClick={() => { setShowFaqModal(false); setEditingFaq(null); }} className="p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85]"><X size={18}/></button>
             </div>
-            <form onSubmit={async e => { e.preventDefault(); try { await saveFaq(editingFaq); setShowFaqModal(false); setEditingFaq(null); } catch(err: any){ alert(err.message);} }} className="space-y-4">
+            <form onSubmit={async e => { e.preventDefault(); try { await saveFaq(editingFaq); setShowFaqModal(false); setEditingFaq(null); } catch(err: any){ toast.error(err.message);} }} className="space-y-4">
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Question *</label>
                 <input required value={editingFaq.question || ''} onChange={e => setEditingFaq({...editingFaq, question: e.target.value})} placeholder="e.g. What's the WiFi password?" className="w-full bg-[#faf7f2] border-none rounded-2xl px-4 py-3"/>
@@ -31590,7 +31593,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                       });
                                       if (!r.ok) throw new Error((await r.json())?.error || 'Save failed');
                                       await loadGroupDetail(groupDetailId!);
-                                    } catch (err: any) { alert(err.message); }
+                                    } catch (err: any) { toast.error(err.message); }
                                     finally { setGroupGuestSaving(null); }
                                   }}
                                   className="text-[10px] font-bold px-2 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
@@ -31617,7 +31620,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     if (!r.ok) throw new Error((await r.json())?.error || 'Failed');
                                     await loadGroupDetail(groupDetailId!);
                                     setGroupsList(null);
-                                  } catch (err: any) { alert(err.message); }
+                                  } catch (err: any) { toast.error(err.message); }
                                 }}
                                 className="mt-2 text-[9px] font-bold text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-0.5 hover:bg-red-50"
                               >✕ Remove room</button>
@@ -31663,7 +31666,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 if (!r.ok) throw new Error((await r.json())?.error || 'Failed');
                                 setGroupTransferFrom(''); setGroupTransferTo('');
                                 await loadGroupDetail(groupDetailId!);
-                              } catch (err: any) { alert(err.message); }
+                              } catch (err: any) { toast.error(err.message); }
                               finally { setGroupTransferBusy(false); }
                             }}
                             className="w-full py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-40"
@@ -31702,7 +31705,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                               if (!r.ok) throw new Error((await r.json())?.error || 'Failed');
                               await loadGroupDetail(groupDetailId!);
                               setGroupsList(null);
-                            } catch (err: any) { alert(err.message); }
+                            } catch (err: any) { toast.error(err.message); }
                             finally { setGroupDateExtBusy(false); }
                           }}
                           className="w-full py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-40"
@@ -31747,10 +31750,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                 body: JSON.stringify({ amount: Number(groupDepositAmt), payment_method: groupDepositMethod, reference: groupDepositRef }),
                               });
                               if (!r.ok) throw new Error((await r.json())?.error || 'Failed');
-                              alert(`✓ Deposit of ₹${groupDepositAmt} recorded`);
+                              toast.success(`Deposit of ₹${groupDepositAmt} recorded`);
                               setGroupDepositAmt(''); setGroupDepositRef('');
                               setGroupsList(null);
-                            } catch (err: any) { alert(err.message); }
+                            } catch (err: any) { toast.error(err.message); }
                             finally { setGroupDepositBusy(false); }
                           }}
                           className="w-full py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-40"
@@ -31880,7 +31883,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
                       const blob = await res.blob();
                       printPdfBlob(blob);
-                    } catch (err: any) { alert(err.message); }
+                    } catch (err: any) { toast.error(err.message); }
                   }}
                   className="flex-1 min-w-[110px] px-4 py-2.5 rounded-2xl border-2 border-[#cc5a16] text-[#cc5a16] text-sm font-bold hover:bg-[#cc5a16]/5 flex items-center justify-center gap-2"
                 ><Printer size={14}/> Print</button>
@@ -31897,7 +31900,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       a.download = `${viewFolio.doc_type === 'CREDIT_NOTE' ? 'CreditNote' : 'Invoice'}-${viewFolio.id}-${safeName}.pdf`;
                       document.body.appendChild(a); a.click();
                       setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-                    } catch (err: any) { alert(err.message); }
+                    } catch (err: any) { toast.error(err.message); }
                   }}
                   className="flex-1 min-w-[110px] px-4 py-2.5 rounded-2xl bg-[#cc5a16] text-white text-sm font-bold hover:bg-[#a84612] flex items-center justify-center gap-2"
                 ><Download size={14}/> Download PDF</button>
@@ -31917,8 +31920,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       });
                       const body = await res.json();
                       if (!res.ok) throw new Error(body.error || 'Failed');
-                      alert(`✅ Invoice ${body.invoice_number} emailed to ${body.sent_to}`);
-                    } catch (err: any) { alert(err.message); }
+                      toast.success(`Invoice ${body.invoice_number} emailed to ${body.sent_to}`);
+                    } catch (err: any) { toast.error(err.message); }
                   }}
                   className="flex-1 min-w-[140px] px-4 py-2.5 rounded-2xl bg-[#1e3a5f] text-white text-sm font-bold hover:bg-[#152a47] flex items-center justify-center gap-2"
                 ><Mail size={14}/> Email Invoice</button>
@@ -32008,11 +32011,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 reference: advanceDraft.reference.trim() || null,
               }),
             });
-            alert(`✓ Advance of ₹${amtNum.toLocaleString('en-IN')} recorded for ${b.guest_name}.`);
+            toast.success(`Advance of ₹${amtNum.toLocaleString('en-IN')} recorded for ${b.guest_name}.`);
             setAdvancePayTarget(null);
             await fetchHotelBookings();
           } catch (err: any) {
-            alert(err?.message || 'Failed to record advance');
+            toast.error(err?.message || 'Failed to record advance');
           }
         };
         return (
@@ -32141,7 +32144,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   m.name.toLowerCase().trim() === newItem.name.toLowerCase().trim() &&
                   (m.category||'').toLowerCase().trim() === (newItem.category||'').toLowerCase().trim()
                 );
-                if (dup) { alert(`"${newItem.name}" in "${newItem.category}" already exists in your menu.`); return; }
+                if (dup) { toast.error(`"${newItem.name}" in "${newItem.category}" already exists in your menu.`); return; }
                 handleAddItem(e);
               }} className="space-y-4">
                 <div>
@@ -34083,6 +34086,7 @@ const HotelCommandCenter: React.FC<{
   restaurantId: string;
   token: string;
 }> = ({ restaurantId, token }) => {
+  const toast = useToast();
   const [rooms, setRooms]       = useState<any[]>([]);
   const [bookings, setBookings] = useState<any[]>([]);
   const [srs, setSrs]           = useState<any[]>([]);
@@ -34494,7 +34498,7 @@ const HotelCommandCenter: React.FC<{
             // follow-up. (Future: emit an event up via context.)
             onCheckOutClick={(_booking) => {
               setSelectedRoomId(null);
-              alert('Open the Hotel Bookings tab to complete check-out for this guest.');
+              toast.info('Open the Hotel Bookings tab to complete check-out for this guest.');
             }}
           />
         )}
@@ -34524,6 +34528,7 @@ const HotelRoomDrawer: React.FC<{
   onClose: () => void;
   onCheckOutClick?: (booking: any) => void;
 }> = ({ room, rooms, bookings, restaurantId, token, onClose, onCheckOutClick }) => {
+  const toast = useToast();
   const [folio, setFolio] = useState<any>(null);
   const [loadingFolio, setLoadingFolio] = useState(false);
 
@@ -34738,7 +34743,7 @@ const HotelRoomDrawer: React.FC<{
                         );
                         if (!res.ok) {
                           const body = await res.json().catch(() => ({}));
-                          alert(body.error || `Failed to download invoice (HTTP ${res.status})`);
+                          toast.error(body.error || `Failed to download invoice (HTTP ${res.status})`);
                           return;
                         }
                         const blob = await res.blob();
@@ -34746,7 +34751,7 @@ const HotelRoomDrawer: React.FC<{
                         window.open(url, '_blank', 'noopener,noreferrer');
                         setTimeout(() => URL.revokeObjectURL(url), 60_000);
                       } catch (err: any) {
-                        alert(err?.message || 'Failed to open invoice');
+                        toast.error(err?.message || 'Failed to open invoice');
                       }
                     }}
                     className="text-[10px] font-bold uppercase tracking-widest text-[#f4b07a] hover:text-[#f4b07a]/80"
@@ -35197,6 +35202,7 @@ const RoomAssignmentBoard: React.FC<{
   initialOpen?: boolean;
   hideHeader?: boolean;
 }> = ({ restaurantId, token, bookings, rooms, onChanged, initialOpen = false, hideHeader = false }) => {
+  const toast = useToast();
   const [open, setOpen] = useState(initialOpen);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [raSearch, setRaSearch] = useState('');
@@ -35253,9 +35259,9 @@ const RoomAssignmentBoard: React.FC<{
         body: JSON.stringify({ room_id: roomId, lock }),
       });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok) { alert(d?.error || 'Could not reassign the room.'); return; }
+      if (!res.ok) { toast.error(d?.error || 'Could not reassign the room.'); return; }
       await onChanged();
-    } catch { alert('Could not reassign the room.'); }
+    } catch { toast.error('Could not reassign the room.'); }
     finally { setBusyId(null); }
   };
 
@@ -36348,6 +36354,7 @@ const HotelInvoicesView: React.FC<{
   restaurantId: string;
   token: string;
 }> = ({ restaurantId, token }) => {
+  const toast = useToast();
   const [folios, setFolios] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<'all' | 'settled' | 'open' | 'voided'>('settled');
   const [search, setSearch] = useState('');
@@ -36393,7 +36400,7 @@ const HotelInvoicesView: React.FC<{
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        alert(body.error || `Failed to download invoice (HTTP ${res.status})`);
+        toast.error(body.error || `Failed to download invoice (HTTP ${res.status})`);
         return;
       }
       const blob = await res.blob();
@@ -36402,7 +36409,7 @@ const HotelInvoicesView: React.FC<{
       // Revoke after a delay so the new tab has time to load.
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err: any) {
-      alert(err?.message || 'Failed to download invoice');
+      toast.error(err?.message || 'Failed to download invoice');
     }
   };
 
@@ -37012,6 +37019,7 @@ const GroupCheckInWizard: React.FC<{
   onSuccess: () => void;
 }> = ({ groupId, groupName, restaurantId, token, onClose, onSuccess }) => {
   const [step, setStep] = useState<'rooms' | 'confirm' | 'done'>('rooms');
+  const toast = useToast();
   const [rooms, setRooms] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedRoom, setExpandedRoom] = useState<string | null>(null);
@@ -37074,7 +37082,7 @@ const GroupCheckInWizard: React.FC<{
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Failed to save'); }
       setExpandedRoom(null);
       await loadReadiness();
-    } catch (err: any) { alert(err.message); }
+    } catch (err: any) { toast.error(err.message); }
     finally { setSaving(null); }
   }
 
@@ -37090,7 +37098,7 @@ const GroupCheckInWizard: React.FC<{
       );
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Upload failed'); }
       await loadReadiness();
-    } catch (err: any) { alert(err.message); }
+    } catch (err: any) { toast.error(err.message); }
     finally { setUploadingFor(null); }
   }
 
@@ -37112,7 +37120,7 @@ const GroupCheckInWizard: React.FC<{
         (!room.type_id || rm.type_id === room.type_id) && rm.available
       );
       setRoomPickerList(filtered);
-    } catch (err: any) { alert(err.message); setRoomPickerFor(null); }
+    } catch (err: any) { toast.error(err.message); setRoomPickerFor(null); }
     finally { setLoadingRoomPicker(false); }
   }
 
@@ -37130,7 +37138,7 @@ const GroupCheckInWizard: React.FC<{
       if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Reassign failed'); }
       setRoomPickerFor(null);
       await loadReadiness();
-    } catch (err: any) { alert(err.message); }
+    } catch (err: any) { toast.error(err.message); }
     finally { setReassigningRoom(null); }
   }
 
@@ -37151,7 +37159,7 @@ const GroupCheckInWizard: React.FC<{
       if (!r.ok) throw new Error(d?.error || 'Check-in failed');
       setResult(d);
       setStep('done');
-    } catch (err: any) { alert(err.message); }
+    } catch (err: any) { toast.error(err.message); }
     finally { setCheckinBusy(false); }
   }
 
@@ -39102,6 +39110,7 @@ const CheckoutModal: React.FC<{
   pendingRoomOrders?: any[];
   onPendingReconciled?: () => void | Promise<void>;
 }> = ({ booking, restaurant, restaurantId, token, fetchFolioOutstanding, hotelApi, onClose, onSettled, loyaltyBanner, lateFeeBanner, pendingRoomOrders = [], onPendingReconciled }) => {
+  const toast = useToast();
   const [data, setData] = useState<any | null>(null);
   // ROBUST F&B-AT-CHECKOUT (17 Jun 2026) — the guest's restaurant bill, fetched
   // from /bookings/:id/restaurant-bill. That query matches CHARGE_TO_ROOM orders
@@ -39177,7 +39186,7 @@ const CheckoutModal: React.FC<{
       await refresh();                          // folio total / outstanding now reflect the charge
       if (onPendingReconciled) await onPendingReconciled();
     } catch (e: any) {
-      alert(e?.message || 'Failed to post the room order to the folio');
+      toast.error(e?.message || 'Failed to post the room order to the folio');
     } finally { setPendingBusyId(null); }
   };
   // Unbilled room F&B to reconcile at checkout. Source it from the robust
@@ -39241,7 +39250,7 @@ const CheckoutModal: React.FC<{
       });
       await refresh();   // re-pull folio so totals + outstanding reflect the change
     } catch (err: any) {
-      alert(err?.message || 'Failed to update GST on the folio');
+      toast.error(err?.message || 'Failed to update GST on the folio');
     } finally { setGstBusy(false); }
   };
 
@@ -39268,11 +39277,11 @@ const CheckoutModal: React.FC<{
         const msg = err?.message || 'Checkout failed';
         if (msg.includes('OUTSTANDING_BALANCE') || msg.includes('Outstanding')) {
           await refresh();
-          alert(msg);
+          toast.error(msg);
         } else {
-          alert(msg);
+          toast.error(msg);
         }
-      } catch { alert('Checkout failed'); }
+      } catch { toast.error('Checkout failed'); }
     } finally { setSubmitting(false); }
   };
 
@@ -39835,6 +39844,7 @@ function HotelHomeLaunchpad({
   onNewBooking: () => void; onNewOrder: () => void; onOpenReports: () => void;
   role: string | null;
 }) {
+  const toast = useToast();
   const [snap, setSnap] = useState<any>(null);
   const [heroUrl, setHeroUrl] = useState<string>('');
   const [bookingSlug, setBookingSlug] = useState<string>('');
@@ -39976,7 +39986,7 @@ function HotelHomeLaunchpad({
                       className="font-mono text-[10px] text-[#6b5d52] hover:underline truncate max-w-[220px]"
                       title={url}>{url.replace(/^https?:\/\//, '')}</a>
                     <button type="button" title="Copy link"
-                      onClick={() => { navigator.clipboard?.writeText(url).then(() => alert('Copied!')); }}
+                      onClick={() => { navigator.clipboard?.writeText(url).then(() => toast.info('Copied!')); }}
                       className="ml-0.5 text-[#9c8e85] hover:text-[#3d3128] transition-colors shrink-0">
                       <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
                     </button>
@@ -40277,6 +40287,7 @@ function BookingTrendReport({ restaurantId, token }: { restaurantId: string; tok
 }
 
 function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const today = new Date().toISOString().slice(0, 10);
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
@@ -40311,21 +40322,21 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
 
   const save = async () => {
     const amt = Number(form.amount);
-    if (!(amt > 0)) { alert('Enter a valid amount'); return; }
+    if (!(amt > 0)) { toast.error('Enter a valid amount'); return; }
     setSaving(true);
     try {
       await api('/petty-cash', { method: 'POST', body: JSON.stringify({ ...form, amount: amt }) });
       setForm(f => ({ ...f, amount: '', category: '', notes: '' }));
       setShowForm(false);
       load();
-    } catch (e: any) { alert('Failed: ' + (e?.message || 'error')); }
+    } catch (e: any) { toast.error('Failed: ' + (e?.message || 'error')); }
     finally { setSaving(false); }
   };
 
   const del = async (id: string) => {
     if (!await showConfirm({ title: 'Delete this entry?', danger: true })) return;
     try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); load(); }
-    catch (e: any) { alert('Failed: ' + (e?.message || '')); }
+    catch (e: any) { toast.error('Failed: ' + (e?.message || '')); }
   };
 
   const modColors: Record<string, string> = {
@@ -40468,6 +40479,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
 }
 
 function ManagementReports({ restaurantId, token, audience, onOpenTab }: { restaurantId: string; token: string; audience: 'FRONT_DESK' | 'OWNER'; onOpenTab: (tab: string) => void }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const today = new Date().toISOString().slice(0, 10);
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
@@ -40524,7 +40536,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
       const r = ALL_REPORTS.find(x => x.key === key)!;
       setData(await api(r.path()));
       if (key === 'expense-journal') await loadExpenseExtras();
-    } catch (e: any) { alert('Report failed: ' + (e?.message || 'error')); }
+    } catch (e: any) { toast.error('Report failed: ' + (e?.message || 'error')); }
     finally { setLoading(false); }
   };
   // Re-run the active report when the date range / grain changes.
@@ -40535,19 +40547,19 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
 
   const addPettyCash = async () => {
     const amt = Number(pcForm.amount);
-    if (!(amt > 0)) { alert('Enter an amount greater than 0'); return; }
+    if (!(amt > 0)) { toast.error('Enter an amount greater than 0'); return; }
     setPcSaving(true);
     try {
       await api('/petty-cash', { method: 'POST', body: JSON.stringify({ ...pcForm, amount: amt }) });
       setPcForm({ direction: pcForm.direction, amount: '', category: '', notes: '', entry_date: pcForm.entry_date, module: pcForm.module });
       load('expense-journal');
-    } catch (e: any) { alert('Save failed: ' + (e?.message || 'error')); }
+    } catch (e: any) { toast.error('Save failed: ' + (e?.message || 'error')); }
     finally { setPcSaving(false); }
   };
   const deletePettyCash = async (id: string) => {
     if (!await showConfirm({ title: 'Delete this entry?', danger: true })) return;
     try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); load('expense-journal'); }
-    catch (e: any) { alert('Delete failed: ' + (e?.message || 'error')); }
+    catch (e: any) { toast.error('Delete failed: ' + (e?.message || 'error')); }
   };
 
   const exportCsv = () => {
@@ -40890,6 +40902,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
 //    ledger, partner statements, auto-generate invoices — intentionally stay in Channel Manager, so the
 //    interactive hooks (openPartnerStatement / autoGenerateInvoices) are dropped here.
 function Ota360Report({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const toast = useToast();
   const [ota360Data, setOta360Data] = useState<any>(null);
   const [ota360Days, setOta360Days] = useState<number>(30);
   const [ota360Loading, setOta360Loading] = useState(false);
@@ -41223,7 +41236,7 @@ function Ota360Report({ restaurantId, token }: { restaurantId: string; token: st
                 {/* CSV export — pure client-side from the already-fetched aging payload. */}
                 <button
                   onClick={() => {
-                    if (!receivablesAging?.partners?.length) { alert('Nothing to export yet.'); return; }
+                    if (!receivablesAging?.partners?.length) { toast.info('Nothing to export yet.'); return; }
                     const headers = ['Partner Type','Partner Code','Partner Name','Invoice Count','Current (<30d)','30-60d','60-90d','90+d','Total Owed (INR)','Oldest Due'];
                     const rows = receivablesAging.partners.map((p: any) => [
                       p.partner_type, p.partner_code, p.partner_name || '',
@@ -44051,6 +44064,7 @@ function RoomGuestInterface({ restaurantId, roomId }: { restaurantId: string; ro
 function LiveOrderEditModal({ order, restaurantId, token, onClose, onSaved }: {
   order: any; restaurantId: string; token: string; onClose: () => void; onSaved: () => void;
 }) {
+  const toast = useToast();
   const initial = (Array.isArray(order.items) ? order.items : []).map((it: any) => ({
     _orig: it,
     name: it.name || it.menuName || 'Item',
@@ -44066,7 +44080,7 @@ function LiveOrderEditModal({ order, restaurantId, token, onClose, onSaved }: {
   const newTotal = r2(kept.reduce((s, l) => s + l.price * l.quantity, 0));
   const origTotal = Number(order.totalAmount ?? order.total_amount ?? 0);
   const save = async () => {
-    if (kept.length === 0) { alert('Keep at least one item, or use ✕ Cancel to void the whole order.'); return; }
+    if (kept.length === 0) { toast.error('Keep at least one item, or use ✕ Cancel to void the whole order.'); return; }
     setSaving(true);
     try {
       const payload = kept.map(l => ({ ...(l._orig || {}), name: l.name, price: l.price, quantity: l.quantity, size: l.size }));
@@ -44076,10 +44090,10 @@ function LiveOrderEditModal({ order, restaurantId, token, onClose, onSaved }: {
         body: JSON.stringify({ items: payload }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) { alert(data?.error || 'Could not save the changes.'); return; }
+      if (!res.ok) { toast.error(data?.error || 'Could not save the changes.'); return; }
       onSaved();
       onClose();
-    } catch { alert('Could not save the changes. Please try again.'); }
+    } catch { toast.error('Could not save the changes. Please try again.'); }
     finally { setSaving(false); }
   };
   return (
@@ -44211,6 +44225,7 @@ function PayPage({ payload }: { payload: string }) {
 }
 
 function CustomerInterface({ restaurantId }: { restaurantId: string }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [cart, setCart] = useState<OrderItem[]>([]);
@@ -44472,12 +44487,12 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
         body: JSON.stringify({}),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) { alert(data?.error || 'Could not cancel this order.'); return; }
+      if (!res.ok) { toast.error(data?.error || 'Could not cancel this order.'); return; }
       // Optimistically drop it from the running bill + list. The backend now
       // also excludes cancelled orders from the session view on next refresh.
       setSession(prev => prev ? { ...prev, orders: (prev.orders || []).filter((o: any) => o.id !== orderId) } : prev);
     } catch {
-      alert('Could not cancel this order. Please try again or ask our staff.');
+      toast.error('Could not cancel this order. Please try again or ask our staff.');
     } finally {
       setCancellingOrderId(null);
     }
@@ -45504,7 +45519,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 
                 <div className="pt-4 border-t border-[#cc5a16]/10">
                   <button
-                    onClick={() => { setShowUPIModal(false); alert("Payment confirmation sent to restaurant. Please wait for verification."); }}
+                    onClick={() => { setShowUPIModal(false); toast.info("Payment confirmation sent to restaurant. Please wait for verification."); }}
                     className="w-full border-2 border-[#cc5a16] text-[#1a1208] py-4 rounded-2xl font-bold hover:bg-[#cc5a16] hover:text-white transition-all"
                   >
                     I have paid
@@ -46705,6 +46720,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 }
 
 function SuperAdminDashboard({ token }: { token: string }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const [restaurants, setRestaurants] = useState<any[]>([]);
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
@@ -47318,7 +47334,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
         fetchInternalUsers();
       } else {
         const data = await res.json();
-        alert(data.error);
+        toast.error(data.error);
       }
     } catch (err) {
       console.error(err);
@@ -47372,12 +47388,12 @@ function SuperAdminDashboard({ token }: { token: string }) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        alert(`Failed: ${data.error || res.status}`);
+        toast.error(`Failed: ${data.error || res.status}`);
         return;
       }
       fetchRestaurants();
     } catch (err) {
-      alert('Network error. Please try again.');
+      toast.error('Network error. Please try again.');
     }
   };
 
@@ -47398,19 +47414,19 @@ function SuperAdminDashboard({ token }: { token: string }) {
         if (contentType && contentType.indexOf("application/json") !== -1) {
           const data = await res.json();
           if (res.ok) {
-            alert("Password reset successfully");
+            toast.success("Password reset successfully");
           } else {
-            alert("Error: " + (data.error || "Failed to reset password"));
+            toast.error("Error: " + (data.error || "Failed to reset password"));
           }
         } else {
           if (res.ok) {
-            alert("Password reset successfully");
+            toast.success("Password reset successfully");
           } else {
-            alert("Error: Failed to reset password");
+            toast.error("Error: Failed to reset password");
           }
         }
       } catch (err) {
-        alert("Network error. Please try again.");
+        toast.error("Network error. Please try again.");
       }
     }
   };
@@ -47430,15 +47446,10 @@ function SuperAdminDashboard({ token }: { token: string }) {
       fetchRestaurants();
       // If a new owner account was created (restaurant had no linked user), show credentials
       if (data.isNew) {
-        alert(
-          `✅ Owner account created successfully!\n\n` +
-          `Login ID:  ${data.loginId}\n` +
-          `Temp Password:  ${data.tempPassword}\n\n` +
-          `⚠️ Please share these credentials with the owner and ask them to change the password after first login.`
-        );
+        toast.success('Owner account created. Login: ' + data.loginId + ' / Temp pwd: ' + data.tempPassword + '. Share with owner.');
       }
     } catch (err: any) {
-      alert(`❌ ${err.message}`);
+      toast.error(err.message);
     }
   };
 
@@ -47455,13 +47466,13 @@ function SuperAdminDashboard({ token }: { token: string }) {
           body: JSON.stringify({ userId, newPassword: newPass })
         });
         if (res.ok) {
-          alert("Password reset successfully");
+          toast.success("Password reset successfully");
         } else {
           const data = await res.json();
-          alert("Error: " + (data.error || "Failed to reset password"));
+          toast.error("Error: " + (data.error || "Failed to reset password"));
         }
       } catch (err) {
-        alert("Network error. Please try again.");
+        toast.error("Network error. Please try again.");
       }
     }
   };
@@ -47782,9 +47793,9 @@ function SuperAdminDashboard({ token }: { token: string }) {
                           headers: { 'Authorization': `Bearer ${token}` }
                         });
                         const data = await res.json();
-                        if (res.ok) alert(`✅ ${data.message}`);
-                        else alert(`❌ ${data.error}`);
-                      } catch { alert('Network error. Please try again.'); }
+                        if (res.ok) toast.success(data.message);
+                        else toast.error(data.error);
+                      } catch { toast.error('Network error. Please try again.'); }
                     }}
                     className="w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest text-blue-700 border border-blue-200 hover:bg-blue-50 transition-all flex items-center justify-center gap-2"
                   >
@@ -47800,22 +47811,22 @@ function SuperAdminDashboard({ token }: { token: string }) {
                         });
                         const data = await res.json();
                         if (!res.ok) {
-                          alert(`❌ ${data.error || 'Failed'}`);
+                          toast.error(data.error || 'Failed');
                           return;
                         }
                         if (data.skipped) {
-                          alert('⚠ Cloudflare auto-provisioning is not configured. See deploy/CLOUDFLARE-AUTO-SETUP.md to enable it.');
+                          toast.info('Cloudflare auto-provisioning is not configured. See deploy/CLOUDFLARE-AUTO-SETUP.md to enable it.');
                           return;
                         }
                         if (data.error) {
-                          alert(`❌ ${data.error}`);
+                          toast.error(data.error);
                           return;
                         }
                         const msg = data.already_exists
-                          ? `✅ DNS already existed for ${data.hostname}. Tunnel rule ${data.tunnel_config_updated ? 'also added' : 'already present'}.`
-                          : `✅ DNS CNAME created for ${data.hostname}. Tunnel rule ${data.tunnel_config_updated ? 'added' : 'skipped (manually managed)'}.`;
-                        alert(msg);
-                      } catch { alert('Network error. Please try again.'); }
+                          ? `DNS already existed for ${data.hostname}. Tunnel rule ${data.tunnel_config_updated ? 'also added' : 'already present'}.`
+                          : `DNS CNAME created for ${data.hostname}. Tunnel rule ${data.tunnel_config_updated ? 'added' : 'skipped (manually managed)'}.`;
+                        toast.success(msg);
+                      } catch { toast.error('Network error. Please try again.'); }
                     }}
                     className="w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest text-[#cc5a16] border border-[#cc5a16]/30 hover:bg-[#cc5a16]/5 transition-all flex items-center justify-center gap-2"
                   >
@@ -47875,11 +47886,11 @@ function SuperAdminDashboard({ token }: { token: string }) {
                                     body: JSON.stringify(body),
                                   });
                                   const data = await res.json();
-                                  if (!res.ok) { alert(`❌ ${data.error || 'Failed'}`); return; }
-                                  alert(`✅ ${data.message || 'Updated'}`);
+                                  if (!res.ok) { toast.error(data.error || 'Failed'); return; }
+                                  toast.success(data.message || 'Updated');
                                   window.location.reload();
                                 } catch {
-                                  alert('Network error. Please try again.');
+                                  toast.error('Network error. Please try again.');
                                 }
                               }}
                               className={cn(
@@ -47918,10 +47929,10 @@ function SuperAdminDashboard({ token }: { token: string }) {
                                 body: JSON.stringify({ enabled: !spaOn }),
                               });
                               const data = await res.json();
-                              if (!res.ok) { alert(`❌ ${data.error || 'Failed'}`); return; }
-                              alert(`✅ ${data.message || 'Updated'}`);
+                              if (!res.ok) { toast.error(data.error || 'Failed'); return; }
+                              toast.success(data.message || 'Updated');
                               window.location.reload();
-                            } catch { alert('Network error. Please try again.'); }
+                            } catch { toast.error('Network error. Please try again.'); }
                           }}
                           className={cn(
                             "w-full py-2 rounded-xl text-[11px] font-bold transition-all border",
@@ -49257,6 +49268,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
 }
 
 function SalesRepresentativeDashboard({ token }: { token: string }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const [restaurants, setRestaurants] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -49315,23 +49327,12 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
       });
       const data = await res.json();
       if (!res.ok) {
-        alert('Seed failed: ' + (data.error || `HTTP ${res.status}`));
+        toast.error('Seed failed: ' + (data.error || `HTTP ${res.status}`));
         return;
       }
-      const s = data.seeded || {};
-      alert(
-        `✓ BCG demo tariff seeded for ${data.tenant?.name || id}.\n\n` +
-        `Loaded:\n` +
-        `  • ${s.room_types || 0} room types\n` +
-        `  • ${s.rooms || 0} rooms\n` +
-        `  • ${s.season_periods || 0} season periods\n` +
-        `  • ${s.room_tariffs || 0} room-tariff cells\n` +
-        `  • ${s.extra_person_charges || 0} extra-person charges\n\n` +
-        `Tariff model: ${data.tariff_model}.\n\n` +
-        `Visit Settings → Tariff Configuration on the tenant to verify.`
-      );
+      toast.success('BCG demo tariff seeded for ' + (data.tenant?.name || id));
     } catch (err: any) {
-      alert('Seed failed: ' + (err?.message || 'Network error'));
+      toast.error('Seed failed: ' + (err?.message || 'Network error'));
     } finally {
       setSeedingTariffFor(null);
     }
@@ -49445,6 +49446,7 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
 }
 
 function CTODashboard({ token }: { token: string }) {
+  const toast = useToast();
   const [report, setReport] = useState<any[]>([]);
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -49486,9 +49488,9 @@ function CTODashboard({ token }: { token: string }) {
         },
         body: JSON.stringify(prices)
       });
-      if (res.ok) alert("Prices updated successfully");
+      if (res.ok) toast.success("Prices updated successfully");
     } catch (err) {
-      alert("Failed to update prices");
+      toast.error("Failed to update prices");
     } finally {
       setIsSavingPrices(false);
     }
@@ -49505,11 +49507,11 @@ function CTODashboard({ token }: { token: string }) {
         body: JSON.stringify({ type })
       });
       if (res.ok) {
-        alert("Subscription renewed successfully");
+        toast.success("Subscription renewed successfully");
         if (selectedSalesRep) fetchSalesRepRestaurants(selectedSalesRep);
       }
     } catch (err) {
-      alert("Failed to renew subscription");
+      toast.error("Failed to renew subscription");
     }
   };
 
@@ -50658,6 +50660,7 @@ function POCreateModal({ token, restaurantId, suppliers, ingredients, onClose, o
 
 // ─── PO view (read-only with line items) ──────────────────────────────────
 function POViewModal({ po, token, onClose }: { po: any; token: string; onClose: () => void }) {
+  const toast = useToast();
   const [emailingTo, setEmailingTo] = useState<string | null>(null);  // null = closed; email modal flow
   const [emailRecipient, setEmailRecipient] = useState(po.supplier_email || '');
   const [emailMessage, setEmailMessage] = useState('');
@@ -50669,7 +50672,7 @@ function POViewModal({ po, token, onClose }: { po: any; token: string; onClose: 
     const r = await fetch(`/api/inventory/purchase-orders/${po.id}/pdf`, {
       headers: { 'Authorization': `Bearer ${token}` },
     });
-    if (!r.ok) { alert('Failed to download PDF'); return; }
+    if (!r.ok) { toast.error('Failed to download PDF'); return; }
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -51277,6 +51280,7 @@ function PhysicalCountModal({ token, count, onClose, onUpdated, onCompleted }: {
   token: string; count: any; onClose: () => void;
   onUpdated: (refreshed: any) => void; onCompleted: () => void;
 }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const isCompleted = count.status === 'COMPLETED';
   const [items, setItems] = useState<any[]>(count.items || []);
@@ -51821,6 +51825,7 @@ function InventoryOnboardingWizard({ token, restaurantId, onClose, onComplete }:
 function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   restaurantId: string; token: string; table: { id: string; name: string }; onClose: () => void;
 }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const [loading, setLoading]     = useState(true);
   const [session, setSession]     = useState<any>(null);
@@ -53060,6 +53065,7 @@ function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token:
 }
 
 function CustomerReservationView({ restaurantId, onBack }: { restaurantId: string; onBack: () => void }) {
+  const toast = useToast();
   const [step, setStep] = useState<'PICK' | 'DETAILS' | 'SUCCESS'>('PICK');
   const todayStr = new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState(todayStr);
@@ -53106,9 +53112,9 @@ function CustomerReservationView({ restaurantId, onBack }: { restaurantId: strin
         setBookingRef(data.id ? String(data.id).slice(-6).toUpperCase() : 'CONFIRMED');
         setStep('SUCCESS');
       } else {
-        alert(data.error || 'Booking failed. Please try again.');
+        toast.error(data.error || 'Booking failed. Please try again.');
       }
-    } catch { alert('Booking failed. Please try again.'); }
+    } catch { toast.error('Booking failed. Please try again.'); }
     finally { setBooking(false); }
   };
 
@@ -53328,6 +53334,7 @@ function CustomerReservationView({ restaurantId, onBack }: { restaurantId: strin
 //   3. ANALYTICS — KPI cards + per-tier charts
 // All data per-tenant (server-side getTenantDb scoping).
 function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   type SubTab = 'TIERS' | 'CUSTOMERS' | 'PROMO_CODES' | 'ANALYTICS';
   const [subTab, setSubTab] = useState<SubTab>('TIERS');
@@ -55406,6 +55413,7 @@ function PartnerPortal({ restaurantId, token, restaurantName }: { restaurantId: 
 // PartnerPortal rate sheet; commission is resolved live from the linked
 // channel/agent unless an override is set here.
 function PartnerLoginsManager({ restaurantId, token }: { restaurantId: string; token: string; }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const [accounts, setAccounts] = useState<any[]>([]);
   const [channels, setChannels] = useState<any[]>([]);
@@ -55755,6 +55763,7 @@ function _formatTimeRange(start: string, end: string): string {
 // Visible to ALL property types (HOTEL, RESTAURANT, BOTH).
 // Sub-tabs: Suppliers | Purchase Orders | Invoices | Payments | Ledger | Reports
 function ProcurementView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   type ProcTab = 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'INVOICES' | 'PAYMENTS' | 'LEDGER' | 'REPORTS';
   const [subTab, setSubTab] = useState<ProcTab>('SUPPLIERS');
@@ -55945,24 +55954,24 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
       else await api('/procurement/suppliers', { method: 'POST', body: JSON.stringify(body) });
       setShowSupForm(false);
       await Promise.all([loadSupplierList(), loadSuppliers()]);
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
     finally { setSupSaving(false); }
   };
   const deactivateSupplier = async (id: string, name: string) => {
     if (!await showConfirm({ title: `Deactivate "${name}"?`, body: "They won't appear in dropdowns but all history is preserved." })) return;
     try { await api(`/procurement/suppliers/${id}`, { method: 'DELETE' }); await loadSupplierList(); }
-    catch (e: any) { alert(e.message); }
+    catch (e: any) { toast.error(e.message); }
   };
 
   // ── PO actions ────────────────────────────────────────────────────────────
   const markPOSent = async (poId: string) => {
     try { await api(`/inventory/purchase-orders/${poId}/send`, { method: 'POST' }); await loadPOs(); }
-    catch (e: any) { alert(e.message); }
+    catch (e: any) { toast.error(e.message); }
   };
   const cancelPO = async (poId: string) => {
     if (!await showConfirm({ title: 'Cancel this purchase order?' })) return;
     try { await api(`/inventory/purchase-orders/${poId}/cancel`, { method: 'POST' }); await loadPOs(); }
-    catch (e: any) { alert(e.message); }
+    catch (e: any) { toast.error(e.message); }
   };
   const invoiceFromPO = (po: any) => {
     setSubTab('INVOICES');
@@ -56001,14 +56010,14 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
       else await api('/procurement/supplier-invoices', { method: 'POST', body: JSON.stringify(body) });
       setShowInvModal(false);
       await loadInvoices();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
     finally { setInvSaving(false); }
   };
 
   const deleteInvoice = async (id: string) => {
     if (!await showConfirm({ title: 'Delete this invoice?', body: 'This cannot be undone.', danger: true })) return;
     try { await api(`/procurement/supplier-invoices/${id}`, { method: 'DELETE' }); await loadInvoices(); }
-    catch (e: any) { alert(e.message); }
+    catch (e: any) { toast.error(e.message); }
   };
 
   const openPayModal = (inv: any) => {
@@ -56024,7 +56033,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
       setPayTarget(null);
       await loadInvoices();
       if (subTab === 'PAYMENTS') await loadPayments();
-    } catch (e: any) { alert(e.message); }
+    } catch (e: any) { toast.error(e.message); }
     finally { setPaySaving(false); }
   };
 
@@ -56053,7 +56062,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   const deletePayment = async (id: string) => {
     if (!await showConfirm({ title: 'Reverse this payment?', body: 'The invoice will return to Partial/Unpaid.' })) return;
     try { await api(`/procurement/payments/${id}`, { method: 'DELETE' }); await loadPayments(); }
-    catch (e: any) { alert(e.message); }
+    catch (e: any) { toast.error(e.message); }
   };
 
   const statusColor: Record<string, string> = {
@@ -56986,7 +56995,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
                                     method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
                                   }).then(r => r.json());
                                   setSupForm(f => ({ ...f, [urlKey]: result.url }));
-                                } catch { alert('Upload failed'); }
+                                } catch { toast.error('Upload failed'); }
                               }} />
                           </label>
                         </div>
@@ -57278,6 +57287,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
 // fully wired; subsequent commits will fill in Salary Structure /
 // Components / Payroll / Expenses / Offer Letters / Reports.
 function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const [subTab, setSubTab] = useState<'EMPLOYEES' | 'SALARY' | 'PAYROLL' | 'EXPENSES' | 'OFFERS' | 'SETTINGS'>('EMPLOYEES');
   const [currencyWarning, setCurrencyWarning] = useState<string | null>(null);
@@ -57338,6 +57348,7 @@ function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: st
 
 // ─── Salary Structure Editor ───────────────────────────────────────
 function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const toast = useToast();
   const [employees, setEmployees] = useState<any[]>([]);
   const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null);
   const [structure, setStructure] = useState<any>(null);
@@ -57368,7 +57379,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
 
   async function saveStructure() {
     if (!selectedStaffId) return;
-    if (!tolerance) { alert('Components sum must match gross monthly (±₹2)'); return; }
+    if (!tolerance) { toast.error('Components sum must match gross monthly (±₹2)'); return; }
     const res = await fetch(`/api/restaurant/${restaurantId}/hr/salary-structures`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ staff_id: selectedStaffId, ...form }),
@@ -57382,7 +57393,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
         .then(r => r.json()).then(d2 => setHistory(d2.history || []));
     } else {
       const err = await res.json().catch(() => ({}));
-      alert(err.error || 'Save failed');
+      toast.error(err.error || 'Save failed');
     }
   }
 
@@ -57505,6 +57516,7 @@ function SalaryStructureEditor({ restaurantId, token, restaurant }: { restaurant
 
 // ─── Payroll Runs ──────────────────────────────────────────────────
 function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const toast = useToast();
   const [runs, setRuns] = useState<any[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [payslips, setPayslips] = useState<any[]>([]);
@@ -57569,7 +57581,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        alert(body.error || `Failed to download payslip (HTTP ${res.status})`);
+        toast.error(body.error || `Failed to download payslip (HTTP ${res.status})`);
         return;
       }
       const blob = await res.blob();
@@ -57577,7 +57589,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
       window.open(url, '_blank', 'noopener,noreferrer');
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err: any) {
-      alert(err?.message || 'Failed to download payslip');
+      toast.error(err?.message || 'Failed to download payslip');
     }
   }
 
@@ -57588,7 +57600,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        alert(body.error || `Failed to download EPF ECR (HTTP ${res.status})`);
+        toast.error(body.error || `Failed to download EPF ECR (HTTP ${res.status})`);
         return;
       }
       const blob = await res.blob();
@@ -57601,7 +57613,7 @@ function PayrollRunsView({ restaurantId, token, restaurant }: { restaurantId: st
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err: any) {
-      alert(err?.message || 'Failed to download EPF ECR');
+      toast.error(err?.message || 'Failed to download EPF ECR');
     }
   }
 
@@ -57821,6 +57833,7 @@ function ExpenseClaimsInbox({ restaurantId, token, restaurant }: { restaurantId:
 
 // ─── Offer Letters ─────────────────────────────────────────────────
 function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const toast = useToast();
   const [offers, setOffers] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState<any>({
@@ -57836,7 +57849,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
   useEffect(() => { refresh(); }, [refresh]);
   async function createOffer() {
     if (!form.candidate_name || !form.designation || !form.joining_date || form.ctc <= 0) {
-      alert('Name, designation, joining date and CTC are required'); return;
+      toast.error('Name, designation, joining date and CTC are required'); return;
     }
     const res = await fetch(`/api/restaurant/${restaurantId}/hr/offer-letters`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -57847,7 +57860,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
       setForm({ candidate_name: '', candidate_email: '', candidate_phone: '', designation: '', department: '', ctc: 0, joining_date: '', expires_at: '' });
       refresh();
     } else {
-      const e = await res.json(); alert(e.error || 'Save failed');
+      const e = await res.json(); toast.error(e.error || 'Save failed');
     }
   }
   async function sendOffer(id: string) {
@@ -57863,7 +57876,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        alert(body.error || `Failed to download offer letter (HTTP ${res.status})`);
+        toast.error(body.error || `Failed to download offer letter (HTTP ${res.status})`);
         return;
       }
       const blob = await res.blob();
@@ -57871,7 +57884,7 @@ function OfferLettersView({ restaurantId, token, restaurant }: { restaurantId: s
       window.open(url, '_blank', 'noopener,noreferrer');
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err: any) {
-      alert(err?.message || 'Failed to download offer letter');
+      toast.error(err?.message || 'Failed to download offer letter');
     }
   }
   return (
@@ -58005,6 +58018,7 @@ function StatutoryConfigEditor({ restaurantId, token }: { restaurantId: string; 
 // List + filter + search + Detail modal with full HR fields.
 // Hits the new GET/PUT /api/restaurant/:id/hr/employees endpoints.
 function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const toast = useToast();
   const [data, setData] = useState<{ employees: any[]; count: number; summary: Record<string, number> } | null>(null);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'RESIGNED' | 'TERMINATED' | 'ON_HOLD'>('ACTIVE');
@@ -58025,7 +58039,7 @@ function EmployeeDirectory({ restaurantId, token, restaurant }: { restaurantId: 
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setData(await res.json());
-    } catch (err: any) { alert(err?.message || 'Failed to load employees'); }
+    } catch (err: any) { toast.error(err?.message || 'Failed to load employees'); }
     finally { setLoading(false); }
   };
   useEffect(() => { fetch(); /* eslint-disable-line */ }, [restaurantId, statusFilter]);
@@ -58165,6 +58179,7 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
   restaurantId: string; token: string; staffId: string; restaurant: any;
   onClose: () => void; onSaved: () => void;
 }) {
+  const toast = useToast();
   const [emp, setEmp] = useState<any | null>(null);
   const [structures, setStructures] = useState<any[]>([]);
   const [payslips, setPayslips] = useState<any[]>([]);
@@ -58182,7 +58197,7 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
         setEmp(j.employee);
         setStructures(j.salary_structures || []);
         setPayslips(j.recent_payslips || []);
-      } catch (err: any) { alert(err?.message || 'Failed to load'); onClose(); }
+      } catch (err: any) { toast.error(err?.message || 'Failed to load'); onClose(); }
     })();
     // eslint-disable-next-line
   }, [staffId]);
@@ -58211,7 +58226,7 @@ function EmployeeDetailModal({ restaurantId, token, staffId, restaurant, onClose
         throw new Error(j.error || `HTTP ${res.status}`);
       }
       onSaved();
-    } catch (err: any) { alert(err?.message || 'Save failed'); }
+    } catch (err: any) { toast.error(err?.message || 'Save failed'); }
     finally { setSaving(false); }
   };
 
@@ -59002,6 +59017,7 @@ function TimesheetPayrollPanel({ restaurantId, token, start, end, onApprovalChan
   restaurantId: string; token: string; start: string; end: string;
   onApprovalChange?: () => void;
 }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const [payroll, setPayroll] = useState<any | null>(null);
   const [pendingRows, setPendingRows] = useState<any[]>([]);
@@ -59716,6 +59732,7 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
 }
 
 function BookingsManagement({ restaurantId, token }: { restaurantId: string, token: string }) {
+  const toast = useToast();
   const showConfirm = useConfirm();
   const [bookings, setBookings] = useState<any[]>([]);
   const [configs, setConfigs] = useState<any[]>([]);
@@ -59860,7 +59877,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
 
   const createBooking = async () => {
     if (!nbForm.customer_name || !nbForm.customer_phone || !nbForm.booking_date || !nbForm.booking_time || !nbForm.guests) {
-      alert('Please fill in all required fields.');
+      toast.error('Please fill in all required fields.');
       return;
     }
     setSavingBooking(true);
@@ -59874,7 +59891,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
         setNbForm({ customer_name: '', customer_phone: '', customer_email: '', booking_date: new Date().toISOString().split('T')[0], booking_time: '19:00', guests: 2, notes: '' });
         setTimeout(() => fetchBookings(), 100);
       } else {
-        alert(data.error || 'Failed to create booking');
+        toast.error(data.error || 'Failed to create booking');
       }
     } finally { setSavingBooking(false); }
   };
@@ -60688,6 +60705,7 @@ const NOTIFICATION_CHANNELS = [
 ];
 
 function NotificationSettings({ restaurantId, token }: { restaurantId: string, token: string }) {
+  const toast = useToast();
   const [settings, setSettings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -60743,7 +60761,7 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
         },
         body: JSON.stringify({ settings })
       });
-      if (res.ok) alert("Notification settings saved!");
+      if (res.ok) toast.success("Notification settings saved!");
     } catch (err) {
       console.error(err);
     } finally {
@@ -60755,14 +60773,14 @@ function NotificationSettings({ restaurantId, token }: { restaurantId: string, t
     try {
       const res = await fetch('/api/owner/test-notification', {
         method: 'POST',
-        headers: { 
+        headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ eventName })
       });
-      if (res.ok) alert("Test notification triggered!");
-      else alert("Failed to trigger test notification. Check console.");
+      if (res.ok) toast.success("Test notification triggered!");
+      else toast.error("Failed to trigger test notification. Check console.");
     } catch (err) {
       console.error(err);
     }
@@ -61050,6 +61068,7 @@ function TelegramSetupGuide({ token }: { token: string }) {
    nationality, email, special requests T-3 days before arrival.
    Soft phone-last-4 verification before submit. No auth.            */
 function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingId: string }) {
+  const toast = useToast();
   const [info, setInfo] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -61094,7 +61113,7 @@ function OnlineCheckInPage({ tenantId, bookingId }: { tenantId: string; bookingI
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setSubmitted(true);
     } catch (err: any) {
-      alert(err?.message || 'Failed to submit');
+      toast.error(err?.message || 'Failed to submit');
     } finally { setSubmitting(false); }
   };
 
@@ -61378,6 +61397,7 @@ function PublicRestaurantPage({ tenantId }: { tenantId: string }) {
      3. Confirm — guest details form + booking creation
    Plus a success state with confirmation reference.                 */
 function PublicBookingPage({ tenantId }: { tenantId: string }) {
+  const toast = useToast();
   const [step, setStep] = useState<'LANDING' | 'SEARCH' | 'GUEST' | 'DONE'>('LANDING');
   const [hotelInfo, setHotelInfo] = useState<any>(null);
   const [error, setError] = useState('');
@@ -61584,7 +61604,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
       setSearchResults(Array.isArray(data?.categories) && data.categories.length > 0
         ? data.categories
         : (Array.isArray(data?.rooms) ? data.rooms : []));
-    } catch (err: any) { alert(err?.message || 'Search failed'); }
+    } catch (err: any) { toast.error(err?.message || 'Search failed'); }
     finally { setSearching(false); }
   };
 
@@ -61630,7 +61650,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setConfirmation(data);
       setStep('DONE');
-    } catch (err: any) { alert(err?.message || 'Booking failed'); }
+    } catch (err: any) { toast.error(err?.message || 'Booking failed'); }
     finally { setSubmitting(false); }
   };
 
@@ -61767,7 +61787,7 @@ function PublicBookingPage({ tenantId }: { tenantId: string }) {
     if (navigator.share) {
       try { await navigator.share({ title, text, url }); return; } catch { /* fall through */ }
     }
-    try { await navigator.clipboard?.writeText(url); alert('Link copied to clipboard!'); }
+    try { await navigator.clipboard?.writeText(url); toast.info('Link copied to clipboard!'); }
     catch { window.prompt('Copy this link:', url); }
   };
 
