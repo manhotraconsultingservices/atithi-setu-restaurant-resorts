@@ -2366,6 +2366,7 @@ export default function App() {
         )}
         {role === 'CHEF' && <ChefDashboard restaurantId={restaurantId!} token={token!} />}
         {(role === 'WAITER' || role === 'CASHIER') && <WaiterDashboard restaurantId={restaurantId!} token={token!} />}
+        {role === 'THERAPIST' && <TherapistDashboard restaurantId={restaurantId!} token={token!} />}
         {['FRONT_DESK','HOUSEKEEPING','MAINTENANCE','CONCIERGE'].includes(role || '') && (
           <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={role!} />
         )}
@@ -10269,6 +10270,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     { id: 'CHEF',         label: 'Chef',         emoji: '👨‍🍳', scope: 'RESTAURANT', chipBg: 'bg-orange-200', chipText: 'text-orange-800', cardBg: 'bg-orange-50' },
     { id: 'WAITER',       label: 'Waiter',       emoji: '🧑‍🍽️', scope: 'RESTAURANT', chipBg: 'bg-blue-200',   chipText: 'text-blue-800',   cardBg: 'bg-blue-50' },
     { id: 'CASHIER',      label: 'Cashier',      emoji: '🧾',   scope: 'RESTAURANT', chipBg: 'bg-green-200',  chipText: 'text-green-800',  cardBg: 'bg-green-50' },
+    { id: 'THERAPIST',    label: 'Therapist',    emoji: '💆',   scope: 'BOTH',       chipBg: 'bg-violet-200', chipText: 'text-violet-800', cardBg: 'bg-violet-50' },
     { id: 'MANAGER',      label: 'Manager',      emoji: '🧑‍💼', scope: 'BOTH',       chipBg: 'bg-purple-200', chipText: 'text-purple-800', cardBg: 'bg-purple-50' },
     { id: 'FRONT_DESK',   label: 'Front Desk',   emoji: '🛎️',  scope: 'HOTEL',      chipBg: 'bg-amber-200',  chipText: 'text-amber-800',  cardBg: 'bg-amber-50' },
     { id: 'HOUSEKEEPING', label: 'Housekeeping', emoji: '🛏️',  scope: 'HOTEL',      chipBg: 'bg-teal-200',   chipText: 'text-teal-800',   cardBg: 'bg-teal-50' },
@@ -53203,6 +53205,116 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
 
 // Keep alias for backward compat with call sites
 const TableBillModal = PostpaidInvoiceModal;
+
+// ─── THERAPIST DASHBOARD ─────────────────────────────────────────────────────
+const SPA_APPT_STATUSES = ['PENDING','CONFIRMED','CHECKED_IN','IN_PROGRESS','COMPLETED','CANCELLED','NO_SHOW'] as const;
+type SpaApptStatus = typeof SPA_APPT_STATUSES[number];
+const STATUS_COLORS: Record<SpaApptStatus, string> = {
+  PENDING:    'bg-yellow-100 text-yellow-800',
+  CONFIRMED:  'bg-blue-100 text-blue-800',
+  CHECKED_IN: 'bg-indigo-100 text-indigo-800',
+  IN_PROGRESS:'bg-purple-100 text-purple-800',
+  COMPLETED:  'bg-green-100 text-green-800',
+  CANCELLED:  'bg-red-100 text-red-800',
+  NO_SHOW:    'bg-gray-100 text-gray-700',
+};
+const NEXT_ACTIONS: Partial<Record<SpaApptStatus, { label: string; next: string; cls: string }>> = {
+  PENDING:    { label: 'Confirm',   next: 'confirm',   cls: 'bg-blue-600 text-white' },
+  CONFIRMED:  { label: 'Check-In',  next: 'check-in',  cls: 'bg-indigo-600 text-white' },
+  CHECKED_IN: { label: 'Complete',  next: 'complete',  cls: 'bg-green-600 text-white' },
+};
+
+function TherapistDashboard({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const [date, setDate] = React.useState(todayStr);
+  const [data, setData] = React.useState<{ therapist_id: string | null; appointments: any[] } | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [busy, setBusy] = React.useState<Record<string, boolean>>({});
+
+  const load = React.useCallback(async (d: string) => {
+    setLoading(true);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/spa/my-appointments?from=${d}&to=${d}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (r.ok) setData(await r.json());
+    } finally { setLoading(false); }
+  }, [restaurantId, token]);
+
+  React.useEffect(() => { load(date); }, [date, load]);
+
+  const transition = async (aid: string, action: string) => {
+    setBusy(b => ({ ...b, [aid]: true }));
+    try {
+      await fetch(`/api/restaurant/${restaurantId}/spa/appointments/${aid}/${action}`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      });
+      await load(date);
+    } finally { setBusy(b => ({ ...b, [aid]: false })); }
+  };
+
+  const appts = data?.appointments ?? [];
+  const linked = data?.therapist_id != null;
+
+  return (
+    <div className="max-w-2xl mx-auto space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold text-gray-900">My Schedule</h2>
+        <input
+          type="date" value={date} onChange={e => setDate(e.target.value)}
+          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none"
+        />
+      </div>
+      {!linked && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+          Your account is not yet linked to a therapist profile. Ask the manager to set your Staff ID in the Therapist settings.
+          Showing all appointments for selected date.
+        </div>
+      )}
+      {loading && <div className="text-center py-8 text-gray-400">Loading...</div>}
+      {!loading && appts.length === 0 && (
+        <div className="text-center py-16 text-gray-400">
+          <div className="text-4xl mb-3">💆</div>
+          <p className="font-medium">No appointments for {date}</p>
+        </div>
+      )}
+      {!loading && appts.map((a: any) => {
+        const status = a.status as SpaApptStatus;
+        const action = NEXT_ACTIONS[status];
+        const time = a.start_at ? new Date(a.start_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '—';
+        const endTime = a.end_at ? new Date(a.end_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '';
+        return (
+          <div key={a.id} className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 flex items-start gap-4">
+            <div className="text-center min-w-[52px]">
+              <div className="text-sm font-bold text-gray-900">{time}</div>
+              {endTime && <div className="text-xs text-gray-400">{endTime}</div>}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-semibold text-gray-900 truncate">{a.client_name || 'Guest'}</span>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[status] ?? 'bg-gray-100 text-gray-600'}`}>
+                  {status.replace('_', ' ')}
+                </span>
+              </div>
+              <div className="text-sm text-gray-600 mt-0.5">{a.service_name_full || a.service_name}</div>
+              {a.resource_name && <div className="text-xs text-gray-400">{a.resource_name}</div>}
+              {a.notes && <div className="text-xs text-gray-500 italic mt-1">{a.notes}</div>}
+            </div>
+            {action && (
+              <button
+                onClick={() => transition(a.id, action.next)}
+                disabled={busy[a.id]}
+                className={`shrink-0 px-3 py-1.5 rounded-lg text-sm font-medium disabled:opacity-50 ${action.cls}`}
+              >
+                {busy[a.id] ? '...' : action.label}
+              </button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function WaiterDashboard({ restaurantId, token }: { restaurantId: string, token: string }) {
   const [activeTab, setActiveTab] = useState<'DASHBOARD' | 'ATTENDANCE'>('DASHBOARD');

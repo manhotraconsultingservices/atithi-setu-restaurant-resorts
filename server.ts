@@ -4720,7 +4720,7 @@ const restaurantAdmin = requireRole(RESTAURANT_ADMIN_ROLES);
 // Hotel front-desk / concierge can book spa appointments for hotel guests;
 // restaurant cashiers handle spa checkout. Tab-level permissions (SPA_*) do
 // the fine-grained access control on top.
-const SPA_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'WAITER', 'CHEF'];
+const SPA_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'WAITER', 'CHEF', 'THERAPIST'];
 const spaStaff = requireRole(SPA_OPERATIONAL_ROLES);
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -21585,6 +21585,37 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch appointments" }); }
   });
 
+  // Returns appointments for the authenticated therapist (matched via staff_id).
+  // Falls back to today's full schedule if no therapist record is linked.
+  app.get("/api/restaurant/:id/spa/my-appointments", authenticate, spaStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const userId = req.user?.id;
+      let therapistId: string | null = null;
+      if (userId) {
+        const thr: any = await db.get("SELECT id FROM spa_therapists WHERE staff_id = ? AND is_active = 1", [userId]);
+        if (thr) therapistId = thr.id;
+      }
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+      const clauses = [`a.start_at >= ? AND a.start_at < date(?, '+1 day')`];
+      const params: any[] = [from, to];
+      if (therapistId) { clauses.push("a.therapist_id = ?"); params.push(therapistId); }
+      const rows = await db.query(
+        `SELECT a.*, s.name AS service_name_full, t.display_name AS therapist_name, r.name AS resource_name, c.phone AS client_phone
+           FROM spa_appointments a
+           LEFT JOIN spa_services s ON s.id = a.service_id
+           LEFT JOIN spa_therapists t ON t.id = a.therapist_id
+           LEFT JOIN spa_resources r ON r.id = a.resource_id
+           LEFT JOIN spa_clients c ON c.id = a.client_id
+          WHERE ${clauses.join(' AND ')}
+          ORDER BY a.start_at`, params);
+      res.json({ therapist_id: therapistId, appointments: rows });
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch my appointments" }); }
+  });
+
   app.get("/api/restaurant/:id/spa/appointments/:aid", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -31770,7 +31801,7 @@ ${data.tenant.name}`;
   // the guest has departed (e.g. damaged Aadhaar replaced). New uploads
   // on a CHECKED_IN or CHECKED_OUT booking start LOCKED — once a
   // document is associated with a non-pending booking, it's permanent.
-  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/documents", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/bookings/:bookingId/documents", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -33277,7 +33308,7 @@ ${data.tenant.name}`;
   });
 
   // ─── FOLIOS — list + view + settle (Phase 3) ─────────────────────────────
-  app.get("/api/restaurant/:id/hotel/folios", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/folios", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -33398,7 +33429,7 @@ ${data.tenant.name}`;
   // any folio, so without reconciliation it is silently missed at checkout
   // — a revenue leak. These two endpoints power the front desk's "Unbilled
   // room orders" surface: list them, and one-click post each onto a folio.
-  app.get("/api/restaurant/:id/hotel/orders/pending-folio", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/orders/pending-folio", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -33760,7 +33791,7 @@ ${data.tenant.name}`;
   //   total_refunded, outstanding, is_fully_paid } — the master record
   //   for the checkout modal's "Outstanding" section.
 
-  app.get("/api/restaurant/:id/hotel/folios/:folioId/outstanding", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/folios/:folioId/outstanding", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -33785,7 +33816,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/folios/:folioId/payments", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/folios/:folioId/payments", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -33881,7 +33912,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.get("/api/restaurant/:id/hotel/folios/:folioId", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/folios/:folioId", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -34263,7 +34294,7 @@ ${data.tenant.name}`;
   // generateInvoicePdf renderer as single-folio invoices by building
   // a virtual aggregated folio: entries from each child are prefixed
   // with the room name so the line items remain legible.
-  app.get("/api/restaurant/:id/hotel/booking-groups/:groupId/invoice-pdf", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/booking-groups/:groupId/invoice-pdf", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
     const checkRes = await ensureHotelEnabled(req.params.id);
     if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
     try {
@@ -34790,7 +34821,7 @@ ${data.tenant.name}`;
 
   // ─── COMPLIANCE (Phase 3) ────────────────────────────────────────────────
   // GET /hotel/compliance/foreign-guests — list bookings with foreign nationals
-  app.get("/api/restaurant/:id/hotel/compliance/foreign-guests", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/compliance/foreign-guests", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -38181,6 +38212,33 @@ ${data.tenant.name}`;
         INSERT INTO users (id, login_id, name, email, phone, password, restaurant_id, role)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `, [userId, loginId, name, email, phone, hashedPassword, restaurantId, 'OWNER']);
+
+      // Seed sensible default tab-permission levels for each staff role.
+      // Without seeds, perms===null → fail-open (any tab accessible).
+      // These defaults give each role access to their core workflow only;
+      // the owner can expand/restrict further via Settings → Staff Access.
+      // Level: 0=None, 1=View, 2=Edit, 3=Full
+      try {
+        const defaultRolePerms: Record<string, Record<string, number>> = {
+          WAITER:       { QR: 2, LOYALTY: 1, ROSTER: 1 },
+          CHEF:         { MENU: 2, INVENTORY: 2, QR: 1 },
+          CASHIER:      { QR: 2, INVOICES: 2, LOYALTY: 1 },
+          FRONT_DESK:   { HOTEL_BOOKINGS: 2, SERVICE_REQUESTS: 2, FOLIOS: 2, ROOMS: 1, SERVICES: 1 },
+          HOUSEKEEPING: { SERVICE_REQUESTS: 2, ROOMS: 1 },
+          MAINTENANCE:  { SERVICE_REQUESTS: 2, ROOMS: 1 },
+          CONCIERGE:    { HOTEL_BOOKINGS: 2, SERVICE_REQUESTS: 2, ROOMS: 1, SERVICES: 1 },
+          THERAPIST:    { SPA_APPOINTMENTS: 2, SPA_CATALOG: 1, SPA_CLIENTS: 1 },
+        };
+        for (const [role, perms] of Object.entries(defaultRolePerms)) {
+          await centralDb.run(
+            `INSERT OR IGNORE INTO restaurant_role_permissions (restaurant_id, role, allowed_tabs, tab_permissions)
+             VALUES (?, ?, '[]', ?)`,
+            [restaurantId, role, JSON.stringify(perms)]
+          );
+        }
+      } catch (seedErr) {
+        console.error('[register] default permission seed failed (non-fatal):', seedErr);
+      }
 
       // Auto-provision Cloudflare DNS + Tunnel Public Hostname for the tenant
       // subdomain. Best-effort: if CF env vars aren't set or the API is down,

@@ -1,6 +1,6 @@
 export type UserRole =
   | 'SUPER_ADMIN' | 'OWNER' | 'CHEF' | 'WAITER' | 'CUSTOMER'
-  | 'SALES_REP'   | 'CTO'   | 'MANAGER' | 'CASHIER'
+  | 'SALES_REP'   | 'CTO'   | 'MANAGER' | 'CASHIER' | 'THERAPIST'
   // Hospitality module roles (Phase 1+):
   | 'HOUSEKEEPING' | 'FRONT_DESK' | 'CONCIERGE' | 'MAINTENANCE'
   // B2B partner portal roles — read-only commission-bumped rate sheet:
