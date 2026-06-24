@@ -2365,7 +2365,7 @@ export default function App() {
           />
         )}
         {role === 'CHEF' && <ChefDashboard restaurantId={restaurantId!} token={token!} />}
-        {role === 'WAITER' && <WaiterDashboard restaurantId={restaurantId!} token={token!} />}
+        {(role === 'WAITER' || role === 'CASHIER') && <WaiterDashboard restaurantId={restaurantId!} token={token!} />}
         {['FRONT_DESK','HOUSEKEEPING','MAINTENANCE','CONCIERGE'].includes(role || '') && (
           <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={role!} />
         )}
@@ -10268,6 +10268,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   }> = [
     { id: 'CHEF',         label: 'Chef',         emoji: '👨‍🍳', scope: 'RESTAURANT', chipBg: 'bg-orange-200', chipText: 'text-orange-800', cardBg: 'bg-orange-50' },
     { id: 'WAITER',       label: 'Waiter',       emoji: '🧑‍🍽️', scope: 'RESTAURANT', chipBg: 'bg-blue-200',   chipText: 'text-blue-800',   cardBg: 'bg-blue-50' },
+    { id: 'CASHIER',      label: 'Cashier',      emoji: '🧾',   scope: 'RESTAURANT', chipBg: 'bg-green-200',  chipText: 'text-green-800',  cardBg: 'bg-green-50' },
     { id: 'MANAGER',      label: 'Manager',      emoji: '🧑‍💼', scope: 'BOTH',       chipBg: 'bg-purple-200', chipText: 'text-purple-800', cardBg: 'bg-purple-50' },
     { id: 'FRONT_DESK',   label: 'Front Desk',   emoji: '🛎️',  scope: 'HOTEL',      chipBg: 'bg-amber-200',  chipText: 'text-amber-800',  cardBg: 'bg-amber-50' },
     { id: 'HOUSEKEEPING', label: 'Housekeeping', emoji: '🛏️',  scope: 'HOTEL',      chipBg: 'bg-teal-200',   chipText: 'text-teal-800',   cardBg: 'bg-teal-50' },

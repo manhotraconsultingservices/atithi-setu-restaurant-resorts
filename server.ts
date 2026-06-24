@@ -4690,6 +4690,9 @@ function requireRole(allowedRoles: string[]) {
 // or document state. Owners and managers can configure granular UI access
 // separately; this is the server-side defense-in-depth layer.
 const hotelStaff = requireRole(HOTEL_OPERATIONAL_ROLES);
+// HOUSEKEEPING and MAINTENANCE can update service-request status (their
+// primary workflow) but not financial operations (confirm-bill / waive-bill).
+const serviceRequestStaff = requireRole([...HOTEL_OPERATIONAL_ROLES, 'HOUSEKEEPING', 'MAINTENANCE']);
 
 // ─────────────────────────────────────────────────────────────────────────
 // RBAC-2 — Restaurant-side server enforcement (mirror hotel)
@@ -4712,6 +4715,13 @@ const RESTAURANT_ADMIN_ROLES       = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'];
 
 const restaurantStaff = requireRole(RESTAURANT_OPERATIONAL_ROLES);
 const restaurantAdmin = requireRole(RESTAURANT_ADMIN_ROLES);
+
+// Spa mutations: open to all operational roles from both modules.
+// Hotel front-desk / concierge can book spa appointments for hotel guests;
+// restaurant cashiers handle spa checkout. Tab-level permissions (SPA_*) do
+// the fine-grained access control on top.
+const SPA_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'WAITER', 'CHEF'];
+const spaStaff = requireRole(SPA_OPERATIONAL_ROLES);
 
 // ─────────────────────────────────────────────────────────────────────────
 // RBAC-4 — Permission-aware tab guard (consults restaurant_role_permissions)
@@ -4833,8 +4843,9 @@ function requireTabAction(tabId: string, action: 'READ' | 'CREATE' | 'UPDATE' | 
         required_tab: tabId,
         required_action: action,
       });
-    } catch {
-      next(); // fail-open
+    } catch (err) {
+      console.error('[requireTabAction] permission lookup error — denying access:', err);
+      return res.status(503).json({ error: 'Permission check temporarily unavailable. Try again shortly.' });
     }
   };
 }
@@ -21185,7 +21196,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch services" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/services", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/services", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21207,7 +21218,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create service" }); }
   });
 
-  app.patch("/api/restaurant/:id/spa/services/:sid", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/spa/services/:sid", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21229,7 +21240,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update service" }); }
   });
 
-  app.delete("/api/restaurant/:id/spa/services/:sid", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/spa/services/:sid", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21250,7 +21261,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch add-ons" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/services/:sid/addons", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/services/:sid/addons", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21281,7 +21292,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch consumables" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/services/:sid/consumables", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/services/:sid/consumables", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21297,7 +21308,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to add consumable" }); }
   });
 
-  app.delete("/api/restaurant/:id/spa/consumables/:cid", authenticate, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/spa/consumables/:cid", authenticate, spaStaff, requireTabAccess('SPA_CATALOG'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21317,7 +21328,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch resources" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/resources", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/resources", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21333,7 +21344,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create resource" }); }
   });
 
-  app.patch("/api/restaurant/:id/spa/resources/:rid", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/spa/resources/:rid", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21359,7 +21370,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch blocks" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/resource-blocks", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/resource-blocks", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21375,7 +21386,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create block" }); }
   });
 
-  app.delete("/api/restaurant/:id/spa/resource-blocks/:bid", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/spa/resource-blocks/:bid", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21395,7 +21406,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch therapists" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/therapists", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/therapists", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21411,7 +21422,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create therapist" }); }
   });
 
-  app.patch("/api/restaurant/:id/spa/therapists/:tid", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/spa/therapists/:tid", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21438,7 +21449,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch skills" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21455,7 +21466,7 @@ ${data.tenant.name}`;
   });
 
   // PUT is the idiomatic "replace entire skill set" verb — alias to the POST handler
-  app.put("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/spa/therapists/:tid/services", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21480,7 +21491,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch schedules" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/therapists/:tid/schedules", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/therapists/:tid/schedules", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21496,7 +21507,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to create schedule" }); }
   });
 
-  app.delete("/api/restaurant/:id/spa/schedules/:schedId", authenticate, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
+  app.delete("/api/restaurant/:id/spa/schedules/:schedId", authenticate, spaStaff, requireTabAccess('SPA_RESOURCES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21592,7 +21603,7 @@ ${data.tenant.name}`;
   });
 
   // Book — dual-resource conflict guard (therapist + cabin) → 409 on overlap.
-  app.post("/api/restaurant/:id/spa/appointments", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21666,7 +21677,7 @@ ${data.tenant.name}`;
   });
 
   // Reschedule — re-runs the dual-resource guard for the new window/resources.
-  app.put("/api/restaurant/:id/spa/appointments/:aid", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/spa/appointments/:aid", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21708,15 +21719,15 @@ ${data.tenant.name}`;
     return db.get("SELECT * FROM spa_appointments WHERE id = ?", [appt.id]);
   };
 
-  app.post("/api/restaurant/:id/spa/appointments/:aid/confirm", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/confirm", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     try { const row = await spaSetStatus(req, res, 'CONFIRMED'); if (row) res.json(row); }
     catch (err: any) { res.status(500).json({ error: "Failed to confirm" }); }
   });
-  app.post("/api/restaurant/:id/spa/appointments/:aid/check-in", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/check-in", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     try { const row = await spaSetStatus(req, res, 'CHECKED_IN'); if (row) res.json(row); }
     catch (err: any) { res.status(500).json({ error: "Failed to check in" }); }
   });
-  app.post("/api/restaurant/:id/spa/appointments/:aid/cancel", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/cancel", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     try {
       const check = await ensureSpaEnabled(req.params.id);
       if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -21726,7 +21737,7 @@ ${data.tenant.name}`;
       res.json(await db.get("SELECT * FROM spa_appointments WHERE id = ?", [req.params.aid]));
     } catch (err: any) { res.status(500).json({ error: "Failed to cancel" }); }
   });
-  app.post("/api/restaurant/:id/spa/appointments/:aid/no-show", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/no-show", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     try {
       const check = await ensureSpaEnabled(req.params.id);
       if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -21737,7 +21748,7 @@ ${data.tenant.name}`;
   });
 
   // Complete — deducts service consumables from inventory (stock_movements).
-  app.post("/api/restaurant/:id/spa/appointments/:aid/complete", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/complete", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21771,7 +21782,7 @@ ${data.tenant.name}`;
   // Builds a SPA folio (reusing the hotel folio ledger), posts the service line
   // (or a package redemption), tip, applies a membership discount, and assigns
   // a SPA-<year>-NNNNN invoice number. Payment is a separate step (/payments).
-  app.post("/api/restaurant/:id/spa/appointments/:aid/checkout", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/appointments/:aid/checkout", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21895,7 +21906,7 @@ ${data.tenant.name}`;
   });
 
   // Record a payment on a spa folio (FINAL by default). Closes folio when paid.
-  app.post("/api/restaurant/:id/spa/folios/:fid/payments", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/folios/:fid/payments", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -21923,7 +21934,7 @@ ${data.tenant.name}`;
   });
 
   // Void a spa folio payment (reopens the folio)
-  app.post("/api/restaurant/:id/spa/folios/:fid/payments/:pid/void", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/folios/:fid/payments/:pid/void", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -22041,7 +22052,7 @@ ${data.tenant.name}`;
     catch (err: any) { res.status(500).json({ error: "Failed to fetch packages" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/packages", authenticate, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/packages", authenticate, spaStaff, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -22057,7 +22068,7 @@ ${data.tenant.name}`;
   });
 
   // Purchase a package for a client → client package + paid folio/invoice.
-  app.post("/api/restaurant/:id/spa/clients/:cid/packages", authenticate, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/clients/:cid/packages", authenticate, spaStaff, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -22091,7 +22102,7 @@ ${data.tenant.name}`;
     catch (err: any) { res.status(500).json({ error: "Failed to fetch membership plans" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/memberships", authenticate, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/memberships", authenticate, spaStaff, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -22107,7 +22118,7 @@ ${data.tenant.name}`;
   });
 
   // Subscribe a client → client membership + paid folio/invoice (first month).
-  app.post("/api/restaurant/:id/spa/clients/:cid/memberships", authenticate, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/clients/:cid/memberships", authenticate, spaStaff, requireTabAccess('SPA_PACKAGES'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -22133,7 +22144,7 @@ ${data.tenant.name}`;
   });
 
   // ─── RETAIL SALE (sell a SPA_RETAIL product, deduct stock, invoice) ──────────
-  app.post("/api/restaurant/:id/spa/retail-sale", authenticate, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/retail-sale", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -22179,7 +22190,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch clients" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/clients", authenticate, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/clients", authenticate, spaStaff, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -22211,7 +22222,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch client" }); }
   });
 
-  app.patch("/api/restaurant/:id/spa/clients/:cid", authenticate, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/spa/clients/:cid", authenticate, spaStaff, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -22236,7 +22247,7 @@ ${data.tenant.name}`;
     catch (err: any) { res.status(500).json({ error: "Failed to fetch forms" }); }
   });
 
-  app.post("/api/restaurant/:id/spa/clients/:cid/forms", authenticate, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
+  app.post("/api/restaurant/:id/spa/clients/:cid/forms", authenticate, spaStaff, requireTabAccess('SPA_CLIENTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -22346,7 +22357,7 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to load spa profile" }); }
   });
 
-  app.put("/api/restaurant/:id/spa/profile", authenticate, async (req: AuthRequest, res: Response) => {
+  app.put("/api/restaurant/:id/spa/profile", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
     const check = await ensureSpaEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -24089,7 +24100,7 @@ ${data.tenant.name}`;
     }
   });
 
-  app.patch("/api/restaurant/:id/hotel/service-requests/:requestId/status", authenticate, hotelStaff, requireTabAccess('SERVICE_REQUESTS'), async (req: AuthRequest, res: Response) => {
+  app.patch("/api/restaurant/:id/hotel/service-requests/:requestId/status", authenticate, serviceRequestStaff, requireTabAccess('SERVICE_REQUESTS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
@@ -28052,7 +28063,7 @@ ${data.tenant.name}`;
   // env vars). Read-only — operators rotate IPs by updating env +
   // restarting the server, since OTA IP ranges change rarely and
   // burying them in a DB editor invites misconfiguration.
-  app.get("/api/restaurant/:id/hotel/channel-security-config", authenticate, async (req: AuthRequest, res: Response) => {
+  app.get("/api/restaurant/:id/hotel/channel-security-config", authenticate, requireRole(['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER']), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     const channels: Record<string, { cidrs: string[]; enforcing: boolean }> = {};
