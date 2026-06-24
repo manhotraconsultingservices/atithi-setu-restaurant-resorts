@@ -8376,7 +8376,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Phase 2 & 3 state
   const [hotelBookings, setHotelBookings] = useState<any[]>([]);
   const [bookingStats, setBookingStats] = useState<{arr:number;inh:number;dep:number;upc:number;his:number}>({arr:0,inh:0,dep:0,upc:0,his:0});
-  const [bookingViewTab, setBookingViewTab] = useState<'ARR'|'INH'|'DEP'|'UPC'|'HIS'>('INH');
+  const [bookingViewTab, setBookingViewTab] = useState<'ALL'|'ARR'|'INH'|'DEP'|'UPC'|'HIS'>('ALL');
   const [bookingSubTab, setBookingSubTab] = useState<'RESERVATIONS'|'GROUPS'|'ROOM_ASSIGN'>('RESERVATIONS');
   const [colWidths, setColWidths] = useState<Record<string,number>>({});
   const colWidthsRef = useRef<Record<string,number>>({});
@@ -8412,6 +8412,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     let rows = hotelBookings;
     // Tab pre-filter (primary — applied before search/source)
     switch (bookingViewTab) {
+      case 'ALL': break;
       case 'ARR':
         rows = rows.filter((b: any) =>
           (b.status === 'BOOKED' || b.status === 'CHECKED_IN') &&
@@ -20377,65 +20378,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               in Departures with a "Check In" action that takes them
               through the normal check-in flow. CHECKED_IN day-use guests
               continue to show with a "Check Out" action. */}
-          {/* Journey-stage stat strip — clicking a tile switches the tab and fetches the right data */}
-          <div className="grid grid-cols-4 border border-[#cc5a16]/10 rounded-3xl overflow-hidden mb-4">
-            {([
-              { tab: 'ARR' as const, label: 'Arrivals today',  count: bookingStats.arr, color: '#0f766e', dot: '#0f766e' },
-              { tab: 'INH' as const, label: 'In-house',        count: bookingStats.inh, color: '#cc5a16', dot: '#cc5a16' },
-              { tab: 'DEP' as const, label: 'Departures today',count: bookingStats.dep, color: '#b8860b', dot: '#b8860b' },
-              { tab: 'UPC' as const, label: 'Upcoming',        count: bookingStats.upc, color: '#534ab7', dot: '#534ab7' },
-            ] as { tab: 'ARR'|'INH'|'DEP'|'UPC'; label: string; count: number; color: string; dot: string }[]).map((tile, i) => (
-              <button
-                key={tile.tab}
-                type="button"
-                onClick={() => switchBookingTab(tile.tab)}
-                className={cn(
-                  "flex flex-col items-start px-5 py-4 transition-colors text-left",
-                  i < 3 ? "border-r border-[#cc5a16]/10" : "",
-                  bookingViewTab === tile.tab
-                    ? "bg-[#faf7f2]"
-                    : "bg-white hover:bg-[#faf7f2]/60"
-                )}
-              >
-                <span className="text-2xl font-semibold leading-tight" style={{ color: tile.color }}>{tile.count}</span>
-                <span className="text-[11px] font-bold uppercase tracking-widest text-[#9c8e85] mt-1 flex items-center gap-1">
-                  <span className="inline-block w-2 h-2 rounded-full" style={{ background: tile.dot }}></span>
-                  {tile.label}
-                </span>
-                {bookingViewTab === tile.tab && (
-                  <span className="mt-1 w-5 h-0.5 rounded-full" style={{ background: tile.color }}></span>
-                )}
-              </button>
-            ))}
-          </div>
-
-          {/* Journey-stage tabs */}
-          <div className="flex items-center gap-0 border border-[#cc5a16]/10 rounded-2xl overflow-hidden mb-4 bg-white">
-            {([
-              { tab: 'ARR' as const, label: 'Arrivals',  count: bookingStats.arr, pill: 'bg-emerald-100 text-emerald-700' },
-              { tab: 'INH' as const, label: 'In-house',  count: bookingStats.inh, pill: 'bg-amber-100 text-amber-800' },
-              { tab: 'DEP' as const, label: 'Departures',count: bookingStats.dep, pill: 'bg-yellow-100 text-yellow-800' },
-              { tab: 'UPC' as const, label: 'Upcoming',  count: bookingStats.upc, pill: 'bg-violet-100 text-violet-700' },
-              { tab: 'HIS' as const, label: 'History',   count: bookingStats.his, pill: 'bg-stone-100 text-stone-600' },
-            ] as { tab: 'ARR'|'INH'|'DEP'|'UPC'|'HIS'; label: string; count: number; pill: string }[]).map((t, i) => (
-              <button
-                key={t.tab}
-                type="button"
-                onClick={() => switchBookingTab(t.tab)}
-                className={cn(
-                  "flex items-center gap-2 px-5 py-2.5 text-[12px] font-bold uppercase tracking-widest transition-colors whitespace-nowrap border-r border-[#cc5a16]/10 last:border-r-0",
-                  bookingViewTab === t.tab
-                    ? "bg-[#cc5a16] text-white"
-                    : "text-[#6b5d52] hover:bg-[#faf7f2]"
-                )}
-              >
-                {t.label}
-                <span className={cn("px-1.5 py-0.5 rounded-full text-[10px] font-bold",
-                  bookingViewTab === t.tab ? "bg-white/25 text-white" : t.pill
-                )}>{t.count}</span>
-              </button>
-            ))}
-          </div>
 
           {/* REQ 5 — Booking-history search bar */}
           <div className="bg-white rounded-[32px] border border-[#cc5a16]/10 p-4 sm:p-5 mb-4 shadow-sm">
@@ -20501,9 +20443,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                 className="sm:col-span-1 bg-[#cc5a16] text-white rounded-2xl px-4 py-2.5 text-xs font-bold uppercase tracking-widest hover:bg-[#a84612]"
               >Search</button>
             </form>
-            <p className="text-[10px] text-[#9c8e85] mt-2 italic">
-              Tip — phone <code>9876543210</code>, name <code>Sharma</code>, or invoice number all work. Past check-out records are searchable. Best matches appear first.
-            </p>
 
             {/* FIX-1 — quick-filter chips. Date filter uses OVERLAP semantics
                 now, so "Today" finds every booking active today (including
