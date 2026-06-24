@@ -1705,6 +1705,7 @@ async function _initTenantDb(schema: string): Promise<DbInterface> {
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS pan_doc_url TEXT").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS msme_doc_url TEXT").catch(() => {});
   await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS gst_doc_url TEXT").catch(() => {});
+  await db.exec("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP").catch(() => {});
 
   // ───────────────────────────────────────────────────────────────────────
   // Multi-platform delivery integration (Swiggy / Zomato / Dunzo / Magicpin
