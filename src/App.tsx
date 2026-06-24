@@ -2677,6 +2677,7 @@ function BrandDashboardModal({ token, onClose }: { token: string; onClose: () =>
 // BrandAnnouncementsAdmin (Phase B2) — owner UI to create/edit brand
 // announcements that broadcast to every location's dashboard.
 function BrandAnnouncementsAdmin({ token }: { token: string }) {
+  const showConfirm = useConfirm();
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState(false);
@@ -2712,7 +2713,7 @@ function BrandAnnouncementsAdmin({ token }: { token: string }) {
   };
 
   const remove = async (id: string) => {
-    if (!window.confirm('Delete this announcement?')) return;
+    if (!await showConfirm({ title: 'Delete this announcement?', danger: true })) return;
     await fetch(`/api/brand/announcements/${id}`,
       { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     load();
@@ -2806,6 +2807,7 @@ function BrandAnnouncementsAdmin({ token }: { token: string }) {
 // tenant's menu table if a row with the same name doesn't already exist;
 // otherwise skip (or update if overwrite=true).
 function BrandMenuTemplatesAdmin({ token }: { token: string }) {
+  const showConfirm = useConfirm();
   const [templates, setTemplates] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2839,7 +2841,7 @@ function BrandMenuTemplatesAdmin({ token }: { token: string }) {
   };
 
   const deleteTemplate = async (id: string) => {
-    if (!window.confirm('Delete this template?')) return;
+    if (!await showConfirm({ title: 'Delete this template?', danger: true })) return;
     await fetch(`/api/brand/menu-templates/${encodeURIComponent(id)}`,
       { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     load();
@@ -2976,6 +2978,7 @@ function BrandMenuTemplatesAdmin({ token }: { token: string }) {
 // sync them to selected locations. Mirrors the menu-templates pattern:
 // insert-if-missing semantics by default, force-overwrite as a secondary.
 function BrandSuppliersAdmin({ token }: { token: string }) {
+  const showConfirm = useConfirm();
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [locations, setLocations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -3009,7 +3012,7 @@ function BrandSuppliersAdmin({ token }: { token: string }) {
   };
 
   const deleteSupplier = async (id: string) => {
-    if (!window.confirm('Delete this brand supplier?')) return;
+    if (!await showConfirm({ title: 'Delete this brand supplier?', danger: true })) return;
     await fetch(`/api/brand/suppliers/${encodeURIComponent(id)}`,
       { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     load();
@@ -6205,6 +6208,7 @@ function NotificationTemplateEditor({ templates, onSave }: { templates: any[]; o
 // Covers hotel supplies: linen, toiletries, housekeeping consumables, F&B staples.
 // Sub-tabs: Items | Low Stock | Movements | Quick Setup
 function HotelInventoryView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const showConfirm = useConfirm();
   type HTab = 'ITEMS' | 'LOW_STOCK' | 'MOVEMENTS' | 'SETUP';
   const [tab, setTab] = useState<HTab>('ITEMS');
   const [items, setItems] = useState<any[]>([]);
@@ -6285,7 +6289,7 @@ function HotelInventoryView({ restaurantId, token }: { restaurantId: string; tok
   };
 
   const deleteItem = async (id: string) => {
-    if (!window.confirm('Remove this item?')) return;
+    if (!await showConfirm({ title: 'Remove this item?', danger: true })) return;
     try { await api(`/hotel-inventory/${id}`, { method: 'DELETE' }); await load(); }
     catch (e: any) { alert(e.message); }
   };
@@ -9290,7 +9294,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } catch (e: any) { alert(e?.message || 'Failed to save rate plan'); }
   };
   const deleteRatePlan = async (id: string) => {
-    if (!window.confirm('Deactivate this rate plan? Existing bookings stay intact.')) return;
+    if (!await showConfirm({ title: 'Deactivate this rate plan?', body: 'Existing bookings stay intact.' })) return;
     try { await hotelApi(`/rate-plans/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchRatePlans(); }
     catch (e: any) { alert(e?.message || 'Failed to delete rate plan'); }
   };
@@ -9306,7 +9310,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     catch (e: any) { alert(e?.message || 'Retry failed'); }
   };
   const dismissSyncQueueRow = async (rowId: string) => {
-    if (!window.confirm('Dismiss this queued sync? It will not retry automatically.')) return;
+    if (!await showConfirm({ title: 'Dismiss this queued sync?', body: 'It will not retry automatically.' })) return;
     try { await hotelApi(`/channel-sync-queue/${encodeURIComponent(rowId)}/dismiss`, { method: 'POST' }); await fetchChannelSyncQueue(); }
     catch (e: any) { alert(e?.message || 'Dismiss failed'); }
   };
@@ -9318,7 +9322,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } catch { setReconciliationReports([]); }
   };
   const runReconciliationNow = async () => {
-    if (!window.confirm('Run reconciliation now for all enabled OTA channels? This pulls last 24h of bookings from each.')) return;
+    if (!await showConfirm({ title: 'Run reconciliation now?', body: 'This pulls the last 24h of bookings from all enabled OTA channels.' })) return;
     setReconciliationRunning(true);
     try { await hotelApi('/channel-reconciliation-reports/run', { method: 'POST' }); await fetchReconciliationReports(); }
     catch (e: any) { alert(e?.message || 'Reconciliation failed'); }
@@ -9389,7 +9393,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } catch (e: any) { alert(e?.message || 'Failed to save agent'); }
   };
   const deleteTravelAgent = async (id: string) => {
-    if (!window.confirm('Deactivate this travel agent? Existing bookings stay intact.')) return;
+    if (!await showConfirm({ title: 'Deactivate this travel agent?', body: 'Existing bookings stay intact.' })) return;
     try { await hotelApi(`/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchTravelAgents(); }
     catch (e: any) { alert(e?.message || 'Failed to delete agent'); }
   };
@@ -9520,7 +9524,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } catch (e: any) { alert(e?.message || 'Failed to record payment'); }
   };
   const autoGenerateInvoices = async () => {
-    if (!window.confirm('Auto-generate OTA invoices for LAST MONTH from checked-out bookings? Idempotent — re-running refreshes amounts.')) return;
+    if (!await showConfirm({ title: 'Auto-generate OTA invoices for last month?', body: 'Generates from checked-out bookings. Idempotent — re-running refreshes amounts.' })) return;
     setAutoGeneratingInvoices(true);
     try {
       const res = await hotelApi('/partner-invoices/auto-generate', { method: 'POST', body: JSON.stringify({ month_offset: 1 }) });
@@ -10346,7 +10350,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   };
 
   const removeStaff = async (id: string) => {
-    if (!confirm("Are you sure you want to remove this staff member?")) return;
+    if (!await showConfirm({ title: 'Remove this staff member?', danger: true })) return;
     try {
       await fetch(`/api/owner/staff/${id}`, {
         method: 'DELETE',
@@ -10361,7 +10365,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const toggleStaffActive = async (s: any) => {
     const next = s.is_active ? 0 : 1;
     const verb = next ? 'activate' : 'deactivate';
-    if (!confirm(`${verb.charAt(0).toUpperCase() + verb.slice(1)} ${s.name}?`)) return;
+    if (!await showConfirm({ title: `${verb.charAt(0).toUpperCase() + verb.slice(1)} ${s.name}?` })) return;
     try {
       const res = await fetch(`/api/owner/staff/${s.id}`, {
         method: 'PATCH',
@@ -11497,7 +11501,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } catch (e: any) { alert(e?.message || 'Upload failed'); }
   };
   const deletePropertyGalleryImage = async (id: string) => {
-    if (!window.confirm('Remove this photo from the public gallery?')) return;
+    if (!await showConfirm({ title: 'Remove this photo from the public gallery?', danger: true })) return;
     try { await hotelApi(`/property-gallery/${encodeURIComponent(id)}`, { method: 'DELETE' }); await fetchPropertyGallery(); }
     catch (e: any) { alert(e?.message || 'Delete failed'); }
   };
@@ -11510,7 +11514,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } catch (e: any) { alert(e?.message || 'Upload failed'); }
   };
   const deleteRoomTypeGalleryImage = async (typeId: string, imageId: string) => {
-    if (!window.confirm('Remove this photo from the category gallery?')) return;
+    if (!await showConfirm({ title: 'Remove this photo from the category gallery?', danger: true })) return;
     try { await hotelApi(`/room-types/${encodeURIComponent(typeId)}/gallery/${encodeURIComponent(imageId)}`, { method: 'DELETE' }); await fetchRoomTypeGallery(typeId); }
     catch (e: any) { alert(e?.message || 'Delete failed'); }
   };
@@ -11579,7 +11583,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchHotelRooms();
   };
   const deleteRoomType = async (typeId: string) => {
-    if (!confirm('Delete this room type? Rooms currently in this type will lose their tag (data preserved).')) return;
+    if (!await showConfirm({ title: 'Delete this room type?', body: 'Rooms currently in this type will lose their tag (data preserved).', danger: true })) return;
     await hotelApi(`/room-types/${typeId}`, { method: 'DELETE' });
     await fetchHotelRoomTypes();
     await fetchHotelRooms();
@@ -11595,7 +11599,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchRateOverrides();
   };
   const deleteRateOverride = async (overrideId: string) => {
-    if (!confirm('Delete this rate plan? Future bookings will fall back to the base rate.')) return;
+    if (!await showConfirm({ title: 'Delete this rate plan?', body: 'Future bookings will fall back to the base rate.', danger: true })) return;
     await hotelApi(`/rate-overrides/${overrideId}`, { method: 'DELETE' });
     await fetchRateOverrides();
   };
@@ -11610,7 +11614,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchYieldRules();
   };
   const deleteYieldRule = async (id: string) => {
-    if (!confirm('Delete this yield rule? Future bookings will skip this rate multiplier.')) return;
+    if (!await showConfirm({ title: 'Delete this yield rule?', body: 'Future bookings will skip this rate multiplier.', danger: true })) return;
     await hotelApi(`/yield-rules/${id}`, { method: 'DELETE' });
     await fetchYieldRules();
   };
@@ -11638,7 +11642,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     } finally { setChannelTesting(false); }
   };
   const deleteChannelCredential = async (channel: string) => {
-    if (!confirm(`Remove ${channel} credentials? Inventory sync to this channel will stop.`)) return;
+    if (!await showConfirm({ title: `Remove ${channel} credentials?`, body: 'Inventory sync to this channel will stop.', danger: true })) return;
     await hotelApi(`/channel-credentials/${channel}`, { method: 'DELETE' });
     await fetchChannelCredentials();
   };
@@ -11653,7 +11657,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchIcalFeeds();
   };
   const deleteIcalFeed = async (id: string) => {
-    if (!confirm('Remove this iCal feed? Already-imported bookings stay; no further sync from this URL.')) return;
+    if (!await showConfirm({ title: 'Remove this iCal feed?', body: 'Already-imported bookings stay; no further sync from this URL.', danger: true })) return;
     await hotelApi(`/ical-feeds/${id}`, { method: 'DELETE' });
     await fetchIcalFeeds();
   };
@@ -11764,7 +11768,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const copyPermissionsFrom = async (sourceTenantId: string) => {
     if (!restaurantId || !sourceTenantId || sourceTenantId === restaurantId) return;
     const sourceName = manageableTenants.find(t => t.id === sourceTenantId)?.name || sourceTenantId;
-    if (!confirm(`Copy ALL staff access permissions from "${sourceName}" to this property? This overwrites existing settings (except OWNER + admin roles).`)) return;
+    if (!await showConfirm({ title: `Copy all staff permissions from "${sourceName}"?`, body: 'This overwrites existing settings (except OWNER + admin roles).' })) return;
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/role-permissions/copy-from/${sourceTenantId}`, {
         method: 'POST',
@@ -11832,7 +11836,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     }
   };
   const deleteRoomHold = async (holdId: string) => {
-    if (!confirm('Lift this hold? The room will become available for booking again.')) return;
+    if (!await showConfirm({ title: 'Lift this hold?', body: 'The room will become available for booking again.' })) return;
     try {
       await hotelApi(`/room-holds/${holdId}`, { method: 'DELETE' });
       if (blockingRoom?.id) await fetchRoomHolds(blockingRoom.id);
@@ -11852,7 +11856,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchHotelRooms();
   };
   const deleteRoom = async (roomId: string) => {
-    if (!confirm('Delete this room?')) return;
+    if (!await showConfirm({ title: 'Delete this room?', danger: true })) return;
     await hotelApi(`/rooms/${roomId}`, { method: 'DELETE' });
     await fetchHotelRooms();
   };
@@ -11875,7 +11879,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchHotelServices();
   };
   const deleteService = async (serviceId: string) => {
-    if (!confirm('Delete this service?')) return;
+    if (!await showConfirm({ title: 'Delete this service?', danger: true })) return;
     await hotelApi(`/services/${serviceId}`, { method: 'DELETE' });
     await fetchHotelServices();
   };
@@ -12249,7 +12253,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     await fetchHotelFaqs();
   };
   const deleteFaq = async (id: string) => {
-    if (!confirm('Delete this FAQ?')) return;
+    if (!await showConfirm({ title: 'Delete this FAQ?', danger: true })) return;
     await hotelApi(`/concierge/faqs/${id}`, { method: 'DELETE' });
     await fetchHotelFaqs();
   };
@@ -12723,7 +12727,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const menuByName = new Map<string, any>();
     menu.forEach((m: any) => menuByName.set(String(m.name).toLowerCase(), m));
 
-    if (!confirm(`Import recipes for ${totalGroups} menu item(s)? Existing recipes for these items will be REPLACED.`)) return;
+    if (!await showConfirm({ title: `Import recipes for ${totalGroups} menu item(s)?`, body: 'Existing recipes for these items will be replaced.' })) return;
 
     let saved = 0, skippedMenu = 0, skippedItems = 0, failed = 0;
     for (const [menuName, lines] of Object.entries(groups)) {
@@ -14355,7 +14359,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                     {isDuplicate && (
                                       <button
                                         onClick={async () => {
-                                          if (!confirm(`Soft-delete this duplicate "${ing.name}"? Stock movements remain in audit trail. You can re-add it later.`)) return;
+                                          if (!await showConfirm({ title: `Soft-delete duplicate "${ing.name}"?`, body: 'Stock movements remain in audit trail. You can re-add it later.', danger: true })) return;
                                           await fetch(`/api/inventory/ingredients/${ing.id}`, {
                                             method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` },
                                           });
@@ -14672,7 +14676,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   {po.status === 'DRAFT' && (
                                     <button
                                       onClick={async () => {
-                                        if (!confirm(`Send ${po.id} to supplier?`)) return;
+                                        if (!await showConfirm({ title: `Send ${po.id} to supplier?` })) return;
                                         const r = await fetch(`/api/inventory/purchase-orders/${po.id}/send`, {
                                           method: 'POST',
                                           headers: { 'Authorization': `Bearer ${token}` },
@@ -14691,7 +14695,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   {!['RECEIVED', 'CANCELLED'].includes(po.status) && (
                                     <button
                                       onClick={async () => {
-                                        if (!confirm(`Cancel ${po.id}?`)) return;
+                                        if (!await showConfirm({ title: `Cancel ${po.id}?` })) return;
                                         const r = await fetch(`/api/inventory/purchase-orders/${po.id}/cancel`, {
                                           method: 'POST',
                                           headers: { 'Authorization': `Bearer ${token}` },
@@ -15039,10 +15043,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   {inventoryCounts.filter((c: any) => c.status === 'IN_PROGRESS').length} in progress
                 </p>
                 <button
-                  onClick={() => {
+                  onClick={async () => {
                     if (inventoryIngredients.length === 0) { alert('Add at least one ingredient first'); return; }
                     if (inventoryCounts.some((c: any) => c.status === 'IN_PROGRESS')) {
-                      if (!confirm('A count is already in progress. Start a new one anyway?')) return;
+                      if (!await showConfirm({ title: 'Start a new count?', body: 'A count is already in progress. Starting a new one will replace it.' })) return;
                     }
                     setStartingCount(true);
                   }}
@@ -15936,7 +15940,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             <td className="px-4 py-2 text-xs">{f.label || '—'}</td>
                             <td className="px-4 py-2">
                               <button onClick={async () => {
-                                if (!window.confirm('Delete this seasonality factor?')) return;
+                                if (!await showConfirm({ title: 'Delete this seasonality factor?', danger: true })) return;
                                 await fetch(`/api/inventory/seasonality/${f.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
                                 fetchSeasonalityFactors();
                               }} className="text-xs text-red-700 hover:underline">Remove</button>
@@ -15988,7 +15992,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       fetchHotelInventory();
                     }}
                     onDelete={async (id) => {
-                      if (!window.confirm('Remove this hotel inventory item?')) return;
+                      if (!await showConfirm({ title: 'Remove this hotel inventory item?', danger: true })) return;
                       await fetch(`/api/restaurant/${restaurantId}/hotel-inventory/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
                       fetchHotelInventory();
                     }}
@@ -16015,7 +16019,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     }}
                     onDelete={async (id) => {
                       if (id === 'LOC-MAIN') return alert("Can't delete the default Main location.");
-                      if (!window.confirm('Remove this location?')) return;
+                      if (!await showConfirm({ title: 'Remove this location?', danger: true })) return;
                       await fetch(`/api/storage-locations/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
                       fetchStorageLocations();
                     }}
@@ -17056,7 +17060,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       >✎</button>
                       <button
                         onClick={async () => {
-                          if (!confirm(`Delete role "${cr.name}"? Staff already assigned this role will keep it until reassigned.`)) return;
+                          if (!await showConfirm({ title: `Delete role "${cr.name}"?`, body: 'Staff already assigned this role will keep it until reassigned.', danger: true })) return;
                           await fetch(`/api/restaurant/${restaurantId}/custom-roles/${cr.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
                           fetchCustomRoles();
                         }}
@@ -20170,7 +20174,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                   <td className="px-2 py-2 text-right">
                                     <button
                                       onClick={async () => {
-                                        if (!confirm(`Delete "${e.description}"?`)) return;
+                                        if (!await showConfirm({ title: `Delete "${e.description}"?`, danger: true })) return;
                                         try {
                                           const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${masterFolioGroupId}/master-folio/entries/${e.id}`, {
                                             method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
@@ -25637,7 +25641,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   <button
                     type="button"
                     onClick={async () => {
-                      if (!confirm('Remove logo?')) return;
+                      if (!await showConfirm({ title: 'Remove logo?', danger: true })) return;
                       try {
                         const res = await fetch(`/api/restaurant/${restaurantId}/logo`, {
                           method: 'DELETE',
@@ -27116,8 +27120,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
                                   {/* Cancel order */}
                                   <button
-                                    onClick={() => {
-                                      if (window.confirm(`Cancel order #${String(o.id).slice(-6).toUpperCase()} for ${orderLocationLabel(o.tableNumber)}?`)) {
+                                    onClick={async () => {
+                                      if (await showConfirm({ title: `Cancel order #${String(o.id).slice(-6).toUpperCase()} for ${orderLocationLabel(o.tableNumber)}?` })) {
                                         patchLiveOrder(o.id, { status: 'CANCELLED' });
                                       }
                                     }}
@@ -31607,7 +31611,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                             {b.status === 'BOOKED' && (
                               <button
                                 onClick={async () => {
-                                  if (!confirm('Remove this room from the group?')) return;
+                                  if (!await showConfirm({ title: 'Remove this room from the group?' })) return;
                                   try {
                                     const r = await fetch(`/api/restaurant/${restaurantId}/hotel/booking-groups/${groupDetailId}/rooms/${b.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
                                     if (!r.ok) throw new Error((await r.json())?.error || 'Failed');
@@ -36749,6 +36753,7 @@ const GuestDocumentsWidget: React.FC<{
    *  the DB and visible inside the widget. */
   onChange?: () => void;
 }> = ({ bookingId, bookingStatus, restaurantId, token, onPreview, onChange }) => {
+  const showConfirm = useConfirm();
   const [docs, setDocs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -36813,7 +36818,7 @@ const GuestDocumentsWidget: React.FC<{
   };
 
   const handleDelete = async (docId: string) => {
-    if (!confirm('Delete this document? This cannot be undone.')) return;
+    if (!await showConfirm({ title: 'Delete this document?', body: 'This cannot be undone.', danger: true })) return;
     setError('');
     try {
       const res = await fetch(
@@ -40272,6 +40277,7 @@ function BookingTrendReport({ restaurantId, token }: { restaurantId: string; tok
 }
 
 function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const showConfirm = useConfirm();
   const today = new Date().toISOString().slice(0, 10);
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const [from, setFrom] = useState(monthAgo);
@@ -40317,7 +40323,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
   };
 
   const del = async (id: string) => {
-    if (!window.confirm('Delete this entry?')) return;
+    if (!await showConfirm({ title: 'Delete this entry?', danger: true })) return;
     try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); load(); }
     catch (e: any) { alert('Failed: ' + (e?.message || '')); }
   };
@@ -40462,6 +40468,7 @@ function ExpenseJournalView({ restaurantId, token }: { restaurantId: string; tok
 }
 
 function ManagementReports({ restaurantId, token, audience, onOpenTab }: { restaurantId: string; token: string; audience: 'FRONT_DESK' | 'OWNER'; onOpenTab: (tab: string) => void }) {
+  const showConfirm = useConfirm();
   const today = new Date().toISOString().slice(0, 10);
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
   const [from, setFrom] = useState(monthAgo);
@@ -40538,7 +40545,7 @@ function ManagementReports({ restaurantId, token, audience, onOpenTab }: { resta
     finally { setPcSaving(false); }
   };
   const deletePettyCash = async (id: string) => {
-    if (!confirm('Delete this entry?')) return;
+    if (!await showConfirm({ title: 'Delete this entry?', danger: true })) return;
     try { await api(`/petty-cash/${id}`, { method: 'DELETE' }); load('expense-journal'); }
     catch (e: any) { alert('Delete failed: ' + (e?.message || 'error')); }
   };
@@ -44204,6 +44211,7 @@ function PayPage({ payload }: { payload: string }) {
 }
 
 function CustomerInterface({ restaurantId }: { restaurantId: string }) {
+  const showConfirm = useConfirm();
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [cart, setCart] = useState<OrderItem[]>([]);
   const [order, setOrder] = useState<Order | null>(null);
@@ -44455,7 +44463,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
   const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
   const cancelMyOrder = async (orderId: string) => {
     if (!session?.session_token || !restaurantId || cancellingOrderId) return;
-    if (!window.confirm('Cancel this order? This is only possible before the kitchen starts preparing it.')) return;
+    if (!await showConfirm({ title: 'Cancel this order?', body: 'This is only possible before the kitchen starts preparing it.' })) return;
     setCancellingOrderId(orderId);
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/orders/${orderId}/cancel`, {
@@ -46697,6 +46705,7 @@ function CustomerInterface({ restaurantId }: { restaurantId: string }) {
 }
 
 function SuperAdminDashboard({ token }: { token: string }) {
+  const showConfirm = useConfirm();
   const [restaurants, setRestaurants] = useState<any[]>([]);
   const [internalUsers, setInternalUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -46781,7 +46790,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   };
   const deleteMigBookings = async () => {
     if (migSelectedIds.size === 0 || !migSelectedTenant) return;
-    if (!window.confirm(`Permanently hard-delete ${migSelectedIds.size} booking(s)? This bypasses the cancel flow and cannot be undone.`)) return;
+    if (!await showConfirm({ title: `Permanently delete ${migSelectedIds.size} booking(s)?`, body: 'This bypasses the cancel flow and cannot be undone.', danger: true })) return;
     try {
       const res = await fetch('/api/admin/data-migration/bookings', {
         method: 'DELETE',
@@ -46919,7 +46928,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
     }
   };
   const restoreTenantAccess = async (tenantId: string, tenantName: string) => {
-    if (!confirm(`Restore access for ${tenantName}?`)) return;
+    if (!await showConfirm({ title: `Restore access for ${tenantName}?` })) return;
     try {
       const res = await fetch(`/api/admin/tenants/${tenantId}/restore-access`, {
         method: 'POST',
@@ -47150,7 +47159,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
   };
 
   const handleDeleteLocation = async (id: string, label: string) => {
-    if (!window.confirm(`Delete "${label}"? This cannot be undone.`)) return;
+    if (!await showConfirm({ title: `Delete "${label}"?`, body: 'This cannot be undone.', danger: true })) return;
     try {
       await fetch(`/api/admin/locations/${id}`, {
         method: 'DELETE',
@@ -47349,12 +47358,10 @@ function SuperAdminDashboard({ token }: { token: string }) {
   const setInvoiceDeleteFlag = async (id: string, currentlyEnabled: boolean) => {
     const next = currentlyEnabled ? 0 : 1;
     if (next === 1) {
-      const ok = window.confirm(
-        "Enable invoice deletion for this restaurant?\n\n" +
-        "The OWNER will be able to permanently delete invoices (including PRINTED).\n" +
-        "Every deletion is recorded in the central audit log.\n\n" +
-        "GST records: this is a regulatory-sensitive feature. Proceed only after the operator has acknowledged compliance implications."
-      );
+      const ok = await showConfirm({
+        title: 'Enable invoice deletion for this restaurant?',
+        body: 'The OWNER will be able to permanently delete invoices (including PRINTED). Every deletion is recorded in the central audit log. GST records: this is a regulatory-sensitive feature. Proceed only after the operator has acknowledged compliance implications.',
+      });
       if (!ok) return;
     }
     try {
@@ -47855,13 +47862,10 @@ function SuperAdminDashboard({ token }: { token: string }) {
                               key={tc.value}
                               disabled={pt === tc.value}
                               onClick={async () => {
-                                if (!confirm(
-                                  `Change "${r.name}" to ${tc.label}?\n\n` +
-                                  `Current: ${pt}\nAfter: ${tc.value}\n\n` +
-                                  (tc.value === 'RESTAURANT'
-                                    ? 'This hides Hotel tabs. Hotel data is preserved.'
-                                    : 'Confirm the customer is on a Hotel-tier subscription before proceeding.')
-                                )) return;
+                                if (!await showConfirm({
+                                  title: `Change "${r.name}" to ${tc.label}?`,
+                                  body: tc.value === 'RESTAURANT' ? 'This hides Hotel tabs. Hotel data is preserved.' : 'Confirm the customer is on a Hotel-tier subscription before proceeding.',
+                                })) return;
                                 try {
                                   const body: Record<string, unknown> = { enabled: tc.enabled };
                                   if (tc.type) body.type = tc.type;
@@ -47906,7 +47910,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
                         </p>
                         <button
                           onClick={async () => {
-                            if (!confirm(`${spaOn ? 'Disable' : 'Enable'} the Spa module for "${r.name}"?\n\n${spaOn ? 'This hides Spa tabs. Spa data is preserved.' : 'Confirm the customer is on a Spa-tier subscription before proceeding.'}`)) return;
+                            if (!await showConfirm({ title: `${spaOn ? 'Disable' : 'Enable'} the Spa module for "${r.name}"?`, body: spaOn ? 'This hides Spa tabs. Spa data is preserved.' : 'Confirm the customer is on a Spa-tier subscription before proceeding.' })) return;
                             try {
                               const res = await fetch(`/api/restaurant/${r.id}/spa/enable`, {
                                 method: 'POST',
@@ -49253,6 +49257,7 @@ function SuperAdminDashboard({ token }: { token: string }) {
 }
 
 function SalesRepresentativeDashboard({ token }: { token: string }) {
+  const showConfirm = useConfirm();
   const [restaurants, setRestaurants] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -49298,16 +49303,10 @@ function SalesRepresentativeDashboard({ token }: { token: string }) {
   // running because the seed overwrites 50+ rows on the target tenant.
   const [seedingTariffFor, setSeedingTariffFor] = useState<string | null>(null);
   const seedBcgTariff = async (id: string, name: string) => {
-    if (!window.confirm(
-      `Seed BCG demo tariff into ${name} (${id})?\n\n` +
-      `This will:\n` +
-      `  • Create / refresh 3 room categories (Superior / Premium / River View)\n` +
-      `  • Create / update 27 sample rooms (101-312)\n` +
-      `  • Load 4 season date ranges (Peak / Off, 2026 calendar)\n` +
-      `  • Load 24 room-rate cells + 24 extra-person cells\n` +
-      `  • Flip the tenant's tariff_model to 'MATRIX'\n\n` +
-      `Idempotent — safe to re-run.`
-    )) return;
+    if (!await showConfirm({
+      title: `Seed BCG demo tariff into ${name}?`,
+      body: `Creates/refreshes 3 room categories, 27 sample rooms, 4 season date ranges, and 24 room-rate cells. Flips tariff_model to MATRIX. Idempotent — safe to re-run.`,
+    })) return;
     setSeedingTariffFor(id);
     try {
       const res = await fetch(`/api/admin/tenants/${id}/seed-bcg-tariff`, {
@@ -51278,6 +51277,7 @@ function PhysicalCountModal({ token, count, onClose, onUpdated, onCompleted }: {
   token: string; count: any; onClose: () => void;
   onUpdated: (refreshed: any) => void; onCompleted: () => void;
 }) {
+  const showConfirm = useConfirm();
   const isCompleted = count.status === 'COMPLETED';
   const [items, setItems] = useState<any[]>(count.items || []);
   const [savingId, setSavingId] = useState<string | null>(null);
@@ -51311,7 +51311,7 @@ function PhysicalCountModal({ token, count, onClose, onUpdated, onCompleted }: {
   };
 
   const complete = async () => {
-    if (!confirm(`Complete this count? This will post stock adjustments for every line where the actual differs from expected. ${count.id} will be locked.`)) return;
+    if (!await showConfirm({ title: 'Complete this count?', body: `Posts stock adjustments for every line where actual differs from expected. ${count.id} will be locked.` })) return;
     setCompleting(true); setErr('');
     try {
       const r = await fetch(`/api/inventory/counts/${count.id}/complete`, {
@@ -51821,6 +51821,7 @@ function InventoryOnboardingWizard({ token, restaurantId, onClose, onComplete }:
 function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
   restaurantId: string; token: string; table: { id: string; name: string }; onClose: () => void;
 }) {
+  const showConfirm = useConfirm();
   const [loading, setLoading]     = useState(true);
   const [session, setSession]     = useState<any>(null);
   const [orders, setOrders]       = useState<any[]>([]);
@@ -52210,7 +52211,7 @@ function PostpaidInvoiceModal({ restaurantId, token, table, onClose }: {
               <button
                 onClick={async () => {
                   if (!session) return;
-                  if (!confirm(`Close empty session on ${table.name}? The table will return to AVAILABLE.`)) return;
+                  if (!await showConfirm({ title: `Close empty session on ${table.name}?`, body: 'The table will return to AVAILABLE. Nothing will be billed.' })) return;
                   setClosing(true);
                   try {
                     const res = await fetch(`/api/restaurant/${restaurantId}/sessions/${session.session_token}/close`, {
@@ -53327,6 +53328,7 @@ function CustomerReservationView({ restaurantId, onBack }: { restaurantId: strin
 //   3. ANALYTICS — KPI cards + per-tier charts
 // All data per-tenant (server-side getTenantDb scoping).
 function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const showConfirm = useConfirm();
   type SubTab = 'TIERS' | 'CUSTOMERS' | 'PROMO_CODES' | 'ANALYTICS';
   const [subTab, setSubTab] = useState<SubTab>('TIERS');
 
@@ -53442,7 +53444,7 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
 
   // Disable a tier (we never hard-delete to preserve history)
   const disableTier = async (tierId: string, name: string) => {
-    if (!confirm(`Disable the ${name} tier? Customers currently on this tier will be recalculated to the next-eligible tier when they next order. Existing history is preserved.`)) return;
+    if (!await showConfirm({ title: `Disable the ${name} tier?`, body: 'Customers currently on this tier will be recalculated to the next-eligible tier when they next order. Existing history is preserved.' })) return;
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/tiers/${tierId}`, {
         method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
@@ -53455,7 +53457,7 @@ function LoyaltyManagement({ restaurantId, token }: { restaurantId: string; toke
 
   // After threshold edits, the admin may want all existing customers to re-tier
   const recomputeAllTiers = async () => {
-    if (!confirm('Recompute tiers for every customer based on current thresholds? This may shuffle customers between tiers. It will not affect any historical data.')) return;
+    if (!await showConfirm({ title: 'Recompute tiers for all customers?', body: 'This may shuffle customers between tiers based on current thresholds. Historical data is not affected.' })) return;
     try {
       const res = await fetch(`/api/restaurant/${restaurantId}/loyalty/recompute-tiers`, {
         method: 'POST', headers: { Authorization: `Bearer ${token}` },
@@ -55404,6 +55406,7 @@ function PartnerPortal({ restaurantId, token, restaurantName }: { restaurantId: 
 // PartnerPortal rate sheet; commission is resolved live from the linked
 // channel/agent unless an override is set here.
 function PartnerLoginsManager({ restaurantId, token }: { restaurantId: string; token: string; }) {
+  const showConfirm = useConfirm();
   const [accounts, setAccounts] = useState<any[]>([]);
   const [channels, setChannels] = useState<any[]>([]);
   const [agents, setAgents] = useState<any[]>([]);
@@ -55476,7 +55479,7 @@ function PartnerLoginsManager({ restaurantId, token }: { restaurantId: string; t
   };
 
   const disableAccount = async (a: any) => {
-    if (!window.confirm(`Disable the login for "${a.display_name}"? They will no longer be able to sign in.`)) return;
+    if (!await showConfirm({ title: `Disable login for "${a.display_name}"?`, body: 'They will no longer be able to sign in.' })) return;
     try { await api(`/partner-accounts/${a.id}`, { method: 'DELETE' }); await loadAll(); }
     catch (e: any) { setError(e.message || 'Failed to disable.'); }
   };
@@ -55752,6 +55755,7 @@ function _formatTimeRange(start: string, end: string): string {
 // Visible to ALL property types (HOTEL, RESTAURANT, BOTH).
 // Sub-tabs: Suppliers | Purchase Orders | Invoices | Payments | Ledger | Reports
 function ProcurementView({ restaurantId, token }: { restaurantId: string; token: string }) {
+  const showConfirm = useConfirm();
   type ProcTab = 'SUPPLIERS' | 'PURCHASE_ORDERS' | 'INVOICES' | 'PAYMENTS' | 'LEDGER' | 'REPORTS';
   const [subTab, setSubTab] = useState<ProcTab>('SUPPLIERS');
 
@@ -55945,7 +55949,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
     finally { setSupSaving(false); }
   };
   const deactivateSupplier = async (id: string, name: string) => {
-    if (!window.confirm(`Deactivate "${name}"? They won't appear in dropdowns but all history is preserved.`)) return;
+    if (!await showConfirm({ title: `Deactivate "${name}"?`, body: "They won't appear in dropdowns but all history is preserved." })) return;
     try { await api(`/procurement/suppliers/${id}`, { method: 'DELETE' }); await loadSupplierList(); }
     catch (e: any) { alert(e.message); }
   };
@@ -55956,7 +55960,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
     catch (e: any) { alert(e.message); }
   };
   const cancelPO = async (poId: string) => {
-    if (!window.confirm('Cancel this purchase order?')) return;
+    if (!await showConfirm({ title: 'Cancel this purchase order?' })) return;
     try { await api(`/inventory/purchase-orders/${poId}/cancel`, { method: 'POST' }); await loadPOs(); }
     catch (e: any) { alert(e.message); }
   };
@@ -56002,7 +56006,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   };
 
   const deleteInvoice = async (id: string) => {
-    if (!window.confirm('Delete this invoice? This cannot be undone.')) return;
+    if (!await showConfirm({ title: 'Delete this invoice?', body: 'This cannot be undone.', danger: true })) return;
     try { await api(`/procurement/supplier-invoices/${id}`, { method: 'DELETE' }); await loadInvoices(); }
     catch (e: any) { alert(e.message); }
   };
@@ -56047,7 +56051,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
   const allUnpaidSelected = unpaidInvoices.length > 0 && unpaidInvoices.every((inv: any) => bulkSelected.has(inv.id));
 
   const deletePayment = async (id: string) => {
-    if (!window.confirm('Reverse this payment? The invoice will return to Partial/Unpaid.')) return;
+    if (!await showConfirm({ title: 'Reverse this payment?', body: 'The invoice will return to Partial/Unpaid.' })) return;
     try { await api(`/procurement/payments/${id}`, { method: 'DELETE' }); await loadPayments(); }
     catch (e: any) { alert(e.message); }
   };
@@ -57274,6 +57278,7 @@ function ProcurementView({ restaurantId, token }: { restaurantId: string; token:
 // fully wired; subsequent commits will fill in Salary Structure /
 // Components / Payroll / Expenses / Offer Letters / Reports.
 function HRPayrollModule({ restaurantId, token, restaurant }: { restaurantId: string; token: string; restaurant: any }) {
+  const showConfirm = useConfirm();
   const [subTab, setSubTab] = useState<'EMPLOYEES' | 'SALARY' | 'PAYROLL' | 'EXPENSES' | 'OFFERS' | 'SETTINGS'>('EMPLOYEES');
   const [currencyWarning, setCurrencyWarning] = useState<string | null>(null);
   const SUB_TABS: Array<{ id: typeof subTab; label: string; emoji: string }> = [
@@ -58997,6 +59002,7 @@ function TimesheetPayrollPanel({ restaurantId, token, start, end, onApprovalChan
   restaurantId: string; token: string; start: string; end: string;
   onApprovalChange?: () => void;
 }) {
+  const showConfirm = useConfirm();
   const [payroll, setPayroll] = useState<any | null>(null);
   const [pendingRows, setPendingRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -59041,7 +59047,7 @@ function TimesheetPayrollPanel({ restaurantId, token, start, end, onApprovalChan
   };
 
   const bulkApprove = async (status: 'APPROVED' | 'REJECTED') => {
-    if (!window.confirm(`${status === 'APPROVED' ? 'Approve' : 'Reject'} all ${pendingRows.length} pending rows in this range?`)) return;
+    if (!await showConfirm({ title: `${status === 'APPROVED' ? 'Approve' : 'Reject'} all ${pendingRows.length} pending rows in this range?` })) return;
     const res = await fetch(`/api/restaurant/${restaurantId}/timesheet/bulk-approval`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -59710,6 +59716,7 @@ function TimesheetDashboard({ restaurantId, token }: { restaurantId: string; tok
 }
 
 function BookingsManagement({ restaurantId, token }: { restaurantId: string, token: string }) {
+  const showConfirm = useConfirm();
   const [bookings, setBookings] = useState<any[]>([]);
   const [configs, setConfigs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -59815,7 +59822,7 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
   };
 
   const deleteConfig = async () => {
-    if (!window.confirm(`Remove availability config for ${configDate}?`)) return;
+    if (!await showConfirm({ title: `Remove availability config for ${configDate}?`, danger: true })) return;
     setDeletingConfig(true);
     try {
       await fetch(`/api/owner/reservation-config/${configDate}`, { method: 'DELETE', headers: authHeaders });
