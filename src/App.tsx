@@ -2366,6 +2366,9 @@ export default function App() {
         )}
         {role === 'CHEF' && <ChefDashboard restaurantId={restaurantId!} token={token!} />}
         {role === 'WAITER' && <WaiterDashboard restaurantId={restaurantId!} token={token!} />}
+        {['FRONT_DESK','HOUSEKEEPING','MAINTENANCE','CONCIERGE'].includes(role || '') && (
+          <HotelStaffDashboard restaurantId={restaurantId!} token={token!} userRole={role!} />
+        )}
         {/* Hospitality: if URL has ?room=, render the in-room guest UI;
             otherwise render the classic restaurant customer UI. */}
         {role === 'CUSTOMER' && (
@@ -42725,6 +42728,274 @@ function RestaurantReports({ restaurantId, token, onOpenTab }: { restaurantId: s
           </div>
           <div className="p-3 overflow-x-auto">{renderTable()}</div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HotelStaffDashboard — shown for FRONT_DESK / HOUSEKEEPING / MAINTENANCE /
+// CONCIERGE roles. Blank-screen fix for SD-004.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const HSD_SR_STATUS_COLORS: Record<string, string> = {
+  PENDING:      'bg-yellow-100 text-yellow-800',
+  ACKNOWLEDGED: 'bg-blue-100 text-blue-800',
+  IN_PROGRESS:  'bg-orange-100 text-orange-800',
+  COMPLETED:    'bg-green-100 text-green-800',
+  CANCELLED:    'bg-gray-100 text-gray-600',
+};
+const HSD_PRIORITY_COLORS: Record<string, string> = {
+  URGENT: 'bg-red-100 text-red-700 border border-red-300',
+  HIGH:   'bg-orange-50 text-orange-700',
+  NORMAL: 'bg-gray-50 text-gray-600',
+  LOW:    'bg-gray-50 text-gray-400',
+};
+const HSD_NEXT_STATUS: Record<string, string> = { PENDING: 'ACKNOWLEDGED', ACKNOWLEDGED: 'IN_PROGRESS', IN_PROGRESS: 'COMPLETED' };
+const HSD_NEXT_LABEL:  Record<string, string> = { PENDING: 'Acknowledge', ACKNOWLEDGED: 'Start', IN_PROGRESS: 'Complete' };
+
+const HsdSrCard: React.FC<{ sr: any; updatingId: string | null; onUpdate: (id: string, status: string) => void }> = ({ sr, updatingId, onUpdate }) => {
+  return (
+    <div className={`rounded-lg border p-3 text-sm ${sr.priority === 'URGENT' ? 'border-red-300 bg-red-50' : 'border-gray-200 bg-white'}`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${HSD_SR_STATUS_COLORS[sr.status] || 'bg-gray-100'}`}>
+              {sr.status?.replace('_', ' ')}
+            </span>
+            {sr.priority && sr.priority !== 'NORMAL' && (
+              <span className={`text-xs px-1.5 py-0.5 rounded ${HSD_PRIORITY_COLORS[sr.priority] || ''}`}>{sr.priority}</span>
+            )}
+            <span className="text-xs text-gray-400">{sr.room_name ? `Room ${sr.room_name}` : 'No room'}</span>
+          </div>
+          <p className="font-medium text-gray-800 mt-1 truncate">{sr.category || 'Request'}</p>
+          {sr.description && <p className="text-gray-500 text-xs mt-0.5 line-clamp-2">{sr.description}</p>}
+          {sr.guest_name && <p className="text-xs text-gray-400 mt-1">Guest: {sr.guest_name}</p>}
+        </div>
+        {HSD_NEXT_STATUS[sr.status] && (
+          <button
+            onClick={() => onUpdate(sr.id, HSD_NEXT_STATUS[sr.status])}
+            disabled={updatingId === sr.id}
+            className="shrink-0 text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-1.5 rounded-md font-medium disabled:opacity-50"
+          >
+            {updatingId === sr.id ? '…' : HSD_NEXT_LABEL[sr.status]}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const HsdBookingCard: React.FC<{ b: any }> = ({ b }) => {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-3 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <p className="font-medium text-gray-800 truncate">{b.guest_name || 'Guest'}</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {b.room_name ? `Room ${b.room_name}` : 'Room TBD'}
+            {b.room_category ? ` · ${b.room_category}` : ''}
+          </p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {b.check_in_date} → {b.check_out_date}
+            {b.num_adults ? ` · ${b.num_adults} adult${b.num_adults > 1 ? 's' : ''}` : ''}
+          </p>
+        </div>
+        <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${
+          b.status === 'CHECKED_IN' ? 'bg-green-100 text-green-700' :
+          b.status === 'BOOKED'     ? 'bg-blue-100 text-blue-700' :
+                                      'bg-gray-100 text-gray-600'
+        }`}>{b.status?.replace('_', ' ')}</span>
+      </div>
+    </div>
+  );
+}
+
+const HsdEmpty: React.FC<{ msg: string }> = ({ msg }) =>
+  <div className="text-center py-12 text-gray-400 text-sm">{msg}</div>;
+
+function HotelStaffDashboard({ restaurantId, token, userRole }: {
+  restaurantId: string; token: string; userRole: string;
+}) {
+  const today = new Date().toISOString().slice(0, 10);
+
+  const ROLE_META: Record<string, { label: string; emoji: string; color: string }> = {
+    FRONT_DESK:   { label: 'Front Desk',   emoji: '🛎️',  color: 'amber' },
+    HOUSEKEEPING: { label: 'Housekeeping', emoji: '🛏️',  color: 'teal'  },
+    MAINTENANCE:  { label: 'Maintenance',  emoji: '🔧',   color: 'slate' },
+    CONCIERGE:    { label: 'Concierge',    emoji: '🎩',  color: 'rose'  },
+  };
+  const meta = ROLE_META[userRole] || { label: userRole, emoji: '👤', color: 'gray' };
+
+  const isFrontDesk = userRole === 'FRONT_DESK';
+
+  type SrTab = 'OPEN' | 'IN_PROGRESS' | 'DONE';
+  type BkTab = 'ARRIVALS' | 'DEPARTURES' | 'INHOUSE' | 'REQUESTS';
+  const [srTab, setSrTab] = useState<SrTab>('OPEN');
+  const [bkTab, setBkTab] = useState<BkTab>('ARRIVALS');
+
+  const [serviceRequests, setServiceRequests] = useState<any[]>([]);
+  const [bookings, setBookings] = useState<any[]>([]);
+  const [loadingSr, setLoadingSr] = useState(false);
+  const [loadingBk, setLoadingBk] = useState(false);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+
+  const staffName = useMemo(() => {
+    try {
+      const p = JSON.parse(atob(token.split('.')[1]));
+      return localStorage.getItem('userName') || p.name || p.userName || meta.label;
+    } catch { return meta.label; }
+  }, [token, meta.label]);
+
+  const h = useMemo(() => ({ 'Authorization': `Bearer ${token}` }), [token]);
+
+  const fetchSr = useCallback(async () => {
+    setLoadingSr(true);
+    try {
+      const roleFilter = (userRole !== 'CONCIERGE' && userRole !== 'FRONT_DESK')
+        ? `&role=${userRole}` : '';
+      const r = await fetch(`/api/restaurant/${restaurantId}/hotel/service-requests?${roleFilter}`, { headers: h });
+      if (r.ok) setServiceRequests(await r.json());
+    } catch { /* silent */ } finally { setLoadingSr(false); }
+  }, [restaurantId, h, userRole]);
+
+  const fetchBk = useCallback(async () => {
+    if (!isFrontDesk) return;
+    setLoadingBk(true);
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/hotel/bookings?limit=200`, { headers: h });
+      if (r.ok) setBookings(await r.json());
+    } catch { /* silent */ } finally { setLoadingBk(false); }
+  }, [restaurantId, h, isFrontDesk]);
+
+  useEffect(() => {
+    fetchSr();
+    fetchBk();
+    const t = setInterval(() => { fetchSr(); fetchBk(); }, 30000);
+    return () => clearInterval(t);
+  }, [fetchSr, fetchBk]);
+
+  const updateSrStatus = async (srId: string, newStatus: string) => {
+    setUpdatingId(srId);
+    try {
+      await fetch(`/api/restaurant/${restaurantId}/hotel/service-requests/${srId}/status`, {
+        method: 'PATCH',
+        headers: { ...h, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      await fetchSr();
+    } catch { /* silent */ } finally { setUpdatingId(null); }
+  };
+
+  // ── Derived data ────────────────────────────────────────────────────────────
+  const openSr       = serviceRequests.filter(s => s.status === 'PENDING' || s.status === 'ACKNOWLEDGED');
+  const inProgressSr = serviceRequests.filter(s => s.status === 'IN_PROGRESS');
+  const doneSr       = serviceRequests.filter(s => s.status === 'COMPLETED' || s.status === 'CANCELLED');
+
+  const arrivals   = bookings.filter(b => b.check_in_date  === today && (b.status === 'BOOKED' || b.status === 'CONFIRMED'));
+  const departures = bookings.filter(b => b.check_out_date === today && b.status === 'CHECKED_IN');
+  const inhouse    = bookings.filter(b => b.status === 'CHECKED_IN');
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+  // (SrCard, BookingCard, EmptyState defined as module-level _Hsd* functions)
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+  return (
+    <div className="max-w-2xl mx-auto space-y-4">
+      {/* Header */}
+      <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center gap-3">
+        <span className="text-3xl">{meta.emoji}</span>
+        <div>
+          <p className="font-semibold text-gray-900 text-lg">{meta.label} Dashboard</p>
+          <p className="text-sm text-gray-500">Welcome, {staffName}</p>
+        </div>
+        <div className="ml-auto flex gap-2 flex-wrap justify-end">
+          {isFrontDesk && (
+            <>
+              <div className="text-center bg-blue-50 rounded-lg px-3 py-1.5">
+                <p className="text-xl font-bold text-blue-700">{arrivals.length}</p>
+                <p className="text-xs text-blue-500">Arrivals</p>
+              </div>
+              <div className="text-center bg-orange-50 rounded-lg px-3 py-1.5">
+                <p className="text-xl font-bold text-orange-700">{departures.length}</p>
+                <p className="text-xs text-orange-500">Departures</p>
+              </div>
+              <div className="text-center bg-green-50 rounded-lg px-3 py-1.5">
+                <p className="text-xl font-bold text-green-700">{inhouse.length}</p>
+                <p className="text-xs text-green-500">In-House</p>
+              </div>
+            </>
+          )}
+          {!isFrontDesk && (
+            <>
+              <div className="text-center bg-yellow-50 rounded-lg px-3 py-1.5">
+                <p className="text-xl font-bold text-yellow-700">{openSr.length}</p>
+                <p className="text-xs text-yellow-500">Open</p>
+              </div>
+              <div className="text-center bg-orange-50 rounded-lg px-3 py-1.5">
+                <p className="text-xl font-bold text-orange-700">{inProgressSr.length}</p>
+                <p className="text-xs text-orange-500">In Progress</p>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex gap-1 bg-gray-100 p-1 rounded-lg">
+        {isFrontDesk ? (
+          <>
+            {([
+              ['ARRIVALS',   `Arrivals (${arrivals.length})`],
+              ['DEPARTURES', `Departures (${departures.length})`],
+              ['INHOUSE',    `In-House (${inhouse.length})`],
+              ['REQUESTS',   `Requests (${openSr.length + inProgressSr.length})`],
+            ] as [BkTab, string][]).map(([id, label]) => (
+              <button key={id} onClick={() => setBkTab(id)}
+                className={`flex-1 text-xs sm:text-sm font-medium py-1.5 px-2 rounded-md transition-colors ${
+                  bkTab === id ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'
+                }`}>{label}</button>
+            ))}
+          </>
+        ) : (
+          <>
+            {([
+              ['OPEN',        `Open (${openSr.length})`],
+              ['IN_PROGRESS', `In Progress (${inProgressSr.length})`],
+              ['DONE',        `Done (${doneSr.length})`],
+            ] as [SrTab, string][]).map(([id, label]) => (
+              <button key={id} onClick={() => setSrTab(id)}
+                className={`flex-1 text-xs sm:text-sm font-medium py-1.5 px-2 rounded-md transition-colors ${
+                  srTab === id ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'
+                }`}>{label}</button>
+            ))}
+          </>
+        )}
+      </div>
+
+      {/* Content */}
+      <div className="space-y-2">
+        {isFrontDesk ? (
+          <>
+            {loadingBk && bkTab !== 'REQUESTS' && <HsdEmpty msg="Loading…" />}
+            {bkTab === 'ARRIVALS'   && !loadingBk && (arrivals.length   ? arrivals.map(b => <HsdBookingCard key={b.id} b={b} />)   : <HsdEmpty msg="No arrivals today" />)}
+            {bkTab === 'DEPARTURES' && !loadingBk && (departures.length ? departures.map(b => <HsdBookingCard key={b.id} b={b} />) : <HsdEmpty msg="No departures today" />)}
+            {bkTab === 'INHOUSE'    && !loadingBk && (inhouse.length    ? inhouse.map(b => <HsdBookingCard key={b.id} b={b} />)    : <HsdEmpty msg="No guests currently in-house" />)}
+            {bkTab === 'REQUESTS'   && (
+              loadingSr ? <HsdEmpty msg="Loading…" /> :
+              (openSr.length + inProgressSr.length) > 0
+                ? [...openSr, ...inProgressSr].map(sr => <HsdSrCard key={sr.id} sr={sr} updatingId={updatingId} onUpdate={updateSrStatus} />)
+                : <HsdEmpty msg="No open guest requests" />
+            )}
+          </>
+        ) : (
+          <>
+            {loadingSr && <HsdEmpty msg="Loading…" />}
+            {!loadingSr && srTab === 'OPEN'        && (openSr.length       ? openSr.map(sr => <HsdSrCard key={sr.id} sr={sr} updatingId={updatingId} onUpdate={updateSrStatus} />)       : <HsdEmpty msg="No open requests — all clear!" />)}
+            {!loadingSr && srTab === 'IN_PROGRESS' && (inProgressSr.length ? inProgressSr.map(sr => <HsdSrCard key={sr.id} sr={sr} updatingId={updatingId} onUpdate={updateSrStatus} />) : <HsdEmpty msg="Nothing in progress" />)}
+            {!loadingSr && srTab === 'DONE'        && (doneSr.length       ? doneSr.map(sr => <HsdSrCard key={sr.id} sr={sr} updatingId={updatingId} onUpdate={updateSrStatus} />)       : <HsdEmpty msg="No completed requests yet" />)}
+          </>
+        )}
       </div>
     </div>
   );
