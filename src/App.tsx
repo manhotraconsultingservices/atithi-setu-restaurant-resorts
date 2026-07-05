@@ -9632,14 +9632,32 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [hotelSettingsSaved, setHotelSettingsSaved] = useState(false);
 
   // Aiosell-style Rates & Inventory tab — active CM sub-tab + rate grid data.
-  const [activeCmTab, setActiveCmTab] = useState<'rates'|'bulk'|'live'|'mappings'>('rates');
+  const [activeCmTab, setActiveCmTab] = useState<'rates'|'rooms'|'bulk'|'live'|'mappings'>('rates');
   const [rateGrid, setRateGrid] = useState<{ dates: string[]; meta: Record<string,any>; room_types: any[] } | null>(null);
   const [rateGridLoading, setRateGridLoading] = useState(false);
   const [rateGridDirty, setRateGridDirty] = useState<Record<string,Record<string,number>>>({}); // {roomTypeId: {date: rate}}
   const [rateGridFrom, setRateGridFrom] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [rateGridSaving, setRateGridSaving] = useState(false);
-  const [bulkRateForm, setBulkRateForm] = useState<any>({ room_type_ids: [], from_date: '', to_date: '', rate: '', apply_days: [] });
+  const [bulkRateForm, setBulkRateForm] = useState<any>({ type: 'rate', room_type_ids: [], from_date: '', to_date: '', value: '', apply_days: [] });
   const [bulkRateSaving, setBulkRateSaving] = useState(false);
+  // Update Rooms (inventory grid) state
+  const [invGrid, setInvGrid] = useState<{ dates: string[]; room_types: any[] } | null>(null);
+  const [invGridLoading, setInvGridLoading] = useState(false);
+  const [invGridDirty, setInvGridDirty] = useState<Record<string,Record<string,number>>>({});
+  const [invGridFrom, setInvGridFrom] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [invGridSaving, setInvGridSaving] = useState(false);
+  const fetchInvGrid = async (from?: string) => {
+    if (!isHotelEnabled) return;
+    setInvGridLoading(true);
+    try {
+      const f = from || invGridFrom;
+      const d = new Date(f + 'T12:00:00Z'); d.setDate(d.getDate() + 13);
+      const to = d.toISOString().slice(0, 10);
+      const data = await hotelApi(`/inventory-grid?from=${f}&to=${to}`);
+      setInvGrid(data);
+      setInvGridDirty({});
+    } catch { } finally { setInvGridLoading(false); }
+  };
   const fetchRateGrid = async (from?: string) => {
     if (!isHotelEnabled) return;
     setRateGridLoading(true);
@@ -22475,13 +22493,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           <div className="flex gap-1 border-b border-[#e8e0d8] overflow-x-auto">
             {([
               { id: 'rates',    label: 'Rates & Inventory' },
+              { id: 'rooms',    label: 'Update Rooms' },
               { id: 'bulk',     label: 'Bulk Update' },
               { id: 'live',     label: 'Live Bookings' },
               { id: 'mappings', label: 'Mappings' },
             ] as const).map(t => (
               <button
                 key={t.id}
-                onClick={() => setActiveCmTab(t.id)}
+                onClick={() => { setActiveCmTab(t.id); if (t.id === 'rooms') fetchInvGrid(); if (t.id === 'rates') fetchRateGrid(); }}
                 className={cn(
                   'px-5 py-2.5 text-sm font-semibold rounded-t-xl whitespace-nowrap transition-colors',
                   activeCmTab === t.id
@@ -22661,34 +22680,222 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           )}
 
           {/* ══════════════════════════════════════════════════════════
+              TAB: UPDATE ROOMS — manual inventory override grid
+              ══════════════════════════════════════════════════════════ */}
+          {activeCmTab === 'rooms' && (
+            <div className="space-y-4">
+              {/* Date navigator */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <button
+                  onClick={() => {
+                    const d = new Date(invGridFrom + 'T12:00:00Z'); d.setDate(d.getDate() - 7);
+                    const f = d.toISOString().slice(0, 10);
+                    setInvGridFrom(f); fetchInvGrid(f);
+                  }}
+                  className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm"
+                >◀ Back 7d</button>
+                <input
+                  type="date"
+                  value={invGridFrom}
+                  onChange={e => { setInvGridFrom(e.target.value); fetchInvGrid(e.target.value); }}
+                  className="border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm"
+                />
+                <button
+                  onClick={() => {
+                    const d = new Date(invGridFrom + 'T12:00:00Z'); d.setDate(d.getDate() + 7);
+                    const f = d.toISOString().slice(0, 10);
+                    setInvGridFrom(f); fetchInvGrid(f);
+                  }}
+                  className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm"
+                >Next 7d ▶</button>
+                <button onClick={() => fetchInvGrid()} className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm">↻</button>
+                {Object.keys(invGridDirty).length > 0 && (
+                  <button
+                    disabled={invGridSaving}
+                    onClick={async () => {
+                      const overrides: any[] = [];
+                      for (const [rtId, dates] of Object.entries(invGridDirty)) {
+                        for (const [date, count] of Object.entries(dates)) {
+                          overrides.push({ room_type_id: rtId, date, available_count: Number(count) });
+                        }
+                      }
+                      setInvGridSaving(true);
+                      try {
+                        await hotelApi('/inventory-grid', { method: 'PUT', body: JSON.stringify({ overrides }) });
+                        toast.success('Inventory saved.');
+                        await fetchInvGrid();
+                      } catch { toast.error('Failed to save inventory.'); }
+                      finally { setInvGridSaving(false); }
+                    }}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 transition-colors"
+                  >
+                    {invGridSaving ? 'Saving…' : `Save ${Object.values(invGridDirty).reduce((s: number, d: Record<string,number>) => s + Object.keys(d).length, 0)} changes`}
+                  </button>
+                )}
+                {Object.keys(invGridDirty).length > 0 && (
+                  <button
+                    onClick={() => setInvGridDirty({})}
+                    className="px-4 py-2 rounded-xl border border-[#e8e0d8] text-sm text-[#6b5d52] hover:bg-[#f5f0ea]"
+                  >Reset</button>
+                )}
+              </div>
+              <p className="text-xs text-[#9c8e85]">
+                Set the available room count for each room type per day. Leave as auto (greyed) to use the calculated figure (total rooms minus occupied). A manual override stops-sell when the count reaches zero.
+              </p>
+
+              {invGridLoading ? (
+                <div className="text-center py-10 text-[#9c8e85]">Loading inventory grid…</div>
+              ) : !invGrid ? (
+                <div className="text-center py-10 text-[#9c8e85]">No data — configure room types in Room Setup first.</div>
+              ) : (
+                <div className="overflow-x-auto rounded-2xl border border-[#e8e0d8] bg-white">
+                  <table className="min-w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-[#f5f0ea]">
+                        <th className="sticky left-0 bg-[#f5f0ea] z-10 px-4 py-2 text-left font-bold text-[#1a1208] border-r border-[#e8e0d8] min-w-[160px]">Room Type</th>
+                        {invGrid.dates.map(d => (
+                          <th key={d} className="px-3 py-2 text-center font-semibold text-[#6b5d52] border-l border-[#e8e0d8] min-w-[80px]">
+                            <div>{new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</div>
+                            <div className="text-[9px] font-normal">{new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { weekday: 'short' })}</div>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invGrid.room_types.map(rt => (
+                        <tr key={rt.id} className="border-t border-[#e8e0d8] hover:bg-blue-50/30">
+                          <td className="sticky left-0 bg-white z-10 px-4 py-2 border-r border-[#e8e0d8]">
+                            <div className="font-semibold text-[#1a1208]">{rt.name}</div>
+                            <div className="text-[9px] text-[#9c8e85]">{rt.total_rooms} total rooms</div>
+                          </td>
+                          {invGrid.dates.map(d => {
+                            const dirty = invGridDirty[rt.id]?.[d];
+                            const override = rt.overrides?.[d];
+                            const occupied = rt.occupied?.[d] ?? 0;
+                            const autoAvail = Math.max(0, rt.total_rooms - occupied);
+                            const displayVal = dirty !== undefined ? dirty : (override !== undefined ? override : autoAvail);
+                            const isDirty = dirty !== undefined;
+                            const isOverridden = override !== undefined && dirty === undefined;
+                            const occ = rt.total_rooms > 0 ? Math.round((occupied / rt.total_rooms) * 100) : 0;
+                            const occColor = occ >= 80 ? 'text-red-600' : occ >= 50 ? 'text-amber-600' : 'text-emerald-700';
+                            return (
+                              <td key={d} className={cn('px-1 py-1 border-l border-[#e8e0d8]', isDirty ? 'bg-blue-50' : isOverridden ? 'bg-amber-50' : '')}>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max={rt.total_rooms}
+                                  step="1"
+                                  value={displayVal}
+                                  onChange={e => {
+                                    const v = Math.max(0, Math.min(rt.total_rooms, Number(e.target.value)));
+                                    setInvGridDirty(prev => ({
+                                      ...prev,
+                                      [rt.id]: { ...(prev[rt.id] || {}), [d]: v },
+                                    }));
+                                  }}
+                                  className={cn(
+                                    'w-full text-center text-xs py-1 px-1 rounded border focus:ring-1 ring-blue-300 outline-none',
+                                    isDirty ? 'border-blue-400 font-bold text-blue-800'
+                                      : isOverridden ? 'border-amber-400 text-amber-800'
+                                      : 'border-transparent hover:border-[#e8e0d8] text-[#6b5d52]'
+                                  )}
+                                />
+                                <div className={cn('text-[9px] text-center mt-0.5', occColor)}>{occ}%</div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                      {/* Summary: Total Available Rooms */}
+                      <tr className="border-t-2 border-[#e8e0d8] bg-slate-50 font-semibold">
+                        <td className="sticky left-0 bg-slate-50 z-10 px-4 py-2 border-r border-[#e8e0d8] text-[#1a1208]">Total Available Rooms</td>
+                        {invGrid.dates.map(d => {
+                          const total = invGrid.room_types.reduce((s, rt) => {
+                            const dirty = invGridDirty[rt.id]?.[d];
+                            const override = rt.overrides?.[d];
+                            const occupied = rt.occupied?.[d] ?? 0;
+                            const v = dirty !== undefined ? dirty : (override !== undefined ? override : Math.max(0, rt.total_rooms - occupied));
+                            return s + v;
+                          }, 0);
+                          const totalRooms = invGrid.room_types.reduce((s, rt) => s + rt.total_rooms, 0);
+                          const occ = totalRooms > 0 ? Math.round(((totalRooms - total) / totalRooms) * 100) : 0;
+                          const color = occ >= 80 ? 'text-red-700' : occ >= 50 ? 'text-amber-700' : 'text-emerald-700';
+                          return (
+                            <td key={d} className={cn('px-2 py-2 text-center border-l border-[#e8e0d8]', color)}>
+                              <div>{total}</div>
+                              <div className="text-[9px] font-normal">({occ}% occ)</div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════
               TAB: BULK UPDATE
               ══════════════════════════════════════════════════════════ */}
           {activeCmTab === 'bulk' && (
             <div className="max-w-2xl space-y-5">
-              <div className="bg-white border border-[#e8e0d8] rounded-2xl p-6 space-y-4">
-                <h3 className="text-lg font-bold text-[#1a1208]">Bulk Rate Update</h3>
-                <p className="text-sm text-[#6b5d52]">Apply one rate to multiple room types across a date range — useful for season changes or promotions.</p>
+              <div className="bg-white border border-[#e8e0d8] rounded-2xl p-6 space-y-5">
+                <div>
+                  <h3 className="text-lg font-bold text-[#1a1208]">Bulk Update</h3>
+                  <p className="text-sm text-[#6b5d52]">Apply changes to multiple room types across a date range.</p>
+                </div>
 
-                <div className="space-y-1">
-                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Room Types</label>
+                {/* Type selector */}
+                <div className="space-y-2">
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Type</label>
                   <div className="flex flex-wrap gap-2">
-                    {(rateGrid?.room_types || []).filter(rt => rt.id !== '__untyped__').map(rt => {
-                      const sel = (bulkRateForm.room_type_ids || []).includes(rt.id);
-                      return (
-                        <button
-                          key={rt.id}
-                          type="button"
-                          onClick={() => setBulkRateForm((f: any) => ({
-                            ...f,
-                            room_type_ids: sel ? f.room_type_ids.filter((x: string) => x !== rt.id) : [...f.room_type_ids, rt.id],
-                          }))}
-                          className={cn('px-3 py-1.5 rounded-xl text-sm border transition-colors', sel ? 'bg-blue-600 text-white border-blue-600' : 'border-[#e8e0d8] text-[#6b5d52] hover:bg-[#f5f0ea]')}
-                        >{rt.name}</button>
-                      );
-                    })}
+                    {([
+                      { id: 'rate',             label: 'Rate' },
+                      { id: 'inventory',        label: 'Inventory' },
+                      { id: 'min_rate',         label: 'Minimum Rate' },
+                      { id: 'increment',        label: 'Increment' },
+                      { id: 'restrictions_rate', label: 'Restrictions (Rates)' },
+                      { id: 'restrictions_inv', label: 'Restrictions (Inventory)' },
+                    ] as { id: string; label: string }[]).map(t => (
+                      <button key={t.id} type="button"
+                        onClick={() => setBulkRateForm((f: any) => ({ ...f, type: t.id, value: '' }))}
+                        className={cn('px-4 py-1.5 rounded-xl text-sm border font-medium transition-colors',
+                          bulkRateForm.type === t.id
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'border-[#e8e0d8] text-[#6b5d52] hover:bg-[#f5f0ea]'
+                        )}
+                      >{t.label}</button>
+                    ))}
                   </div>
                 </div>
 
+                {/* Room Types */}
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Room Types</label>
+                  <div className="flex flex-wrap gap-2">
+                    {((invGrid?.room_types || rateGrid?.room_types || []) as any[])
+                      .filter((rt: any) => rt.id !== '__untyped__')
+                      .map((rt: any) => {
+                        const sel = (bulkRateForm.room_type_ids || []).includes(rt.id);
+                        return (
+                          <button key={rt.id} type="button"
+                            onClick={() => setBulkRateForm((f: any) => ({
+                              ...f,
+                              room_type_ids: sel
+                                ? f.room_type_ids.filter((x: string) => x !== rt.id)
+                                : [...f.room_type_ids, rt.id],
+                            }))}
+                            className={cn('px-3 py-1.5 rounded-xl text-sm border transition-colors',
+                              sel ? 'bg-blue-600 text-white border-blue-600' : 'border-[#e8e0d8] text-[#6b5d52] hover:bg-[#f5f0ea]'
+                            )}
+                          >{rt.name}</button>
+                        );
+                      })}
+                  </div>
+                </div>
+
+                {/* Date range */}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">From Date</label>
@@ -22700,46 +22907,94 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   </div>
                 </div>
 
-                <div className="space-y-1">
-                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Rate (₹ per night)</label>
-                  <input type="number" min="0" step="50" value={bulkRateForm.rate} onChange={e => setBulkRateForm((f: any) => ({ ...f, rate: e.target.value }))} className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm" placeholder="e.g. 3500" />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Apply on (blank = every day)</label>
+                {/* Apply on days */}
+                <div className="space-y-2">
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Apply On Days</label>
                   <div className="flex gap-2 flex-wrap">
-                    {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((day, idx) => {
+                    {(() => {
+                      const allSel = (bulkRateForm.apply_days || []).length === 7;
+                      return (
+                        <button type="button"
+                          onClick={() => setBulkRateForm((f: any) => ({ ...f, apply_days: allSel ? [] : [0,1,2,3,4,5,6] }))}
+                          className={cn('px-3 py-1 rounded-lg text-xs border font-semibold transition-colors',
+                            allSel ? 'bg-blue-600 text-white border-blue-600' : 'border-[#e8e0d8] text-[#6b5d52] hover:bg-[#f5f0ea]'
+                          )}
+                        >All</button>
+                      );
+                    })()}
+                    {(['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] as const).map((day, i) => {
+                      const idx = i === 6 ? 0 : i + 1;
                       const sel = (bulkRateForm.apply_days || []).includes(idx);
                       return (
-                        <button key={idx} type="button"
+                        <button key={day} type="button"
                           onClick={() => setBulkRateForm((f: any) => ({
                             ...f,
                             apply_days: sel ? f.apply_days.filter((x: number) => x !== idx) : [...f.apply_days, idx],
                           }))}
-                          className={cn('px-3 py-1 rounded-lg text-xs border transition-colors', sel ? 'bg-blue-600 text-white border-blue-600' : 'border-[#e8e0d8] text-[#6b5d52] hover:bg-[#f5f0ea]')}
+                          className={cn('px-3 py-1 rounded-lg text-xs border transition-colors',
+                            sel ? 'bg-blue-600 text-white border-blue-600' : 'border-[#e8e0d8] text-[#6b5d52] hover:bg-[#f5f0ea]'
+                          )}
                         >{day}</button>
                       );
                     })}
                   </div>
+                  <p className="text-[10px] text-[#9c8e85]">Leave all unselected to apply every day of the week.</p>
                 </div>
 
+                {/* Value input — label changes per type */}
+                {(['rate','inventory','min_rate','increment'] as const).includes(bulkRateForm.type) && (
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">
+                      {bulkRateForm.type === 'inventory'  ? 'Available Rooms'
+                        : bulkRateForm.type === 'min_rate'  ? 'Minimum Rate (₹/night)'
+                        : bulkRateForm.type === 'increment' ? 'Increment (₹, negative to decrease)'
+                        : 'Rate (₹/night)'}
+                    </label>
+                    <input
+                      type="number"
+                      min={bulkRateForm.type === 'increment' ? undefined : '0'}
+                      step={bulkRateForm.type === 'inventory' ? '1' : '50'}
+                      value={bulkRateForm.value}
+                      onChange={e => setBulkRateForm((f: any) => ({ ...f, value: e.target.value }))}
+                      className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm"
+                      placeholder={
+                        bulkRateForm.type === 'inventory'  ? 'e.g. 10'
+                        : bulkRateForm.type === 'increment' ? 'e.g. 500 or -200'
+                        : 'e.g. 3500'
+                      }
+                    />
+                  </div>
+                )}
+                {(['restrictions_rate','restrictions_inv'] as const).includes(bulkRateForm.type) && (
+                  <div className="rounded-xl border border-[#e8e0d8] bg-[#f5f0ea] p-4 text-sm text-[#6b5d52]">
+                    Restrictions management (stop-sell, close-out, min-stay) is coming soon.
+                  </div>
+                )}
+
                 <button
-                  disabled={bulkRateSaving || !bulkRateForm.room_type_ids.length || !bulkRateForm.from_date || !bulkRateForm.to_date || !bulkRateForm.rate}
+                  disabled={
+                    bulkRateSaving
+                    || !bulkRateForm.room_type_ids.length
+                    || !bulkRateForm.from_date
+                    || !bulkRateForm.to_date
+                    || ((['rate','inventory','min_rate','increment'] as const).includes(bulkRateForm.type) && !bulkRateForm.value)
+                  }
                   onClick={async () => {
                     setBulkRateSaving(true);
                     try {
                       const res = await hotelApi('/bulk-rate-update', {
                         method: 'POST',
-                        body: JSON.stringify({ ...bulkRateForm, rate: Number(bulkRateForm.rate) }),
+                        body: JSON.stringify({ ...bulkRateForm, rate: Number(bulkRateForm.value) }),
                       });
                       alert(`Done. ${res.created ?? 0} created, ${res.updated ?? 0} updated.`);
-                      fetchRateGrid();
+                      if (bulkRateForm.type === 'inventory') fetchInvGrid();
+                      else fetchRateGrid();
                     } catch { alert('Failed to apply bulk update.'); }
                     finally { setBulkRateSaving(false); }
                   }}
                   className="w-full py-2.5 rounded-xl bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
                 >
-                  {bulkRateSaving ? 'Applying…' : 'Apply Bulk Rate'}
+                  {bulkRateSaving ? 'Applying…' : `Apply Bulk ${bulkRateForm.type === 'inventory' ? 'Inventory' : 'Rate'} Update`}
                 </button>
               </div>
             </div>

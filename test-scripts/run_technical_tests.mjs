@@ -240,6 +240,64 @@ async function testHotel() {
   } else {
     fail('TC-HOTEL-PUBLISH', 'Publish rates endpoint', `HTTP ${pr.status}`);
   }
+
+  // Inventory Grid — GET (Part C: Update Rooms tab).
+  const ig = await api('GET', `/api/restaurant/${restaurantId}/hotel/inventory-grid`);
+  if (ig.status === 200 && Array.isArray(ig.data?.dates) && Array.isArray(ig.data?.room_types)) {
+    pass('TC-HOTEL-INVGRID-GET', `Inventory grid loads: ${ig.data.dates.length} dates, ${ig.data.room_types.length} room types`);
+    // PUT smoke test — upsert with zero changes (empty overrides array is safe).
+    const igPut = await api('PUT', `/api/restaurant/${restaurantId}/hotel/inventory-grid`, { overrides: [] });
+    if (igPut.status === 200 && igPut.data?.ok) {
+      pass('TC-HOTEL-INVGRID-PUT', `Inventory grid PUT (empty): saved=${igPut.data.saved ?? 0}`);
+    } else {
+      fail('TC-HOTEL-INVGRID-PUT', 'Inventory grid PUT endpoint', `HTTP ${igPut.status}`);
+    }
+  } else if (ig.status === 403 || ig.status === 404) {
+    skip('TC-HOTEL-INVGRID-GET', 'Inventory grid GET', `HTTP ${ig.status}`);
+    skip('TC-HOTEL-INVGRID-PUT', 'Inventory grid PUT', 'skipped — GET unavailable');
+  } else {
+    fail('TC-HOTEL-INVGRID-GET', 'Inventory grid GET endpoint', `HTTP ${ig.status}`);
+    skip('TC-HOTEL-INVGRID-PUT', 'Inventory grid PUT', 'skipped — GET failed');
+  }
+
+  // Bulk Rate Update — rate type smoke test (Part C: Bulk Update tab).
+  if (rg.status === 200 && rg.data?.room_types?.length) {
+    const firstRtId = rg.data.room_types[0].id;
+    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+    const dayAfter = new Date(); dayAfter.setDate(dayAfter.getDate() + 2);
+    const dayAfterStr = dayAfter.toISOString().slice(0, 10);
+    const bu = await api('POST', `/api/restaurant/${restaurantId}/hotel/bulk-rate-update`, {
+      type: 'rate',
+      room_type_ids: [firstRtId],
+      from_date: tomorrowStr,
+      to_date: dayAfterStr,
+      rate: 0,
+      apply_days: [],
+    });
+    if (bu.status === 200 && (bu.data?.created !== undefined || bu.data?.updated !== undefined)) {
+      pass('TC-HOTEL-BULKRATE', `Bulk rate update: created=${bu.data.created ?? 0}, updated=${bu.data.updated ?? 0}`);
+    } else {
+      fail('TC-HOTEL-BULKRATE', 'Bulk rate update endpoint', `HTTP ${bu.status}`);
+    }
+    // Bulk inventory type smoke test.
+    const bui = await api('POST', `/api/restaurant/${restaurantId}/hotel/bulk-rate-update`, {
+      type: 'inventory',
+      room_type_ids: [firstRtId],
+      from_date: tomorrowStr,
+      to_date: dayAfterStr,
+      rate: 0,
+      apply_days: [],
+    });
+    if (bui.status === 200 && (bui.data?.created !== undefined || bui.data?.updated !== undefined)) {
+      pass('TC-HOTEL-BULKINV', `Bulk inventory update: created=${bui.data.created ?? 0}, updated=${bui.data.updated ?? 0}`);
+    } else {
+      fail('TC-HOTEL-BULKINV', 'Bulk inventory update endpoint', `HTTP ${bui.status}`);
+    }
+  } else {
+    skip('TC-HOTEL-BULKRATE', 'Bulk rate update smoke test', 'no room types in rate-grid response');
+    skip('TC-HOTEL-BULKINV',  'Bulk inventory update smoke test', 'no room types in rate-grid response');
+  }
 }
 
 // ── Procurement tests ──────────────────────────────────────────────────────

@@ -436,6 +436,17 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- Day-use time window: HH:MM 24h strings, null for overnight bookings
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS day_use_start_time TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS day_use_end_time   TEXT;
+    -- Inventory override grid: manual cap on rooms available for sale per type per date.
+    -- When a row exists, the UI shows this count instead of the auto-calculated figure.
+    CREATE TABLE IF NOT EXISTS room_inventory_overrides (
+      id TEXT PRIMARY KEY,
+      restaurant_id TEXT NOT NULL,
+      room_type_id TEXT NOT NULL,
+      date TEXT NOT NULL,
+      available_count INTEGER NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(restaurant_id, room_type_id, date)
+    );
     -- Phase H1 — channel manager re-sync log.
     -- One row per outbound-sync attempt. For now we only LOG (status =
     -- 'skipped_direct' for direct bookings and 'queued' for OTA-sourced
@@ -22871,13 +22882,48 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
-      const { room_type_ids, from_date, to_date, rate, apply_days } = req.body || {};
+      const { room_type_ids, from_date, to_date, rate, apply_days, type: updateType } = req.body || {};
       if (!Array.isArray(room_type_ids) || room_type_ids.length === 0)
         return res.status(400).json({ error: "room_type_ids must be a non-empty array." });
-      if (!from_date || !to_date || typeof rate !== 'number' || rate < 0)
-        return res.status(400).json({ error: "from_date, to_date, and rate are required." });
+      if (!from_date || !to_date)
+        return res.status(400).json({ error: "from_date and to_date are required." });
       const WD_BULK = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
       const applyDays: number[] | null = Array.isArray(apply_days) && apply_days.length > 0 ? apply_days : null;
+
+      // Build the list of dates this bulk update applies to (respecting day-of-week filter)
+      const targetDates: string[] = [];
+      const cur = new Date(from_date + 'T12:00:00Z');
+      const endD = new Date(to_date + 'T12:00:00Z');
+      while (cur <= endD) {
+        const wd = cur.getDay(); // 0=SUN...6=SAT
+        if (!applyDays || applyDays.includes(wd)) targetDates.push(cur.toISOString().slice(0, 10));
+        cur.setDate(cur.getDate() + 1);
+      }
+
+      // Inventory bulk update: upsert room_inventory_overrides per type per date
+      if (updateType === 'inventory') {
+        const count = Number(rate);
+        if (isNaN(count) || count < 0) return res.status(400).json({ error: "available_count must be a non-negative number." });
+        let saved = 0;
+        for (const rtId of room_type_ids) {
+          for (const d of targetDates) {
+            const id = `INVOVR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+            await tenantDb.run(
+              `INSERT INTO room_inventory_overrides (id, restaurant_id, room_type_id, date, available_count)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (restaurant_id, room_type_id, date)
+               DO UPDATE SET available_count = EXCLUDED.available_count`,
+              [id, req.params.id, rtId, d, count]
+            );
+            saved++;
+          }
+        }
+        return res.json({ ok: true, saved });
+      }
+
+      // Default: rate bulk update (original behaviour) — convert date range into a rate_override
+      const rateVal = Number(rate);
+      if (isNaN(rateVal) || rateVal < 0) return res.status(400).json({ error: "rate must be a non-negative number." });
       const appliesStr = applyDays ? applyDays.map((d: number) => WD_BULK[d]).join(',') : null;
       let created = 0, updated = 0;
       for (const rtId of room_type_ids) {
@@ -22886,13 +22932,13 @@ ${data.tenant.name}`;
           [rtId, from_date, to_date]
         );
         if (existing) {
-          await tenantDb.run("UPDATE rate_overrides SET rate = ?, applies_to_days = ? WHERE id = ?", [rate, appliesStr, existing.id]);
+          await tenantDb.run("UPDATE rate_overrides SET rate = ?, applies_to_days = ? WHERE id = ?", [rateVal, appliesStr, existing.id]);
           updated++;
         } else {
           const rid = `RATE-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
           await tenantDb.run(
             "INSERT INTO rate_overrides (id, scope, scope_id, start_date, end_date, rate, label, applies_to_days, priority) VALUES (?, 'TYPE', ?, ?, ?, ?, 'Bulk update', ?, 5)",
-            [rid, rtId, from_date, to_date, rate, appliesStr]
+            [rid, rtId, from_date, to_date, rateVal, appliesStr]
           );
           created++;
         }
@@ -22901,6 +22947,126 @@ ${data.tenant.name}`;
       res.json({ ok: true, created, updated });
     } catch (err) {
       res.status(500).json({ error: "Failed to apply bulk rate update" });
+    }
+  });
+
+  // ─── INVENTORY GRID (Update Rooms tab) ─────────────────────────────────────
+  // GET  /hotel/inventory-grid  — room types × dates with auto + manual available count.
+  // PUT  /hotel/inventory-grid  — batch-upsert manual overrides per type per date.
+  app.get("/api/restaurant/:id/hotel/inventory-grid", authenticate, hotelStaff, requireTabAccess('CHANNEL_MANAGER'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const toRaw = String(req.query.to || '');
+      const toDate = toRaw || (() => { const d = new Date(from + 'T12:00:00Z'); d.setDate(d.getDate() + 13); return d.toISOString().slice(0, 10); })();
+
+      // Build date array
+      const dates: string[] = [];
+      const cur = new Date(from + 'T12:00:00Z');
+      const end = new Date(toDate + 'T12:00:00Z');
+      while (cur <= end) { dates.push(cur.toISOString().slice(0, 10)); cur.setDate(cur.getDate() + 1); }
+
+      // Room types with total rooms per type
+      const types: any[] = await tenantDb.query(`
+        SELECT rt.id, rt.name, COUNT(r.id)::int AS total_rooms
+        FROM room_types rt
+        LEFT JOIN rooms r ON r.type_id = rt.id AND r.status NOT IN ('MAINTENANCE','BLOCKED')
+        WHERE rt.restaurant_id = ?
+        GROUP BY rt.id, rt.name
+        ORDER BY rt.sort_order, rt.name
+      `, [req.params.id]);
+
+      // Also include uncategorised rooms as a synthetic type
+      const untypedRooms: any[] = await tenantDb.query(
+        "SELECT id FROM rooms WHERE type_id IS NULL AND restaurant_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED')",
+        [req.params.id]
+      );
+
+      // Manual overrides for the date range
+      const overrideRows: any[] = await tenantDb.query(
+        `SELECT room_type_id, date, available_count FROM room_inventory_overrides
+         WHERE restaurant_id = ? AND date >= ? AND date <= ?`,
+        [req.params.id, from, toDate]
+      );
+      const overrideMap: Record<string, Record<string, number>> = {};
+      for (const r of overrideRows) {
+        if (!overrideMap[r.room_type_id]) overrideMap[r.room_type_id] = {};
+        overrideMap[r.room_type_id][r.date] = Number(r.available_count);
+      }
+
+      // Active bookings per date range for occupancy calculation
+      const bookings: any[] = await tenantDb.query(
+        `SELECT rb.room_id, r.type_id, rb.check_in_date, rb.check_out_date, rb.booking_type
+         FROM room_bookings rb
+         JOIN rooms r ON r.id = rb.room_id
+         WHERE rb.status NOT IN ('CANCELLED','CHECKED_OUT')
+           AND rb.check_in_date <= ? AND rb.check_out_date >= ?
+           AND r.restaurant_id = ?`,
+        [toDate, from, req.params.id]
+      );
+
+      // Compute occupied count per type per date
+      const occupied: Record<string, Record<string, number>> = {};
+      for (const b of bookings) {
+        const tId = b.type_id || '__untyped__';
+        if (!occupied[tId]) occupied[tId] = {};
+        for (const d of dates) {
+          const isOcc = b.booking_type === 'DAY_USE'
+            ? b.check_in_date === d
+            : b.check_in_date <= d && b.check_out_date > d;
+          if (isOcc) occupied[tId][d] = (occupied[tId][d] || 0) + 1;
+        }
+      }
+
+      const room_types = types.map((rt: any) => ({
+        id: rt.id,
+        name: rt.name,
+        total_rooms: rt.total_rooms,
+        overrides: overrideMap[rt.id] || {},
+        occupied: occupied[rt.id] || {},
+      }));
+      if (untypedRooms.length > 0) {
+        room_types.push({
+          id: '__untyped__',
+          name: 'Uncategorised',
+          total_rooms: untypedRooms.length,
+          overrides: overrideMap['__untyped__'] || {},
+          occupied: occupied['__untyped__'] || {},
+        });
+      }
+
+      res.json({ dates, room_types });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load inventory grid' });
+    }
+  });
+
+  app.put("/api/restaurant/:id/hotel/inventory-grid", authenticate, hotelStaff, requireTabAccess('CHANNEL_MANAGER'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const { overrides } = req.body || {};
+      if (!Array.isArray(overrides) || overrides.length === 0)
+        return res.status(400).json({ error: 'overrides must be a non-empty array' });
+      let saved = 0;
+      for (const o of overrides) {
+        if (!o.room_type_id || !o.date || o.available_count == null) continue;
+        const id = `INVOVR-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        await tenantDb.run(
+          `INSERT INTO room_inventory_overrides (id, restaurant_id, room_type_id, date, available_count)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (restaurant_id, room_type_id, date)
+           DO UPDATE SET available_count = EXCLUDED.available_count`,
+          [id, req.params.id, o.room_type_id, o.date, Number(o.available_count)]
+        );
+        saved++;
+      }
+      res.json({ ok: true, saved });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to save inventory overrides' });
     }
   });
 
