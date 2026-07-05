@@ -433,6 +433,9 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- Day-use booking type (idempotent — existing rows default to OVERNIGHT)
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS booking_type TEXT DEFAULT 'OVERNIGHT';
     UPDATE room_bookings SET booking_type = 'OVERNIGHT' WHERE booking_type IS NULL;
+    -- Day-use time window: HH:MM 24h strings, null for overnight bookings
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS day_use_start_time TEXT;
+    ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS day_use_end_time   TEXT;
     -- Phase H1 — channel manager re-sync log.
     -- One row per outbound-sync attempt. For now we only LOG (status =
     -- 'skipped_direct' for direct bookings and 'queued' for OTA-sourced
@@ -22701,6 +22704,206 @@ ${data.tenant.name}`;
     }
   });
 
+  // ─── RATE GRID (Aiosell-style Rates & Inventory spreadsheet) ───────────────
+  // GET  /hotel/rate-grid  — date-column spreadsheet: room types × dates with
+  //   availability, recommended rates (yield engine), and current sell rates.
+  // PUT  /hotel/rate-grid  — batch-save cell edits as single-date TYPE overrides.
+  // POST /hotel/publish-rates — explicit "Publish Rates" → triggerAllRoomRatePush.
+  // POST /hotel/bulk-rate-update — mass insert override across a date range.
+  app.get("/api/restaurant/:id/hotel/rate-grid", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const fromDate = (req.query.from as string) || todayIso;
+      const toDate   = (req.query.to as string) || (() => {
+        const d = new Date(fromDate + 'T12:00:00Z'); d.setDate(d.getDate() + 13);
+        return d.toISOString().slice(0, 10);
+      })();
+      const dates: string[] = [];
+      const cur = new Date(fromDate + 'T12:00:00Z');
+      const endD = new Date(toDate   + 'T12:00:00Z');
+      while (cur <= endD && dates.length < 90) {
+        dates.push(cur.toISOString().slice(0, 10));
+        cur.setDate(cur.getDate() + 1);
+      }
+      const WD = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+      function pickRateGrid(overrides: any[], dateStr: string): number | null {
+        const wd = WD[new Date(dateStr + 'T12:00:00Z').getUTCDay()];
+        const cands = overrides.filter((r: any) => {
+          if (dateStr < r.start_date || dateStr > r.end_date) return false;
+          if (r.applies_to_days) {
+            const days = String(r.applies_to_days).split(',').map((s: string) => s.trim().toUpperCase());
+            if (days.length > 0 && !days.includes(wd)) return false;
+          }
+          return true;
+        });
+        if (!cands.length) return null;
+        cands.sort((a: any, b: any) => Number(b.priority || 0) - Number(a.priority || 0));
+        return Number(cands[0].rate);
+      }
+      const roomTypes: any[] = await tenantDb.query(
+        "SELECT id, name, description, base_rate, capacity FROM room_types ORDER BY display_order, name"
+      );
+      const rooms: any[] = await tenantDb.query("SELECT id, name, type_id, base_rate, status FROM rooms ORDER BY name");
+      const totalRooms = rooms.length;
+      const allOverrides: any[] = await tenantDb.query(
+        "SELECT * FROM rate_overrides WHERE start_date <= ? AND end_date >= ?", [toDate, fromDate]
+      );
+      const yieldRules: any[] = await tenantDb.query(
+        "SELECT * FROM yield_rules WHERE is_enabled = 1 ORDER BY priority DESC"
+      );
+      const bookings: any[] = await tenantDb.query(
+        `SELECT room_id, check_in_date, check_out_date, booking_type FROM room_bookings
+         WHERE status IN ('BOOKED','CHECKED_IN') AND check_in_date <= ? AND check_out_date >= ?`,
+        [toDate, fromDate]
+      );
+      const avgBaseRate = rooms.length > 0
+        ? rooms.reduce((s: number, r: any) => s + Number(r.base_rate || 0), 0) / rooms.length : 0;
+      const meta: Record<string, any> = {};
+      for (const d of dates) {
+        const occupied = bookings.filter((b: any) =>
+          b.booking_type === 'DAY_USE' ? b.check_in_date === d : b.check_in_date <= d && b.check_out_date > d
+        ).length;
+        const occupancyPct = totalRooms > 0 ? Math.round((occupied / totalRooms) * 100) : 0;
+        const daysOut = Math.max(0, Math.ceil((new Date(d + 'T12:00:00Z').getTime() - Date.now()) / 86400000));
+        let recommendedRate: number | null = null;
+        let dynamicRatesEnabled = false;
+        for (const rule of yieldRules) {
+          const minOcc = rule.occupancy_min == null ? -Infinity : Number(rule.occupancy_min);
+          const maxOcc = rule.occupancy_max == null ? Infinity  : Number(rule.occupancy_max);
+          const minDO  = rule.days_out_min  == null ? -Infinity : Number(rule.days_out_min);
+          const maxDO  = rule.days_out_max  == null ? Infinity  : Number(rule.days_out_max);
+          if (occupancyPct >= minOcc && occupancyPct <= maxOcc && daysOut >= minDO && daysOut <= maxDO) {
+            recommendedRate = Math.round(avgBaseRate * Number(rule.multiplier));
+            if (String(rule.mode || '').toUpperCase() === 'AUTO') dynamicRatesEnabled = true;
+            break;
+          }
+        }
+        meta[d] = { available_rooms: totalRooms - occupied, total_rooms: totalRooms, occupancy_pct: occupancyPct, recommended_rate: recommendedRate, dynamic_rates_enabled: dynamicRatesEnabled };
+      }
+      const roomTypeRates = roomTypes.map((rt: any) => {
+        const typeOvr  = allOverrides.filter((o: any) => o.scope === 'TYPE' && o.scope_id === rt.id);
+        const typeRooms = rooms.filter((r: any) => r.type_id === rt.id);
+        const rates: Record<string, number> = {};
+        for (const d of dates) {
+          const tr = pickRateGrid(typeOvr, d);
+          if (tr !== null) { rates[d] = tr; continue; }
+          let best: number | null = null;
+          for (const room of typeRooms) {
+            const rOvr = allOverrides.filter((o: any) => o.scope === 'ROOM' && o.scope_id === room.id);
+            const r = pickRateGrid(rOvr, d);
+            if (r !== null && (best === null || r > best)) best = r;
+          }
+          rates[d] = best ?? Number(rt.base_rate || 0);
+        }
+        return { id: rt.id, name: rt.name, base_rate: rt.base_rate, capacity: rt.capacity, rates };
+      });
+      const untypedRooms = rooms.filter((r: any) => !r.type_id);
+      if (untypedRooms.length > 0) {
+        const rates: Record<string, number> = {};
+        for (const d of dates) {
+          let best: number | null = null;
+          for (const room of untypedRooms) {
+            const rOvr = allOverrides.filter((o: any) => o.scope === 'ROOM' && o.scope_id === room.id);
+            const r = pickRateGrid(rOvr, d);
+            if (r !== null && (best === null || r > best)) best = r;
+          }
+          rates[d] = best ?? Number(untypedRooms[0]?.base_rate || 0);
+        }
+        roomTypeRates.push({ id: '__untyped__', name: 'Other Rooms', base_rate: untypedRooms[0]?.base_rate || 0, capacity: null, rates });
+      }
+      res.json({ dates, meta, room_types: roomTypeRates });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch rate grid" });
+    }
+  });
+
+  app.put("/api/restaurant/:id/hotel/rate-grid", authenticate, hotelStaff, requireTabAccess('CHANNEL_MANAGER'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const overrides: Array<{ room_type_id: string; date: string; rate: number }> = req.body?.overrides || [];
+      if (!Array.isArray(overrides) || overrides.length === 0)
+        return res.status(400).json({ error: "overrides array is required." });
+      for (const o of overrides) {
+        if (!o.room_type_id || !o.date || typeof o.rate !== 'number')
+          return res.status(400).json({ error: "Each override needs room_type_id, date, and rate." });
+        const existing: any = await tenantDb.get(
+          "SELECT id FROM rate_overrides WHERE scope = 'TYPE' AND scope_id = ? AND start_date = ? AND end_date = ?",
+          [o.room_type_id, o.date, o.date]
+        );
+        if (existing) {
+          await tenantDb.run("UPDATE rate_overrides SET rate = ? WHERE id = ?", [o.rate, existing.id]);
+        } else {
+          const rid = `RATE-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+          await tenantDb.run(
+            "INSERT INTO rate_overrides (id, scope, scope_id, start_date, end_date, rate, label, priority) VALUES (?, 'TYPE', ?, ?, ?, ?, 'Grid override', 10)",
+            [rid, o.room_type_id, o.date, o.date, o.rate]
+          );
+        }
+      }
+      triggerAllRoomRatePush(req.params.id).catch(() => {});
+      res.json({ ok: true, saved: overrides.length });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to save rate grid" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/publish-rates", authenticate, hotelStaff, requireTabAccess('CHANNEL_MANAGER'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const enabledOtas: any[] = await db.query("SELECT channel FROM channel_credentials WHERE is_enabled = 1");
+      triggerAllRoomRatePush(req.params.id).catch(() => {});
+      const n = enabledOtas.length;
+      res.json({ ok: true, queued: n, message: `Rates queued for ${n} OTA channel${n !== 1 ? 's' : ''}.` });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to publish rates" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/hotel/bulk-rate-update", authenticate, hotelStaff, requireTabAccess('CHANNEL_MANAGER'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const { room_type_ids, from_date, to_date, rate, apply_days } = req.body || {};
+      if (!Array.isArray(room_type_ids) || room_type_ids.length === 0)
+        return res.status(400).json({ error: "room_type_ids must be a non-empty array." });
+      if (!from_date || !to_date || typeof rate !== 'number' || rate < 0)
+        return res.status(400).json({ error: "from_date, to_date, and rate are required." });
+      const WD_BULK = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+      const applyDays: number[] | null = Array.isArray(apply_days) && apply_days.length > 0 ? apply_days : null;
+      const appliesStr = applyDays ? applyDays.map((d: number) => WD_BULK[d]).join(',') : null;
+      let created = 0, updated = 0;
+      for (const rtId of room_type_ids) {
+        const existing: any = await tenantDb.get(
+          "SELECT id FROM rate_overrides WHERE scope = 'TYPE' AND scope_id = ? AND start_date = ? AND end_date = ?",
+          [rtId, from_date, to_date]
+        );
+        if (existing) {
+          await tenantDb.run("UPDATE rate_overrides SET rate = ?, applies_to_days = ? WHERE id = ?", [rate, appliesStr, existing.id]);
+          updated++;
+        } else {
+          const rid = `RATE-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+          await tenantDb.run(
+            "INSERT INTO rate_overrides (id, scope, scope_id, start_date, end_date, rate, label, applies_to_days, priority) VALUES (?, 'TYPE', ?, ?, ?, ?, 'Bulk update', ?, 5)",
+            [rid, rtId, from_date, to_date, rate, appliesStr]
+          );
+          created++;
+        }
+      }
+      triggerAllRoomRatePush(req.params.id).catch(() => {});
+      res.json({ ok: true, created, updated });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to apply bulk rate update" });
+    }
+  });
+
   // GET /hotel/rate-preview?room_id=X&start=Y&end=Z
   // Per-night breakdown for a date range — used by the booking modal
   // to show "Total: ₹X with rate-plan breakdown" before submit.
@@ -24307,10 +24510,15 @@ ${data.tenant.name}`;
       }
 
       // FIX-1: Date filter — OVERLAP, not containment.
-      // booking range: [check_in_date, check_out_date)  half-open
-      // filter range:  [fromDate, toDate]              inclusive
-      // overlap:       check_in_date <= toDate AND check_out_date > fromDate
-      if (fromDate) { sql += ` AND b.check_out_date > ?`;  params.push(fromDate); }
+      // Overnight range: [check_in_date, check_out_date)  half-open
+      // Day-use: check_out === check_in (degenerate interval), so the standard
+      // half-open test `check_out_date > fromDate` is FALSE when the booking
+      // falls exactly on fromDate. Special-case day-use to use >= instead.
+      // filter range: [fromDate, toDate] inclusive
+      if (fromDate) {
+        sql += ` AND (b.check_out_date > ? OR (b.booking_type = 'DAY_USE' AND b.check_in_date >= ?))`;
+        params.push(fromDate, fromDate);
+      }
       if (toDate)   { sql += ` AND b.check_in_date  <= ?`; params.push(toDate); }
 
       // Float in-house (CHECKED_IN) then upcoming (BOOKED) bookings to the top
@@ -25328,6 +25536,8 @@ ${data.tenant.name}`;
         // Receivables Phase 2 — optional travel-agent attribution. When set,
         // this booking rolls into that agent's statement + receivables aging.
         agent_id,
+        // Day-use time window (HH:MM, 24h). Only meaningful when booking_type='DAY_USE'.
+        day_use_start_time, day_use_end_time,
       } = req.body || {};
       if (!guest_name || String(guest_name).trim().length === 0) {
         return res.status(400).json({ error: "Guest name is required." });
@@ -25485,19 +25695,24 @@ ${data.tenant.name}`;
       }
       const net_amount = Math.max(0, total - commission_amount);
 
+      const duStartTime = bookingType === 'DAY_USE' ? (day_use_start_time || null) : null;
+      const duEndTime   = bookingType === 'DAY_USE' ? (day_use_end_time   || null) : null;
+
       await tenantDb.run(
         `INSERT INTO room_bookings
          (id, room_id, room_locked, guest_name, guest_phone, guest_email, guest_id_proof, guest_nationality, guest_state,
           num_guests, check_in_date, check_out_date, status, booking_source, room_rate, total_amount, special_requests, booking_type,
           meal_plan_id, meal_plan_snapshot, extra_adults, extra_children_with_mattress, extra_children_no_mattress, num_adults,
-          agent_id, commission_pct, commission_amount, net_amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          agent_id, commission_pct, commission_amount, net_amount,
+          day_use_start_time, day_use_end_time)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BOOKED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [bid, resolvedRoomId, roomLocked, guest_name, guest_phone || null, guest_email || null,
          guest_id_proof || null, guest_nationality || null, guest_state || null,
          effectiveNumGuests, check_in_date, check_out_date, booking_source || 'DIRECT', rate, total,
          special_requests || null, bookingType,
          meal_plan_id || null, mealPlanSnapshot, xpAdults, xpChildMat, xpChildNoMat, numAdultsToStore,
-         agent_id || null, commission_pct, commission_amount, net_amount]
+         agent_id || null, commission_pct, commission_amount, net_amount,
+         duStartTime, duEndTime]
       );
       const row = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [bid]);
       try { await triggerNotification(req.params.id, 'BOOKING_CREATED', { bookingId: bid, guestName: guest_name, checkIn: check_in_date, checkOut: check_out_date }); } catch {}
@@ -31307,7 +31522,9 @@ ${data.tenant.name}`;
         // Receivables Phase 2 — agent + booking_source editable post-create
         // so owner can re-tag a misattributed booking. Not locked after
         // check-in: tagging the right partner is a back-office concern.
-        'booking_source','agent_id'];
+        'booking_source','agent_id',
+        // Day-use time window — HH:MM strings, only meaningful for DAY_USE bookings.
+        'day_use_start_time','day_use_end_time'];
       const patch: any = {};
       for (const k of allow) if (k in (req.body || {})) patch[k] = req.body[k];
       if (Object.keys(patch).length === 0) return res.json(b);

@@ -9628,6 +9628,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [webhookLog, setWebhookLog] = useState<any[]>([]);
   const [hotelSettingsSaved, setHotelSettingsSaved] = useState(false);
 
+  // Aiosell-style Rates & Inventory tab — active CM sub-tab + rate grid data.
+  const [activeCmTab, setActiveCmTab] = useState<'rates'|'bulk'|'live'|'mappings'>('rates');
+  const [rateGrid, setRateGrid] = useState<{ dates: string[]; meta: Record<string,any>; room_types: any[] } | null>(null);
+  const [rateGridLoading, setRateGridLoading] = useState(false);
+  const [rateGridDirty, setRateGridDirty] = useState<Record<string,Record<string,number>>>({}); // {roomTypeId: {date: rate}}
+  const [rateGridFrom, setRateGridFrom] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [rateGridSaving, setRateGridSaving] = useState(false);
+  const [bulkRateForm, setBulkRateForm] = useState<any>({ room_type_ids: [], from_date: '', to_date: '', rate: '', apply_days: [] });
+  const [bulkRateSaving, setBulkRateSaving] = useState(false);
+  const fetchRateGrid = async (from?: string) => {
+    if (!isHotelEnabled) return;
+    setRateGridLoading(true);
+    try {
+      const f = from || rateGridFrom;
+      const d = new Date(f + 'T12:00:00Z'); d.setDate(d.getDate() + 13);
+      const to = d.toISOString().slice(0, 10);
+      const data = await hotelApi(`/rate-grid?from=${f}&to=${to}`);
+      setRateGrid(data);
+      setRateGridDirty({});
+    } catch { /* non-fatal */ } finally { setRateGridLoading(false); }
+  };
+
   // OTA Gaps 5-9 — Channel Manager extension state.
   // Gap 5: commission summary per channel (gross/commission/net last 30d).
   // Gap 6: rate plans (BAR/NRF/LSTAY/MEMBER) editor.
@@ -12655,7 +12677,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     // BCG client request 8 Jun 2026 — Channel Manager moved out of Settings.
     // Eagerly load credentials + iCal feeds + recent webhook events when
     // the tab is opened so the page renders with data, not loading spinners.
-    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); fetchTravelAgents(); fetchReceivablesAging(); fetchPartnerInvoices(); fetchOutstandingReport(); }
+    if (activeTab === 'CHANNEL_MANAGER') { fetchChannelCredentials(); fetchIcalFeeds(); fetchWebhookLog(); fetchHotelRooms(); fetchCommissionSummary(); fetchRatePlans(); fetchChannelSyncQueue(); fetchReconciliationReports(); fetchChannelSecurityConfig(); fetchOta360(); fetchTravelAgents(); fetchReceivablesAging(); fetchPartnerInvoices(); fetchOutstandingReport(); fetchRateGrid(); }
     if (activeTab === 'RECEIVABLES') { fetchReceivablesAging(); fetchPartnerInvoices(); fetchTravelAgents(); }
     if (activeTab === 'ACCOUNTS_PNL')          { fetchAccountsPnl(); }
     if (activeTab === 'ACCOUNTS_CASHFLOW')      { fetchCashFlow(); }
@@ -22418,24 +22440,374 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : activeTab === 'CHANNEL_MANAGER' && isHotelEnabled ? (
         /* ════════════════ CHANNEL MANAGER (top-level tab) ════════════════
-           Promoted from Settings → top-level (client request 8 Jun 2026).
-           OTAs are a high-frequency operational concern (daily iCal review,
-           weekly room-mapping audits, webhook-error firefighting), so the
-           page deserves muscle-memory placement next to Front Desk.
-
-           Same content that used to live under Settings — iCal feeds,
-           webhook activity, OTA credentials — just hoisted up. */
+           Aiosell-style layout: 5-tab nav → Rates & Inventory / Update Rooms
+           / Bulk Update / Live Bookings / Mappings. "Rates & Inventory" is
+           the default view — date-grid spreadsheet with Recommended Rates,
+           Available Rooms (occupancy %), and editable sell-rate cells. */
         <div className="space-y-5">
-          {/* ── HEADER ─────────────────────────────────────────────────
-              Plain-English subtitle so a non-technical hotel owner
-              immediately understands what this page does. */}
-          <div>
-            <h2 className="text-3xl font-bold font-serif text-[#1a1208]">🛰️ Channel Manager</h2>
-            <p className="text-sm text-[#6b5d52] mt-1">
-              Where your bookings come from, and how much you keep from each one.
-              <span className="ml-1 text-[#9c8e85]">(OTA = Online Travel Agency — Booking.com, MakeMyTrip, Goibibo, Agoda, Airbnb, etc.)</span>
-            </p>
+          {/* ── HEADER ── */}
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-3xl font-bold font-serif text-[#1a1208]">🛰️ Channel Manager & RMS</h2>
+              <p className="text-sm text-[#6b5d52] mt-1">
+                Set rates, manage availability, and sync with OTAs — all from one place.
+              </p>
+            </div>
+            {activeCmTab === 'rates' && (
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await hotelApi('/publish-rates', { method: 'POST' });
+                    alert(res?.message || 'Rates published to all OTAs.');
+                  } catch { alert('Failed to publish rates.'); }
+                }}
+                className="px-5 py-2.5 rounded-xl bg-blue-600 text-white font-bold text-sm shadow hover:bg-blue-700 transition-colors flex items-center gap-2"
+              >
+                ↑ Publish Rates
+              </button>
+            )}
           </div>
+
+          {/* ── 5-TAB NAV (Aiosell-style) ── */}
+          <div className="flex gap-1 border-b border-[#e8e0d8] overflow-x-auto">
+            {([
+              { id: 'rates',    label: 'Rates & Inventory' },
+              { id: 'bulk',     label: 'Bulk Update' },
+              { id: 'live',     label: 'Live Bookings' },
+              { id: 'mappings', label: 'Mappings' },
+            ] as const).map(t => (
+              <button
+                key={t.id}
+                onClick={() => setActiveCmTab(t.id)}
+                className={cn(
+                  'px-5 py-2.5 text-sm font-semibold rounded-t-xl whitespace-nowrap transition-colors',
+                  activeCmTab === t.id
+                    ? 'bg-white border border-b-white border-[#e8e0d8] text-[#cc5a16] -mb-px'
+                    : 'text-[#6b5d52] hover:text-[#1a1208] hover:bg-[#f5f0ea]'
+                )}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {/* ══════════════════════════════════════════════════════════
+              TAB: RATES & INVENTORY — Aiosell-style date grid
+              ══════════════════════════════════════════════════════════ */}
+          {activeCmTab === 'rates' && (
+            <div className="space-y-4">
+              {/* Date navigator */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <button
+                  onClick={() => {
+                    const d = new Date(rateGridFrom + 'T12:00:00Z'); d.setDate(d.getDate() - 7);
+                    const f = d.toISOString().slice(0, 10);
+                    setRateGridFrom(f); fetchRateGrid(f);
+                  }}
+                  className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm"
+                >◀ Back 7d</button>
+                <input
+                  type="date"
+                  value={rateGridFrom}
+                  onChange={e => { setRateGridFrom(e.target.value); fetchRateGrid(e.target.value); }}
+                  className="border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm"
+                />
+                <button
+                  onClick={() => {
+                    const d = new Date(rateGridFrom + 'T12:00:00Z'); d.setDate(d.getDate() + 7);
+                    const f = d.toISOString().slice(0, 10);
+                    setRateGridFrom(f); fetchRateGrid(f);
+                  }}
+                  className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm"
+                >Next 7d ▶</button>
+                <button onClick={() => fetchRateGrid()} className="p-2 rounded-lg border border-[#e8e0d8] hover:bg-[#f5f0ea] text-sm">↻</button>
+                {Object.keys(rateGridDirty).length > 0 && (
+                  <button
+                    disabled={rateGridSaving}
+                    onClick={async () => {
+                      const overrides: any[] = [];
+                      for (const [rtId, dates] of Object.entries(rateGridDirty)) {
+                        for (const [date, rate] of Object.entries(dates)) {
+                          overrides.push({ room_type_id: rtId, date, rate: Number(rate) });
+                        }
+                      }
+                      setRateGridSaving(true);
+                      try {
+                        await hotelApi('/rate-grid', { method: 'PUT', body: JSON.stringify({ overrides }) });
+                        await fetchRateGrid();
+                      } catch { alert('Failed to save rates.'); }
+                      finally { setRateGridSaving(false); }
+                    }}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 transition-colors"
+                  >
+                    {rateGridSaving ? 'Saving…' : `Save ${Object.values(rateGridDirty).reduce((s: number, d: Record<string,number>) => s + Object.keys(d).length, 0)} changes`}
+                  </button>
+                )}
+              </div>
+
+              {rateGridLoading ? (
+                <div className="text-center py-10 text-[#9c8e85]">Loading grid…</div>
+              ) : !rateGrid ? (
+                <div className="text-center py-10 text-[#9c8e85]">No data — check that rooms and room types are configured in Room Setup.</div>
+              ) : (
+                <div className="overflow-x-auto rounded-2xl border border-[#e8e0d8] bg-white">
+                  <table className="min-w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-[#f5f0ea]">
+                        <th className="sticky left-0 bg-[#f5f0ea] z-10 px-4 py-2 text-left font-bold text-[#1a1208] border-r border-[#e8e0d8] min-w-[150px]">Room Type</th>
+                        {rateGrid.dates.map(d => (
+                          <th key={d} className="px-3 py-2 text-center font-semibold text-[#6b5d52] border-l border-[#e8e0d8] min-w-[90px]">
+                            <div>{new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</div>
+                            <div className="text-[9px] font-normal">{new Date(d + 'T12:00:00Z').toLocaleDateString('en-IN', { weekday: 'short' })}</div>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {/* Dynamic Rates row */}
+                      <tr className="border-t border-[#e8e0d8]">
+                        <td className="sticky left-0 bg-white z-10 px-4 py-2 font-semibold text-[#6b5d52] border-r border-[#e8e0d8]">Dynamic Rates</td>
+                        {rateGrid.dates.map(d => {
+                          const m = rateGrid.meta[d] || {};
+                          return (
+                            <td key={d} className="px-2 py-1.5 text-center border-l border-[#e8e0d8]">
+                              <span className={cn('px-1.5 py-0.5 rounded text-[9px] font-bold uppercase', m.dynamic_rates_enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-500')}>
+                                {m.dynamic_rates_enabled ? 'ON' : 'OFF'}
+                              </span>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                      {/* Available Rooms (Occupancy %) row */}
+                      <tr className="border-t border-[#e8e0d8] bg-slate-50">
+                        <td className="sticky left-0 bg-slate-50 z-10 px-4 py-2 font-semibold text-[#6b5d52] border-r border-[#e8e0d8]">Available Rooms</td>
+                        {rateGrid.dates.map(d => {
+                          const m = rateGrid.meta[d] || {};
+                          const occ = m.occupancy_pct ?? 0;
+                          const color = occ >= 80 ? 'text-red-700' : occ >= 50 ? 'text-amber-700' : 'text-emerald-700';
+                          return (
+                            <td key={d} className={cn('px-2 py-1.5 text-center border-l border-[#e8e0d8] font-semibold', color)}>
+                              {m.available_rooms ?? '–'}
+                              <div className="text-[9px] font-normal text-[#9c8e85]">({occ}%)</div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                      {/* Recommended Rates row */}
+                      <tr className="border-t border-[#e8e0d8] bg-amber-50">
+                        <td className="sticky left-0 bg-amber-50 z-10 px-4 py-2 font-semibold text-amber-800 border-r border-[#e8e0d8]">Recommended Rates</td>
+                        {rateGrid.dates.map(d => {
+                          const m = rateGrid.meta[d] || {};
+                          return (
+                            <td key={d} className="px-2 py-1.5 text-center border-l border-[#e8e0d8] text-amber-700 font-semibold">
+                              {m.recommended_rate != null ? `₹${Number(m.recommended_rate).toLocaleString('en-IN')}` : '–'}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                      {/* Separator */}
+                      <tr><td colSpan={rateGrid.dates.length + 1} className="h-2 bg-[#f5f0ea]" /></tr>
+                      {/* Per room type editable rows */}
+                      {rateGrid.room_types.map(rt => (
+                        <tr key={rt.id} className="border-t border-[#e8e0d8] hover:bg-blue-50/30">
+                          <td className="sticky left-0 bg-white z-10 px-4 py-2 border-r border-[#e8e0d8]">
+                            <div className="font-semibold text-[#1a1208]">{rt.name}</div>
+                            {rt.base_rate > 0 && <div className="text-[9px] text-[#9c8e85]">Base ₹{Number(rt.base_rate).toLocaleString('en-IN')}</div>}
+                          </td>
+                          {rateGrid.dates.map(d => {
+                            const dirty = rateGridDirty[rt.id]?.[d];
+                            const stored = rt.rates?.[d] ?? rt.base_rate ?? 0;
+                            const displayVal = dirty !== undefined ? dirty : stored;
+                            const isDirty = dirty !== undefined;
+                            if (rt.id === '__untyped__') {
+                              return (
+                                <td key={d} className="px-2 py-1 text-center border-l border-[#e8e0d8] text-[#6b5d52]">
+                                  ₹{Number(displayVal).toLocaleString('en-IN')}
+                                </td>
+                              );
+                            }
+                            return (
+                              <td key={d} className={cn('px-1 py-1 border-l border-[#e8e0d8]', isDirty ? 'bg-blue-50' : '')}>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="50"
+                                  value={displayVal}
+                                  onChange={e => {
+                                    const v = Number(e.target.value);
+                                    setRateGridDirty(prev => ({
+                                      ...prev,
+                                      [rt.id]: { ...(prev[rt.id] || {}), [d]: v },
+                                    }));
+                                  }}
+                                  className={cn(
+                                    'w-full text-center text-xs py-1 px-1 rounded border focus:ring-1 ring-blue-300 outline-none',
+                                    isDirty ? 'border-blue-400 font-bold text-blue-800' : 'border-transparent hover:border-[#e8e0d8]'
+                                  )}
+                                />
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════
+              TAB: BULK UPDATE
+              ══════════════════════════════════════════════════════════ */}
+          {activeCmTab === 'bulk' && (
+            <div className="max-w-2xl space-y-5">
+              <div className="bg-white border border-[#e8e0d8] rounded-2xl p-6 space-y-4">
+                <h3 className="text-lg font-bold text-[#1a1208]">Bulk Rate Update</h3>
+                <p className="text-sm text-[#6b5d52]">Apply one rate to multiple room types across a date range — useful for season changes or promotions.</p>
+
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Room Types</label>
+                  <div className="flex flex-wrap gap-2">
+                    {(rateGrid?.room_types || []).filter(rt => rt.id !== '__untyped__').map(rt => {
+                      const sel = (bulkRateForm.room_type_ids || []).includes(rt.id);
+                      return (
+                        <button
+                          key={rt.id}
+                          type="button"
+                          onClick={() => setBulkRateForm((f: any) => ({
+                            ...f,
+                            room_type_ids: sel ? f.room_type_ids.filter((x: string) => x !== rt.id) : [...f.room_type_ids, rt.id],
+                          }))}
+                          className={cn('px-3 py-1.5 rounded-xl text-sm border transition-colors', sel ? 'bg-blue-600 text-white border-blue-600' : 'border-[#e8e0d8] text-[#6b5d52] hover:bg-[#f5f0ea]')}
+                        >{rt.name}</button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">From Date</label>
+                    <input type="date" value={bulkRateForm.from_date} onChange={e => setBulkRateForm((f: any) => ({ ...f, from_date: e.target.value }))} className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">To Date</label>
+                    <input type="date" value={bulkRateForm.to_date} onChange={e => setBulkRateForm((f: any) => ({ ...f, to_date: e.target.value }))} className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm" />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Rate (₹ per night)</label>
+                  <input type="number" min="0" step="50" value={bulkRateForm.rate} onChange={e => setBulkRateForm((f: any) => ({ ...f, rate: e.target.value }))} className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2 text-sm" placeholder="e.g. 3500" />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">Apply on (blank = every day)</label>
+                  <div className="flex gap-2 flex-wrap">
+                    {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((day, idx) => {
+                      const sel = (bulkRateForm.apply_days || []).includes(idx);
+                      return (
+                        <button key={idx} type="button"
+                          onClick={() => setBulkRateForm((f: any) => ({
+                            ...f,
+                            apply_days: sel ? f.apply_days.filter((x: number) => x !== idx) : [...f.apply_days, idx],
+                          }))}
+                          className={cn('px-3 py-1 rounded-lg text-xs border transition-colors', sel ? 'bg-blue-600 text-white border-blue-600' : 'border-[#e8e0d8] text-[#6b5d52] hover:bg-[#f5f0ea]')}
+                        >{day}</button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <button
+                  disabled={bulkRateSaving || !bulkRateForm.room_type_ids.length || !bulkRateForm.from_date || !bulkRateForm.to_date || !bulkRateForm.rate}
+                  onClick={async () => {
+                    setBulkRateSaving(true);
+                    try {
+                      const res = await hotelApi('/bulk-rate-update', {
+                        method: 'POST',
+                        body: JSON.stringify({ ...bulkRateForm, rate: Number(bulkRateForm.rate) }),
+                      });
+                      alert(`Done. ${res.created ?? 0} created, ${res.updated ?? 0} updated.`);
+                      fetchRateGrid();
+                    } catch { alert('Failed to apply bulk update.'); }
+                    finally { setBulkRateSaving(false); }
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                >
+                  {bulkRateSaving ? 'Applying…' : 'Apply Bulk Rate'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════
+              TAB: LIVE BOOKINGS — OTA booking feed
+              ══════════════════════════════════════════════════════════ */}
+          {activeCmTab === 'live' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-bold text-[#1a1208]">Live Bookings</h3>
+                  <p className="text-sm text-[#6b5d52]">Bookings received via OTA channels (Booking.com, MakeMyTrip, Agoda, Airbnb, etc.).</p>
+                </div>
+              </div>
+              {(() => {
+                const otaSources = new Set(['MMT','BOOKING','GOIBIBO','AGODA','EXPEDIA','AIRBNB','YATRA','CLEARTRIP','ORBITZ','IXIGO']);
+                const otaBookings = hotelBookings.filter((b: any) => otaSources.has(String(b.booking_source || '').toUpperCase()));
+                if (!otaBookings.length) {
+                  return <div className="text-center py-10 text-[#9c8e85]">No OTA bookings found in the system yet.</div>;
+                }
+                const CHANNEL_COLORS: Record<string,string> = {
+                  BOOKING: 'bg-blue-600', MMT: 'bg-red-600', AGODA: 'bg-rose-600',
+                  GOIBIBO: 'bg-orange-500', EXPEDIA: 'bg-yellow-600', AIRBNB: 'bg-pink-600',
+                  YATRA: 'bg-purple-600', CLEARTRIP: 'bg-teal-600',
+                };
+                return (
+                  <div className="overflow-x-auto rounded-2xl border border-[#e8e0d8] bg-white">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-[#f5f0ea]">
+                        <tr>
+                          {['Channel','Guest','Room','Check-in','Check-out','Amount','Commission'].map(h => (
+                            <th key={h} className="px-4 py-2 text-left text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {otaBookings.slice(0, 100).map((b: any) => {
+                          const src = String(b.booking_source || '').toUpperCase();
+                          const cc = CHANNEL_COLORS[src] || 'bg-gray-500';
+                          const commPct = Number(b.commission_pct || 0);
+                          const commAmt = commPct > 0 ? Math.round(Number(b.total_amount || 0) * commPct / 100) : Number(b.commission_amount || 0);
+                          return (
+                            <tr key={b.id} className="border-t border-[#e8e0d8] hover:bg-[#f5f0ea]/50">
+                              <td className="px-4 py-2">
+                                <span className={`${cc} text-white text-[10px] font-bold px-2 py-0.5 rounded-full`}>{b.booking_source}</span>
+                              </td>
+                              <td className="px-4 py-2 font-medium">{b.guest_name}</td>
+                              <td className="px-4 py-2 text-[#6b5d52]">{b.room_name || '—'}</td>
+                              <td className="px-4 py-2 text-[#6b5d52]">{b.check_in_date}</td>
+                              <td className="px-4 py-2 text-[#6b5d52]">{b.check_out_date}</td>
+                              <td className="px-4 py-2 font-semibold text-emerald-700">₹{Number(b.total_amount || 0).toLocaleString('en-IN')}</td>
+                              <td className="px-4 py-2 text-red-600">{commAmt > 0 ? `₹${commAmt.toLocaleString('en-IN')} (${commPct}%)` : '–'}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════
+              TAB: MAPPINGS — all existing channel manager content
+              (credentials, iCal, webhook, sync queue, rate plans,
+              yield rules, IP allowlist, reconciliation, partner logins)
+              ══════════════════════════════════════════════════════════ */}
+          {activeCmTab === 'mappings' && (<div className="space-y-5">
 
           {/* ── HOW IT WORKS — 3-step explainer ────────────────────────
               Every section below maps to one of these steps. Once the
@@ -23869,6 +24241,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               </div>
             )}
           </div>
+          </div>)} {/* end Mappings tab wrapper */}
         </div>
       ) : activeTab === 'FOLIOS' && isHotelEnabled ? (
         /* ════════════════ FOLIOS & SETTLEMENT ════════════════ */
@@ -28367,7 +28740,9 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       {sc.label}
                     </span>
                     {b.booking_type === 'DAY_USE' && (
-                      <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-teal-100 text-teal-800">Day-use</span>
+                      <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full bg-teal-100 text-teal-800">
+                        Day-use{b.day_use_start_time ? ` · ${b.day_use_start_time}${b.day_use_end_time ? `–${b.day_use_end_time}` : ''}` : ''}
+                      </span>
                     )}
                     {b.group_id && (
                       <span
@@ -30712,6 +31087,79 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   )}
                 </div>
               </div>
+
+              {/* Day-use time window: check-in time + duration */}
+              {(editingBooking.booking_type || 'OVERNIGHT') === 'DAY_USE' && (
+                <div className="bg-teal-50 border border-teal-200 rounded-2xl p-4 space-y-3">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-teal-700">Day-Use Time Window</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-teal-600 mb-1">Check-in Time</label>
+                      <input
+                        type="time"
+                        value={editingBooking.day_use_start_time || '12:00'}
+                        onChange={e => {
+                          const start = e.target.value;
+                          const next: any = { ...editingBooking, day_use_start_time: start };
+                          // Auto-update end time if a duration was implicitly set
+                          if (editingBooking.day_use_end_time) {
+                            // keep existing end time; user can change duration buttons
+                          }
+                          setEditingBooking(next);
+                        }}
+                        className="w-full bg-white border border-teal-200 rounded-xl px-3 py-2 focus:ring-2 ring-teal-300 outline-none text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-widest text-teal-600 mb-1">Check-out Time</label>
+                      <input
+                        type="time"
+                        value={editingBooking.day_use_end_time || ''}
+                        onChange={e => setEditingBooking({ ...editingBooking, day_use_end_time: e.target.value })}
+                        className="w-full bg-white border border-teal-200 rounded-xl px-3 py-2 focus:ring-2 ring-teal-300 outline-none text-sm"
+                      />
+                    </div>
+                  </div>
+                  {/* Quick duration buttons */}
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-teal-600 mb-1.5">Quick Duration</label>
+                    <div className="flex gap-2">
+                      {[4, 6, 8].map(hrs => (
+                        <button
+                          key={hrs}
+                          type="button"
+                          onClick={() => {
+                            const start = editingBooking.day_use_start_time || '12:00';
+                            const [h, m] = start.split(':').map(Number);
+                            const totalMins = h * 60 + (m || 0) + hrs * 60;
+                            const endH = Math.floor(totalMins / 60) % 24;
+                            const endM = totalMins % 60;
+                            const endStr = `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+                            setEditingBooking({ ...editingBooking, day_use_end_time: endStr, day_use_start_time: start });
+                          }}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-teal-300 bg-white text-teal-700 hover:bg-teal-100 transition-colors"
+                        >
+                          {hrs}h
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Summary line */}
+                  {editingBooking.day_use_start_time && editingBooking.day_use_end_time && (
+                    <p className="text-xs font-medium text-teal-700">
+                      {editingBooking.day_use_start_time} → {editingBooking.day_use_end_time}
+                      {(() => {
+                        const [sh, sm] = editingBooking.day_use_start_time.split(':').map(Number);
+                        const [eh, em] = editingBooking.day_use_end_time.split(':').map(Number);
+                        const diffMins = (eh * 60 + em) - (sh * 60 + sm);
+                        if (diffMins <= 0) return null;
+                        const h = Math.floor(diffMins / 60), m = diffMins % 60;
+                        return ` (${h > 0 ? `${h}h` : ''}${m > 0 ? ` ${m}m` : ''})`;
+                      })()}
+                    </p>
+                  )}
+                </div>
+              )}
 
               <div>
                 <div className="flex items-baseline justify-between mb-1">

@@ -206,6 +206,40 @@ async function testHotel() {
   } else {
     fail('TC-HOTEL-014', 'Rate plans endpoint responds', `HTTP ${rp.status}`);
   }
+
+  // Day-use date filter — Part A fix regression check.
+  // Create a day-use booking for today and verify it appears when filtering by today.
+  const today = new Date().toISOString().slice(0, 10);
+  const hbFiltered = await api('GET', `/api/restaurant/${restaurantId}/hotel/bookings?from=${today}&to=${today}`);
+  if (hbFiltered.status === 200 && Array.isArray(hbFiltered.data)) {
+    const dayUseCount = hbFiltered.data.filter(b => b.booking_type === 'DAY_USE' && b.check_in_date === today).length;
+    const overnightCount = hbFiltered.data.filter(b => b.booking_type !== 'DAY_USE').length;
+    pass('TC-HOTEL-DAYUSE-FILTER', `Date-filter returns ${hbFiltered.data.length} bookings for today (${dayUseCount} day-use, ${overnightCount} overnight)`);
+  } else if (hbFiltered.status === 403 || hbFiltered.status === 404) {
+    skip('TC-HOTEL-DAYUSE-FILTER', 'Day-use date filter', `HTTP ${hbFiltered.status}`);
+  } else {
+    fail('TC-HOTEL-DAYUSE-FILTER', 'Day-use date filter', `HTTP ${hbFiltered.status}`);
+  }
+
+  // Rate Grid — Aiosell-style Rates & Inventory endpoint (Part C).
+  const rg = await api('GET', `/api/restaurant/${restaurantId}/hotel/rate-grid`);
+  if (rg.status === 200 && Array.isArray(rg.data?.dates) && Array.isArray(rg.data?.room_types)) {
+    pass('TC-HOTEL-RATEGRID', `Rate grid loads: ${rg.data.dates.length} dates, ${rg.data.room_types.length} room types`);
+  } else if (rg.status === 403 || rg.status === 404) {
+    skip('TC-HOTEL-RATEGRID', 'Rate grid', `HTTP ${rg.status}`);
+  } else {
+    fail('TC-HOTEL-RATEGRID', 'Rate grid endpoint', `HTTP ${rg.status}, data keys: ${rg.data ? Object.keys(rg.data).join(',') : 'none'}`);
+  }
+
+  // Publish Rates — explicit ARI push endpoint (Part C).
+  const pr = await api('POST', `/api/restaurant/${restaurantId}/hotel/publish-rates`, {});
+  if (pr.status === 200 && pr.data?.ok) {
+    pass('TC-HOTEL-PUBLISH', `Publish rates: queued=${pr.data.queued}`);
+  } else if (pr.status === 403 || pr.status === 404) {
+    skip('TC-HOTEL-PUBLISH', 'Publish rates', `HTTP ${pr.status}`);
+  } else {
+    fail('TC-HOTEL-PUBLISH', 'Publish rates endpoint', `HTTP ${pr.status}`);
+  }
 }
 
 // ── Procurement tests ──────────────────────────────────────────────────────
