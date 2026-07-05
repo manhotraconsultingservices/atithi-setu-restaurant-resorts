@@ -13244,7 +13244,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ],
           },
           {
-            id: 'FRONT_DESK', label: 'Front Desk', icon: <Bed size={16} />,
+            id: 'FRONT_DESK', label: 'PMS', icon: <Bed size={16} />,
             visible: isHotelEnabled,
             tabs: [
               ...(bothEnabled ? opsTrio('HOTEL') : []),
@@ -20822,40 +20822,6 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               >Search</button>
             </form>
 
-            {/* FIX-1 — quick-filter chips. Date filter uses OVERLAP semantics
-                now, so "Today" finds every booking active today (including
-                overnight stays that started yesterday or end tomorrow). */}
-            <div className="flex flex-wrap gap-1.5 mt-3">
-              {(() => {
-                const today = new Date().toISOString().slice(0, 10);
-                const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-                const sevenDaysAhead = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
-                const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-                const presets: Array<{ label: string; f: any }> = [
-                  { label: 'Today',           f: { from: today,         to: today,           status: '' } },
-                  { label: 'Arrivals today',  f: { from: today,         to: today,           status: 'BOOKED' } },
-                  { label: 'In-house now',    f: { from: today,         to: today,           status: 'CHECKED_IN' } },
-                  { label: 'Yesterday',       f: { from: yesterday,     to: yesterday,       status: '' } },
-                  { label: 'Next 7 days',     f: { from: today,         to: sevenDaysAhead,  status: 'BOOKED' } },
-                  { label: 'Last 7 days',     f: { from: sevenDaysAgo,  to: today,           status: 'CHECKED_OUT' } },
-                ];
-                return presets.map(p => (
-                  <button
-                    key={p.label}
-                    type="button"
-                    onClick={async () => {
-                      setBookingHistoryFilter(f => ({ ...f, ...p.f }));
-                      await fetchHotelBookings({
-                        search: bookingHistoryFilter.search || undefined,
-                        ...p.f,
-                      });
-                    }}
-                    className="px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-white border border-[#cc5a16]/20 text-[#3d3128] hover:bg-[#faf7f2]"
-                  >{p.label}</button>
-                ));
-              })()}
-            </div>
-
             {/* Source / Agent filter chips — client-side, no server round-trip.
                 Shows every unique booking_source in the loaded data. */}
             {hotelBookings.length > 0 && (() => {
@@ -21469,7 +21435,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             {/* Audience toggle — Front Desk (daily ops) vs Owner / Manager (management). */}
             <div className="inline-flex bg-white rounded-2xl p-1 border border-[#cc5a16]/15 shadow-sm shrink-0">
               {([
-                { id: 'FRONT_DESK', label: 'Front Desk' },
+                { id: 'FRONT_DESK', label: 'PMS' },
                 { id: 'OWNER', label: 'Owner / Manager' },
               ] as const).map(opt => (
                 <button
@@ -24329,7 +24295,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             // tenants; restaurant-only roles are hidden for hotel-only tenants.
             const ALL_MANAGED_ROLES: { id: string; label: string; hint: string; hotelOnly?: boolean; restaurantOnly?: boolean }[] = [
               { id: 'MANAGER',      label: 'Manager',      hint: 'Senior staff — typically full operational access' },
-              { id: 'FRONT_DESK',   label: 'Front Desk',   hint: 'Receptionist — bookings, guest bills, guest services',  hotelOnly: true },
+              { id: 'FRONT_DESK',   label: 'PMS',          hint: 'Receptionist — bookings, guest bills, guest services',  hotelOnly: true },
               { id: 'CONCIERGE',    label: 'Concierge',    hint: 'Guest service coordinator',                         hotelOnly: true },
               { id: 'CASHIER',      label: 'Cashier',      hint: 'Orders + invoices, no settings',                    restaurantOnly: true },
               { id: 'WAITER',       label: 'Waiter',       hint: 'Table orders, KOT',                                 restaurantOnly: true },
