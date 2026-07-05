@@ -31854,17 +31854,22 @@ ${data.tenant.name}`;
       const isEarly = newCo < co;
 
       if (isEarly) {
-        // Delete per-night entries for the cancelled nights (>= newCo, < original co).
+        // Delete per-night entries for the cancelled nights.
         // Description format: "Room charge · YYYY-MM-DD..." / "Service charge (X%) · YYYY-MM-DD..."
-        // SUBSTR(description, INSTR(description,'· ') + 2, 10) extracts the embedded date.
-        await tenantDb.run(
-          `DELETE FROM folio_entries
-           WHERE folio_id = ?
-             AND entry_type IN ('ROOM_CHARGE', 'SERVICE_CHARGE')
-             AND SUBSTR(description, INSTR(description, '· ') + 2, 10) >= ?
-             AND SUBSTR(description, INSTR(description, '· ') + 2, 10) < ?`,
-          [folio.id, newCo, co]
-        );
+        // Iterate each cancelled night and use LIKE matching — avoids INSTR (SQLite-only).
+        const delCur = new Date(newCo + 'T12:00:00Z');
+        const delEnd = new Date(co    + 'T12:00:00Z');
+        while (delCur < delEnd) {
+          const nightDate = delCur.toISOString().slice(0, 10);
+          await tenantDb.run(
+            `DELETE FROM folio_entries
+             WHERE folio_id = ?
+               AND entry_type IN ('ROOM_CHARGE', 'SERVICE_CHARGE')
+               AND description LIKE ?`,
+            [folio.id, `%· ${nightDate}%`]
+          );
+          delCur.setUTCDate(delCur.getUTCDate() + 1);
+        }
       } else {
         // Extension — add new nightly ROOM_CHARGE (+ SERVICE_CHARGE) entries.
         const cfg = await loadHotelTaxConfig(req.params.id);
