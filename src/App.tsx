@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { DataTable, exportToCsv } from './components/DataTable';
+import { AllReportsHub } from './components/AllReportsHub';
 import { useToast } from './components/Toast';
 import { useConfirm } from './components/ConfirmDialog';
 import { usePaymentDialog } from './components/PaymentDialog';
@@ -99,7 +100,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // to any non-owner with an ancient unmarked allowedTabs list — which is
 // the exact bug the founder flagged on 7 Jun 2026 ("STAFF_ACCESS should
 // only be visible to Business owner. this is critical.").
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'RESTAURANT_REPORTS', 'HR_PAYROLL', 'PROCUREMENT']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'RESTAURANT_REPORTS', 'HR_PAYROLL', 'PROCUREMENT', 'ALL_REPORTS']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -8194,6 +8195,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'ACCOUNTS_VENDOR_AGING'                     // Vendor aging — what we owe suppliers
     | 'SPA_BILLING'                               // Spa settlement ledger in Accounts context
     | 'ACCOUNTING'                                // Double-entry GL · trial balance · TDS tracker
+    | 'ALL_REPORTS'                              // Unified reports hub (Aiosell-style — all 26 reports)
     | 'HOME'                                      // post-login launchpad (welcome + Hotel/Restaurant tiles)
   >('HOME');
   // Inventory sub-navigation (only meaningful when activeTab === 'INVENTORY')
@@ -13375,6 +13377,13 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'PUBLIC_BOOKING_PAGE', label: 'Direct Booking Page', requires: 'hotel' },
               { id: 'LOYALTY',             label: 'Loyalty' },
               { id: 'FEEDBACK',            label: 'Guest Feedback' },
+            ],
+          },
+          {
+            id: 'REPORTS_HUB', label: 'Reports', icon: <BarChart3 size={16} />,
+            visible: true,
+            tabs: [
+              { id: 'ALL_REPORTS', label: 'All Reports' },
             ],
           },
           {
@@ -21470,6 +21479,11 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             <div className="p-4"><InventoryInsightsReport restaurantId={restaurantId} token={token} /></div>
           </details>
         </div>
+      ) : activeTab === 'ALL_REPORTS' ? (
+        /* ════════════════ UNIFIED REPORTS HUB ════════════════════════════════
+           26-report catalogue matching Aiosell — 4 categories, date range,
+           DataTable results, CSV export.  Visible to all roles.             */
+        <AllReportsHub restaurantId={restaurantId} token={token} />
       ) : activeTab === 'FRONT_OFFICE_REPORTS' && isHotelEnabled ? (
         /* ════════════════ FRONT OFFICE REPORTS (top-level tab) ════════════════
            Four classic hotel-ops reports: Arrival / Departure / Room Status /

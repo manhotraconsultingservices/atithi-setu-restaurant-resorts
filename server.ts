@@ -31472,6 +31472,257 @@ ${data.tenant.name}`;
     }
   });
 
+  // ── AIOSELL-GAP REPORTS ─────────────────────────────────────────────────────
+  // Nine new endpoints that close the gap between Atithi Setu and Aiosell's
+  // 26-report catalogue.  All share the /hotel/reports/* prefix.
+
+  app.get("/api/restaurant/:id/hotel/reports/police-enquiry", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || from);
+      const rows = await tenantDb.query(
+        `SELECT b.id,
+                b.guest_name, b.guest_phone, b.guest_email,
+                COALESCE(b.guest_nationality, 'Indian') AS nationality,
+                b.guest_id_proof,
+                b.num_guests,
+                b.check_in_date, b.check_out_date,
+                b.actual_checkin_at, b.actual_checkout_at,
+                b.status,
+                r.name        AS room_name,
+                r.room_number
+           FROM room_bookings b
+      LEFT JOIN rooms r ON r.id = b.room_id
+          WHERE b.check_in_date BETWEEN ? AND ?
+            AND b.status NOT IN ('CANCELLED','NO_SHOW')
+          ORDER BY b.check_in_date, b.guest_name`,
+        [from, to]
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load police enquiry report' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/no-shows", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || from);
+      const rows = await tenantDb.query(
+        `SELECT b.id,
+                b.guest_name, b.guest_phone, b.guest_email,
+                b.check_in_date, b.check_out_date,
+                b.room_rate,    b.total_amount,
+                COALESCE(b.booking_source, 'DIRECT') AS booking_source,
+                r.name        AS room_name,
+                r.room_number,
+                COALESCE(rt.name, r.type) AS room_category
+           FROM room_bookings b
+      LEFT JOIN rooms      r  ON r.id  = b.room_id
+      LEFT JOIN room_types rt ON rt.id = r.type_id
+          WHERE b.status = 'NO_SHOW'
+            AND b.check_in_date BETWEEN ? AND ?
+          ORDER BY b.check_in_date DESC`,
+        [from, to]
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load no-show report' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/out-of-order-rooms", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const rows = await tenantDb.query(
+        `SELECT r.id, r.name, r.room_number, r.status, r.type,
+                COALESCE(rt.name, r.type) AS room_category,
+                r.notes
+           FROM rooms r
+      LEFT JOIN room_types rt ON rt.id = r.type_id
+          WHERE r.status IN ('MAINTENANCE', 'BLOCKED', 'CLEANING')
+          ORDER BY r.room_number, r.name`
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load out-of-order rooms' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/hotel-sales", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || from);
+      const rows = await tenantDb.query(
+        `SELECT TO_CHAR(f.settled_at, 'YYYY-MM-DD')                                                                   AS sale_date,
+                COUNT(DISTINCT f.id)::int                                                                              AS folios_settled,
+                COALESCE(SUM(fe.amount) FILTER (WHERE fe.entry_type = 'ROOM_CHARGE'),      0)::float                  AS room_revenue,
+                COALESCE(SUM(fe.amount) FILTER (WHERE fe.entry_type NOT IN ('ROOM_CHARGE','ADVANCE','PAYMENT')), 0)::float AS service_revenue,
+                COALESCE(SUM(fe.amount) FILTER (WHERE fe.entry_type NOT IN ('ADVANCE','PAYMENT')), 0)::float          AS gross_revenue,
+                COALESCE(SUM(f.grand_total), 0)::float                                                                AS net_billed,
+                COALESCE(SUM(f.gst_amount),  0)::float                                                                AS gst_collected
+           FROM folios f
+      LEFT JOIN folio_entries fe ON fe.folio_id = f.id
+          WHERE f.status = 'settled'
+            AND TO_CHAR(f.settled_at, 'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY TO_CHAR(f.settled_at, 'YYYY-MM-DD')
+          ORDER BY sale_date`,
+        [from, to]
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load hotel sales report' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/pos-report", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || from);
+      const rows = await tenantDb.query(
+        `SELECT TO_CHAR(o.created_at, 'YYYY-MM-DD')                          AS sale_date,
+                COUNT(*)::int                                                  AS order_count,
+                COALESCE(SUM(o.total_amount),                             0)::float AS gross_revenue,
+                COALESCE(SUM(COALESCE(o.gst_amount, 0)),                  0)::float AS gst,
+                COALESCE(SUM(o.total_amount - COALESCE(o.gst_amount, 0)), 0)::float AS net_revenue,
+                COUNT(DISTINCT o.table_number)::int                            AS tables_served
+           FROM orders o
+          WHERE o.payment_status = 'PAID'
+            AND TO_CHAR(o.created_at, 'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY TO_CHAR(o.created_at, 'YYYY-MM-DD')
+          ORDER BY sale_date`,
+        [from, to]
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load POS report' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/item-consumption", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || from);
+      const rows = await tenantDb.query(
+        `SELECT mi.name                                 AS item_name,
+                COALESCE(mi.category, 'Uncategorised') AS category,
+                SUM(oi.quantity)::float                 AS qty_sold,
+                AVG(oi.price)::float                    AS avg_price,
+                SUM(oi.quantity * oi.price)::float      AS total_revenue
+           FROM order_items oi
+           JOIN orders     o  ON o.id  = oi.order_id
+           JOIN menu_items mi ON mi.id = oi.menu_item_id
+          WHERE o.payment_status = 'PAID'
+            AND TO_CHAR(o.created_at, 'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY mi.id, mi.name, mi.category
+          ORDER BY qty_sold DESC`,
+        [from, to]
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load item consumption report' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/daily-forecast", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10));
+      const rows = await tenantDb.query(
+        `SELECT b.check_in_date                                                         AS forecast_date,
+                COUNT(*)::int                                                            AS expected_arrivals,
+                COALESCE(SUM(b.num_guests), 0)::int                                     AS expected_guests,
+                COALESCE(SUM(b.room_rate),  0)::float                                   AS expected_revenue,
+                COUNT(*) FILTER (WHERE b.booking_type = 'DAY_USE')::int                 AS day_use_count
+           FROM room_bookings b
+          WHERE b.status IN ('BOOKED', 'CONFIRMED')
+            AND b.check_in_date BETWEEN ? AND ?
+          GROUP BY b.check_in_date
+          ORDER BY forecast_date`,
+        [from, to]
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load daily forecast report' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/monthly-pnl", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 8) + '01');
+      const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
+
+      const revenue: any[] = await tenantDb.query(
+        `SELECT SUBSTR(TO_CHAR(f.settled_at, 'YYYY-MM-DD'), 1, 7) AS month,
+                COALESCE(SUM(f.grand_total), 0)::float              AS revenue,
+                COALESCE(SUM(f.gst_amount),  0)::float              AS gst
+           FROM folios f
+          WHERE f.status = 'settled'
+            AND TO_CHAR(f.settled_at, 'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY 1 ORDER BY 1`,
+        [from, to]
+      ).catch(() => []);
+
+      const expenses: any[] = await tenantDb.query(
+        `SELECT SUBSTR(TO_CHAR(entry_date, 'YYYY-MM-DD'), 1, 7)                         AS month,
+                COALESCE(SUM(CASE WHEN direction='OUT' THEN amount ELSE 0 END), 0)::float AS expenses
+           FROM petty_cash
+          WHERE TO_CHAR(entry_date, 'YYYY-MM-DD') BETWEEN ? AND ?
+          GROUP BY 1 ORDER BY 1`,
+        [from, to]
+      ).catch(() => []);
+
+      const months = Array.from(
+        new Set([...revenue.map((r: any) => r.month), ...expenses.map((e: any) => e.month)])
+      ).sort();
+      const rows = months.map(m => {
+        const rev = revenue.find((r: any) => r.month === m);
+        const exp = expenses.find((e: any) => e.month === m);
+        const revAmt = Number(rev?.revenue || 0);
+        const expAmt = Number(exp?.expenses || 0);
+        return { month: m, revenue: revAmt, gst: Number(rev?.gst || 0), expenses: expAmt, net_profit: revAmt - expAmt };
+      });
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load monthly P&L report' });
+    }
+  });
+
+  app.get("/api/restaurant/:id/hotel/reports/contribution", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || from);
+      const rows: any[] = await tenantDb.query(
+        `SELECT COALESCE(b.booking_source, 'DIRECT')                                          AS source,
+                COUNT(*)::int                                                                   AS bookings,
+                COALESCE(SUM(b.total_amount), 0)::float                                        AS total_revenue,
+                COALESCE(SUM(b.total_amount) FILTER (WHERE b.status = 'CHECKED_OUT'), 0)::float AS settled_revenue,
+                COALESCE(AVG(b.total_amount), 0)::float                                        AS avg_revenue
+           FROM room_bookings b
+          WHERE b.check_in_date BETWEEN ? AND ?
+            AND b.status NOT IN ('CANCELLED')
+          GROUP BY COALESCE(b.booking_source, 'DIRECT')
+          ORDER BY total_revenue DESC`,
+        [from, to]
+      );
+      const total = rows.reduce((s, r) => s + Number(r.total_revenue), 0);
+      res.json(rows.map(r => ({
+        ...r,
+        share_pct: total > 0 ? Math.round((Number(r.total_revenue) / total) * 1000) / 10 : 0,
+      })));
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load contribution report' });
+    }
+  });
+
   // ── MASTER-BILLING ──────────────────────────────────────────────────────────
   // Shared helper: idempotently create/return the master folio for a group.
   const ensureGroupMasterFolio = async (restaurantId: string, groupId: string): Promise<string> => {
