@@ -8988,6 +8988,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [editingBooking, setEditingBooking] = useState<any>(null);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [checkoutBooking, setCheckoutBooking] = useState<any>(null);
+  const [amendStay, setAmendStay] = useState<{ booking: any; newDate: string; saving: boolean } | null>(null);
   // Mid-stay room move (20 Jun 2026) — a CHECKED_IN guest can be moved to
   // another room of the SAME category (e.g. AC fault), based on availability.
   const [moveRoom, setMoveRoom] = useState<{ booking: any; rooms: any[] | null; loading: boolean; busyId: string; error: string } | null>(null);
@@ -21335,6 +21336,14 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                                         ⬆ Upgrade room
                                       </button>
                                     )}
+                                    {b.status === 'CHECKED_IN' && (
+                                      <button className={menuItemCls} onClick={() => {
+                                        setAmendStay({ booking: b, newDate: String(b.check_out_date || '').slice(0, 10), saving: false });
+                                        setOpenActionMenu(null);
+                                      }}>
+                                        📅 Amend checkout date
+                                      </button>
+                                    )}
                                     {/* Group document actions */}
                                     {b.group_id && sep}
                                     {b.group_id && (
@@ -32458,6 +32467,109 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           </div>
         </div>
       )}
+
+      {/* ═════════ Amend Checkout Date modal ═════════ */}
+      {amendStay && (() => {
+        const bk = amendStay.booking;
+        const ci = String(bk.check_in_date || '').slice(0, 10);
+        const origCo = String(bk.check_out_date || '').slice(0, 10);
+        const nd = amendStay.newDate;
+        const msPerDay = 86400000;
+        const origNights = Math.max(1, Math.round((new Date(origCo + 'T12:00:00Z').getTime() - new Date(ci + 'T12:00:00Z').getTime()) / msPerDay));
+        const newNights  = nd ? Math.max(0, Math.round((new Date(nd   + 'T12:00:00Z').getTime() - new Date(ci + 'T12:00:00Z').getTime()) / msPerDay)) : 0;
+        const diff       = newNights - origNights;
+        const rate       = Number(bk.room_rate) || 0;
+        const isEarly    = diff < 0;
+        const isValid    = nd && nd !== origCo && newNights > 0;
+        const minDate = (() => { const d = new Date(ci + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
+        return (
+          <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+              <div className="p-6 border-b border-[#e8e0d8]">
+                <h2 className="text-xl font-bold text-[#1a1208]">Amend Checkout Date</h2>
+                <p className="text-sm text-[#6b5d52] mt-0.5">{bk.guest_name} · {bk.room_name || bk.room_id}</p>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="rounded-xl bg-[#f5f0ea] p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Check-in</div>
+                    <div className="font-semibold">{ci}</div>
+                  </div>
+                  <div className="rounded-xl bg-amber-50 border border-amber-200 p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-widest text-[#6b5d52] mb-1">Current Checkout</div>
+                    <div className="font-semibold">{origCo}</div>
+                    <div className="text-[10px] text-[#6b5d52]">{origNights}N</div>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-[#6b5d52]">New Checkout Date</label>
+                  <input
+                    type="date"
+                    value={nd}
+                    min={minDate}
+                    onChange={e => setAmendStay(m => m ? { ...m, newDate: e.target.value } : m)}
+                    className="w-full border border-[#e8e0d8] rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                {isValid && (
+                  <div className={cn('rounded-xl p-3 text-sm border',
+                    isEarly ? 'bg-red-50 border-red-200' : 'bg-emerald-50 border-emerald-200'
+                  )}>
+                    <div className="font-semibold text-[#1a1208]">
+                      {isEarly
+                        ? `Early checkout: ${Math.abs(diff)} night${Math.abs(diff) !== 1 ? 's' : ''} removed`
+                        : `Stay extended: ${diff} night${diff !== 1 ? 's' : ''} added`}
+                    </div>
+                    <div className="text-[#6b5d52] mt-0.5">
+                      {origNights}N → {newNights}N · Folio adjustment: {isEarly ? '−' : '+'}₹{Math.abs(diff * rate).toLocaleString('en-IN')} (excl. GST)
+                    </div>
+                    {isEarly && (
+                      <div className="text-[10px] text-[#9c8e85] mt-1">
+                        Cancelled night charges will be removed from the folio. F&B and service charges are unaffected.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-6 pt-0 flex gap-3">
+                <button
+                  onClick={() => setAmendStay(null)}
+                  className="flex-1 py-2.5 rounded-xl border border-[#e8e0d8] text-sm font-semibold text-[#3d3128] hover:bg-[#f5f0ea] transition-colors"
+                >Cancel</button>
+                <button
+                  disabled={!isValid || amendStay.saving}
+                  onClick={async () => {
+                    setAmendStay(m => m ? { ...m, saving: true } : m);
+                    try {
+                      const r = await fetch(
+                        `/api/restaurant/${restaurantId}/hotel/bookings/${bk.id}/amend-checkout`,
+                        { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify({ new_check_out_date: nd }) }
+                      );
+                      const data = await r.json();
+                      if (!r.ok) throw new Error(data?.error || `Failed (${r.status})`);
+                      const label = data.amend_type === 'early_checkout' ? 'Early checkout confirmed' : 'Stay extended';
+                      const action = data.amend_type === 'early_checkout' ? 'removed from' : 'added to';
+                      toast.success(`${label}: checkout moved to ${nd}. ${data.nights_changed} night(s) ${action} folio.`);
+                      setAmendStay(null);
+                      fetchHotelBookings();
+                    } catch (err: any) {
+                      toast.error(err.message);
+                      setAmendStay(m => m ? { ...m, saving: false } : m);
+                    }
+                  }}
+                  className="flex-1 py-2.5 rounded-xl bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                >
+                  {amendStay.saving ? 'Saving…' : 'Confirm Amendment'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ═════════ Check-out modal (with folio preview) ═════════ */}
       {showCheckoutModal && checkoutBooking && (

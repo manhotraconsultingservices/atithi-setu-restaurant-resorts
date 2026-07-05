@@ -31821,6 +31821,130 @@ ${data.tenant.name}`;
     }
   });
 
+  // Amend checkout date for a CHECKED_IN guest (early departure or stay extension).
+  // Bypasses the normal LOCKED_AFTER_CHECKIN guard because this is a deliberate,
+  // supervised front-desk operation — distinct from a post-hoc billing correction.
+  // For early checkout: removes folio entries for the cancelled nights.
+  // For extension:      adds new nightly folio entries at the booking's stored rate.
+  // Either way, recomputes folio totals so the outstanding balance is correct.
+  app.post("/api/restaurant/:id/hotel/bookings/:bookingId/amend-checkout", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureHotelEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const b: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
+      if (!b) return res.status(404).json({ error: "Booking not found" });
+      if (b.status !== 'CHECKED_IN') return res.status(409).json({ error: "Only a CHECKED_IN booking can have its checkout date amended." });
+
+      const newCo = String(req.body.new_check_out_date || '').trim();
+      if (!newCo || !/^\d{4}-\d{2}-\d{2}$/.test(newCo)) {
+        return res.status(400).json({ error: "new_check_out_date is required (YYYY-MM-DD format)" });
+      }
+      const ci = normaliseDateIso(b.check_in_date);
+      const co = normaliseDateIso(b.check_out_date);
+      if (newCo <= ci) return res.status(400).json({ error: "New checkout date must be after check-in date." });
+      if (newCo === co)  return res.status(400).json({ error: "New checkout date is the same as the current one." });
+
+      const folio: any = await tenantDb.get(
+        "SELECT * FROM folios WHERE booking_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+        [b.id]
+      );
+      if (!folio) return res.status(409).json({ error: "No open folio found. Folio may already be settled." });
+
+      const isEarly = newCo < co;
+
+      if (isEarly) {
+        // Delete per-night entries for the cancelled nights (>= newCo, < original co).
+        // Description format: "Room charge · YYYY-MM-DD..." / "Service charge (X%) · YYYY-MM-DD..."
+        // SUBSTR(description, INSTR(description,'· ') + 2, 10) extracts the embedded date.
+        await tenantDb.run(
+          `DELETE FROM folio_entries
+           WHERE folio_id = ?
+             AND entry_type IN ('ROOM_CHARGE', 'SERVICE_CHARGE')
+             AND SUBSTR(description, INSTR(description, '· ') + 2, 10) >= ?
+             AND SUBSTR(description, INSTR(description, '· ') + 2, 10) < ?`,
+          [folio.id, newCo, co]
+        );
+      } else {
+        // Extension — add new nightly ROOM_CHARGE (+ SERVICE_CHARGE) entries.
+        const cfg = await loadHotelTaxConfig(req.params.id);
+        const nightRate   = Number(b.room_rate) || 0;
+        const gstExclusive = Number(b.room_rate_gst_exclusive ?? 1) !== 0;
+        const svcPct      = cfg.serviceChargePct;
+
+        const cur = new Date(co + 'T12:00:00Z');
+        const end = new Date(newCo + 'T12:00:00Z');
+        let idx = 0;
+        while (cur < end) {
+          const dateStr = cur.toISOString().slice(0, 10);
+          const gstPct  = gstRateForTariff(nightRate, cfg);
+          const tag     = Math.random().toString(36).slice(2, 5).toUpperCase();
+
+          let amount: number, gstAmt: number;
+          if (gstExclusive) {
+            amount = nightRate;
+            gstAmt = Math.round((nightRate * gstPct / 100) * 100) / 100;
+          } else {
+            const divisor = 1 + gstPct / 100;
+            amount = Math.round((nightRate / divisor) * 100) / 100;
+            gstAmt = Math.round((nightRate - amount) * 100) / 100;
+          }
+
+          await tenantDb.run(
+            `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, cost_centre, account_head)
+             VALUES (?, ?, 'ROOM_CHARGE', ?, 1, ?, ?, ?, ?, 'ROOMS', 'ROOM_REVENUE')`,
+            [`FE-${Date.now()}-${idx}-${tag}`, folio.id, `Room charge · ${dateStr} (extended stay)`, amount, amount, gstPct, gstAmt]
+          );
+
+          if (svcPct > 0) {
+            const svcAmt = Math.round((amount * svcPct / 100) * 100) / 100;
+            if (svcAmt > 0) {
+              const svcGst = Math.round((svcAmt * gstPct / 100) * 100) / 100;
+              await tenantDb.run(
+                `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, cost_centre, account_head)
+                 VALUES (?, ?, 'SERVICE_CHARGE', ?, 1, ?, ?, ?, ?, 'ROOMS', 'SERVICE_CHARGE_REVENUE')`,
+                [`FE-${Date.now()}-${idx}-S-${tag}`, folio.id, `Service charge (${svcPct}%) · ${dateStr}`, svcAmt, svcAmt, gstPct, svcGst]
+              );
+            }
+          }
+          idx++;
+          cur.setUTCDate(cur.getUTCDate() + 1);
+        }
+      }
+
+      // Update booking dates + recompute total_amount.
+      const newNights = Math.max(1, Math.round(
+        (new Date(newCo + 'T12:00:00Z').getTime() - new Date(ci + 'T12:00:00Z').getTime()) / 86400000
+      ));
+      const newTotal = Number(b.room_rate) * newNights;
+      await tenantDb.run(
+        "UPDATE room_bookings SET check_out_date = ?, total_amount = ? WHERE id = ?",
+        [newCo, newTotal, b.id]
+      );
+
+      await recomputeFolioTotals(tenantDb, folio.id);
+
+      const nightsChanged = Math.abs(Math.round(
+        (new Date(newCo + 'T12:00:00Z').getTime() - new Date(co + 'T12:00:00Z').getTime()) / 86400000
+      ));
+      const updated: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [b.id]);
+      const updatedFolio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+
+      return res.json({
+        ok: true,
+        amend_type: isEarly ? 'early_checkout' : 'extension',
+        nights_changed: nightsChanged,
+        old_check_out_date: co,
+        new_check_out_date: newCo,
+        booking: updated,
+        folio: updatedFolio,
+      });
+    } catch (err: any) {
+      console.error("amend-checkout error:", err);
+      res.status(500).json({ error: "Failed to amend checkout date" });
+    }
+  });
+
   // Check-in: mark booking CHECKED_IN, set room OCCUPIED, open a folio with initial nightly charges
   app.post("/api/restaurant/:id/hotel/bookings/:bookingId/checkin", authenticate, hotelStaff, requireTabAccess('HOTEL_BOOKINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);
