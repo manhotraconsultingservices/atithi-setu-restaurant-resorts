@@ -180,6 +180,23 @@ const REPORTS: ReportDef[] = [
       { key: 'notes',         label: 'Notes',     getValue: r => r.notes || '—' },
     ],
   },
+  {
+    key: 'room-changes',
+    label: 'Room Change Report',
+    description: 'Log of every room move during the period — reassignments and complimentary upgrades with reason and timestamp.',
+    category: 'front-office',
+    endpoint: '/hotel/reports/room-changes?from={from}&to={to}',
+    columns: [
+      { key: 'changed_at',      label: 'Changed At',   sortable: true },
+      { key: 'guest_name',      label: 'Guest',        sortable: true },
+      { key: 'from_room_name',  label: 'From Room',    sortable: true, getValue: r => r.from_room_name || '—' },
+      { key: 'to_room_name',    label: 'To Room',      sortable: true, getValue: r => r.to_room_name   || '—' },
+      { key: 'reason',          label: 'Reason',       getValue: r => r.reason || '—' },
+      { key: 'check_in_date',   label: 'Check-in',     sortable: true,
+        getValue: r => r.check_in_date ? String(r.check_in_date).slice(0, 10) : '—' },
+      { key: 'booking_status',  label: 'Status',       sortable: true },
+    ],
+  },
 
   // ── ACCOUNTING ─────────────────────────────────────────────────────────────
   {

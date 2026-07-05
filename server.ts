@@ -436,6 +436,22 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- Day-use time window: HH:MM 24h strings, null for overnight bookings
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS day_use_start_time TEXT;
     ALTER TABLE room_bookings ADD COLUMN IF NOT EXISTS day_use_end_time   TEXT;
+    -- Room Change log: one row per physical room move during an active stay.
+    -- Recorded by front desk when a guest is moved (upgrade, maintenance, preference).
+    -- from_room_name / to_room_name are snapshots so the report stays readable
+    -- even after rooms are renamed or deleted.
+    CREATE TABLE IF NOT EXISTS room_changes (
+      id            TEXT PRIMARY KEY,
+      booking_id    TEXT NOT NULL,
+      guest_name    TEXT NOT NULL,
+      from_room_id  TEXT,
+      from_room_name TEXT,
+      to_room_id    TEXT NOT NULL,
+      to_room_name  TEXT,
+      reason        TEXT,
+      changed_by    TEXT,
+      changed_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
     -- Inventory override grid: manual cap on rooms available for sale per type per date.
     -- When a row exists, the UI shows this count instead of the auto-calculated figure.
     CREATE TABLE IF NOT EXISTS room_inventory_overrides (
@@ -25908,6 +25924,7 @@ ${data.tenant.name}`;
       const tenantDb = await getTenantDb(req.params.id);
       const target = String(req.body?.room_id || '').trim();
       const lock = req.body?.lock === true || req.body?.lock === 1 || req.body?.lock === '1';
+      const changeReason = String(req.body?.reason || '').trim() || null;
       if (!target) return res.status(400).json({ error: 'room_id is required.' });
       const bk: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       if (!bk) return res.status(404).json({ error: 'Booking not found.' });
@@ -25958,6 +25975,8 @@ ${data.tenant.name}`;
       // A checked-in stay keeps the room locked; otherwise floating stays
       // floating unless the caller explicitly locks the room.
       const newLock = isCheckedIn ? 1 : (lock ? 1 : Number(bk.room_locked || 0));
+      const oldRoom: any = await tenantDb.get("SELECT name, room_number FROM rooms WHERE id = ?", [bk.room_id]).catch(() => null);
+      const newRoom2: any = await tenantDb.get("SELECT name, room_number FROM rooms WHERE id = ?", [target]).catch(() => null);
       await tenantDb.run(
         "UPDATE room_bookings SET room_id = ?, room_locked = ? WHERE id = ? AND status IN ('BOOKED','CHECKED_IN')",
         [target, newLock, req.params.bookingId]
@@ -25970,6 +25989,15 @@ ${data.tenant.name}`;
         await tenantDb.run("UPDATE rooms SET status = 'OCCUPIED' WHERE id = ?", [target]).catch(() => {});
         await tenantDb.run("UPDATE folios SET room_id = ? WHERE booking_id = ? AND status = 'open'", [target, req.params.bookingId]).catch(() => {});
       }
+      // Record the move in the room_changes audit log.
+      await tenantDb.run(
+        `INSERT INTO room_changes (id, booking_id, guest_name, from_room_id, from_room_name, to_room_id, to_room_name, reason, changed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [`RC-${Date.now()}`, req.params.bookingId, bk.guest_name,
+         bk.room_id, oldRoom?.name || oldRoom?.room_number || bk.room_id,
+         target, newRoom2?.name || newRoom2?.room_number || target,
+         changeReason, (req as any).user?.id || null]
+      ).catch(() => {});
       const row: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       res.json({ ok: true, room_id: target, room_locked: row?.room_locked, booking: row });
     } catch (err: any) {
@@ -26035,6 +26063,14 @@ ${data.tenant.name}`;
           [`FE-UPG-${Date.now()}`, folio.id, `Complimentary upgrade: ${oldLabel} → ${newLabel}`]
         ).catch(() => {});
       }
+      // Record the complimentary upgrade in the room_changes audit log.
+      await tenantDb.run(
+        `INSERT INTO room_changes (id, booking_id, guest_name, from_room_id, from_room_name, to_room_id, to_room_name, reason, changed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [`RC-${Date.now()}`, req.params.bookingId, bk.guest_name,
+         bk.room_id, oldLabel, newRoomId, newLabel,
+         'Complimentary upgrade', (req as any).user?.id || null]
+      ).catch(() => {});
       const row: any = await tenantDb.get("SELECT * FROM room_bookings WHERE id = ?", [req.params.bookingId]);
       res.json({ ok: true, booking: row, old_room_id: bk.room_id, new_room_id: newRoomId, old_room_label: oldLabel, new_room_label: newLabel });
     } catch (err: any) {
@@ -31475,6 +31511,33 @@ ${data.tenant.name}`;
   // ── AIOSELL-GAP REPORTS ─────────────────────────────────────────────────────
   // Nine new endpoints that close the gap between Atithi Setu and Aiosell's
   // 26-report catalogue.  All share the /hotel/reports/* prefix.
+
+  app.get("/api/restaurant/:id/hotel/reports/room-changes", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const from = String(req.query.from || new Date().toISOString().slice(0, 10));
+      const to   = String(req.query.to   || from);
+      const rows = await tenantDb.query(
+        `SELECT rc.id,
+                rc.guest_name,
+                rc.from_room_name,
+                rc.to_room_name,
+                rc.reason,
+                TO_CHAR(rc.changed_at, 'YYYY-MM-DD HH24:MI') AS changed_at,
+                b.check_in_date,
+                b.check_out_date,
+                b.status        AS booking_status
+           FROM room_changes rc
+           LEFT JOIN room_bookings b ON b.id = rc.booking_id
+          WHERE TO_CHAR(rc.changed_at, 'YYYY-MM-DD') BETWEEN ? AND ?
+          ORDER BY rc.changed_at DESC`,
+        [from, to]
+      );
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load room change report' });
+    }
+  });
 
   app.get("/api/restaurant/:id/hotel/reports/police-enquiry", authenticate, hotelStaff, async (req: AuthRequest, res: Response) => {
     try {
