@@ -298,6 +298,41 @@ async function testHotel() {
     skip('TC-HOTEL-BULKRATE', 'Bulk rate update smoke test', 'no room types in rate-grid response');
     skip('TC-HOTEL-BULKINV',  'Bulk inventory update smoke test', 'no room types in rate-grid response');
   }
+
+  // Amend-checkout — non-destructive guard tests (status guard + same-date guard).
+  if (hb.status === 200 && Array.isArray(hb.data)) {
+    const bookedBkg     = hb.data.find(b => b.status === 'BOOKED');
+    const checkedInBkg  = hb.data.find(b => b.status === 'CHECKED_IN');
+
+    if (bookedBkg) {
+      // A BOOKED (not yet checked-in) booking must be rejected with 400.
+      const ac = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings/${bookedBkg.id}/amend-checkout`,
+        { new_check_out_date: (bookedBkg.check_out_date || '').slice(0, 10) });
+      if (ac.status === 400) {
+        pass('TC-HOTEL-AMEND-GUARD', `Amend-checkout rejects non-CHECKED_IN booking (${ac.data?.error || 'status guard OK'})`);
+      } else if (ac.status === 403 || ac.status === 404) {
+        skip('TC-HOTEL-AMEND-GUARD', 'Amend-checkout status guard', `HTTP ${ac.status}`);
+      } else {
+        fail('TC-HOTEL-AMEND-GUARD', 'Amend-checkout must reject BOOKED status with 400', `HTTP ${ac.status}`);
+      }
+    } else if (checkedInBkg) {
+      // Same checkout date must be rejected (non-destructive — nothing is changed).
+      const coDate = (checkedInBkg.check_out_date || '').slice(0, 10);
+      const ac = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings/${checkedInBkg.id}/amend-checkout`,
+        { new_check_out_date: coDate });
+      if (ac.status === 400) {
+        pass('TC-HOTEL-AMEND-GUARD', `Amend-checkout rejects same checkout date (${ac.data?.error || 'same-date guard OK'})`);
+      } else if (ac.status === 403 || ac.status === 404) {
+        skip('TC-HOTEL-AMEND-GUARD', 'Amend-checkout same-date guard', `HTTP ${ac.status}`);
+      } else {
+        fail('TC-HOTEL-AMEND-GUARD', 'Amend-checkout must reject same checkout date with 400', `HTTP ${ac.status}`);
+      }
+    } else {
+      skip('TC-HOTEL-AMEND-GUARD', 'Amend-checkout smoke test', 'no BOOKED or CHECKED_IN bookings in list');
+    }
+  } else {
+    skip('TC-HOTEL-AMEND-GUARD', 'Amend-checkout smoke test', 'hotel bookings list unavailable');
+  }
 }
 
 // ── Procurement tests ──────────────────────────────────────────────────────
