@@ -8902,7 +8902,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     const params: Record<string,string> = {};
     if (tab === 'ARR') { params.from = today; params.to = today; params.status = 'BOOKED'; }
     else if (tab === 'INH') { params.status = 'CHECKED_IN'; }
-    else if (tab === 'DEP') { params.from = today; params.to = today; params.status = 'CHECKED_IN'; }
+    // DEP includes both CHECKED_IN guests and BOOKED day-use guests (who haven't
+    // checked in yet but are departing today). Fetch both so the frontend filter
+    // at case 'DEP' (which shows BOOKED+DAY_USE) actually has the rows to work with.
+    else if (tab === 'DEP') { params.from = today; params.to = today; params.status = 'BOOKED,CHECKED_IN'; }
     else if (tab === 'UPC') { params.status = 'BOOKED'; }
     else if (tab === 'HIS') { params.status = 'CHECKED_OUT'; }
     setBookingHistoryFilter(f => ({
