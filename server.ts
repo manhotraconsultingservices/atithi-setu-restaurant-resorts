@@ -31609,17 +31609,21 @@ ${data.tenant.name}`;
       const from = String(req.query.from || new Date().toISOString().slice(0, 10));
       const to   = String(req.query.to   || from);
       const rows = await tenantDb.query(
-        `SELECT mi.name                                 AS item_name,
-                COALESCE(mi.category, 'Uncategorised') AS category,
-                SUM(oi.quantity)::float                 AS qty_sold,
-                AVG(oi.price)::float                    AS avg_price,
-                SUM(oi.quantity * oi.price)::float      AS total_revenue
-           FROM order_items oi
-           JOIN orders     o  ON o.id  = oi.order_id
-           JOIN menu_items mi ON mi.id = oi.menu_item_id
+        `SELECT item->>'name'                                            AS item_name,
+                COALESCE(m.category, 'Uncategorised')                   AS category,
+                SUM((item->>'quantity')::float)::float                  AS qty_sold,
+                AVG((item->>'price')::float)::float                     AS avg_price,
+                SUM((item->>'quantity')::float * (item->>'price')::float)::float AS total_revenue
+           FROM orders o,
+                jsonb_array_elements(
+                  CASE WHEN o.items IS NOT NULL AND o.items ~ '^\\['
+                  THEN o.items::jsonb ELSE '[]'::jsonb END
+                ) AS item
+           LEFT JOIN menu m ON m.id = item->>'id'
           WHERE o.payment_status = 'PAID'
             AND TO_CHAR(o.created_at, 'YYYY-MM-DD') BETWEEN ? AND ?
-          GROUP BY mi.id, mi.name, mi.category
+            AND item->>'name' IS NOT NULL
+          GROUP BY item->>'name', m.category
           ORDER BY qty_sold DESC`,
         [from, to]
       );
