@@ -35695,6 +35695,185 @@ ${data.tenant.name}`;
     }
   });
 
+  // POST /hotel/folios/:folioId/entries
+  // Add a manual charge line to an open folio (custom description, amount, GST rate).
+  // Used primarily when editing a revised invoice that is back in 'open' state.
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/entries", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const checkRes = await ensureHotelEnabled(req.params.id);
+    if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
+    try {
+      const { description, amount, gst_rate, quantity, entry_type } = req.body || {};
+      if (!description || !String(description).trim()) return res.status(400).json({ error: 'description is required' });
+      const amt = Number(amount);
+      if (!isFinite(amt) || amt === 0) return res.status(400).json({ error: 'amount must be a non-zero number' });
+      const rate = Math.max(0, Number(gst_rate || 0));
+      const qty  = Math.max(1, Number(quantity || 1));
+      const gst_amount = +(amt * qty * rate / 100).toFixed(2);
+      const tenantDb = await getTenantDb(req.params.id);
+      const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [req.params.folioId]);
+      if (!folio) return res.status(404).json({ error: "Folio not found" });
+      if (folio.status !== 'open') return res.status(409).json({ error: `Folio is ${folio.status} — entries can only be added to open folios` });
+      const eid = `FE-MAN-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount, posted_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [eid, folio.id, entry_type || 'MANUAL_CHARGE', String(description).trim(),
+         qty, +(amt).toFixed(2), +(amt * qty).toFixed(2), rate, gst_amount,
+         (req as any).user?.id || null]
+      );
+      await recomputeFolioTotals(tenantDb, folio.id);
+      const updated: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+      res.status(201).json({ entry_id: eid, subtotal: updated.subtotal, gst_amount: updated.gst_amount, grand_total: updated.grand_total });
+    } catch (err: any) {
+      console.error("Folio entry add error:", err);
+      res.status(500).json({ error: err?.message || "Failed to add entry" });
+    }
+  });
+
+  // DELETE /hotel/folios/:folioId/entries/:entryId
+  // Reverses a folio entry non-destructively: posts a matching negative entry
+  // with reversal_of_entry_id pointing at the original (audit-preserving).
+  app.delete("/api/restaurant/:id/hotel/folios/:folioId/entries/:entryId", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const checkRes = await ensureHotelEnabled(req.params.id);
+    if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [req.params.folioId]);
+      if (!folio) return res.status(404).json({ error: "Folio not found" });
+      if (folio.status !== 'open') return res.status(409).json({ error: `Folio is ${folio.status} — only open folios can be edited` });
+      const entry: any = await tenantDb.get("SELECT * FROM folio_entries WHERE id = ? AND folio_id = ?", [req.params.entryId, folio.id]);
+      if (!entry) return res.status(404).json({ error: "Entry not found on this folio" });
+      // Prevent double-reversal: if this entry is itself a reversal, block it
+      if (entry.reversal_of_entry_id) return res.status(409).json({ error: "Cannot reverse a reversal entry" });
+      // Check if already reversed
+      const existing: any = await tenantDb.get("SELECT id FROM folio_entries WHERE reversal_of_entry_id = ?", [entry.id]);
+      if (existing) return res.status(409).json({ error: "Entry has already been reversed" });
+      const rid = `FE-REV-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      await tenantDb.run(
+        `INSERT INTO folio_entries
+           (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount,
+            reversal_of_entry_id, posted_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [rid, folio.id, entry.entry_type,
+         `Reversal: ${entry.description}`,
+         -(Number(entry.quantity || 1)), entry.unit_price,
+         -(Number(entry.amount || 0)), entry.gst_rate,
+         -(Number(entry.gst_amount || 0)),
+         entry.id, (req as any).user?.id || null]
+      );
+      await recomputeFolioTotals(tenantDb, folio.id);
+      const updated: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+      res.json({ reversal_id: rid, subtotal: updated.subtotal, gst_amount: updated.gst_amount, grand_total: updated.grand_total });
+    } catch (err: any) {
+      console.error("Folio entry reverse error:", err);
+      res.status(500).json({ error: err?.message || "Failed to reverse entry" });
+    }
+  });
+
+  // POST /hotel/folios/:folioId/settle
+  // Standalone settle for revised invoices (and any open folio not handled
+  // by the booking checkout flow). Generates invoice number, records a FINAL
+  // payment, flips status → 'settled', posts GL.
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/settle", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const checkRes = await ensureHotelEnabled(req.params.id);
+    if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
+    try {
+      const { payment_method, discount } = req.body || {};
+      if (!payment_method) return res.status(400).json({ error: 'payment_method is required' });
+      const tenantDb = await getTenantDb(req.params.id);
+      const folio: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [req.params.folioId]);
+      if (!folio) return res.status(404).json({ error: "Folio not found" });
+      if (folio.status !== 'open') return res.status(409).json({ error: `Folio is already ${folio.status}` });
+      if (folio.doc_type === 'CREDIT_NOTE') return res.status(400).json({ error: "Credit notes cannot be settled via this endpoint" });
+
+      const effectiveDiscount = Math.max(0, Number(discount || 0));
+      if (effectiveDiscount > 0) {
+        await tenantDb.run("UPDATE folios SET discount = ? WHERE id = ?", [effectiveDiscount, folio.id]);
+      }
+      await recomputeFolioTotals(tenantDb, folio.id);
+      const now = new Date().toISOString();
+
+      // Generate invoice number (same logic as hotel checkout)
+      const settledDate = new Date(now);
+      let invNum = folio.invoice_number || '';
+      if (!invNum) {
+        try {
+          const seq = await getNextTenantSequence(tenantDb, `hotel-invoice-${settledDate.getFullYear()}`);
+          invNum = `INV-${settledDate.getFullYear()}-${String(seq).padStart(5, '0')}`;
+        } catch {
+          invNum = `INV-${settledDate.getFullYear()}-${String(folio.id).slice(-6).toUpperCase()}`;
+        }
+      }
+
+      await tenantDb.run(
+        "UPDATE folios SET status = 'settled', settled_at = ?, payment_method = ?, invoice_number = COALESCE(invoice_number, ?) WHERE id = ?",
+        [now, payment_method, invNum, folio.id]
+      );
+
+      // Record a FINAL payment covering the outstanding balance
+      const refreshed: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [folio.id]);
+      const outstanding = await getFolioOutstanding(tenantDb, folio.id);
+      const balanceDue = outstanding ? Math.max(0, outstanding.outstanding) : Number(refreshed.grand_total || 0);
+      if (balanceDue > 0) {
+        const pid = `FP-SETTLE-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+        await tenantDb.run(
+          `INSERT INTO folio_payments (id, folio_id, payment_type, payment_method, amount, recorded_by, recorded_at)
+           VALUES (?, ?, 'FINAL', ?, ?, ?, NOW())`,
+          [pid, folio.id, payment_method, balanceDue, (req as any).user?.id || null]
+        ).catch(() => {});
+      }
+
+      // Post GL (same logic as settleFolioForBooking, reused inline)
+      try {
+        const journalRef = `FOLIO-${folio.id}`;
+        const already = await tenantDb.get("SELECT id FROM gl_entries WHERE journal_ref = ?", [journalRef]);
+        if (!already) {
+          const entryDate = now.slice(0, 10);
+          const subtotal  = Number(refreshed.subtotal  || 0);
+          const gstAmt    = Number(refreshed.gst_amount || 0);
+          const disc      = Number(refreshed.discount  || 0);
+          const grandTotal = Number(refreshed.grand_total || 0);
+          const cgst = +(gstAmt / 2).toFixed(2);
+          const sgst = gstAmt - cgst;
+          const payments2: any[] = await tenantDb.query(
+            "SELECT * FROM folio_payments WHERE folio_id = ? AND is_voided = 0", [folio.id]
+          );
+          const advances = payments2.filter((p: any) => p.payment_type === 'ADVANCE');
+          const advTotal  = advances.reduce((s: number, p: any) => s + Number(p.amount), 0);
+          const nonAdv    = payments2.filter((p: any) => p.payment_type !== 'ADVANCE');
+          const glLines: GlLine[] = [];
+          if (subtotal + gstAmt > 0) {
+            glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: subtotal + gstAmt - disc, cr_amount: 0, narration: `Guest bill ${folio.id}` });
+            glLines.push({ account_code: '4000', account_name: 'Room Revenue', dr_amount: 0, cr_amount: subtotal, narration: `Revenue folio ${folio.id}` });
+            if (disc > 0) glLines.push({ account_code: '4900', account_name: 'Other Income', dr_amount: disc, cr_amount: 0, narration: `Discount folio ${folio.id}` });
+            if (cgst > 0) glLines.push({ account_code: '2200', account_name: 'GST Payable — CGST', dr_amount: 0, cr_amount: cgst, narration: `CGST folio ${folio.id}` });
+            if (sgst > 0) glLines.push({ account_code: '2210', account_name: 'GST Payable — SGST', dr_amount: 0, cr_amount: sgst, narration: `SGST folio ${folio.id}` });
+          }
+          if (advTotal > 0) {
+            const applied = Math.min(advTotal, grandTotal);
+            glLines.push({ account_code: '2100', account_name: 'Advances from Guests', dr_amount: applied, cr_amount: 0, narration: `Advance applied ${folio.id}` });
+            glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: applied, narration: `Advance applied ${folio.id}` });
+          }
+          for (const p of nonAdv) {
+            const amt = Number(p.amount);
+            if (amt <= 0) continue;
+            const cashAcct = _glAccountForPaymentMethod(p.payment_method);
+            glLines.push({ account_code: cashAcct.code, account_name: cashAcct.name, dr_amount: amt, cr_amount: 0, narration: `${p.payment_method} ${folio.id}` });
+            glLines.push({ account_code: '1100', account_name: 'Accounts Receivable — Guests', dr_amount: 0, cr_amount: amt, narration: `AR cleared ${folio.id}` });
+          }
+          await _postGlEntries(tenantDb, req.params.id, journalRef, entryDate, 'FOLIO_SETTLEMENT', folio.id, glLines, null);
+        }
+      } catch (glErr) {
+        console.error('[GL] standalone settle error:', glErr);
+      }
+
+      res.json({ ok: true, invoice_number: invNum, settled_at: now, grand_total: refreshed.grand_total });
+    } catch (err: any) {
+      console.error("Standalone settle error:", err);
+      res.status(500).json({ error: err?.message || "Failed to settle folio" });
+    }
+  });
+
   // ─── HOTEL ANALYTICS (Phase 3) ────────────────────────────────────────────
   app.get("/api/restaurant/:id/hotel/analytics", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureHotelEnabled(req.params.id);

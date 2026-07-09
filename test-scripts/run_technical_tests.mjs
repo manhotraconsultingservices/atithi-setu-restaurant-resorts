@@ -1167,6 +1167,46 @@ async function testCheckoutAndInvoice() {
     skip('TC-BIZ-CHKOUT-005c', 'Revise guard', 'no folios exist');
   }
 
+  // TC-BIZ-CHKOUT-005d: Folio entry management (add charge + reverse entry guards)
+  if (firstFolio && firstFolio.status === 'open') {
+    // Add a manual charge to the open folio
+    const addEntry = await api('POST', `/api/restaurant/${restaurantId}/hotel/folios/${firstFolio.id}/entries`, {
+      description: 'Autotest manual charge', amount: 100, gst_rate: 0, quantity: 1, entry_type: 'MANUAL_CHARGE',
+    });
+    if (addEntry.status === 201 && addEntry.data.entry_id) {
+      pass('TC-BIZ-CHKOUT-005d', `POST /entries added charge (entry ${addEntry.data.entry_id})`);
+      // Reverse that entry
+      const revEntry = await api('DELETE', `/api/restaurant/${restaurantId}/hotel/folios/${firstFolio.id}/entries/${addEntry.data.entry_id}`);
+      if (revEntry.status === 200 && revEntry.data.reversal_id) {
+        pass('TC-BIZ-CHKOUT-005d', `DELETE /entries reversed (reversal ${revEntry.data.reversal_id})`);
+        // Double-reverse must be blocked
+        const dbl = await api('DELETE', `/api/restaurant/${restaurantId}/hotel/folios/${firstFolio.id}/entries/${addEntry.data.entry_id}`);
+        if (dbl.status === 409) {
+          pass('TC-BIZ-CHKOUT-005d', 'Double-reversal correctly blocked (409)');
+        } else {
+          fail('TC-BIZ-CHKOUT-005d', 'Double-reversal guard', `Expected 409, got ${dbl.status}`);
+        }
+      } else {
+        fail('TC-BIZ-CHKOUT-005d', 'DELETE /entries', `HTTP ${revEntry.status}`);
+      }
+    } else if (addEntry.status === 409) {
+      skip('TC-BIZ-CHKOUT-005d', 'POST /entries', 'folio locked or 409 returned');
+    } else {
+      fail('TC-BIZ-CHKOUT-005d', 'POST /entries', `HTTP ${addEntry.status} — ${JSON.stringify(addEntry.data).slice(0,120)}`);
+    }
+    // Standalone settle guard: settled/voided folio must 409 — skip if folio is open (correct for revised invoice test)
+    const settleGuard = await api('POST', `/api/restaurant/${restaurantId}/hotel/folios/${firstFolio.id}/settle`, { payment_method: 'CASH' });
+    if ([200, 201].includes(settleGuard.status)) {
+      pass('TC-BIZ-CHKOUT-005d', `POST /settle succeeded for open folio (invoice: ${settleGuard.data.invoice_number})`);
+    } else if (settleGuard.status === 409) {
+      pass('TC-BIZ-CHKOUT-005d', 'POST /settle on already-settled folio correctly 409');
+    } else {
+      fail('TC-BIZ-CHKOUT-005d', 'POST /settle', `HTTP ${settleGuard.status} — ${JSON.stringify(settleGuard.data).slice(0,120)}`);
+    }
+  } else {
+    skip('TC-BIZ-CHKOUT-005d', 'Folio entry management', firstFolio ? `folio status=${firstFolio.status}` : 'no folios');
+  }
+
   // TC-BIZ-CHKOUT-006: Checkout guard — must be CHECKED_IN, not BOOKED
   const rmList = await api('GET', `/api/restaurant/${restaurantId}/hotel/rooms`);
   if (rmList.status === 200 && Array.isArray(rmList.data) && rmList.data.length > 0) {

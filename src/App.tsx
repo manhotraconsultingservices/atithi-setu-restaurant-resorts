@@ -9092,6 +9092,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [viewFolio, setViewFolio] = useState<any>(null);
   const [revisionHistory, setRevisionHistory] = useState<any[] | null>(null);
   const [revisionHistoryLoading, setRevisionHistoryLoading] = useState(false);
+  const [addChargeOpen, setAddChargeOpen] = useState(false);
+  const [addChargeDesc, setAddChargeDesc] = useState('');
+  const [addChargeAmt, setAddChargeAmt] = useState('');
+  const [addChargeGst, setAddChargeGst] = useState('0');
+  const [addChargeQty, setAddChargeQty] = useState('1');
+  const [addChargeSaving, setAddChargeSaving] = useState(false);
   const [folioSlideBooking, setFolioSlideBooking] = useState<any>(null);
   // Sprint RS — F&B charge modal state (phone-in room service, minibar, banquet)
   const [fnbChargeFolio, setFnbChargeFolio] = useState<any>(null);
@@ -32981,6 +32987,41 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700"
                   ><ChefHat size={13}/> Add F&amp;B</button>
                 )}
+                {viewFolio.doc_type !== 'CREDIT_NOTE' && viewFolio.status === 'open' && (
+                  <button
+                    onClick={() => { setAddChargeDesc(''); setAddChargeAmt(''); setAddChargeGst('0'); setAddChargeQty('1'); setAddChargeOpen(true); }}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700"
+                  ><Plus size={13}/> Add Charge</button>
+                )}
+                {viewFolio.doc_type === 'REVISED_INVOICE' && viewFolio.status === 'open' && (
+                  <button
+                    onClick={async () => {
+                      const r = await promptPayment({
+                        title: 'Settle & Issue Revised Invoice',
+                        fields: [
+                          { name: 'payment_method', label: 'Payment method', type: 'select', options: [{value:'CASH',label:'Cash'},{value:'CARD',label:'Card'},{value:'UPI',label:'UPI'},{value:'BANK_TRANSFER',label:'Bank Transfer'},{value:'ONLINE',label:'Online'},{value:'CHEQUE',label:'Cheque'},{value:'CREDIT',label:'Credit'}], required: true },
+                          { name: 'discount', label: 'Discount amount (₹, optional)', type: 'number', placeholder: '0' },
+                        ],
+                        confirmLabel: 'Settle & Issue Invoice',
+                      });
+                      if (!r) return;
+                      if (!r.payment_method) { toast.error('Payment method is required'); return; }
+                      try {
+                        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/settle`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify({ payment_method: r.payment_method, discount: Number(r.discount || 0) }),
+                        });
+                        const body = await res.json();
+                        if (!res.ok) throw new Error(body.error || 'Failed to settle');
+                        toast.success(`Invoice ${body.invoice_number} issued`);
+                        setRevisionHistory(null);
+                        await loadFolio(viewFolio.id);
+                      } catch (err: any) { toast.error(err.message); }
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-[#cc5a16] text-white text-xs font-bold hover:bg-[#a84612]"
+                  ><CheckCircle2 size={13}/> Settle &amp; Issue Invoice</button>
+                )}
                 {viewFolio.doc_type !== 'CREDIT_NOTE' && (viewFolio.status === 'settled' || viewFolio.status === 'voided') && (
                   <button
                     onClick={async () => {
@@ -33040,11 +33081,12 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     <th className="text-center py-2">Qty</th>
                     <th className="text-right py-2">Amount</th>
                     <th className="text-right py-2">GST</th>
+                    {viewFolio.status === 'open' && <th className="w-8"/>}
                   </tr>
                 </thead>
                 <tbody>
                   {(viewFolio.entries || []).map((e: any) => (
-                    <tr key={e.id} className="border-t border-[#cc5a16]/10">
+                    <tr key={e.id} className={cn('border-t border-[#cc5a16]/10', e.reversal_of_entry_id ? 'opacity-50' : '')}>
                       <td className="py-2">
                         <div className="font-semibold">{e.description}</div>
                         <div className="text-[10px] text-[#9c8e85] uppercase tracking-wide">{e.entry_type}</div>
@@ -33052,6 +33094,28 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       <td className="py-2 text-center font-mono">{e.quantity}</td>
                       <td className="py-2 text-right font-mono">₹{Number(e.amount).toLocaleString('en-IN')}</td>
                       <td className="py-2 text-right font-mono text-[#6b5d52]">{e.gst_rate || 0}% · ₹{Number(e.gst_amount || 0).toFixed(0)}</td>
+                      {viewFolio.status === 'open' && (
+                        <td className="py-2 pl-2">
+                          {!e.reversal_of_entry_id && (
+                            <button
+                              title="Remove this charge (posts a reversal)"
+                              onClick={async () => {
+                                try {
+                                  const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/entries/${e.id}`, {
+                                    method: 'DELETE',
+                                    headers: { Authorization: `Bearer ${token}` },
+                                  });
+                                  const body = await res.json();
+                                  if (!res.ok) throw new Error(body.error || 'Failed');
+                                  toast.success('Entry reversed');
+                                  await loadFolio(viewFolio.id);
+                                } catch (err: any) { toast.error(err.message); }
+                              }}
+                              className="p-1 rounded text-rose-400 hover:text-rose-600 hover:bg-rose-50"
+                            ><Trash2 size={13}/></button>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -33228,6 +33292,95 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             setFnbChargeFolio(null);
           }}
         />
+      )}
+
+      {/* Add Manual Charge modal — for open folio entries (revised invoices) */}
+      {addChargeOpen && viewFolio && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-[#1a1208]">Add Manual Charge</h3>
+              <button onClick={() => setAddChargeOpen(false)} className="p-1 rounded-lg hover:bg-gray-100 text-gray-400"><X size={18}/></button>
+            </div>
+            <div className="flex flex-col gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-[#6b5d52] mb-1">Description *</label>
+                <input
+                  value={addChargeDesc}
+                  onChange={e => setAddChargeDesc(e.target.value)}
+                  placeholder="e.g. Extra bed charge, Laundry service"
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16]"
+                />
+              </div>
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <label className="block text-xs font-semibold text-[#6b5d52] mb-1">Amount (₹) *</label>
+                  <input
+                    type="number" value={addChargeAmt} onChange={e => setAddChargeAmt(e.target.value)}
+                    placeholder="0" min="0"
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16]"
+                  />
+                </div>
+                <div className="w-20">
+                  <label className="block text-xs font-semibold text-[#6b5d52] mb-1">Qty</label>
+                  <input
+                    type="number" value={addChargeQty} onChange={e => setAddChargeQty(e.target.value)}
+                    min="1"
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16]"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-[#6b5d52] mb-1">GST Rate (%)</label>
+                <select
+                  value={addChargeGst} onChange={e => setAddChargeGst(e.target.value)}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-[#cc5a16]"
+                >
+                  <option value="0">0% (Nil)</option>
+                  <option value="5">5%</option>
+                  <option value="12">12%</option>
+                  <option value="18">18%</option>
+                  <option value="28">28%</option>
+                </select>
+              </div>
+              {addChargeAmt && Number(addChargeAmt) > 0 && (
+                <p className="text-xs text-[#6b5d52] bg-[#faf7f2] rounded-lg px-3 py-2">
+                  Total: ₹{(Number(addChargeAmt) * Number(addChargeQty || 1) * (1 + Number(addChargeGst) / 100)).toFixed(2)}
+                  {' '}(incl. {addChargeGst}% GST)
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setAddChargeOpen(false)} className="px-4 py-2 rounded-xl text-sm text-gray-500 hover:bg-gray-100">Cancel</button>
+              <button
+                disabled={addChargeSaving || !addChargeDesc.trim() || !addChargeAmt || Number(addChargeAmt) <= 0}
+                onClick={async () => {
+                  setAddChargeSaving(true);
+                  try {
+                    const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/entries`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                      body: JSON.stringify({
+                        description: addChargeDesc.trim(),
+                        amount: Number(addChargeAmt),
+                        gst_rate: Number(addChargeGst),
+                        quantity: Number(addChargeQty || 1),
+                        entry_type: 'MANUAL_CHARGE',
+                      }),
+                    });
+                    const body = await res.json();
+                    if (!res.ok) throw new Error(body.error || 'Failed');
+                    toast.success('Charge added');
+                    setAddChargeOpen(false);
+                    await loadFolio(viewFolio.id);
+                  } catch (err: any) { toast.error(err.message); }
+                  finally { setAddChargeSaving(false); }
+                }}
+                className="px-4 py-2 rounded-xl text-sm bg-blue-600 text-white font-bold hover:bg-blue-700 disabled:opacity-50"
+              >{addChargeSaving ? 'Saving…' : 'Add Charge'}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ═════════ Advance Payment Modal ═════════
