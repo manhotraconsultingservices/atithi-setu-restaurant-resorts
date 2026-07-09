@@ -1324,6 +1324,14 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- folios keep folio_kind='HOTEL' + appointment_id NULL → identical behaviour.
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS folio_kind TEXT DEFAULT 'HOTEL';
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS appointment_id TEXT;
+    -- Invoice Revision System (Jul 2026) — once a folio is settled/voided,
+    -- staff must create a new revision rather than editing in place.
+    -- revision_number: 1 for original, 2+ for each subsequent amendment.
+    -- revised_by / revised_at: who created this revision and when.
+    -- parent_folio_id (existing) and reason (existing) carry the linkage + justification.
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS revision_number INTEGER DEFAULT 1;
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS revised_by TEXT;
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS revised_at TIMESTAMP;
 
     CREATE TABLE IF NOT EXISTS folio_entries (
       id         TEXT PRIMARY KEY,
@@ -35554,6 +35562,136 @@ ${data.tenant.name}`;
     } catch (err: any) {
       console.error("Credit note error:", err);
       res.status(500).json({ error: err?.message || "Failed to generate credit note" });
+    }
+  });
+
+  // POST /hotel/folios/:folioId/revise
+  // body: { reason: string (mandatory) }
+  // Creates a new open folio as a revision of a settled/voided folio.
+  // The original folio is marked 'superseded'; the revision is 'open' and ready to edit.
+  app.post("/api/restaurant/:id/hotel/folios/:folioId/revise", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const checkRes = await ensureHotelEnabled(req.params.id);
+    if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
+    try {
+      const reason = String(req.body?.reason || '').trim();
+      if (!reason) return res.status(400).json({ error: 'Revision reason is mandatory for audit trail' });
+      const tenantDb = await getTenantDb(req.params.id);
+      const original: any = await tenantDb.get("SELECT * FROM folios WHERE id = ?", [req.params.folioId]);
+      if (!original) return res.status(404).json({ error: "Folio not found" });
+      if (original.doc_type === 'CREDIT_NOTE') {
+        return res.status(400).json({ error: "Credit notes cannot be revised — create a new credit note if needed" });
+      }
+      if (original.status === 'superseded') {
+        return res.status(409).json({ error: "This folio has been superseded — only the latest revision can be revised" });
+      }
+      if (!['settled', 'voided'].includes(original.status)) {
+        return res.status(409).json({ error: `Only settled or voided folios can be revised (current status: ${original.status})` });
+      }
+      // Prevent creating a second revision from the same folio
+      const existingRevision: any = await tenantDb.get(
+        "SELECT id FROM folios WHERE parent_folio_id = ? AND doc_type IN ('INVOICE', 'REVISED_INVOICE') AND status != 'superseded'",
+        [original.id]
+      );
+      if (existingRevision) {
+        return res.status(409).json({ error: "A revision already exists for this folio", revision_id: existingRevision.id });
+      }
+
+      const newRevNum = (original.revision_number || 1) + 1;
+      const newId = `FOLIO-REV-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      const revisedBy = (req as any).user?.id || (req as any).user?.email || null;
+      const now = new Date().toISOString();
+
+      await tenantDb.run(
+        `INSERT INTO folios
+           (id, booking_id, room_id, status, subtotal, gst_amount, service_charge, discount, grand_total,
+            doc_type, parent_folio_id, reason, revision_number, revised_by, revised_at,
+            currency_snapshot, tax_label_snapshot, gst_exempt, gst_exempt_reason, folio_kind, appointment_id,
+            created_at)
+         VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?,
+                 'REVISED_INVOICE', ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?, ?,
+                 NOW())`,
+        [newId, original.booking_id, original.room_id,
+         original.subtotal || 0, original.gst_amount || 0, original.service_charge || 0,
+         original.discount || 0, original.grand_total || 0,
+         original.id, reason, newRevNum, revisedBy, now,
+         original.currency_snapshot || null, original.tax_label_snapshot || null,
+         original.gst_exempt || 0, original.gst_exempt_reason || null,
+         original.folio_kind || 'HOTEL', original.appointment_id || null]
+      );
+
+      // Copy all entries from original to the new revision
+      const entries: any[] = await tenantDb.query(
+        "SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at ASC", [original.id]
+      );
+      for (const e of entries) {
+        const eid = `FE-REV-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+        await tenantDb.run(
+          `INSERT INTO folio_entries
+             (id, folio_id, entry_type, entry_subtype, description, quantity, unit_price, amount,
+              gst_rate, gst_amount, source_id, reference_number, posted_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+          [eid, newId, e.entry_type, e.entry_subtype || null, e.description,
+           e.quantity, e.unit_price, e.amount, e.gst_rate, e.gst_amount,
+           e.source_id || null, e.reference_number || null, revisedBy]
+        );
+      }
+
+      // Mark the original folio as superseded
+      await tenantDb.run("UPDATE folios SET status = 'superseded' WHERE id = ?", [original.id]);
+
+      res.status(201).json({ id: newId, revision_number: newRevNum, parent_folio_id: original.id });
+    } catch (err: any) {
+      console.error("Folio revise error:", err);
+      res.status(500).json({ error: err?.message || "Failed to create revision" });
+    }
+  });
+
+  // GET /hotel/folios/:folioId/revisions
+  // Returns the full revision chain (original + all amendments) for a folio,
+  // sorted by revision_number ASC. Works from any folio in the chain.
+  app.get("/api/restaurant/:id/hotel/folios/:folioId/revisions", authenticate, hotelStaff, requireTabAccess('FOLIOS'), async (req: AuthRequest, res: Response) => {
+    const checkRes = await ensureHotelEnabled(req.params.id);
+    if (!checkRes.ok) return res.status(checkRes.status).json({ error: checkRes.error });
+    try {
+      const tenantDb = await getTenantDb(req.params.id);
+      // Walk backward via parent_folio_id to find the chain root
+      let rootId = req.params.folioId;
+      for (let i = 0; i < 20; i++) {
+        const row: any = await tenantDb.get(
+          "SELECT parent_folio_id, doc_type FROM folios WHERE id = ?", [rootId]
+        );
+        if (!row || row.doc_type === 'CREDIT_NOTE' || !row.parent_folio_id) break;
+        rootId = row.parent_folio_id;
+      }
+      // Walk forward from root, collecting the full chain (BFS)
+      const chain: any[] = [];
+      const visited = new Set<string>();
+      const queue: string[] = [rootId];
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (visited.has(id)) continue;
+        visited.add(id);
+        const row: any = await tenantDb.get(
+          `SELECT id, doc_type, status, revision_number, reason, revised_by, revised_at,
+                  parent_folio_id, grand_total, created_at, settled_at
+             FROM folios
+            WHERE id = ? AND doc_type IN ('INVOICE', 'REVISED_INVOICE')`,
+          [id]
+        );
+        if (!row) continue;
+        chain.push(row);
+        const children: any[] = await tenantDb.query(
+          "SELECT id FROM folios WHERE parent_folio_id = ? AND doc_type IN ('INVOICE', 'REVISED_INVOICE')",
+          [id]
+        );
+        for (const c of children) queue.push(c.id);
+      }
+      chain.sort((a, b) => (a.revision_number || 1) - (b.revision_number || 1));
+      res.json(chain);
+    } catch (err: any) {
+      console.error("Folio revisions error:", err);
+      res.status(500).json({ error: err?.message || "Failed to fetch revisions" });
     }
   });
 

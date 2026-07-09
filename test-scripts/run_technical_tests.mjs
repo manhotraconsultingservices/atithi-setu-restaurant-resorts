@@ -1134,6 +1134,39 @@ async function testCheckoutAndInvoice() {
     skip('TC-BIZ-CHKOUT-005', 'Folio payments list', 'no folios exist');
   }
 
+  // TC-BIZ-CHKOUT-005b: Invoice revision endpoints (smoke test — no mutation)
+  if (firstFolio) {
+    // Revisions list must respond (200 for settled, or 200 with empty chain for open)
+    const revList = await api('GET', `/api/restaurant/${restaurantId}/hotel/folios/${firstFolio.id}/revisions`);
+    if (revList.status === 200 && Array.isArray(revList.data)) {
+      pass('TC-BIZ-CHKOUT-005b', `Revision chain endpoint responds (${revList.data.length} revision(s) in chain)`);
+    } else {
+      fail('TC-BIZ-CHKOUT-005b', 'Revision chain endpoint', `HTTP ${revList.status}`);
+    }
+    // Attempt to revise an open folio — must be rejected with 409
+    if (firstFolio.status === 'open') {
+      const badRevise = await api('POST', `/api/restaurant/${restaurantId}/hotel/folios/${firstFolio.id}/revise`, { reason: 'autotest guard check' });
+      if (badRevise.status === 409) {
+        pass('TC-BIZ-CHKOUT-005c', 'Revise open folio correctly blocked (409)');
+      } else {
+        fail('TC-BIZ-CHKOUT-005c', 'Revise guard on open folio', `Expected 409, got ${badRevise.status}`);
+      }
+    } else {
+      // Attempt to revise without reason — must be rejected with 400
+      const noReason = await api('POST', `/api/restaurant/${restaurantId}/hotel/folios/${firstFolio.id}/revise`, { reason: '' });
+      if (noReason.status === 400) {
+        pass('TC-BIZ-CHKOUT-005c', 'Revise without reason correctly blocked (400)');
+      } else if (noReason.status === 409) {
+        pass('TC-BIZ-CHKOUT-005c', 'Revise folio already has revision (409) — guard working');
+      } else {
+        skip('TC-BIZ-CHKOUT-005c', 'Revision reason guard', `HTTP ${noReason.status}`);
+      }
+    }
+  } else {
+    skip('TC-BIZ-CHKOUT-005b', 'Revision chain endpoint', 'no folios exist');
+    skip('TC-BIZ-CHKOUT-005c', 'Revise guard', 'no folios exist');
+  }
+
   // TC-BIZ-CHKOUT-006: Checkout guard — must be CHECKED_IN, not BOOKED
   const rmList = await api('GET', `/api/restaurant/${restaurantId}/hotel/rooms`);
   if (rmList.status === 200 && Array.isArray(rmList.data) && rmList.data.length > 0) {

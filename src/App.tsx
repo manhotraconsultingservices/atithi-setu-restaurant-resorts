@@ -9090,6 +9090,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   const [checkoutPayment, setCheckoutPayment] = useState<'CASH'|'CARD'|'UPI'|'BANK'>('CASH');
   const [checkoutDiscount, setCheckoutDiscount] = useState(0);
   const [viewFolio, setViewFolio] = useState<any>(null);
+  const [revisionHistory, setRevisionHistory] = useState<any[] | null>(null);
+  const [revisionHistoryLoading, setRevisionHistoryLoading] = useState(false);
   const [folioSlideBooking, setFolioSlideBooking] = useState<any>(null);
   // Sprint RS — F&B charge modal state (phone-in room service, minibar, banquet)
   const [fnbChargeFolio, setFnbChargeFolio] = useState<any>(null);
@@ -32896,7 +32898,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
 
       {/* ═════════ Folio viewer modal ═════════ */}
       {(viewFolio || folioSlideBooking) && (
-        <div className="fixed inset-0 z-50" onClick={() => { setViewFolio(null); setFolioSlideBooking(null); }}>
+        <div className="fixed inset-0 z-50" onClick={() => { setViewFolio(null); setFolioSlideBooking(null); setRevisionHistory(null); }}>
           <div className="absolute inset-0 bg-black/30" />
           <div className="absolute inset-y-0 right-0 w-[520px] max-w-full bg-white shadow-2xl flex flex-col folio-slide-in" onClick={e => e.stopPropagation()}>
 
@@ -32925,7 +32927,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     </p>
                   )}
                 </div>
-                <button onClick={() => setViewFolio(null)} className="flex-none p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] mt-0.5"><X size={18} /></button>
+                <button onClick={() => { setViewFolio(null); setRevisionHistory(null); }} className="flex-none p-1.5 hover:bg-[#faf7f2] rounded-xl text-[#9c8e85] mt-0.5"><X size={18} /></button>
               </div>
               {/* Inline action strip */}
               <div className="flex gap-2 mt-4 flex-wrap">
@@ -32966,7 +32968,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                       const a = document.createElement('a');
                       a.href = url;
                       const safeName = String(viewFolio.guest_name || 'guest').replace(/\s+/g, '-');
-                      a.download = `${viewFolio.doc_type === 'CREDIT_NOTE' ? 'CreditNote' : 'Invoice'}-${viewFolio.id}-${safeName}.pdf`;
+                      a.download = `${viewFolio.doc_type === 'CREDIT_NOTE' ? 'CreditNote' : viewFolio.doc_type === 'REVISED_INVOICE' ? `RevisedInvoice-R${viewFolio.revision_number || 2}` : 'Invoice'}-${viewFolio.id}-${safeName}.pdf`;
                       document.body.appendChild(a); a.click();
                       setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
                     } catch (err: any) { toast.error(err.message); }
@@ -32979,7 +32981,53 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                     className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700"
                   ><ChefHat size={13}/> Add F&amp;B</button>
                 )}
+                {viewFolio.doc_type !== 'CREDIT_NOTE' && (viewFolio.status === 'settled' || viewFolio.status === 'voided') && (
+                  <button
+                    onClick={async () => {
+                      const r = await promptPayment({
+                        title: 'Create Invoice Revision',
+                        fields: [{ name: 'reason', label: 'Reason for revision (mandatory)', type: 'text', placeholder: 'e.g. Wrong room rate applied, additional charges missed', required: true }],
+                        confirmLabel: 'Create Revision',
+                      });
+                      if (!r) return;
+                      const justification = String(r.reason || '').trim();
+                      if (!justification) { toast.error('Revision reason is required'); return; }
+                      try {
+                        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/revise`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                          body: JSON.stringify({ reason: justification }),
+                        });
+                        const body = await res.json();
+                        if (!res.ok) throw new Error(body.error || 'Failed to create revision');
+                        toast.success(`Revision #${body.revision_number} created — folio opened for editing`);
+                        setRevisionHistory(null);
+                        setViewFolio(null);
+                        await loadFolio(body.id);
+                      } catch (err: any) { toast.error(err.message); }
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-2xl border border-amber-600/30 text-amber-700 text-xs font-bold hover:bg-amber-50"
+                  ><RefreshCw size={13}/> Revise Invoice</button>
+                )}
               </div>
+              {/* Revision / superseded badges */}
+              {(viewFolio.revision_number > 1 || viewFolio.status === 'superseded') && (
+                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                  {viewFolio.revision_number > 1 && (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-wide">
+                      Revision #{viewFolio.revision_number}
+                    </span>
+                  )}
+                  {viewFolio.status === 'superseded' && (
+                    <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 text-[10px] font-bold uppercase tracking-wide">
+                      Superseded
+                    </span>
+                  )}
+                  {viewFolio.reason && (
+                    <span className="text-[10px] text-[#9c8e85] italic">"{viewFolio.reason}"</span>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* ── Scrollable body ────────────────────────────────────── */}
@@ -33078,6 +33126,67 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
                   }}
                   className="w-full px-4 py-2.5 rounded-2xl border-2 border-[#c13b3b] text-[#c13b3b] text-sm font-bold hover:bg-[#fdf0f0] flex items-center justify-center gap-2"
                 ><RefreshCw size={14}/> Generate Credit Note</button>
+              )}
+
+              {/* Revision History — shown when this folio is part of a revision chain */}
+              {viewFolio.doc_type !== 'CREDIT_NOTE' && (viewFolio.revision_number > 1 || viewFolio.status === 'superseded') && (
+                <div className="border border-amber-200 rounded-2xl overflow-hidden">
+                  <button
+                    className="w-full flex items-center justify-between px-4 py-3 bg-amber-50 text-amber-800 text-xs font-bold hover:bg-amber-100"
+                    onClick={async () => {
+                      if (revisionHistory) { setRevisionHistory(null); return; }
+                      setRevisionHistoryLoading(true);
+                      try {
+                        const res = await fetch(`/api/restaurant/${restaurantId}/hotel/folios/${viewFolio.id}/revisions`, { headers: { Authorization: `Bearer ${token}` } });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || 'Failed');
+                        setRevisionHistory(data);
+                      } catch (err: any) { toast.error(err.message); }
+                      finally { setRevisionHistoryLoading(false); }
+                    }}
+                  >
+                    <span className="flex items-center gap-1.5"><History size={13}/> Revision History</span>
+                    <span className="text-amber-600">{revisionHistoryLoading ? '…' : revisionHistory ? '▲' : '▼'}</span>
+                  </button>
+                  {revisionHistory && (
+                    <div className="divide-y divide-amber-100">
+                      {revisionHistory.map((rev: any) => (
+                        <div key={rev.id}
+                          className={`px-4 py-3 flex items-start justify-between gap-3 ${rev.id === viewFolio.id ? 'bg-amber-50/60' : 'bg-white'}`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[10px] font-bold uppercase tracking-wide text-amber-700">
+                                {rev.revision_number === 1 ? 'Original' : `Revision #${rev.revision_number}`}
+                              </span>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase ${
+                                rev.status === 'settled' ? 'bg-emerald-100 text-emerald-700'
+                                : rev.status === 'superseded' ? 'bg-rose-100 text-rose-700'
+                                : rev.status === 'open' ? 'bg-blue-100 text-blue-700'
+                                : 'bg-gray-100 text-gray-600'
+                              }`}>{rev.status}</span>
+                              {rev.id === viewFolio.id && <span className="text-[10px] text-[#9c8e85] italic">current</span>}
+                            </div>
+                            {rev.reason && <p className="text-[11px] text-[#6b5d52] mt-0.5 italic">"{rev.reason}"</p>}
+                            <p className="text-[10px] text-[#9c8e85] mt-0.5">
+                              {rev.revised_at ? new Date(rev.revised_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : new Date(rev.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })}
+                              {rev.revised_by ? ` · by ${rev.revised_by}` : ''}
+                            </p>
+                          </div>
+                          <div className="flex-none text-right">
+                            <div className="font-mono text-sm font-bold text-[#1a1208]">₹{Number(rev.grand_total || 0).toLocaleString('en-IN')}</div>
+                            {rev.id !== viewFolio.id && (
+                              <button
+                                onClick={async () => { setRevisionHistory(null); await loadFolio(rev.id); }}
+                                className="text-[10px] text-[#cc5a16] font-bold hover:underline mt-0.5"
+                              >View</button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
             </>) : (<>
