@@ -33423,9 +33423,30 @@ ${data.tenant.name}`;
       const existing: any[] = await tenantDb.query("SELECT * FROM meal_plans ORDER BY display_order, name");
       if (Array.isArray(existing) && existing.length > 0) return existing;
     } catch (err: any) {
-      // Table might not exist on a hotel-not-enabled tenant — bail quietly.
-      console.warn(`[meal_plans heal] SELECT failed for tenant: ${err?.message || err}`);
-      return [];
+      // Table missing — create it inline so the seed below can proceed.
+      // This happens when createHotelTables()'s exec() block failed partway
+      // through for this tenant (any earlier statement error aborts the batch).
+      console.warn(`[meal_plans heal] SELECT failed (${err?.message || err}), creating table inline…`);
+      try {
+        await tenantDb.exec(`
+          CREATE TABLE IF NOT EXISTS meal_plans (
+            id                  TEXT PRIMARY KEY,
+            code                TEXT NOT NULL,
+            name                TEXT NOT NULL,
+            description         TEXT,
+            includes_breakfast  INT DEFAULT 0,
+            includes_lunch      INT DEFAULT 0,
+            includes_dinner     INT DEFAULT 0,
+            display_order       INT DEFAULT 0,
+            is_active           INT DEFAULT 1,
+            created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
+        console.log(`[meal_plans heal] table created`);
+      } catch (ddlErr: any) {
+        console.error(`[meal_plans heal] CREATE TABLE failed: ${ddlErr?.message || ddlErr}`);
+        return [];
+      }
     }
     // Re-seed defaults.
     console.log(`[meal_plans heal] table empty — seeding EP/CP/MAP/API defaults`);
@@ -33620,6 +33641,10 @@ ${data.tenant.name}`;
       if (!check.ok) return res.status(check.status).json({ error: check.error });
       const list: any[] = Array.isArray(req.body?.meal_plans) ? req.body.meal_plans : [];
       const tenantDb = await getTenantDb(req.params.id);
+      // Guarantee the table exists before attempting any INSERT.
+      // ensureMealPlansSeeded creates it inline when createHotelTables()'s
+      // exec() block failed partway through for this tenant.
+      await ensureMealPlansSeeded(tenantDb);
       // BCG Tariff Phase 4.5 — surface per-row validation failures and
       // return the actual saved list. Previously this endpoint returned
       // {ok: true, count: input.length} which was misleading when rows
