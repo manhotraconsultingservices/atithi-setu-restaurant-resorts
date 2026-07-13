@@ -539,19 +539,6 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     -- accumulates ad-hoc group charges (banquet, AV, meeting-room hire, etc.)
     -- separate from individual room folios.
     ALTER TABLE room_booking_groups ADD COLUMN IF NOT EXISTS master_folio_id TEXT;
-    ALTER TABLE folios ADD COLUMN IF NOT EXISTS group_id TEXT;
-    -- COST-CENTRE + TRANSFER (Jun 2026): cost_centre tags master-account charges
-    -- for per-department invoice subtotals; transferred_from_folio_id tracks origin.
-    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS cost_centre TEXT;
-    -- Sprint 1 BCG (Jun 2026) — every folio_entries row maps to an income account
-    -- so the P&L can split Rooms vs F&B vs Services vs Ancillary. Values:
-    --   ROOM_REVENUE         room rent + extra person charges
-    --   SERVICE_CHARGE_REVENUE  hotel mandatory service charge (% of room rent)
-    --   F_AND_B_REVENUE      restaurant / room-service / bar / minibar
-    --   ANCILLARY_REVENUE    spa, laundry, telecom, retail, service requests
-    --   ADJUSTMENT           discounts, waivers, write-offs (negative entries)
-    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS account_head TEXT;
-    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS transferred_from_folio_id TEXT;
     -- Sprint 2 BCG (Jun 2026) — GST output register.
     -- One row per settled folio_entry carrying GST; used to build GSTR-1.
     CREATE TABLE IF NOT EXISTS gst_output_register (
@@ -1332,6 +1319,8 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS revision_number INTEGER DEFAULT 1;
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS revised_by TEXT;
     ALTER TABLE folios ADD COLUMN IF NOT EXISTS revised_at TIMESTAMP;
+    -- MASTER-BILLING (Jun 2026): group_id links a folio to its group-level master folio.
+    ALTER TABLE folios ADD COLUMN IF NOT EXISTS group_id TEXT;
 
     CREATE TABLE IF NOT EXISTS folio_entries (
       id         TEXT PRIMARY KEY,
@@ -1363,6 +1352,13 @@ async function createHotelTables(tenantDb: DbInterface): Promise<void> {
     ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS reversal_of_entry_id TEXT;
     ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS posted_by TEXT;
     CREATE INDEX IF NOT EXISTS idx_folio_entries_ref ON folio_entries (reference_number);
+    -- COST-CENTRE + TRANSFER (Jun 2026): cost_centre tags master-account charges
+    -- for per-department invoice subtotals; transferred_from_folio_id tracks origin.
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS cost_centre TEXT;
+    -- Sprint 1 BCG (Jun 2026) — every folio_entries row maps to an income account
+    -- so the P&L can split Rooms vs F&B vs Services vs Ancillary.
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS account_head TEXT;
+    ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS transferred_from_folio_id TEXT;
 
     -- folio_payments ledger (10 Jun 2026 — critical checkout-flow fix).
     -- Previously the folio model only had a single payment_method
@@ -24612,6 +24608,7 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const tenantDb = await getTenantDb(req.params.id);
+      await ensureGuestDocumentsCreated(tenantDb);
       const status = (req.query.status as string) || null;
       // REQ 5: search + date-range filters for booking-history lookup
       // 10 Jun 2026 — full rewrite. The previous version had a 22-
@@ -33473,6 +33470,40 @@ ${data.tenant.name}`;
       return await tenantDb.query("SELECT * FROM meal_plans ORDER BY display_order, name");
     } catch {
       return [];
+    }
+  }
+
+  // Self-heal for guest_documents table missing due to exec() block aborting early
+  // (ALTER TABLE folios at line ~542 failed before folios was created, stopping the
+  // batch and leaving guest_documents and all tables after it uncreated). Called at
+  // the top of GET /hotel/bookings so the bookings list never returns a 500.
+  async function ensureGuestDocumentsCreated(tenantDb: DbInterface): Promise<void> {
+    try {
+      await tenantDb.query("SELECT id FROM guest_documents LIMIT 0");
+    } catch (err: any) {
+      console.warn(`[guest_documents heal] table missing (${err?.message || err}), creating inline…`);
+      try {
+        await tenantDb.exec(`
+          CREATE TABLE IF NOT EXISTS guest_documents (
+            id           TEXT PRIMARY KEY,
+            booking_id   TEXT NOT NULL,
+            file_url     TEXT NOT NULL,
+            file_name    TEXT,
+            mime_type    TEXT,
+            size_bytes   INT,
+            label        TEXT,
+            doc_type     TEXT,
+            uploaded_by  TEXT,
+            uploaded_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            locked_at    TIMESTAMP
+          );
+          CREATE INDEX IF NOT EXISTS idx_guest_documents_booking
+            ON guest_documents (booking_id, uploaded_at DESC)
+        `);
+        console.log(`[guest_documents heal] table created`);
+      } catch (ddlErr: any) {
+        console.error(`[guest_documents heal] CREATE TABLE failed: ${ddlErr?.message || ddlErr}`);
+      }
     }
   }
 
