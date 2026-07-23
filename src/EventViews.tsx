@@ -10,7 +10,7 @@ import { ObjectDetail } from './components/ObjectDetail';
 import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
-  RefreshCw, Send, IndianRupee, ClipboardList, Hotel,
+  RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
 } from 'lucide-react';
 
 // ── shared fetch helper ─────────────────────────────────────────────────────
@@ -207,6 +207,7 @@ function EventRentals({ restaurantId, token }: Props) {
             <div><label className={LABEL}>{t('events.rentals.rentDaily')}</label><input type="number" className={INPUT} value={form.rent_daily} onChange={e => setForm({ ...form, rent_daily: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.rentals.rentWeekly')}</label><input type="number" className={INPUT} value={form.rent_weekly} onChange={e => setForm({ ...form, rent_weekly: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.rentals.deposit')}</label><input type="number" className={INPUT} value={form.deposit} onChange={e => setForm({ ...form, deposit: e.target.value })} /></div>
+            <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('common.description')}</label><input className={INPUT} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Pulled into booking, quote & invoice" /></div>
           </div>
           <div className="flex gap-2 mt-3">
             <button className={BTN_PRIMARY} onClick={save}>{t('common.save')}</button>
@@ -282,6 +283,7 @@ function EventServices({ restaurantId, token }: Props) {
                 {['PER_EVENT', 'PER_HOUR', 'PER_DAY', 'PER_PERSON', 'PER_UNIT'].map(c => <option key={c} value={c}>{c}</option>)}
               </select></div>
             <div><label className={LABEL}>{t('events.services.rate')}</label><input type="number" className={INPUT} value={form.rate} onChange={e => setForm({ ...form, rate: e.target.value })} /></div>
+            <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('common.description')}</label><input className={INPUT} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Pulled into booking, quote & invoice" /></div>
           </div>
           <div className="flex gap-2 mt-3">
             <button className={BTN_PRIMARY} onClick={save}>{t('common.save')}</button>
@@ -302,6 +304,100 @@ function EventServices({ restaurantId, token }: Props) {
           { key: '_a', label: t('common.actions'), render: (r: any) => (
             <div className="flex gap-1">
               <button className={BTN_GHOST} onClick={() => { setEdit(r); setForm({ ...r }); setShowForm(true); }}>{t('common.edit')}</button>
+              <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
+            </div>
+          ) },
+        ]}
+      />
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// CATERING MENUS (Buffet / Plated packages with configurable menu sections)
+// ════════════════════════════════════════════════════════════════════════
+function EventCatering({ restaurantId, token }: Props) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const [rows, setRows] = useState<any[]>([]);
+  const [showForm, setShowForm] = useState(false);
+  const [edit, setEdit] = useState<any>(null);
+  const blank = { name: '', package_type: 'BUFFET', price_per_plate: '', gst_percent: '5', description: '', sections: [{ name: '', optionsText: '' }] };
+  const [form, setForm] = useState<any>(blank);
+
+  const load = async () => { try { setRows(await api('/events/catering-packages')); } catch { /* */ } };
+  useEffect(() => { load(); }, []);
+
+  const openEdit = (r: any) => {
+    let sections = [{ name: '', optionsText: '' }];
+    try { const m = r.menu_json ? JSON.parse(r.menu_json) : []; if (Array.isArray(m) && m.length) sections = m.map((s: any) => ({ name: s.section || '', optionsText: (s.options || []).join(', ') })); } catch { /* */ }
+    setEdit(r); setForm({ ...r, sections }); setShowForm(true);
+  };
+  const save = async () => {
+    if (!form.name) return;
+    const menu = (form.sections || []).filter((s: any) => s.name).map((s: any) => ({ section: s.name, options: String(s.optionsText || '').split(',').map((x: string) => x.trim()).filter(Boolean) }));
+    const body = { name: form.name, package_type: form.package_type, price_per_plate: Number(form.price_per_plate || 0), gst_percent: Number(form.gst_percent || 5), description: form.description, menu_json: menu };
+    try {
+      if (edit) await api(`/events/catering-packages/${edit.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+      else await api('/events/catering-packages', { method: 'POST', body: JSON.stringify(body) });
+      setShowForm(false); setEdit(null); setForm(blank); await load();
+    } catch (e: any) { alert(e.message); }
+  };
+  const remove = async (id: string) => { if (!window.confirm('Deactivate this package?')) return; try { await api(`/events/catering-packages/${id}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+
+  const setSection = (i: number, field: string, value: string) => {
+    const s = [...(form.sections || [])]; s[i] = { ...s[i], [field]: value }; setForm({ ...form, sections: s });
+  };
+
+  return (
+    <div>
+      <SectionHeader icon={<Sofa size={18} />} title={t('events.catering.title')} sub={t('events.catering.sub')}
+        action={<button className={BTN_PRIMARY} onClick={() => { setEdit(null); setForm(blank); setShowForm(true); }}><Plus size={14} />{t('events.catering.add')}</button>} />
+
+      {showForm && (
+        <div className={`${CARD} mb-4`}>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="col-span-2 md:col-span-1"><label className={LABEL}>{t('common.name')}</label><input className={INPUT} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('events.catering.type')}</label>
+              <select className={INPUT} value={form.package_type} onChange={e => setForm({ ...form, package_type: e.target.value })}>
+                <option value="BUFFET">{t('events.catering.buffet')}</option><option value="PLATED">{t('events.catering.plated')}</option>
+              </select></div>
+            <div><label className={LABEL}>{t('events.catering.pricePerPlate')}</label><input type="number" className={INPUT} value={form.price_per_plate} onChange={e => setForm({ ...form, price_per_plate: e.target.value })} /></div>
+            <div><label className={LABEL}>GST %</label><input type="number" className={INPUT} value={form.gst_percent} onChange={e => setForm({ ...form, gst_percent: e.target.value })} /></div>
+            <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('common.description')}</label><input className={INPUT} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Pulled into booking, quote & invoice" /></div>
+          </div>
+
+          <div className="mt-3">
+            <label className={LABEL}>{t('events.catering.sections')}</label>
+            {(form.sections || []).map((s: any, i: number) => (
+              <div key={i} className="flex items-center gap-2 mb-1.5">
+                <input className={`${INPUT} md:w-56`} placeholder={t('events.catering.sectionName')} value={s.name} onChange={e => setSection(i, 'name', e.target.value)} />
+                <input className={INPUT} placeholder={t('events.catering.options')} value={s.optionsText} onChange={e => setSection(i, 'optionsText', e.target.value)} />
+                <button className={BTN_DANGER} onClick={() => setForm({ ...form, sections: form.sections.filter((_: any, j: number) => j !== i) })}><Trash2 size={13} /></button>
+              </div>
+            ))}
+            <button className={BTN_GHOST} onClick={() => setForm({ ...form, sections: [...(form.sections || []), { name: '', optionsText: '' }] })}>{t('events.catering.addSection')}</button>
+          </div>
+
+          <div className="flex gap-2 mt-3">
+            <button className={BTN_PRIMARY} onClick={save}>{t('common.save')}</button>
+            <button className={BTN_GHOST} onClick={() => { setShowForm(false); setEdit(null); }}>{t('common.cancel')}</button>
+          </div>
+        </div>
+      )}
+
+      <DataTable
+        data={rows}
+        rowKey={(r: any) => r.id}
+        emptyMessage={t('events.catering.empty')}
+        columns={[
+          { key: 'name', label: t('common.name') },
+          { key: 'package_type', label: t('events.catering.type'), render: (r: any) => r.package_type === 'PLATED' ? t('events.catering.plated') : t('events.catering.buffet') },
+          { key: 'price_per_plate', label: t('events.catering.pricePerPlate'), render: (r: any) => money(r.price_per_plate) },
+          { key: 'menu_json', label: t('events.catering.sections'), render: (r: any) => { try { const m = JSON.parse(r.menu_json || '[]'); return (m || []).map((s: any) => s.section).join(', ') || '—'; } catch { return '—'; } } },
+          { key: '_a', label: t('common.actions'), render: (r: any) => (
+            <div className="flex gap-1">
+              <button className={BTN_GHOST} onClick={() => openEdit(r)}>{t('common.edit')}</button>
               <button className={BTN_DANGER} onClick={() => remove(r.id)}><Trash2 size={13} /></button>
             </div>
           ) },
@@ -426,10 +522,35 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const [busy, setBusy] = useState(false);
   const [hotelRooms, setHotelRooms] = useState<any[]>([]);
   const [showHotel, setShowHotel] = useState(false);
+  const [caterPkgs, setCaterPkgs] = useState<any[]>([]);
   const [nonce, setNonce] = useState(0);
 
   const load = async () => { try { setBk(await api(`/events/bookings/${bookingId}`)); setNonce(n => n + 1); } catch (e: any) { alert(e.message); } };
-  useEffect(() => { load(); api('/events/rental-items').then(setRentals).catch(() => {}); api('/events/services').then(setServices).catch(() => {}); }, [bookingId]);
+  useEffect(() => { load(); api('/events/rental-items').then(setRentals).catch(() => {}); api('/events/services').then(setServices).catch(() => {}); api('/events/catering-packages').then(setCaterPkgs).catch(() => {}); }, [bookingId]);
+
+  // Catering line helpers (parallel to rentals/services). pax defaults to the
+  // booking's guest_count for a sensible starting quantity.
+  const cateringArray = () => (bk.catering || []).map((x: any) => ({ package_id: x.package_id, pax: x.pax, price_per_plate: x.price_per_plate }));
+  const addCatering = async (pkgId: string) => {
+    const p = caterPkgs.find(x => x.id === pkgId); if (!p) return;
+    const arr = cateringArray();
+    arr.push({ package_id: pkgId, pax: Number(bk.guest_count || 0) || 1, price_per_plate: p.price_per_plate });
+    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ catering: arr }) });
+    await load();
+  };
+  const commitCatering = async (idx: number, field: string, value: string) => {
+    const arr = cateringArray(); if (!arr[idx]) return;
+    const num = Math.max(0, Number(value) || 0);
+    if (Number(arr[idx][field]) === num) return;
+    arr[idx] = { ...arr[idx], [field]: num };
+    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ catering: arr }) });
+    await load();
+  };
+  const removeCatering = async (idx: number) => {
+    const arr = cateringArray(); arr.splice(idx, 1);
+    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ catering: arr }) });
+    await load();
+  };
 
   const addRental = async (itemId: string) => {
     const it = rentals.find(r => r.id === itemId); if (!it) return;
@@ -575,6 +696,28 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               ) : <span className="text-[#9d8b7e]">{sv.quantity} × {money(sv.unit_rate)}</span>}
               <span className="w-16 text-right font-semibold">{money(sv.line_total)}</span>
               {editable && <button onClick={() => removeLine('services', i)}><X size={12} className="text-rose-500" /></button>}
+            </div>
+          ))}
+        </div>
+
+        {/* Catering */}
+        <div className={`${CARD} md:col-span-2`}>
+          <div className="flex items-center justify-between mb-2"><h3 className="font-bold text-sm flex items-center gap-1.5"><Utensils size={15} />{t('events.bookings.catering')}</h3>
+            {editable && <select className={`${INPUT} w-auto text-xs`} value="" onChange={e => e.target.value && addCatering(e.target.value)}>
+              <option value="">+ {t('common.add')}</option>{caterPkgs.map(p => <option key={p.id} value={p.id}>{p.name} ({p.package_type})</option>)}
+            </select>}</div>
+          {(bk.catering || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (bk.catering || []).map((c: any, i: number) => (
+            <div key={c.id} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
+              <span className="flex-1 min-w-0 truncate">{c.name_snapshot} <span className="text-[#9d8b7e]">({c.package_type_snapshot})</span></span>
+              {editable ? (
+                <>
+                  <input type="number" min={0} defaultValue={c.pax} title={t('events.catering.pax')} onBlur={e => commitCatering(i, 'pax', e.target.value)} className="w-14 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                  <span className="text-[#9d8b7e]">×₹</span>
+                  <input type="number" min={0} defaultValue={c.price_per_plate} title={t('events.catering.pricePerPlate')} onBlur={e => commitCatering(i, 'price_per_plate', e.target.value)} className="w-16 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                </>
+              ) : <span className="text-[#9d8b7e]">{c.pax} × {money(c.price_per_plate)}</span>}
+              <span className="w-16 text-right font-semibold">{money(c.line_total)}</span>
+              {editable && <button onClick={() => removeCatering(i)}><X size={12} className="text-rose-500" /></button>}
             </div>
           ))}
         </div>
@@ -754,11 +897,22 @@ function EventObjectRouter({ restaurantId, token, obj, venues, onOpenObject, onB
 // ════════════════════════════════════════════════════════════════════════
 // CALENDAR (venue × date grid)
 // ════════════════════════════════════════════════════════════════════════
+// Status palette mirroring the Hotel availability calendar (Indian-PMS convention).
+const EV_CAL = {
+  CONFIRMED: { bg: '#fde2e7', fg: '#9f1239', border: '#f9a8b8' },   // assigned / held (coral)
+  TENTATIVE: { bg: '#fef3c7', fg: '#92400e', border: '#fbbf24' },   // inquiry / quoted (amber)
+  BLOCKED:   { bg: '#e5e7eb', fg: '#374151', border: '#9ca3af' },   // maintenance / hold (grey)
+  FREE:      { bg: '#f7faf7', fg: '#1f513f', border: '#dcecdf' },   // available (green tint)
+};
+const WD = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const todayIso = () => new Date().toISOString().slice(0, 10);
+
 function EventCalendar({ restaurantId, token }: Props) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
   const [data, setData] = useState<any>(null);
-  const [start, setStart] = useState(new Date().toISOString().slice(0, 10));
+  const [start, setStart] = useState(todayIso());
+  const shift = (n: number) => setStart(new Date(new Date(start + 'T00:00:00Z').getTime() + n * 86400000).toISOString().slice(0, 10));
 
   const load = async () => {
     try {
@@ -769,48 +923,94 @@ function EventCalendar({ restaurantId, token }: Props) {
   useEffect(() => { load(); }, [start]);
 
   const cellFor = (venueId: string, date: string) => {
-    const blocked = (data?.blocks || []).some((b: any) => b.venue_id === venueId && b.from_date <= date && b.to_date >= date);
-    if (blocked) return { label: t('events.calendar.blocked'), cls: 'bg-gray-200 text-gray-600' };
+    const blocked = (data?.blocks || []).some((b: any) => b.venue_id === venueId && String(b.from_date).slice(0, 10) <= date && String(b.to_date).slice(0, 10) >= date);
+    if (blocked) return { label: '⛔', title: t('events.calendar.blocked'), sty: EV_CAL.BLOCKED };
     const booked = (data?.bookings || []).find((b: any) => b.venue_id === venueId && String(b.event_date).slice(0, 10) === date && ['CONFIRMED', 'IN_PROGRESS'].includes(b.status));
-    if (booked) return { label: booked.customer_name?.slice(0, 8) || t('events.calendar.booked'), cls: 'bg-indigo-100 text-indigo-800' };
+    if (booked) return { label: booked.customer_name?.split(' ')[0]?.slice(0, 9) || t('events.calendar.booked'), title: `${booked.customer_name} · ${booked.status}`, sty: EV_CAL.CONFIRMED };
     const tentative = (data?.bookings || []).find((b: any) => b.venue_id === venueId && String(b.event_date).slice(0, 10) === date && ['INQUIRY', 'QUOTED'].includes(b.status));
-    if (tentative) return { label: '◔', cls: 'bg-amber-50 text-amber-700' };
-    return { label: '', cls: 'bg-white' };
+    if (tentative) return { label: '◔', title: `${tentative.customer_name} · ${tentative.status}`, sty: EV_CAL.TENTATIVE };
+    return { label: '', title: t('events.calendar.free'), sty: EV_CAL.FREE };
   };
+
+  // KPI strip over the visible window.
+  const bookings = data?.bookings || [];
+  const kConfirmed = bookings.filter((b: any) => ['CONFIRMED', 'IN_PROGRESS'].includes(b.status)).length;
+  const kTentative = bookings.filter((b: any) => ['INQUIRY', 'QUOTED'].includes(b.status)).length;
+  const kBlocked = (data?.blocks || []).length;
+  const kpi = (label: string, value: number, sty: any) => (
+    <div className="rounded-xl border px-3 py-2 min-w-[92px]" style={{ background: sty.bg, borderColor: sty.border }}>
+      <div className="text-lg font-bold" style={{ color: sty.fg }}>{value}</div>
+      <div className="text-[10px]" style={{ color: sty.fg }}>{label}</div>
+    </div>
+  );
+  const dot = (sty: any, label: string) => (
+    <span className="flex items-center gap-1"><span className="w-3 h-3 rounded inline-block border" style={{ background: sty.bg, borderColor: sty.border }} />{label}</span>
+  );
 
   return (
     <div>
       <SectionHeader icon={<CalendarRange size={18} />} title={t('events.calendar.title')} sub={t('events.calendar.sub')}
-        action={<div className="flex items-center gap-2">
-          <button className={BTN_GHOST} onClick={() => setStart(new Date(new Date(start + 'T00:00:00Z').getTime() - 14 * 86400000).toISOString().slice(0, 10))}>←</button>
+        action={<div className="flex items-center gap-1.5">
+          <button className={BTN_GHOST} onClick={() => shift(-14)}>◀</button>
+          <button className={BTN_GHOST} onClick={() => setStart(todayIso())}>{t('common.date') === 'Date' ? 'Today' : t('common.date')}</button>
           <input type="date" className={INPUT} value={start} onChange={e => setStart(e.target.value)} />
-          <button className={BTN_GHOST} onClick={() => setStart(new Date(new Date(start + 'T00:00:00Z').getTime() + 14 * 86400000).toISOString().slice(0, 10))}>→</button>
+          <button className={BTN_GHOST} onClick={() => shift(14)}>▶</button>
         </div>} />
 
-      <div className={`${CARD} overflow-x-auto`}>
-        {!data ? <p className="text-sm text-[#6b5d52]">{t('common.loading')}</p> : (
-          <table className="text-xs border-collapse">
+      {/* KPI strip */}
+      <div className="flex flex-wrap gap-2 mb-3">
+        {kpi(t('events.calendar.booked'), kConfirmed, EV_CAL.CONFIRMED)}
+        {kpi(t('events.reports.inquiries'), kTentative, EV_CAL.TENTATIVE)}
+        {kpi(t('events.calendar.blocked'), kBlocked, EV_CAL.BLOCKED)}
+      </div>
+
+      <div className={`${CARD} overflow-x-auto p-0`}>
+        {!data ? <p className="text-sm text-[#6b5d52] p-4">{t('common.loading')}</p> : (
+          <table className="text-xs border-collapse w-full">
             <thead>
               <tr>
-                <th className="sticky left-0 bg-white p-2 text-left border-b border-[#e8dccf]">{t('events.bookings.venue')}</th>
-                {(data.dates || []).map((d: string) => <th key={d} className="p-1 border-b border-[#e8dccf] text-[10px] font-semibold text-[#6b5d52] min-w-[42px]">{d.slice(5)}</th>)}
+                <th className="sticky left-0 z-10 bg-[#faf7f2] p-2.5 text-left border-b-2 border-[#e8dccf] min-w-[150px]">{t('events.bookings.venue')}</th>
+                {(data.dates || []).map((d: string) => {
+                  const dow = new Date(d + 'T00:00:00Z').getUTCDay();
+                  const isToday = d === todayIso();
+                  const weekend = dow === 0 || dow === 6;
+                  return (
+                    <th key={d} className={`p-1 border-b-2 border-[#e8dccf] min-w-[44px] ${weekend ? 'bg-[#f5efe6]' : 'bg-[#faf7f2]'}`}>
+                      <div className={`text-[9px] font-semibold ${weekend ? 'text-[#b5651d]' : 'text-[#9d8b7e]'}`}>{WD[dow]}</div>
+                      <div className={`text-[11px] font-bold ${isToday ? 'text-white bg-[#cc5a16] rounded-full w-5 h-5 leading-5 mx-auto' : 'text-[#3d3128]'}`}>{d.slice(8, 10)}</div>
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
-              {(data.venues || []).map((v: any) => (
-                <tr key={v.id}>
-                  <td className="sticky left-0 bg-white p-2 font-semibold whitespace-nowrap border-b border-[#f0e9df]">{v.name}</td>
-                  {(data.dates || []).map((d: string) => { const c = cellFor(v.id, d); return <td key={d} className={`p-1 border border-[#f0e9df] text-center text-[9px] ${c.cls}`}>{c.label}</td>; })}
+              {(data.venues || []).length === 0 ? (
+                <tr><td colSpan={(data.dates || []).length + 1} className="p-4 text-center text-[#9d8b7e]">{t('events.venues.empty')}</td></tr>
+              ) : (data.venues || []).map((v: any) => (
+                <tr key={v.id} className="hover:bg-[#fbf8f3]">
+                  <td className="sticky left-0 z-10 bg-white p-2.5 whitespace-nowrap border-b border-[#f0e9df]">
+                    <div className="font-bold text-[#14110c]">{v.name}</div>
+                    <div className="text-[10px] text-[#9d8b7e]">{v.category} · {v.ac_type === 'AC' ? t('events.venues.ac') : t('events.venues.nonAc')}</div>
+                  </td>
+                  {(data.dates || []).map((d: string) => {
+                    const c = cellFor(v.id, d);
+                    return (
+                      <td key={d} title={c.title} className="border border-[#f0e9df] text-center align-middle p-0">
+                        <div className="text-[9px] font-semibold px-0.5 py-1.5 truncate" style={{ background: c.sty.bg, color: c.sty.fg }}>{c.label || '·'}</div>
+                      </td>
+                    );
+                  })}
                 </tr>
               ))}
             </tbody>
           </table>
         )}
       </div>
-      <div className="flex gap-3 mt-3 text-[10px] text-[#6b5d52]">
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-indigo-100 inline-block" />{t('events.calendar.booked')}</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-gray-200 inline-block" />{t('events.calendar.blocked')}</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-white border border-[#e8dccf] inline-block" />{t('events.calendar.free')}</span>
+      <div className="flex flex-wrap gap-3 mt-3 text-[10px] text-[#6b5d52]">
+        {dot(EV_CAL.CONFIRMED, t('events.calendar.booked'))}
+        {dot(EV_CAL.TENTATIVE, t('events.reports.inquiries'))}
+        {dot(EV_CAL.BLOCKED, t('events.calendar.blocked'))}
+        {dot(EV_CAL.FREE, t('events.calendar.free'))}
       </div>
     </div>
   );
@@ -981,6 +1181,7 @@ function EventsModuleInner({ restaurantId, token, tab }: Props & { tab: string }
     case 'EVENTS_VENUES': return <EventVenues restaurantId={restaurantId} token={token} />;
     case 'EVENTS_RENTALS': return <EventRentals restaurantId={restaurantId} token={token} />;
     case 'EVENTS_SERVICES': return <EventServices restaurantId={restaurantId} token={token} />;
+    case 'EVENTS_CATERING': return <EventCatering restaurantId={restaurantId} token={token} />;
     case 'EVENTS_QUOTATIONS': return <EventQuotations restaurantId={restaurantId} token={token} />;
     case 'EVENTS_REPORTS': return <EventReports restaurantId={restaurantId} token={token} />;
     case 'EVENTS_SETTINGS': return <EventSettings restaurantId={restaurantId} token={token} />;

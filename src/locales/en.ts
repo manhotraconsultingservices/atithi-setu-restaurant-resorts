@@ -25,6 +25,28 @@ export const en: Record<string, string> = {
   'common.notes': 'Notes',
   'common.total': 'Total',
   'common.language': 'Language',
+  'common.description': 'Description',
+  'common.item': 'Item',
+  'common.qty': 'Qty',
+  'common.unitPrice': 'Unit price',
+  'common.amount': 'Amount',
+
+  // Catering
+  'events.tab.catering': 'Catering',
+  'events.catering.title': 'Catering Menus',
+  'events.catering.sub': 'Buffet & plated packages with configurable menu sections',
+  'events.catering.add': 'Add Package',
+  'events.catering.type': 'Type',
+  'events.catering.buffet': 'Buffet',
+  'events.catering.plated': 'Plated',
+  'events.catering.pricePerPlate': 'Price / plate',
+  'events.catering.sections': 'Menu sections',
+  'events.catering.sectionName': 'Section (e.g. Salad, Main Course, Sweet)',
+  'events.catering.options': 'Options (comma-separated)',
+  'events.catering.addSection': '+ Add section',
+  'events.catering.empty': 'No catering packages yet.',
+  'events.catering.pax': 'Plates (pax)',
+  'events.bookings.catering': 'Catering',
 
   // ── Events module — nav / titles ────────────────────────────────────────────
   'events.module': 'Events & Convention',

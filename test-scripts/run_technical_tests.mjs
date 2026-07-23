@@ -654,6 +654,9 @@ async function testEvents() {
   (audit.status === 200 && Array.isArray(audit.data) ? pass : fail)('TC-EVT-008', 'Object-detail audit endpoint wired', `HTTP ${audit.status}`);
   const wu = await api('GET', `/api/restaurant/${restaurantId}/events/bookings/__none__/where-used`);
   (wu.status === 200 ? pass : fail)('TC-EVT-009', 'Object-detail where-used endpoint wired', `HTTP ${wu.status}`);
+
+  const cat = await api('GET', `/api/restaurant/${restaurantId}/events/catering-packages`);
+  (cat.status === 200 && Array.isArray(cat.data) ? pass : fail)('TC-EVT-010', 'Catering packages endpoint responds', `HTTP ${cat.status}`);
 }
 
 // ── Channel Manager tests ──────────────────────────────────────────────────

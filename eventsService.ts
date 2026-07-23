@@ -403,6 +403,50 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
       updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // ── Catering / F&B packages (Buffet / Plated) ───────────────────────────────
+  // A package has a per-plate price and a configurable menu of sections
+  // (Salad / Main Course / Sweet …), each with option items — stored as JSON so
+  // owners can add any number of sections. Attached to a booking by pax count.
+  await tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS event_catering_packages (
+      id              TEXT PRIMARY KEY,
+      name            TEXT NOT NULL,
+      package_type    TEXT DEFAULT 'BUFFET',   -- BUFFET | PLATED
+      price_per_plate DOUBLE PRECISION DEFAULT 0,
+      description     TEXT,
+      menu_json       TEXT,                    -- [{"section":"Salad","options":["Green Salad","Russian Salad"]}, ...]
+      gst_percent     DOUBLE PRECISION DEFAULT 5,
+      is_active       INT DEFAULT 1,
+      display_order   INT DEFAULT 0,
+      created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_catering_active ON event_catering_packages(is_active, display_order);
+
+    CREATE TABLE IF NOT EXISTS event_booking_catering (
+      id                    TEXT PRIMARY KEY,
+      booking_id            TEXT NOT NULL,
+      package_id            TEXT,
+      name_snapshot         TEXT,
+      package_type_snapshot TEXT,
+      description_snapshot  TEXT,
+      menu_snapshot         TEXT,
+      pax                   INT DEFAULT 0,
+      price_per_plate       DOUBLE PRECISION DEFAULT 0,
+      gst_percent           DOUBLE PRECISION DEFAULT 5,
+      line_total            DOUBLE PRECISION DEFAULT 0,
+      created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_bkg_catering ON event_booking_catering(booking_id);
+  `);
+
+  // ── Idempotent column additions for existing tenants ────────────────────────
+  // Customer-facing description on masters, snapshotted onto booking lines so it
+  // flows into the quotation + invoice. IF NOT EXISTS → safe to re-run at boot.
+  await tenantDb.exec(`ALTER TABLE event_rental_items ADD COLUMN IF NOT EXISTS description TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_services ADD COLUMN IF NOT EXISTS description TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_booking_items ADD COLUMN IF NOT EXISTS description_snapshot TEXT`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_booking_services ADD COLUMN IF NOT EXISTS description_snapshot TEXT`).catch(() => {});
 }
 
 // ── Seed a couple of sensible defaults so a fresh tenant sees a populated master.
