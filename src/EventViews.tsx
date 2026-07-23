@@ -26,6 +26,21 @@ function makeApi(restaurantId: string, token: string) {
   };
 }
 
+// Open an authenticated PDF endpoint. A bare window.open() navigation carries
+// no Authorization header (and sessions using the localStorage token have no
+// cookie either) → the endpoint 401s. Fetch with the Bearer token, then open
+// the resulting blob. Mirrors how the hotel/folio invoices are opened.
+async function openAuthedPdf(url: string, token: string) {
+  try {
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error || `HTTP ${r.status}`); }
+    const blob = await r.blob();
+    const objUrl = URL.createObjectURL(blob);
+    window.open(objUrl, '_blank', 'noopener,noreferrer');
+    setTimeout(() => URL.revokeObjectURL(objUrl), 60_000);
+  } catch (e: any) { alert(e?.message || 'Failed to open PDF'); }
+}
+
 const CARD = 'bg-white rounded-2xl border border-[#e8dccf] p-5';
 const BTN = 'px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors';
 const BTN_PRIMARY = `${BTN} bg-[#cc5a16] text-white hover:bg-[#b34f12]`;
@@ -614,7 +629,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   };
   const genQuote = async () => {
     setBusy(true);
-    try { const q = await api(`/events/bookings/${bookingId}/quotations`, { method: 'POST', body: JSON.stringify({}) }); window.open(`/api/restaurant/${restaurantId}/events/quotations/${q.id}/pdf`, '_blank'); await load(); }
+    try { const q = await api(`/events/bookings/${bookingId}/quotations`, { method: 'POST', body: JSON.stringify({}) }); await openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${q.id}/pdf`, token); await load(); }
     catch (e: any) { alert(e.message); } finally { setBusy(false); }
   };
 
@@ -774,7 +789,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               <span>{q.quote_number} (v{q.version}) — {money(q.grand_total)} <Pill status={q.status} /></span>
               <span className="flex gap-1">
                 {onOpenObject && <button className={BTN_GHOST} onClick={() => onOpenObject('EVENT_QUOTATION', q.id)}>Open</button>}
-                <button className={BTN_GHOST} onClick={() => window.open(`/api/restaurant/${restaurantId}/events/quotations/${q.id}/pdf`, '_blank')}>{t('events.quotes.viewPdf')}</button>
+                <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${q.id}/pdf`, token)}>{t('events.quotes.viewPdf')}</button>
                 <button className={BTN_PRIMARY} onClick={async () => { try { await api(`/events/quotations/${q.id}/send`, { method: 'POST', body: JSON.stringify({}) }); alert(t('events.quotes.sent')); await load(); } catch (e: any) { alert(e.message); } }}><Send size={12} />{t('events.quotes.send')}</button>
               </span>
             </div>
@@ -817,7 +832,7 @@ function EventQuotationDetail({ restaurantId, token, quotationId, onBack, onOpen
           <div className={CARD}>
             <div className="flex items-center justify-between mb-2">
               <h3 className="font-bold text-sm">Line items</h3>
-              <button className={BTN_GHOST} onClick={() => window.open(`/api/restaurant/${restaurantId}/events/quotations/${quotationId}/pdf`, '_blank')}>{t('events.quotes.viewPdf')}</button>
+              <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${quotationId}/pdf`, token)}>{t('events.quotes.viewPdf')}</button>
             </div>
             {(q.lines || []).map((l: any) => (
               <div key={l.id} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]">
@@ -1054,7 +1069,7 @@ function EventQuotations({ restaurantId, token }: Props) {
           { key: 'status', label: t('common.status'), render: (r: any) => <Pill status={r.status} /> },
           { key: '_a', label: t('common.actions'), render: (r: any) => (
             <div className="flex gap-1">
-              <button className={BTN_GHOST} onClick={() => window.open(`/api/restaurant/${restaurantId}/events/quotations/${r.id}/pdf`, '_blank')}>{t('events.quotes.viewPdf')}</button>
+              <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${r.id}/pdf`, token)}>{t('events.quotes.viewPdf')}</button>
               <button className={BTN_PRIMARY} onClick={async () => { try { await api(`/events/quotations/${r.id}/send`, { method: 'POST', body: JSON.stringify({}) }); alert(t('events.quotes.sent')); await load(); } catch (e: any) { alert(e.message); } }}><Send size={12} />{t('events.quotes.send')}</button>
             </div>
           ) },
