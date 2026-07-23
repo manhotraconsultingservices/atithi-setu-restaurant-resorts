@@ -43,7 +43,10 @@ const BAND = '#f5f3ff';
 function fmtMoney(n: number, cur = 'INR'): string {
   const v = Math.round((Number(n) || 0) * 100) / 100;
   const s = v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${cur === 'INR' ? '₹' : cur + ' '}${s}`;
+  // NOTE: pdfkit's standard Helvetica uses WinAnsi encoding, which has NO ₹
+  // (U+20B9) glyph — emitting it throws and the whole PDF 500s. Use the ASCII
+  // "Rs." prefix (same fix the hotel invoice templates use). Do not reintroduce ₹.
+  return `${cur === 'INR' ? 'Rs. ' : cur + ' '}${s}`;
 }
 
 function lineTypeLabel(t: string): string {
