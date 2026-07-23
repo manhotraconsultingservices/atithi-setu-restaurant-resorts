@@ -648,6 +648,12 @@ async function testEvents() {
   // Language setting round-trip (app-wide i18n).
   const lg = await api('GET', `/api/restaurant/${restaurantId}/settings/language`);
   (lg.status === 200 ? pass : fail)('TC-EVT-007', 'Language setting endpoint responds', `HTTP ${lg.status}`);
+
+  // Object Detail convention — audit endpoint wired (empty trail for unknown id = 200 []).
+  const audit = await api('GET', `/api/restaurant/${restaurantId}/events/bookings/__none__/audit`);
+  (audit.status === 200 && Array.isArray(audit.data) ? pass : fail)('TC-EVT-008', 'Object-detail audit endpoint wired', `HTTP ${audit.status}`);
+  const wu = await api('GET', `/api/restaurant/${restaurantId}/events/bookings/__none__/where-used`);
+  (wu.status === 200 ? pass : fail)('TC-EVT-009', 'Object-detail where-used endpoint wired', `HTTP ${wu.status}`);
 }
 
 // ── Channel Manager tests ──────────────────────────────────────────────────

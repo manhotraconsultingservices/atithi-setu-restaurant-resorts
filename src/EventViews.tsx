@@ -6,6 +6,7 @@
 // ════════════════════════════════════════════════════════════════════════
 import React, { useState, useEffect } from 'react';
 import { DataTable } from './components/DataTable';
+import { ObjectDetail } from './components/ObjectDetail';
 import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
@@ -303,7 +304,7 @@ function EventBookings({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
   const [rows, setRows] = useState<any[]>([]);
   const [venues, setVenues] = useState<any[]>([]);
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
   const [showNew, setShowNew] = useState(false);
   const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', guest_count: '' };
   const [form, setForm] = useState<any>(blank);
@@ -317,11 +318,18 @@ function EventBookings({ restaurantId, token }: Props) {
     try {
       const body = { ...form, guest_count: Number(form.guest_count || 0) };
       const created = await api('/events/bookings', { method: 'POST', body: JSON.stringify(body) });
-      setShowNew(false); setForm(blank); await load(); setOpenId(created.id);
+      setShowNew(false); setForm(blank); await load(); setObjStack([{ type: 'EVENT_BOOKING', id: created.id }]);
     } catch (e: any) { alert(e.message); }
   };
 
-  if (openId) return <EventBookingDetail restaurantId={restaurantId} token={token} bookingId={openId} venues={venues} onBack={() => { setOpenId(null); load(); }} />;
+  const top = objStack[objStack.length - 1];
+  if (top) return (
+    <EventObjectRouter
+      restaurantId={restaurantId} token={token} obj={top} venues={venues}
+      onOpenObject={(type, id) => setObjStack(s => [...s, { type, id }])}
+      onBack={() => { setObjStack(s => s.slice(0, -1)); load(); }}
+    />
+  );
 
   return (
     <div>
@@ -370,7 +378,7 @@ function EventBookings({ restaurantId, token }: Props) {
           { key: 'guest_count', label: t('events.bookings.guests') },
           { key: 'total_amount', label: t('common.total'), render: (r: any) => money(r.total_amount) },
           { key: 'status', label: t('common.status'), render: (r: any) => <Pill status={r.status} /> },
-          { key: '_a', label: t('common.actions'), render: (r: any) => <button className={BTN_GHOST} onClick={() => setOpenId(r.id)}>{t('common.edit')}</button> },
+          { key: '_a', label: t('common.actions'), render: (r: any) => <button className={BTN_GHOST} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}>{t('common.edit')}</button> },
         ]}
       />
     </div>
@@ -378,7 +386,7 @@ function EventBookings({ restaurantId, token }: Props) {
 }
 
 // ── Booking detail: lines, hotel rooms, quotation, lifecycle ────────────────
-function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack }: Props & { bookingId: string; venues: any[]; onBack: () => void }) {
+function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, onOpenObject }: Props & { bookingId: string; venues: any[]; onBack: () => void; onOpenObject?: (t: string, i: string) => void }) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
   const [bk, setBk] = useState<any>(null);
@@ -387,8 +395,9 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack }: 
   const [busy, setBusy] = useState(false);
   const [hotelRooms, setHotelRooms] = useState<any[]>([]);
   const [showHotel, setShowHotel] = useState(false);
+  const [nonce, setNonce] = useState(0);
 
-  const load = async () => { try { setBk(await api(`/events/bookings/${bookingId}`)); } catch (e: any) { alert(e.message); } };
+  const load = async () => { try { setBk(await api(`/events/bookings/${bookingId}`)); setNonce(n => n + 1); } catch (e: any) { alert(e.message); } };
   useEffect(() => { load(); api('/events/rental-items').then(setRentals).catch(() => {}); api('/events/services').then(setServices).catch(() => {}); }, [bookingId]);
 
   const addRental = async (itemId: string) => {
@@ -439,17 +448,24 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack }: 
   const editable = bk.status !== 'COMPLETED' && bk.status !== 'CANCELLED';
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
-        <button className={BTN_GHOST} onClick={onBack}>← {t('events.bookings.title')}</button>
-        <Pill status={bk.status} />
-      </div>
-
+    <ObjectDetail
+      title={bk.customer_name}
+      subtitle={`${bk.venue_name || '—'} · ${bk.event_date} · ${bk.start_time}–${bk.end_time} · ${bk.guest_count} ${t('events.bookings.guests').toLowerCase()}`}
+      statusPill={<Pill status={bk.status} />}
+      onBack={onBack}
+      backLabel={t('events.bookings.title')}
+      token={token}
+      auditUrl={`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/audit`}
+      whereUsedUrl={`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/where-used`}
+      onOpenObject={onOpenObject}
+      refreshNonce={nonce}
+      overview={
+      <div>
       <div className={`${CARD} mb-4`}>
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-xl font-bold font-serif text-[#14110c]">{bk.customer_name}</h2>
-            <p className="text-xs text-[#6b5d52]">{bk.venue_name || '—'} · {bk.event_date} · {bk.start_time}–{bk.end_time} · {bk.guest_count} {t('events.bookings.guests').toLowerCase()}</p>
+            <h3 className="text-lg font-bold text-[#14110c]">{bk.customer_name}</h3>
+            <p className="text-xs text-[#6b5d52]">{bk.customer_phone || '—'}{bk.customer_email ? ` · ${bk.customer_email}` : ''}</p>
           </div>
           <div className="text-right">
             <div className="text-2xl font-bold text-[#cc5a16]">{money(bk.total_amount)}</div>
@@ -526,6 +542,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack }: 
             <div key={q.id} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]">
               <span>{q.quote_number} (v{q.version}) — {money(q.grand_total)} <Pill status={q.status} /></span>
               <span className="flex gap-1">
+                {onOpenObject && <button className={BTN_GHOST} onClick={() => onOpenObject('EVENT_QUOTATION', q.id)}>Open</button>}
                 <button className={BTN_GHOST} onClick={() => window.open(`/api/restaurant/${restaurantId}/events/quotations/${q.id}/pdf`, '_blank')}>{t('events.quotes.viewPdf')}</button>
                 <button className={BTN_PRIMARY} onClick={async () => { try { await api(`/events/quotations/${q.id}/send`, { method: 'POST', body: JSON.stringify({}) }); alert(t('events.quotes.sent')); await load(); } catch (e: any) { alert(e.message); } }}><Send size={12} />{t('events.quotes.send')}</button>
               </span>
@@ -533,6 +550,115 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack }: 
           ))}
         </div>
       )}
+      </div>
+      }
+    />
+  );
+}
+
+// ── Quotation detail (ObjectDetail Overview + Audit + Where Used) ────────────
+function EventQuotationDetail({ restaurantId, token, quotationId, onBack, onOpenObject }: Props & { quotationId: string; onBack: () => void; onOpenObject?: (t: string, i: string) => void }) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const [q, setQ] = useState<any>(null);
+  useEffect(() => { api(`/events/quotations/${quotationId}`).then(setQ).catch((e: any) => alert(e.message)); }, [quotationId]);
+  if (!q) return <div className="text-sm text-[#6b5d52]">{t('common.loading')}</div>;
+  return (
+    <ObjectDetail
+      title={`${t('events.quotes.number')} ${q.quote_number}`}
+      subtitle={`v${q.version} · ${t('events.quotes.validUntil')} ${String(q.valid_until || '').slice(0, 10)}`}
+      statusPill={<Pill status={q.status} />}
+      onBack={onBack}
+      backLabel={t('events.quotes.title')}
+      token={token}
+      auditUrl={`/api/restaurant/${restaurantId}/events/quotations/${quotationId}/audit`}
+      whereUsedUrl={`/api/restaurant/${restaurantId}/events/quotations/${quotationId}/where-used`}
+      onOpenObject={onOpenObject}
+      overview={
+        <div>
+          <div className={`${CARD} mb-4 flex items-center justify-between`}>
+            <div className="text-sm">
+              <div className="font-bold">{q.quote_number} <span className="text-[#9d8b7e] font-normal">v{q.version}</span></div>
+              <div className="text-xs text-[#6b5d52]">Subtotal {money(q.subtotal)} · GST {money(q.tax_amount)}{Number(q.discount) > 0 ? ` · Disc ${money(q.discount)}` : ''}</div>
+            </div>
+            <div className="text-right"><div className="text-2xl font-bold text-[#cc5a16]">{money(q.grand_total)}</div></div>
+          </div>
+          <div className={CARD}>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="font-bold text-sm">Line items</h3>
+              <button className={BTN_GHOST} onClick={() => window.open(`/api/restaurant/${restaurantId}/events/quotations/${quotationId}/pdf`, '_blank')}>{t('events.quotes.viewPdf')}</button>
+            </div>
+            {(q.lines || []).map((l: any) => (
+              <div key={l.id} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]">
+                <span>{l.description} <span className="text-[#9d8b7e]">({l.line_type})</span></span>
+                <span>{money(l.amount)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      }
+    />
+  );
+}
+
+// ── Event folio (invoice) detail (ObjectDetail Overview + Audit + Where Used) ─
+function EventFolioDetail({ restaurantId, token, folioId, onBack, onOpenObject }: Props & { folioId: string; onBack: () => void; onOpenObject?: (t: string, i: string) => void }) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const [f, setF] = useState<any>(null);
+  useEffect(() => { api(`/events/folios/${folioId}`).then(setF).catch((e: any) => alert(e.message)); }, [folioId]);
+  if (!f) return <div className="text-sm text-[#6b5d52]">{t('common.loading')}</div>;
+  return (
+    <ObjectDetail
+      title={f.invoice_number || folioId}
+      subtitle={`Event invoice · ${String(f.created_at || '').slice(0, 10)}`}
+      statusPill={<Pill status={f.status} />}
+      onBack={onBack}
+      backLabel="Invoices"
+      token={token}
+      auditUrl={`/api/restaurant/${restaurantId}/events/folios/${folioId}/audit`}
+      whereUsedUrl={`/api/restaurant/${restaurantId}/events/folios/${folioId}/where-used`}
+      onOpenObject={onOpenObject}
+      overview={
+        <div>
+          <div className={`${CARD} mb-4 flex items-center justify-between`}>
+            <div className="text-sm font-bold">{f.invoice_number || folioId}</div>
+            <div className="text-right"><div className="text-2xl font-bold text-[#cc5a16]">{money(f.grand_total)}</div><div className="text-xs text-[#6b5d52]">{t('events.bookings.grandTotal')}</div></div>
+          </div>
+          <div className={CARD}>
+            <h3 className="font-bold text-sm mb-2">Line items</h3>
+            {(f.entries || []).map((e: any) => (
+              <div key={e.id} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]">
+                <span>{e.description} <span className="text-[#9d8b7e]">({e.entry_type})</span></span>
+                <span>{money(e.amount)}</span>
+              </div>
+            ))}
+            {(f.payments || []).length > 0 && <h3 className="font-bold text-sm mt-3 mb-2">Payments</h3>}
+            {(f.payments || []).map((p: any) => (
+              <div key={p.id} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]">
+                <span>{p.payment_type} · {p.payment_method}</span>
+                <span>{money(p.amount)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      }
+    />
+  );
+}
+
+// ── Router: opens the right ObjectDetail for a {type,id} across event objects ─
+function EventObjectRouter({ restaurantId, token, obj, venues, onOpenObject, onBack }: Props & { obj: { type: string; id: string }; venues: any[]; onOpenObject: (t: string, i: string) => void; onBack: () => void }) {
+  if (obj.type === 'EVENT_BOOKING') return <EventBookingDetail restaurantId={restaurantId} token={token} bookingId={obj.id} venues={venues} onBack={onBack} onOpenObject={onOpenObject} />;
+  if (obj.type === 'EVENT_QUOTATION') return <EventQuotationDetail restaurantId={restaurantId} token={token} quotationId={obj.id} onBack={onBack} onOpenObject={onOpenObject} />;
+  if (obj.type === 'FOLIO') return <EventFolioDetail restaurantId={restaurantId} token={token} folioId={obj.id} onBack={onBack} onOpenObject={onOpenObject} />;
+  // ROOM_BOOKING and any other type live in another module — surface a note.
+  return (
+    <div>
+      <button className={BTN_GHOST} onClick={onBack}>← Back</button>
+      <div className={`${CARD} mt-4`}>
+        <p className="text-sm text-[#6b5d52]">This record ({obj.type}) lives in another module. Open it from that module: <span className="font-mono text-xs">{obj.id}</span></p>
+      </div>
     </div>
   );
 }

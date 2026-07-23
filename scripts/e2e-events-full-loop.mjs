@@ -149,6 +149,24 @@ async function main() {
   assert('checkout creates folio', (co.status === 201 || co.status === 200) && co.body?.id, co.status, 201);
   assert('folio_kind = EVENT', co.body?.folio_kind === 'EVENT', co.body?.folio_kind, 'EVENT');
 
+  console.log('\n[10b] Object Detail — audit history + where-used');
+  const bAudit = await req('GET', `${base}/events/bookings/${bookingId}/audit`, null, tok);
+  assert('booking audit is a non-empty array', Array.isArray(bAudit.body) && bAudit.body.length > 0, bAudit.status, '≥1 entry');
+  assert('booking audit records CREATED', (bAudit.body || []).some(a => a.action === 'CREATED'), (bAudit.body || []).map(a => a.action), 'includes CREATED');
+  assert('booking audit records CONFIRMED status change', (bAudit.body || []).some(a => a.action === 'STATUS_CHANGED'), (bAudit.body || []).map(a => a.action), 'includes STATUS_CHANGED');
+  const bWU = await req('GET', `${base}/events/bookings/${bookingId}/where-used`, null, tok);
+  const wuGroups = (bWU.body?.groups || []).map(g => g.group);
+  assert('booking where-used lists Quotations + Invoice/Folio', bWU.status === 200 && wuGroups.includes('Quotations') && wuGroups.includes('Invoice / Folio'), wuGroups, 'Quotations + Invoice / Folio');
+  const folioId = co.body?.id;
+  if (folioId) {
+    const fWU = await req('GET', `${base}/events/folios/${folioId}/where-used`, null, tok);
+    assert('folio where-used links back to Booking', (fWU.body?.groups || []).some(g => g.group === 'Booking'), (fWU.body?.groups || []).map(g => g.group), 'includes Booking');
+    const fAudit = await req('GET', `${base}/events/folios/${folioId}/audit`, null, tok);
+    assert('folio audit records CREATED', Array.isArray(fAudit.body) && fAudit.body.some(a => a.action === 'CREATED'), fAudit.status, 'includes CREATED');
+  }
+  const qWU = await req('GET', `${base}/events/quotations/${quoteId}/where-used`, null, tok);
+  assert('quotation where-used links to its Booking', (qWU.body?.groups || []).some(g => g.group === 'Booking'), (qWU.body?.groups || []).map(g => g.group), 'includes Booking');
+
   console.log('\n[11] Language setting round-trip');
   const setLang = await req('PUT', `${base}/settings/language`, { secondary_language: 'ta' }, tok);
   assert('set secondary language', setLang.status === 200 && setLang.body?.secondary_language === 'ta', setLang.body, 'ta');

@@ -21235,6 +21235,54 @@ ${data.tenant.name}`;
   };
   const mkEventId = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
+  // ── Object audit log (per the CLAUDE.md "Object Detail" convention) ─────────
+  // Append-only trail feeding the "Audit History" tree node of Event bookings,
+  // quotations, and folios. Defensive CREATE so any tenant gets it lazily; a
+  // failed write never breaks the underlying business action.
+  const writeObjectAudit = async (
+    tenantDb: DbInterface,
+    req: AuthRequest | null,
+    a: { objectType: string; objectId: string; action: string; summary?: string; before?: any; after?: any }
+  ): Promise<void> => {
+    try {
+      await tenantDb.exec(`
+        CREATE TABLE IF NOT EXISTS object_audit_log (
+          id          TEXT PRIMARY KEY,
+          object_type TEXT NOT NULL,
+          object_id   TEXT NOT NULL,
+          action      TEXT NOT NULL,
+          actor_email TEXT,
+          actor_role  TEXT,
+          summary     TEXT,
+          before_json TEXT,
+          after_json  TEXT,
+          created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_object_audit ON object_audit_log(object_type, object_id, created_at DESC);
+      `);
+      await tenantDb.run(
+        `INSERT INTO object_audit_log (id, object_type, object_id, action, actor_email, actor_role, summary, before_json, after_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [mkEventId('OAL'), a.objectType, a.objectId, a.action, req?.user?.email || null, req?.user?.role || null,
+         a.summary || null, a.before ? JSON.stringify(a.before) : null, a.after ? JSON.stringify(a.after) : null]
+      );
+    } catch (err: any) {
+      console.error('[object_audit] write failed:', err?.message || err);
+    }
+  };
+
+  const readObjectAudit = async (tenantDb: DbInterface, objectType: string, objectId: string): Promise<any[]> => {
+    try {
+      return await tenantDb.query(
+        `SELECT id, action, actor_email, actor_role, summary, before_json, after_json, created_at
+           FROM object_audit_log WHERE object_type = ? AND object_id = ? ORDER BY created_at DESC, id DESC`,
+        [objectType, objectId]
+      );
+    } catch {
+      return []; // table not created yet for this tenant → empty trail
+    }
+  };
+
   // ─── Enable / disable the events module (SUPER_ADMIN / CTO only) ────────────
   app.post("/api/restaurant/:id/events/enable", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -21753,6 +21801,7 @@ ${data.tenant.name}`;
       await insertEventLines(db, id, b);
       await recomputeEventTotal(db, id);
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [id]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: id, action: 'CREATED', summary: `Booking created for ${b.customer_name} on ${b.event_date} (${targetStatus})`, after: row });
       res.status(201).json(row);
     } catch (err: any) {
       console.error("/events/bookings create error:", err);
@@ -21794,6 +21843,7 @@ ${data.tenant.name}`;
       }
       await recomputeEventTotal(db, req.params.bid);
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'EDITED', summary: `Booking details updated`, before: existing, after: row });
       res.json(row);
     } catch (err: any) {
       console.error("/events/bookings update error:", err);
@@ -21812,6 +21862,7 @@ ${data.tenant.name}`;
         "UPDATE event_bookings SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancelled_by = ?, cancellation_reason = ? WHERE id = ?",
         [req.user?.email || null, req.body?.reason || null, req.params.bid]
       );
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'CANCELLED', summary: `Booking cancelled${req.body?.reason ? ` — ${req.body.reason}` : ''}`, before: { status: existing.status }, after: { status: 'CANCELLED' } });
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to cancel booking" }); }
   });
@@ -21822,6 +21873,7 @@ ${data.tenant.name}`;
     try {
       const db = await getTenantDb(req.params.id);
       await db.run("UPDATE event_bookings SET status = 'COMPLETED' WHERE id = ?", [req.params.bid]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: 'Booking marked COMPLETED', after: { status: 'COMPLETED' } });
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to complete booking" }); }
   });
@@ -21968,6 +22020,7 @@ ${data.tenant.name}`;
 
       await db.run("UPDATE event_bookings SET status = 'CONFIRMED' WHERE id = ?", [req.params.bid]);
       const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STATUS_CHANGED', summary: `Booking CONFIRMED${rooms.length ? ` · ${roomResults.filter(r => r.ok).length}/${rooms.length} hotel room(s) booked` : ''}`, before: { status: bk.status }, after: { status: 'CONFIRMED' } });
       const failed = roomResults.filter(r => !r.ok);
       res.json({
         ...row,
@@ -22046,6 +22099,8 @@ ${data.tenant.name}`;
       // Move booking to QUOTED (unless already further along).
       if (bk.status === 'INQUIRY') await db.run("UPDATE event_bookings SET status = 'QUOTED' WHERE id = ?", [req.params.bid]);
       const row = await db.get("SELECT * FROM event_quotations WHERE id = ?", [qid]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_QUOTATION', objectId: qid, action: 'CREATED', summary: `Quotation ${quoteNumber} v${version} created (${grand})`, after: row });
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'QUOTED', summary: `Quotation ${quoteNumber} generated` });
       res.status(201).json(row);
     } catch (err: any) {
       console.error("/events quotation create error:", err);
@@ -22127,6 +22182,7 @@ ${data.tenant.name}`;
       const sent = await sendEmail(to, subject, text, html, [{ filename: `${data.quotation.quote_number}.pdf`, content: pdf }]);
       if (!sent) return res.status(502).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download." });
       await db.run("UPDATE event_quotations SET status = 'SENT', sent_at = CURRENT_TIMESTAMP, sent_to_email = ? WHERE id = ?", [to, req.params.qid]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_QUOTATION', objectId: req.params.qid, action: 'SENT', summary: `Quotation emailed to ${to}` });
       res.json({ success: true, sent_to: to });
     } catch (err: any) {
       console.error("/events quotation send error:", err);
@@ -22173,11 +22229,119 @@ ${data.tenant.name}`;
       }
       await db.run("UPDATE event_bookings SET folio_id = ?, status = CASE WHEN status = 'CONFIRMED' THEN 'IN_PROGRESS' ELSE status END WHERE id = ?", [fid, req.params.bid]);
       const folio = await db.get("SELECT * FROM folios WHERE id = ?", [fid]);
+      await writeObjectAudit(db, req, { objectType: 'FOLIO', objectId: fid, action: 'CREATED', summary: `Event invoice ${invoiceNumber} raised (${grand})`, after: folio });
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'INVOICED', summary: `Invoice ${invoiceNumber} generated (folio ${fid})` });
       res.status(201).json(folio);
     } catch (err: any) {
       console.error("/events checkout error:", err);
       res.status(500).json({ error: "Failed to create event invoice" });
     }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Object Detail — Audit History + Where Used (CLAUDE.md convention).
+  // Feeds the tree menu's two non-Overview nodes for Event Booking, Quotation,
+  // and (EVENT) Folio. Where-Used runs reverse-reference queries, tenant-scoped.
+  // Each where-used item carries link:{objectType,objectId} so the frontend
+  // ObjectDetail shell can deep-link to that record's own detail view.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── EVENT BOOKING ──────────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/events/bookings/:bid/audit", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'EVENT_BOOKING', req.params.bid));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit history" }); }
+  });
+
+  app.get("/api/restaurant/:id/events/bookings/:bid/where-used", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bid = req.params.bid;
+      const groups: any[] = [];
+      const quotes: any[] = await db.query("SELECT id, quote_number, version, status, grand_total FROM event_quotations WHERE booking_id = ? ORDER BY version DESC", [bid]);
+      if (quotes.length) groups.push({ group: 'Quotations', items: quotes.map(q => ({ type: 'Quotation', id: q.id, label: `${q.quote_number} v${q.version}`, sublabel: `${q.status} · ₹${Number(q.grand_total).toLocaleString('en-IN')}`, link: { objectType: 'EVENT_QUOTATION', objectId: q.id } })) });
+      const folios: any[] = await db.query("SELECT id, invoice_number, grand_total, status FROM folios WHERE event_booking_id = ? ORDER BY created_at DESC", [bid]);
+      if (folios.length) groups.push({ group: 'Invoice / Folio', items: folios.map(f => ({ type: 'Folio', id: f.id, label: f.invoice_number || f.id, sublabel: `${f.status} · ₹${Number(f.grand_total).toLocaleString('en-IN')}`, link: { objectType: 'FOLIO', objectId: f.id } })) });
+      const rooms: any[] = await db.query("SELECT id, room_type_snapshot, hotel_booking_id, status, check_in_date, check_out_date FROM event_booking_rooms WHERE booking_id = ? ORDER BY created_at", [bid]);
+      if (rooms.length) groups.push({ group: 'Hotel Rooms', items: rooms.map(r => ({ type: 'Hotel Booking', id: r.hotel_booking_id || r.id, label: r.room_type_snapshot, sublabel: `${r.status}${r.hotel_booking_id ? ` · ${r.hotel_booking_id}` : ''} · ${r.check_in_date}→${r.check_out_date}`, link: r.hotel_booking_id ? { objectType: 'ROOM_BOOKING', objectId: r.hotel_booking_id } : null })) });
+      res.json({ groups });
+    } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
+  });
+
+  // ── EVENT QUOTATION ────────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/events/quotations/:qid/audit", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'EVENT_QUOTATION', req.params.qid));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit history" }); }
+  });
+
+  app.get("/api/restaurant/:id/events/quotations/:qid/where-used", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const q: any = await db.get("SELECT * FROM event_quotations WHERE id = ?", [req.params.qid]);
+      if (!q) return res.status(404).json({ error: "Quotation not found" });
+      const groups: any[] = [];
+      const bk: any = await db.get("SELECT id, customer_name, event_date, status FROM event_bookings WHERE id = ?", [q.booking_id]);
+      if (bk) groups.push({ group: 'Booking', items: [{ type: 'Booking', id: bk.id, label: bk.customer_name, sublabel: `${bk.status} · ${bk.event_date}`, link: { objectType: 'EVENT_BOOKING', objectId: bk.id } }] });
+      const siblings: any[] = await db.query("SELECT id, quote_number, version, status FROM event_quotations WHERE booking_id = ? AND id <> ? ORDER BY version DESC", [q.booking_id, req.params.qid]);
+      if (siblings.length) groups.push({ group: 'Other versions', items: siblings.map(s => ({ type: 'Quotation', id: s.id, label: `${s.quote_number} v${s.version}`, sublabel: s.status, link: { objectType: 'EVENT_QUOTATION', objectId: s.id } })) });
+      const folios: any[] = await db.query("SELECT id, invoice_number, status FROM folios WHERE event_booking_id = ? ORDER BY created_at DESC", [q.booking_id]);
+      if (folios.length) groups.push({ group: 'Invoice / Folio', items: folios.map(f => ({ type: 'Folio', id: f.id, label: f.invoice_number || f.id, sublabel: f.status, link: { objectType: 'FOLIO', objectId: f.id } })) });
+      res.json({ groups });
+    } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
+  });
+
+  // ── EVENT FOLIO (invoice) — overview + audit + where-used ───────────────────
+  app.get("/api/restaurant/:id/events/folios/:fid", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const folio: any = await db.get("SELECT * FROM folios WHERE id = ? AND folio_kind = 'EVENT'", [req.params.fid]);
+      if (!folio) return res.status(404).json({ error: "Event folio not found" });
+      const entries = await db.query("SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at", [req.params.fid]);
+      const payments = await db.query("SELECT * FROM folio_payments WHERE folio_id = ? ORDER BY recorded_at", [req.params.fid]);
+      res.json({ ...folio, entries, payments });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load folio" }); }
+  });
+
+  app.get("/api/restaurant/:id/events/folios/:fid/audit", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      res.json(await readObjectAudit(db, 'FOLIO', req.params.fid));
+    } catch (err: any) { res.status(500).json({ error: "Failed to load audit history" }); }
+  });
+
+  app.get("/api/restaurant/:id/events/folios/:fid/where-used", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const folio: any = await db.get("SELECT * FROM folios WHERE id = ?", [req.params.fid]);
+      if (!folio) return res.status(404).json({ error: "Folio not found" });
+      const groups: any[] = [];
+      if (folio.event_booking_id) {
+        const bk: any = await db.get("SELECT id, customer_name, event_date, status FROM event_bookings WHERE id = ?", [folio.event_booking_id]);
+        if (bk) groups.push({ group: 'Booking', items: [{ type: 'Booking', id: bk.id, label: bk.customer_name, sublabel: `${bk.status} · ${bk.event_date}`, link: { objectType: 'EVENT_BOOKING', objectId: bk.id } }] });
+        const quotes: any[] = await db.query("SELECT id, quote_number, version, status FROM event_quotations WHERE booking_id = ? ORDER BY version DESC", [folio.event_booking_id]);
+        if (quotes.length) groups.push({ group: 'Quotations', items: quotes.map(q => ({ type: 'Quotation', id: q.id, label: `${q.quote_number} v${q.version}`, sublabel: q.status, link: { objectType: 'EVENT_QUOTATION', objectId: q.id } })) });
+      }
+      const payments: any[] = await db.query("SELECT id, amount, payment_method, payment_type, recorded_at FROM folio_payments WHERE folio_id = ? ORDER BY recorded_at", [req.params.fid]);
+      if (payments.length) groups.push({ group: 'Payments', items: payments.map(p => ({ type: 'Payment', id: p.id, label: `₹${Number(p.amount).toLocaleString('en-IN')} · ${p.payment_method}`, sublabel: `${p.payment_type} · ${String(p.recorded_at).slice(0, 16)}`, link: null })) });
+      res.json({ groups });
+    } catch (err: any) { res.status(500).json({ error: "Failed to compute where-used" }); }
   });
 
   // ─── Enable / disable the spa module (SUPER_ADMIN / CTO only) ──────────────
