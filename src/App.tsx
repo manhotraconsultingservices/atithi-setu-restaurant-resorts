@@ -6,6 +6,8 @@ import { useToast } from './components/Toast';
 import { useConfirm } from './components/ConfirmDialog';
 import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
+import { EventsModule, EventBookingPage } from './EventViews';
+import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Utensils, 
@@ -81,6 +83,7 @@ import {
   Database,
   Terminal,
   Building2,
+  CalendarRange,
   Store,
   BedDouble,
 } from 'lucide-react';
@@ -523,6 +526,9 @@ export default function App() {
     if (segs[0] === 'spa' && segs[1]) {
       return { kind: 'spa' as const, tenantId: segs[1] };
     }
+    if (segs[0] === 'events' && segs[1]) {
+      return { kind: 'events' as const, tenantId: segs[1] };
+    }
     if (segs[0] === 'menu' && segs[1]) {
       return { kind: 'menu' as const, tenantId: segs[1] };
     }
@@ -536,6 +542,9 @@ export default function App() {
   }
   if (publicGuestPath?.kind === 'spa') {
     return <SpaBookingPage tenantId={publicGuestPath.tenantId} />;
+  }
+  if (publicGuestPath?.kind === 'events') {
+    return <EventBookingPage tenantId={publicGuestPath.tenantId} />;
   }
   if (publicGuestPath?.kind === 'menu') {
     return <PublicRestaurantPage tenantId={publicGuestPath.tenantId} />;
@@ -9121,6 +9130,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
   // Spa & Wellness is gated by a dedicated flag (orthogonal to property_type).
   // Default 0 on every existing tenant → the SPA nav module never renders.
   const isSpaEnabled = !!restaurant && Number((restaurant as any).spa_enabled) === 1;
+  // Events & Convention — same orthogonal-flag pattern as spa. Default 0 → hidden.
+  const isEventsEnabled = !!restaurant && Number((restaurant as any).events_enabled) === 1;
+  // Tenant's secondary language for the i18n toggle (null = English-only).
+  const secondaryLanguage = (restaurant as any)?.secondary_language || null;
   // ── Dashboard mode ─────────────────────────────────────────────────────
   // For BOTH-mode tenants (Restaurant + Hotel on the same tenant), the
   // owner can pick which "side" of the business to see in the nav. The
@@ -13348,6 +13361,20 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             ],
           },
           {
+            id: 'EVENTS', label: 'Events & Convention', icon: <CalendarRange size={16} />,
+            visible: isEventsEnabled,
+            tabs: [
+              { id: 'EVENTS_CALENDAR',   label: 'Event Calendar' },
+              { id: 'EVENTS_BOOKINGS',   label: 'Bookings' },
+              { id: 'EVENTS_VENUES',     label: 'Halls & Venues' },
+              { id: 'EVENTS_RENTALS',    label: 'Rental Inventory' },
+              { id: 'EVENTS_SERVICES',   label: 'Add-on Services' },
+              { id: 'EVENTS_QUOTATIONS', label: 'Quotations' },
+              { id: 'EVENTS_REPORTS',    label: 'Events Reports' },
+              { id: 'EVENTS_SETTINGS',   label: 'Public Page Settings' },
+            ],
+          },
+          {
             // Accounts = money in / money out ledger for the business owner.
             // Procurement (AP), expenses, and OTA receivables belong here —
             // not buried inside operational modules.
@@ -14112,6 +14139,10 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
+      ) : (activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS') && isEventsEnabled ? (
+        <LanguageProvider secondary={secondaryLanguage}>
+          <EventsModule restaurantId={restaurantId} token={token!} tab={activeTab} />
+        </LanguageProvider>
       ) : activeTab === 'HOTEL_INVENTORY' ? (
         <HotelInventoryView restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'INVENTORY' ? (
@@ -49616,6 +49647,41 @@ function SuperAdminDashboard({ token }: { token: string }) {
                           )}
                         >
                           {spaOn ? 'Spa: ON — click to disable' : 'Spa: OFF — click to enable'}
+                        </button>
+                      </div>
+                    );
+                  })()}
+                  {/* Events & Convention module toggle — orthogonal flag, admin-only. */}
+                  {(() => {
+                    const eventsOn = Number((r as any).events_enabled) === 1;
+                    return (
+                      <div>
+                        <p className="text-[10px] text-[#9c8e85] font-semibold uppercase tracking-widest mb-1.5 flex items-center gap-1.5">
+                          <CalendarRange size={11} /> Events &amp; Convention
+                        </p>
+                        <button
+                          onClick={async () => {
+                            if (!await showConfirm({ title: `${eventsOn ? 'Disable' : 'Enable'} the Events module for "${r.name}"?`, body: eventsOn ? 'This hides Events tabs. Event data is preserved.' : 'Confirm the customer is on an Events-tier subscription before proceeding.' })) return;
+                            try {
+                              const res = await fetch(`/api/restaurant/${r.id}/events/enable`, {
+                                method: 'POST',
+                                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ enabled: !eventsOn }),
+                              });
+                              const data = await res.json();
+                              if (!res.ok) { toast.error(data.error || 'Failed'); return; }
+                              toast.success(data.message || 'Updated');
+                              window.location.reload();
+                            } catch { toast.error('Network error. Please try again.'); }
+                          }}
+                          className={cn(
+                            "w-full py-2 rounded-xl text-[11px] font-bold transition-all border",
+                            eventsOn
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : "text-[#6b5d52] border-[#cc5a16]/15 hover:bg-[#cc5a16]/5"
+                          )}
+                        >
+                          {eventsOn ? 'Events: ON — click to disable' : 'Events: OFF — click to enable'}
                         </button>
                       </div>
                     );

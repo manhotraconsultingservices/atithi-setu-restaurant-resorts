@@ -612,6 +612,44 @@ async function testSpa() {
   }
 }
 
+// ── Events & Convention Center tests ────────────────────────────────────────
+async function testEvents() {
+  section('EVENTS & CONVENTION — Venues / Rentals / Services / Bookings / Quotations');
+  if (!restaurantId) { skip('TC-EVT-*', 'All events tests', 'no restaurantId'); return; }
+
+  // Masters read (gracefully skip when the module isn't enabled for the tenant).
+  const vn = await api('GET', `/api/restaurant/${restaurantId}/events/venues`);
+  if (vn.status === 200 && Array.isArray(vn.data)) {
+    pass('TC-EVT-001', `Events venues list loads (${vn.data.length} venues)`);
+  } else if (vn.status === 403 || vn.status === 404) {
+    skip('TC-EVT-001', 'Events venues', `HTTP ${vn.status} - events may not be enabled`);
+    return; // module off → skip the rest
+  } else {
+    fail('TC-EVT-001', 'Events venues list loads', `HTTP ${vn.status}`);
+    return;
+  }
+
+  const ri = await api('GET', `/api/restaurant/${restaurantId}/events/rental-items`);
+  (ri.status === 200 ? pass : fail)('TC-EVT-002', 'Events rental-items endpoint responds', `HTTP ${ri.status}`);
+
+  const sv = await api('GET', `/api/restaurant/${restaurantId}/events/services`);
+  (sv.status === 200 ? pass : fail)('TC-EVT-003', 'Events services endpoint responds', `HTTP ${sv.status}`);
+
+  const bk = await api('GET', `/api/restaurant/${restaurantId}/events/bookings`);
+  (bk.status === 200 ? pass : fail)('TC-EVT-004', 'Events bookings endpoint responds', `HTTP ${bk.status}`);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const av = await api('GET', `/api/restaurant/${restaurantId}/events/availability?from=${today}`);
+  (av.status === 200 && Array.isArray(av.data?.dates) ? pass : fail)('TC-EVT-005', 'Events availability grid responds', `HTTP ${av.status}`);
+
+  const ra = await api('GET', `/api/restaurant/${restaurantId}/events/rental-availability?date=${today}`);
+  (ra.status === 200 ? pass : fail)('TC-EVT-006', 'Events rental-availability responds', `HTTP ${ra.status}`);
+
+  // Language setting round-trip (app-wide i18n).
+  const lg = await api('GET', `/api/restaurant/${restaurantId}/settings/language`);
+  (lg.status === 200 ? pass : fail)('TC-EVT-007', 'Language setting endpoint responds', `HTTP ${lg.status}`);
+}
+
 // ── Channel Manager tests ──────────────────────────────────────────────────
 
 async function testChannelManager() {
@@ -1487,6 +1525,7 @@ async function main() {
   await testInventory();
   await testAccounting();
   await testSpa();
+  await testEvents();
   await testChannelManager();
   await testReports();
   await testPublicBooking();

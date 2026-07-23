@@ -22,6 +22,11 @@ import {
   findAvailableSlots, serviceWindowMinutes, therapistConflict, resourceConflict, blockConflict,
   tsFromDateMinutes, hhmmToMinutes, minutesToHHMM,
 } from "./spaService.ts";
+import {
+  createEventTables, seedEventDefaults,
+  resolveVenueCharge, venueBookingConflict, venueBlockConflict, rentalCommittedQty,
+} from "./eventsService.ts";
+import { generateEventQuotationPdf, type EventQuotationData } from "./eventQuotationPdf.ts";
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
 import {
   computePayslip as computeStatutoryPayslip,
@@ -4757,6 +4762,11 @@ const restaurantAdmin = requireRole(RESTAURANT_ADMIN_ROLES);
 const SPA_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'WAITER', 'CHEF', 'THERAPIST'];
 const spaStaff = requireRole(SPA_OPERATIONAL_ROLES);
 
+// Events & Convention mutations: open to operational roles plus the dedicated
+// EVENTS_MANAGER role. Tab-level permissions (EVENTS_*) refine access on top.
+const EVENTS_OPERATIONAL_ROLES = ['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER', 'FRONT_DESK', 'CONCIERGE', 'CASHIER', 'EVENTS_MANAGER'];
+const eventsStaff = requireRole(EVENTS_OPERATIONAL_ROLES);
+
 // ─────────────────────────────────────────────────────────────────────────
 // RBAC-4 — Permission-aware tab guard (consults restaurant_role_permissions)
 // ─────────────────────────────────────────────────────────────────────────
@@ -5140,7 +5150,17 @@ async function startServer() {
     // tenant via POST /api/restaurant/:id/spa/enable (SUPER_ADMIN/CTO only).
     await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS spa_enabled INT DEFAULT 0`);
     await centralDb.run(`UPDATE restaurants SET spa_enabled = 0 WHERE spa_enabled IS NULL`);
-    console.log("[hospitality-migration] property_type + logo_url + menu_display_mode + alerts_enabled + spa_enabled ensured");
+    // ====== Events & Convention Center module gate (separate, orthogonal) ======
+    // Dedicated boolean like spa_enabled. DEFAULT 0 = every existing tenant keeps
+    // Events hidden (nav) and gets 403 on /events/* routes. Zero impact. Activated
+    // per tenant via POST /api/restaurant/:id/events/enable (SUPER_ADMIN/CTO only).
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS events_enabled INT DEFAULT 0`);
+    await centralDb.run(`UPDATE restaurants SET events_enabled = 0 WHERE events_enabled IS NULL`);
+    // ====== Secondary language (i18n) ======
+    // NULL = English-only (default). When set (e.g. 'ta','hi','kn','te','pa'), the
+    // app offers an English↔regional toggle. Purely additive; unset tenants unchanged.
+    await centralDb.run(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS secondary_language TEXT`);
+    console.log("[hospitality-migration] property_type + logo_url + menu_display_mode + alerts_enabled + spa_enabled + events_enabled + secondary_language ensured");
   } catch (err) {
     console.error("[hospitality-migration] Warning:", err);
   }
@@ -5276,6 +5296,27 @@ async function startServer() {
     if (spaTenants.length > 0) console.log(`[spa-tenant-migration] Ran for ${spaTenants.length} spa tenant(s)`);
   } catch (err) {
     console.error("[spa-tenant-migration] error:", err);
+  }
+
+  // ====== Per-tenant events schema migrations ======
+  // Re-run createEventTables() at boot for events-enabled tenants so ALTER … ADD
+  // COLUMN IF NOT EXISTS changes land without a module toggle. Guarded on
+  // events_enabled=1 so non-events tenants (the vast majority) are never touched.
+  try {
+    const eventTenants: any[] = await centralDb.query(
+      "SELECT id FROM restaurants WHERE events_enabled = 1"
+    );
+    for (const t of eventTenants) {
+      try {
+        const tenantDb = await getTenantDb(t.id);
+        await createEventTables(tenantDb);
+      } catch (err) {
+        console.error(`[events-tenant-migration] tenant ${t.id}:`, err);
+      }
+    }
+    if (eventTenants.length > 0) console.log(`[events-tenant-migration] Ran for ${eventTenants.length} events tenant(s)`);
+  } catch (err) {
+    console.error("[events-tenant-migration] error:", err);
   }
 
   // ───────────────────────────────────────────────────────────────────────
@@ -21179,6 +21220,966 @@ ${data.tenant.name}`;
   const mkSpaId = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
   const round2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // Events & Convention Center module (gated by restaurants.events_enabled = 1)
+  // Fully isolated: dedicated tables (eventsService.ts), dedicated routes, and
+  // cross-module hotel access strictly through the Hotel HTTP API.
+  // ══════════════════════════════════════════════════════════════════════════
+  const ensureEventsEnabled = async (restaurantId: string): Promise<{ ok: boolean; restaurant: any; status: number; error: string }> => {
+    const r: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [restaurantId]);
+    if (!r) return { ok: false, restaurant: null, status: 404, error: "Restaurant not found" };
+    if (Number(r.events_enabled) !== 1) {
+      return { ok: false, restaurant: null, status: 403, error: "Events module not enabled for this property" };
+    }
+    return { ok: true, restaurant: r, status: 200, error: '' };
+  };
+  const mkEventId = (p: string) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+  // ─── Enable / disable the events module (SUPER_ADMIN / CTO only) ────────────
+  app.post("/api/restaurant/:id/events/enable", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const restaurantId = req.params.id;
+      if (req.user?.role !== 'SUPER_ADMIN' && req.user?.role !== 'CTO') {
+        return res.status(403).json({ error: "This action is restricted to platform administrators. Contact sales to add the Events module to your subscription." });
+      }
+      const enabled: boolean = req.body?.enabled !== false; // default true
+      const current: any = await centralDb.get("SELECT events_enabled FROM restaurants WHERE id = ?", [restaurantId]);
+      if (!current) return res.status(404).json({ error: "Restaurant not found" });
+      await centralDb.run("UPDATE restaurants SET events_enabled = ? WHERE id = ?", [enabled ? 1 : 0, restaurantId]);
+      try {
+        await centralDb.run(
+          `INSERT INTO property_type_audit (restaurant_id, changed_by_email, changed_by_role, from_type, to_type, ip, changed_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [restaurantId, req.user?.email || 'unknown', req.user?.role || 'unknown',
+           `events:${Number(current.events_enabled) === 1 ? 'ON' : 'OFF'}`, `events:${enabled ? 'ON' : 'OFF'}`,
+           String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim()]
+        );
+      } catch (auditErr: any) { console.error("[events/enable] audit write failed:", auditErr?.message); }
+
+      let seeded = 0;
+      if (enabled) {
+        const tenantDb = await getTenantDb(restaurantId);
+        await createEventTables(tenantDb);
+        seeded = await seedEventDefaults(tenantDb);
+      }
+      res.json({
+        success: true,
+        events_enabled: enabled ? 1 : 0,
+        defaults_seeded: seeded,
+        message: enabled ? `Events module enabled${seeded > 0 ? ` · ${seeded} sample records added` : ''}` : "Events module disabled (data preserved)",
+      });
+    } catch (err: any) {
+      console.error("/events/enable error:", err);
+      res.status(500).json({ error: "Failed to toggle events module" });
+    }
+  });
+
+  // ─── Secondary language (i18n) — tenant-level setting ──────────────────────
+  app.get("/api/restaurant/:id/settings/language", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const r: any = await centralDb.get("SELECT secondary_language FROM restaurants WHERE id = ?", [req.params.id]);
+      if (!r) return res.status(404).json({ error: "Restaurant not found" });
+      res.json({ secondary_language: r.secondary_language || null });
+    } catch (err: any) { res.status(500).json({ error: "Failed to read language setting" }); }
+  });
+
+  app.put("/api/restaurant/:id/settings/language", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!['SUPER_ADMIN', 'CTO', 'OWNER', 'MANAGER'].includes(String(req.user?.role))) {
+        return res.status(403).json({ error: "Only owners and managers can change the language setting" });
+      }
+      // Empty string / null clears the secondary language (English-only).
+      const lang = req.body?.secondary_language ? String(req.body.secondary_language).slice(0, 8) : null;
+      await centralDb.run("UPDATE restaurants SET secondary_language = ? WHERE id = ?", [lang, req.params.id]);
+      res.json({ success: true, secondary_language: lang });
+    } catch (err: any) { res.status(500).json({ error: "Failed to update language setting" }); }
+  });
+
+  // ─── VENUES (convention halls) ─────────────────────────────────────────────
+  app.get("/api/restaurant/:id/events/venues", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM event_venues ORDER BY display_order, name");
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch venues" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/venues", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.name) return res.status(400).json({ error: "name is required" });
+      const id = mkEventId('EVN');
+      await db.run(
+        `INSERT INTO event_venues (id, name, category, ac_type, min_occupancy, max_occupancy, floor_area, hourly_rate, half_day_rate, daily_rate, gst_percent, amenities, image_url, display_order, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, b.name, b.category || 'BANQUET', b.ac_type || 'AC',
+         Number(b.min_occupancy || 0), Number(b.max_occupancy || 0), b.floor_area || null,
+         Number(b.hourly_rate || 0), Number(b.half_day_rate || 0), Number(b.daily_rate || 0),
+         Number(b.gst_percent ?? 18), b.amenities || null, b.image_url || null, Number(b.display_order || 0)]
+      );
+      const row = await db.get("SELECT * FROM event_venues WHERE id = ?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to create venue" }); }
+  });
+
+  app.patch("/api/restaurant/:id/events/venues/:vid", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      const allow = ['name','category','ac_type','min_occupancy','max_occupancy','floor_area','hourly_rate','half_day_rate','daily_rate','gst_percent','amenities','image_url','display_order','is_active'];
+      for (const k of allow) {
+        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
+      }
+      if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      vals.push(req.params.vid);
+      await db.run(`UPDATE event_venues SET ${fields.join(', ')} WHERE id = ?`, vals);
+      const row = await db.get("SELECT * FROM event_venues WHERE id = ?", [req.params.vid]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update venue" }); }
+  });
+
+  app.delete("/api/restaurant/:id/events/venues/:vid", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      // Soft-delete: deactivate rather than break historical bookings.
+      await db.run("UPDATE event_venues SET is_active = 0 WHERE id = ?", [req.params.vid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete venue" }); }
+  });
+
+  // Venue blocks (maintenance / hold)
+  app.get("/api/restaurant/:id/events/venue-blocks", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM event_venue_blocks ORDER BY from_date DESC");
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch venue blocks" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/venue-blocks", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.venue_id || !b.from_date || !b.to_date) return res.status(400).json({ error: "venue_id, from_date, to_date required" });
+      const id = mkEventId('EVB');
+      await db.run(
+        `INSERT INTO event_venue_blocks (id, venue_id, from_date, to_date, reason, created_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [id, b.venue_id, b.from_date, b.to_date, b.reason || null, req.user?.email || null]
+      );
+      const row = await db.get("SELECT * FROM event_venue_blocks WHERE id = ?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to create venue block" }); }
+  });
+
+  app.delete("/api/restaurant/:id/events/venue-blocks/:bid", authenticate, eventsStaff, requireTabAccess('EVENTS_VENUES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("DELETE FROM event_venue_blocks WHERE id = ?", [req.params.bid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete venue block" }); }
+  });
+
+  // ─── RENTAL ITEMS (inventory master) ───────────────────────────────────────
+  app.get("/api/restaurant/:id/events/rental-items", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM event_rental_items ORDER BY display_order, name");
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch rental items" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/rental-items", authenticate, eventsStaff, requireTabAccess('EVENTS_RENTALS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.name) return res.status(400).json({ error: "name is required" });
+      const id = mkEventId('ERI');
+      await db.run(
+        `INSERT INTO event_rental_items (id, name, category, unit, quantity_owned, rent_hourly, rent_daily, rent_weekly, deposit, gst_percent, display_order, notes, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, b.name, b.category || 'FURNITURE', b.unit || 'piece', Number(b.quantity_owned || 0),
+         Number(b.rent_hourly || 0), Number(b.rent_daily || 0), Number(b.rent_weekly || 0),
+         Number(b.deposit || 0), Number(b.gst_percent ?? 18), Number(b.display_order || 0), b.notes || null]
+      );
+      const row = await db.get("SELECT * FROM event_rental_items WHERE id = ?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to create rental item" }); }
+  });
+
+  app.patch("/api/restaurant/:id/events/rental-items/:iid", authenticate, eventsStaff, requireTabAccess('EVENTS_RENTALS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      const allow = ['name','category','unit','quantity_owned','rent_hourly','rent_daily','rent_weekly','deposit','gst_percent','display_order','notes','is_active'];
+      for (const k of allow) {
+        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
+      }
+      if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      vals.push(req.params.iid);
+      await db.run(`UPDATE event_rental_items SET ${fields.join(', ')} WHERE id = ?`, vals);
+      const row = await db.get("SELECT * FROM event_rental_items WHERE id = ?", [req.params.iid]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update rental item" }); }
+  });
+
+  app.delete("/api/restaurant/:id/events/rental-items/:iid", authenticate, eventsStaff, requireTabAccess('EVENTS_RENTALS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE event_rental_items SET is_active = 0 WHERE id = ?", [req.params.iid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete rental item" }); }
+  });
+
+  // ─── ADD-ON SERVICES (serving staff, security, parking, decoration) ─────────
+  app.get("/api/restaurant/:id/events/services", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM event_services ORDER BY display_order, name");
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch services" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/services", authenticate, eventsStaff, requireTabAccess('EVENTS_SERVICES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.name) return res.status(400).json({ error: "name is required" });
+      const id = mkEventId('ESV');
+      await db.run(
+        `INSERT INTO event_services (id, name, category, pricing_type, rate, gst_percent, display_order, notes, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, b.name, b.category || 'STAFF', b.pricing_type || 'PER_EVENT',
+         Number(b.rate || 0), Number(b.gst_percent ?? 18), Number(b.display_order || 0), b.notes || null]
+      );
+      const row = await db.get("SELECT * FROM event_services WHERE id = ?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to create service" }); }
+  });
+
+  app.patch("/api/restaurant/:id/events/services/:sid", authenticate, eventsStaff, requireTabAccess('EVENTS_SERVICES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      const allow = ['name','category','pricing_type','rate','gst_percent','display_order','notes','is_active'];
+      for (const k of allow) {
+        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
+      }
+      if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+      vals.push(req.params.sid);
+      await db.run(`UPDATE event_services SET ${fields.join(', ')} WHERE id = ?`, vals);
+      const row = await db.get("SELECT * FROM event_services WHERE id = ?", [req.params.sid]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update service" }); }
+  });
+
+  app.delete("/api/restaurant/:id/events/services/:sid", authenticate, eventsStaff, requireTabAccess('EVENTS_SERVICES'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE event_services SET is_active = 0 WHERE id = ?", [req.params.sid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete service" }); }
+  });
+
+  // ─── PUBLIC PROFILE (staff-side config) ────────────────────────────────────
+  app.get("/api/restaurant/:id/events/profile", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const row = await db.get("SELECT * FROM event_profile WHERE id = 1");
+      res.json(row || {});
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch profile" }); }
+  });
+
+  app.put("/api/restaurant/:id/events/profile", authenticate, eventsStaff, requireTabAccess('EVENTS_SETTINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      await db.run(
+        `INSERT INTO event_profile (id, hero_title, tagline, description, hero_image_url, gallery, contact_phone, contact_email, is_published, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET
+           hero_title = EXCLUDED.hero_title, tagline = EXCLUDED.tagline, description = EXCLUDED.description,
+           hero_image_url = EXCLUDED.hero_image_url, gallery = EXCLUDED.gallery,
+           contact_phone = EXCLUDED.contact_phone, contact_email = EXCLUDED.contact_email,
+           is_published = EXCLUDED.is_published, updated_at = CURRENT_TIMESTAMP`,
+        [b.hero_title || null, b.tagline || null, b.description || null, b.hero_image_url || null,
+         typeof b.gallery === 'string' ? b.gallery : JSON.stringify(b.gallery || []),
+         b.contact_phone || null, b.contact_email || null, b.is_published === false ? 0 : 1]
+      );
+      const row = await db.get("SELECT * FROM event_profile WHERE id = 1");
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update profile" }); }
+  });
+
+  // ─── AVAILABILITY ──────────────────────────────────────────────────────────
+  // Venue × date grid. For each active venue and each date in [from,to], report
+  // whether it is FREE, BOOKED (a CONFIRMED/IN_PROGRESS event overlaps), or
+  // BLOCKED (maintenance/hold). Mirrors the hotel availability response shape so
+  // the frontend calendar component is reused with venues as rows.
+  app.get("/api/restaurant/:id/events/availability", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const from = String(req.query.from || '').trim() || new Date().toISOString().slice(0, 10);
+      const toRaw = String(req.query.to || '').trim();
+      // Default window: 14 days from `from`.
+      const start = new Date(from + 'T00:00:00Z');
+      const to = toRaw || new Date(start.getTime() + 13 * 86400000).toISOString().slice(0, 10);
+
+      const venues: any[] = await db.query("SELECT * FROM event_venues WHERE is_active = 1 ORDER BY display_order, name");
+      const bookings: any[] = await db.query(
+        `SELECT id, venue_id, customer_name, event_date, start_time, end_time, status, event_type
+           FROM event_bookings
+          WHERE status IN ('CONFIRMED','IN_PROGRESS','QUOTED','INQUIRY')
+            AND event_date >= ? AND event_date <= ?`,
+        [from, to]
+      );
+      const blocks: any[] = await db.query(
+        `SELECT id, venue_id, from_date, to_date, reason FROM event_venue_blocks
+          WHERE from_date <= ? AND to_date >= ?`,
+        [to, from]
+      );
+
+      // Build the date list.
+      const dates: string[] = [];
+      for (let d = new Date(from + 'T00:00:00Z'); d.toISOString().slice(0, 10) <= to; d = new Date(d.getTime() + 86400000)) {
+        dates.push(d.toISOString().slice(0, 10));
+      }
+      res.json({ from, to, dates, venues, bookings, blocks });
+    } catch (err: any) {
+      console.error("/events/availability error:", err);
+      res.status(500).json({ error: "Failed to fetch availability" });
+    }
+  });
+
+  // Rental-item availability for a date: owned − committed(CONFIRMED/IN_PROGRESS).
+  app.get("/api/restaurant/:id/events/rental-availability", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const date = String(req.query.date || '').trim() || new Date().toISOString().slice(0, 10);
+      const excludeBookingId = String(req.query.exclude || '').trim() || undefined;
+      const items: any[] = await db.query("SELECT * FROM event_rental_items WHERE is_active = 1 ORDER BY display_order, name");
+      const out = [];
+      for (const it of items) {
+        const committed = await rentalCommittedQty(db, it.id, date, excludeBookingId);
+        out.push({ ...it, committed, available: Math.max(0, Number(it.quantity_owned || 0) - committed) });
+      }
+      res.json({ date, items: out });
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch rental availability" }); }
+  });
+
+  // Recompute + persist a booking's total from its venue + line items.
+  const recomputeEventTotal = async (db: any, bookingId: string): Promise<number> => {
+    const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [bookingId]);
+    if (!bk) return 0;
+    const items: any[] = await db.query("SELECT COALESCE(SUM(line_total),0) AS t FROM event_booking_items WHERE booking_id = ?", [bookingId]);
+    const svcs: any[] = await db.query("SELECT COALESCE(SUM(line_total),0) AS t FROM event_booking_services WHERE booking_id = ?", [bookingId]);
+    const rooms: any[] = await db.query("SELECT COALESCE(SUM(line_total),0) AS t FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId]);
+    const total = round2(
+      Number(bk.venue_rate || 0) + Number(items[0]?.t || 0) + Number(svcs[0]?.t || 0) +
+      Number(rooms[0]?.t || 0) - Number(bk.discount || 0)
+    );
+    await db.run("UPDATE event_bookings SET total_amount = ? WHERE id = ?", [total, bookingId]);
+    return total;
+  };
+
+  // Insert booking line items (rentals + services) from request arrays.
+  const insertEventLines = async (db: any, bookingId: string, body: any) => {
+    if (Array.isArray(body.items)) {
+      for (const it of body.items) {
+        if (!it || !it.rental_item_id) continue;
+        const master: any = await db.get("SELECT * FROM event_rental_items WHERE id = ?", [it.rental_item_id]);
+        const basis = it.rate_basis || 'DAILY';
+        const unitRate = it.unit_rate !== undefined ? Number(it.unit_rate)
+          : basis === 'HOURLY' ? Number(master?.rent_hourly || 0)
+          : basis === 'WEEKLY' ? Number(master?.rent_weekly || 0)
+          : Number(master?.rent_daily || 0);
+        const qty = Number(it.quantity || 1);
+        const dur = Number(it.duration_units || 1);
+        const gst = Number(it.gst_percent ?? master?.gst_percent ?? 18);
+        const lineTotal = round2(unitRate * qty * dur);
+        await db.run(
+          `INSERT INTO event_booking_items (id, booking_id, rental_item_id, name_snapshot, quantity, rate_basis, unit_rate, duration_units, gst_percent, line_total)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [mkEventId('EBI'), bookingId, it.rental_item_id, master?.name || it.name_snapshot || 'Item', qty, basis, unitRate, dur, gst, lineTotal]
+        );
+      }
+    }
+    if (Array.isArray(body.services)) {
+      for (const s of body.services) {
+        if (!s || !s.service_id) continue;
+        const master: any = await db.get("SELECT * FROM event_services WHERE id = ?", [s.service_id]);
+        const unitRate = s.unit_rate !== undefined ? Number(s.unit_rate) : Number(master?.rate || 0);
+        const qty = Number(s.quantity || 1);
+        const gst = Number(s.gst_percent ?? master?.gst_percent ?? 18);
+        const lineTotal = round2(unitRate * qty);
+        await db.run(
+          `INSERT INTO event_booking_services (id, booking_id, service_id, name_snapshot, pricing_snapshot, quantity, unit_rate, gst_percent, line_total)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [mkEventId('EBS'), bookingId, s.service_id, master?.name || s.name_snapshot || 'Service', master?.pricing_type || 'PER_EVENT', qty, unitRate, gst, lineTotal]
+        );
+      }
+    }
+  };
+
+  // ─── BOOKINGS ──────────────────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/events/bookings", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const status = String(req.query.status || '').trim();
+      const from = String(req.query.from || '').trim();
+      const to = String(req.query.to || '').trim();
+      const search = String(req.query.search || '').trim();
+      let sql = `SELECT b.*, v.name AS venue_name, v.category AS venue_category, v.ac_type
+                   FROM event_bookings b
+                   LEFT JOIN event_venues v ON v.id = b.venue_id
+                  WHERE 1=1`;
+      const params: any[] = [];
+      if (status) { sql += ` AND b.status = ?`; params.push(status); }
+      if (from) { sql += ` AND b.event_date >= ?`; params.push(from); }
+      if (to) { sql += ` AND b.event_date <= ?`; params.push(to); }
+      if (search) { sql += ` AND (b.customer_name ILIKE ? OR b.customer_phone ILIKE ?)`; params.push(`%${search}%`, `%${search}%`); }
+      sql += ` ORDER BY b.event_date DESC, b.created_at DESC LIMIT 1000`;
+      const rows = await db.query(sql, params);
+      res.json(rows);
+    } catch (err: any) {
+      console.error("/events/bookings list error:", err);
+      res.status(500).json({ error: "Failed to fetch bookings" });
+    }
+  });
+
+  app.get("/api/restaurant/:id/events/bookings/:bid", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get(
+        `SELECT b.*, v.name AS venue_name, v.category AS venue_category, v.ac_type
+           FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
+          WHERE b.id = ?`, [req.params.bid]
+      );
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const items = await db.query("SELECT * FROM event_booking_items WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
+      const services = await db.query("SELECT * FROM event_booking_services WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
+      const rooms = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
+      const quotations = await db.query("SELECT * FROM event_quotations WHERE booking_id = ? ORDER BY version DESC", [req.params.bid]);
+      res.json({ ...bk, items, services, rooms, quotations });
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch booking" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/bookings", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.customer_name) return res.status(400).json({ error: "customer_name is required" });
+      if (!b.event_date) return res.status(400).json({ error: "event_date is required" });
+      const startTime = b.start_time || '10:00';
+      const endTime = b.end_time || '22:00';
+      const rateBasis = b.venue_rate_basis || 'DAILY';
+
+      // Venue conflict guard (only meaningful for held statuses; INQUIRY skips it).
+      const targetStatus = b.status || 'INQUIRY';
+      if (b.venue_id && (targetStatus === 'CONFIRMED' || targetStatus === 'IN_PROGRESS')) {
+        const conflict = await venueBookingConflict(db, b.venue_id, b.event_date, startTime, endTime);
+        if (conflict) return res.status(409).json({ error: "Venue already booked for this date/time" });
+        const blocked = await venueBlockConflict(db, b.venue_id, b.event_date);
+        if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });
+      }
+
+      let venueRate = Number(b.venue_rate || 0);
+      if (!venueRate && b.venue_id) {
+        const venue: any = await db.get("SELECT * FROM event_venues WHERE id = ?", [b.venue_id]);
+        if (venue) venueRate = resolveVenueCharge(venue, rateBasis, startTime, endTime);
+      }
+
+      const id = mkEventId('EVT');
+      await db.run(
+        `INSERT INTO event_bookings
+          (id, venue_id, customer_name, customer_phone, customer_email, customer_gstin, event_type, status,
+           event_date, end_date, start_time, end_time, venue_rate_basis, guest_count, booking_source,
+           venue_rate, discount, advance_amount, special_requests, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, b.venue_id || null, b.customer_name, b.customer_phone || null, b.customer_email || null,
+         b.customer_gstin || null, b.event_type || null, targetStatus,
+         b.event_date, b.end_date || null, startTime, endTime, rateBasis, Number(b.guest_count || 0),
+         b.booking_source || 'DIRECT', round2(venueRate), Number(b.discount || 0),
+         Number(b.advance_amount || 0), b.special_requests || null, req.user?.email || null]
+      );
+      await insertEventLines(db, id, b);
+      await recomputeEventTotal(db, id);
+      const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) {
+      console.error("/events/bookings create error:", err);
+      res.status(500).json({ error: "Failed to create booking" });
+    }
+  });
+
+  app.put("/api/restaurant/:id/events/bookings/:bid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const existing: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!existing) return res.status(404).json({ error: "Booking not found" });
+      if (existing.status === 'COMPLETED' || existing.status === 'CANCELLED') {
+        return res.status(409).json({ error: `Cannot edit a ${existing.status} booking` });
+      }
+      const fields: string[] = []; const vals: any[] = [];
+      const allow = ['venue_id','customer_name','customer_phone','customer_email','customer_gstin','event_type',
+        'event_date','end_date','start_time','end_time','venue_rate_basis','guest_count','booking_source',
+        'venue_rate','discount','advance_amount','special_requests'];
+      for (const k of allow) {
+        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(b[k]); }
+      }
+      if (fields.length) {
+        vals.push(req.params.bid);
+        await db.run(`UPDATE event_bookings SET ${fields.join(', ')} WHERE id = ?`, vals);
+      }
+      // Replace line items if arrays supplied.
+      if (Array.isArray(b.items)) {
+        await db.run("DELETE FROM event_booking_items WHERE booking_id = ?", [req.params.bid]);
+      }
+      if (Array.isArray(b.services)) {
+        await db.run("DELETE FROM event_booking_services WHERE booking_id = ?", [req.params.bid]);
+      }
+      if (Array.isArray(b.items) || Array.isArray(b.services)) {
+        await insertEventLines(db, req.params.bid, b);
+      }
+      await recomputeEventTotal(db, req.params.bid);
+      const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      res.json(row);
+    } catch (err: any) {
+      console.error("/events/bookings update error:", err);
+      res.status(500).json({ error: "Failed to update booking" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/events/bookings/:bid/cancel", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const existing: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!existing) return res.status(404).json({ error: "Booking not found" });
+      await db.run(
+        "UPDATE event_bookings SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancelled_by = ?, cancellation_reason = ? WHERE id = ?",
+        [req.user?.email || null, req.body?.reason || null, req.params.bid]
+      );
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to cancel booking" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/bookings/:bid/complete", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("UPDATE event_bookings SET status = 'COMPLETED' WHERE id = ?", [req.params.bid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to complete booking" }); }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Hotel-rooms bridge — the ONLY cross-module seam. Never queries hotel tables
+  // directly: it calls the Hotel HTTP API on 127.0.0.1, forwarding the caller's
+  // JWT. Read availability/rates at quote time; create real hotel bookings only
+  // when the event is CONFIRMED.
+  // ══════════════════════════════════════════════════════════════════════════
+  const callSelfApi = async (method: string, path: string, authHeader: string | undefined, body?: any) => {
+    const port = process.env.PORT || 4001;
+    const url = `http://127.0.0.1:${port}${path}`;
+    try {
+      const resp = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...(authHeader ? { Authorization: authHeader } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const text = await resp.text();
+      let json: any = null;
+      try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
+      return { ok: resp.ok, status: resp.status, data: json };
+    } catch (err: any) {
+      return { ok: false, status: 502, data: { error: `Internal API call failed: ${err?.message || err}` } };
+    }
+  };
+
+  // Read hotel availability + rates for an event's dates (read-only, quote time).
+  app.get("/api/restaurant/:id/events/bookings/:bid/hotel-availability", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const from = String(req.query.check_in || bk.event_date || '').slice(0, 10);
+      const to = String(req.query.check_out || bk.end_date || bk.event_date || '').slice(0, 10);
+      const result = await callSelfApi(
+        'GET',
+        `/api/restaurant/${req.params.id}/hotel/availability?from=${from}&to=${to}`,
+        req.headers.authorization
+      );
+      if (!result.ok) {
+        // Hotel not enabled for this tenant, or no rooms — return empty gracefully.
+        return res.json({ hotel_enabled: result.status !== 403, check_in: from, check_out: to, availability: null, note: result.data?.error || null });
+      }
+      res.json({ hotel_enabled: true, check_in: from, check_out: to, availability: result.data });
+    } catch (err: any) {
+      console.error("/events hotel-availability error:", err);
+      res.status(500).json({ error: "Failed to read hotel availability" });
+    }
+  });
+
+  // Attach a hotel room to the event (QUOTED only — no real booking yet).
+  app.post("/api/restaurant/:id/events/bookings/:bid/rooms", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const b = req.body || {};
+      const checkIn = b.check_in_date || bk.event_date;
+      const checkOut = b.check_out_date || bk.end_date || bk.event_date;
+      const numRooms = Math.max(1, Number(b.num_rooms || 1));
+      const rate = Number(b.quoted_rate || 0);
+      // nights × rooms × rate for the room line total.
+      const nights = Math.max(1, Math.round((new Date(checkOut + 'T00:00:00Z').getTime() - new Date(checkIn + 'T00:00:00Z').getTime()) / 86400000) || 1);
+      const lineTotal = round2(rate * numRooms * nights);
+      const id = mkEventId('EBR');
+      await db.run(
+        `INSERT INTO event_booking_rooms
+           (id, booking_id, room_type_id, room_type_snapshot, check_in_date, check_out_date, num_rooms, quoted_rate, gst_percent, line_total, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUOTED')`,
+        [id, req.params.bid, b.room_type_id || null, b.room_type_snapshot || b.room_type_name || 'Room',
+         checkIn, checkOut, numRooms, rate, Number(b.gst_percent ?? 12), lineTotal]
+      );
+      await recomputeEventTotal(db, req.params.bid);
+      const row = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [id]);
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to attach room" }); }
+  });
+
+  app.delete("/api/restaurant/:id/events/bookings/:bid/rooms/:rid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const room: any = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [req.params.rid]);
+      if (!room) return res.status(404).json({ error: "Room line not found" });
+      if (room.status === 'BOOKED' && room.hotel_booking_id) {
+        return res.status(409).json({ error: "This room is already booked in the hotel. Cancel it from the Hotel module first." });
+      }
+      await db.run("DELETE FROM event_booking_rooms WHERE id = ?", [req.params.rid]);
+      await recomputeEventTotal(db, req.params.bid);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to remove room" }); }
+  });
+
+  // Confirm the event → hold the venue + create the real hotel bookings via API.
+  app.post("/api/restaurant/:id/events/bookings/:bid/confirm", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      if (bk.status === 'CANCELLED' || bk.status === 'COMPLETED') {
+        return res.status(409).json({ error: `Cannot confirm a ${bk.status} booking` });
+      }
+      // Re-check venue availability at confirm time.
+      if (bk.venue_id) {
+        const conflict = await venueBookingConflict(db, bk.venue_id, bk.event_date, bk.start_time, bk.end_time, bk.id);
+        if (conflict) return res.status(409).json({ error: "Venue is no longer available for this date/time" });
+        const blocked = await venueBlockConflict(db, bk.venue_id, bk.event_date);
+        if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });
+      }
+
+      // Create real hotel bookings for each QUOTED room via the Hotel API.
+      const rooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND status = 'QUOTED'", [req.params.bid]);
+      const roomResults: any[] = [];
+      for (const rm of rooms) {
+        const payload = {
+          room_type_id: rm.room_type_id,
+          guest_name: bk.customer_name,
+          guest_phone: bk.customer_phone,
+          guest_email: bk.customer_email,
+          check_in_date: rm.check_in_date,
+          check_out_date: rm.check_out_date,
+          booking_source: 'EVENT',
+          room_rate: rm.quoted_rate || undefined,
+          special_requests: `Event booking ${bk.id} — ${bk.customer_name}`,
+        };
+        const result = await callSelfApi('POST', `/api/restaurant/${req.params.id}/hotel/bookings`, req.headers.authorization, payload);
+        if (result.ok && result.data?.id) {
+          await db.run("UPDATE event_booking_rooms SET status = 'BOOKED', hotel_booking_id = ? WHERE id = ?", [result.data.id, rm.id]);
+          roomResults.push({ room_line_id: rm.id, ok: true, hotel_booking_id: result.data.id });
+        } else {
+          await db.run("UPDATE event_booking_rooms SET status = 'FAILED' WHERE id = ?", [rm.id]);
+          roomResults.push({ room_line_id: rm.id, ok: false, error: result.data?.error || `Hotel booking failed (${result.status})` });
+        }
+      }
+
+      await db.run("UPDATE event_bookings SET status = 'CONFIRMED' WHERE id = ?", [req.params.bid]);
+      const row = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      const failed = roomResults.filter(r => !r.ok);
+      res.json({
+        ...row,
+        room_results: roomResults,
+        warning: failed.length ? `${failed.length} hotel room(s) could not be booked — check hotel availability.` : undefined,
+      });
+    } catch (err: any) {
+      console.error("/events/bookings confirm error:", err);
+      res.status(500).json({ error: "Failed to confirm booking" });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Quotations (BEO) — snapshot booking lines, render PDF, email to customer.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Assemble quotation lines from a booking's venue + rentals + services + rooms.
+  const assembleEventQuoteLines = async (db: any, bk: any) => {
+    const lines: any[] = [];
+    if (Number(bk.venue_rate || 0) > 0) {
+      const venue: any = bk.venue_id ? await db.get("SELECT * FROM event_venues WHERE id = ?", [bk.venue_id]) : null;
+      const gst = Number(venue?.gst_percent ?? 18);
+      const amt = round2(bk.venue_rate);
+      lines.push({ line_type: 'VENUE', description: `${venue?.name || 'Venue'} (${bk.venue_rate_basis || 'DAILY'})`, quantity: 1, unit_rate: amt, amount: amt, gst_rate: gst, gst_amount: round2(amt * gst / 100) });
+    }
+    const items: any[] = await db.query("SELECT * FROM event_booking_items WHERE booking_id = ? ORDER BY created_at", [bk.id]);
+    for (const it of items) {
+      const gst = Number(it.gst_percent ?? 18);
+      lines.push({ line_type: 'RENTAL', description: `${it.name_snapshot} × ${it.quantity} (${it.rate_basis} × ${it.duration_units})`, quantity: it.quantity, unit_rate: it.unit_rate, amount: round2(it.line_total), gst_rate: gst, gst_amount: round2(it.line_total * gst / 100) });
+    }
+    const svcs: any[] = await db.query("SELECT * FROM event_booking_services WHERE booking_id = ? ORDER BY created_at", [bk.id]);
+    for (const s of svcs) {
+      const gst = Number(s.gst_percent ?? 18);
+      lines.push({ line_type: 'SERVICE', description: `${s.name_snapshot} × ${s.quantity}`, quantity: s.quantity, unit_rate: s.unit_rate, amount: round2(s.line_total), gst_rate: gst, gst_amount: round2(s.line_total * gst / 100) });
+    }
+    const rooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED' ORDER BY created_at", [bk.id]);
+    for (const rm of rooms) {
+      const gst = Number(rm.gst_percent ?? 12);
+      lines.push({ line_type: 'HOTEL_ROOM', description: `${rm.room_type_snapshot} × ${rm.num_rooms} (${rm.check_in_date} → ${rm.check_out_date})`, quantity: rm.num_rooms, unit_rate: rm.quoted_rate, amount: round2(rm.line_total), gst_rate: gst, gst_amount: round2(rm.line_total * gst / 100) });
+    }
+    const subtotal = round2(lines.reduce((s, l) => s + Number(l.amount || 0), 0));
+    const tax = round2(lines.reduce((s, l) => s + Number(l.gst_amount || 0), 0));
+    const discount = round2(bk.discount || 0);
+    const grand = round2(subtotal + tax - discount);
+    return { lines, subtotal, tax, discount, grand };
+  };
+
+  app.post("/api/restaurant/:id/events/bookings/:bid/quotations", authenticate, eventsStaff, requireTabAccess('EVENTS_QUOTATIONS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const { lines, subtotal, tax, discount, grand } = await assembleEventQuoteLines(db, bk);
+      // Next version + quote number.
+      const verRow: any = await db.get("SELECT COALESCE(MAX(version),0) AS v FROM event_quotations WHERE booking_id = ?", [req.params.bid]);
+      const version = Number(verRow?.v || 0) + 1;
+      const yr = new Date().getFullYear();
+      const cntRow: any = await db.get("SELECT COUNT(*)::int AS c FROM event_quotations", []);
+      const quoteNumber = `EQ-${yr}-${String(Number(cntRow?.c || 0) + 1).padStart(4, '0')}`;
+      const qid = mkEventId('EQT');
+      const validUntil = req.body?.valid_until || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+      await db.run(
+        `INSERT INTO event_quotations (id, booking_id, quote_number, version, status, valid_until, subtotal, tax_amount, discount, grand_total, notes, created_by)
+         VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?)`,
+        [qid, req.params.bid, quoteNumber, version, validUntil, subtotal, tax, discount, grand, req.body?.notes || null, req.user?.email || null]
+      );
+      for (const ln of lines) {
+        await db.run(
+          `INSERT INTO event_quotation_lines (id, quotation_id, line_type, description, quantity, unit_rate, amount, gst_rate, gst_amount)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [mkEventId('EQL'), qid, ln.line_type, ln.description, ln.quantity, ln.unit_rate, ln.amount, ln.gst_rate, ln.gst_amount]
+        );
+      }
+      // Move booking to QUOTED (unless already further along).
+      if (bk.status === 'INQUIRY') await db.run("UPDATE event_bookings SET status = 'QUOTED' WHERE id = ?", [req.params.bid]);
+      const row = await db.get("SELECT * FROM event_quotations WHERE id = ?", [qid]);
+      res.status(201).json(row);
+    } catch (err: any) {
+      console.error("/events quotation create error:", err);
+      res.status(500).json({ error: "Failed to create quotation" });
+    }
+  });
+
+  app.get("/api/restaurant/:id/events/quotations/:qid", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const q: any = await db.get("SELECT * FROM event_quotations WHERE id = ?", [req.params.qid]);
+      if (!q) return res.status(404).json({ error: "Quotation not found" });
+      const lines = await db.query("SELECT * FROM event_quotation_lines WHERE quotation_id = ? ORDER BY created_at", [req.params.qid]);
+      res.json({ ...q, lines });
+    } catch (err: any) { res.status(500).json({ error: "Failed to fetch quotation" }); }
+  });
+
+  // Build the PDF data payload for a quotation.
+  const buildQuotePdfData = async (db: any, restaurant: any, qid: string): Promise<EventQuotationData | null> => {
+    const q: any = await db.get("SELECT * FROM event_quotations WHERE id = ?", [qid]);
+    if (!q) return null;
+    const lines: any[] = await db.query("SELECT * FROM event_quotation_lines WHERE quotation_id = ? ORDER BY created_at", [qid]);
+    const bk: any = await db.get(
+      `SELECT b.*, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?`,
+      [q.booking_id]
+    );
+    return {
+      tenant: {
+        name: restaurant?.name || 'Our Venue',
+        address: restaurant?.address || undefined,
+        gstin: restaurant?.gstin || undefined,
+        phone: restaurant?.phone || undefined,
+        email: restaurant?.email || undefined,
+        currency: 'INR',
+      },
+      quotation: { quote_number: q.quote_number, version: q.version, valid_until: q.valid_until, notes: q.notes, created_at: q.created_at },
+      booking: {
+        customer_name: bk?.customer_name || '', customer_phone: bk?.customer_phone, customer_email: bk?.customer_email,
+        event_type: bk?.event_type, event_date: bk?.event_date, end_date: bk?.end_date,
+        start_time: bk?.start_time, end_time: bk?.end_time, guest_count: bk?.guest_count, venue_name: bk?.venue_name,
+      },
+      lines: lines.map(l => ({ line_type: l.line_type, description: l.description, quantity: Number(l.quantity), unit_rate: Number(l.unit_rate), amount: Number(l.amount), gst_rate: Number(l.gst_rate), gst_amount: Number(l.gst_amount) })),
+      subtotal: Number(q.subtotal), tax_amount: Number(q.tax_amount), discount: Number(q.discount), grand_total: Number(q.grand_total),
+    };
+  };
+
+  app.get("/api/restaurant/:id/events/quotations/:qid/pdf", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const data = await buildQuotePdfData(db, check.restaurant, req.params.qid);
+      if (!data) return res.status(404).json({ error: "Quotation not found" });
+      const pdf = await generateEventQuotationPdf(data);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${data.quotation.quote_number}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) {
+      console.error("/events quotation pdf error:", err);
+      res.status(500).json({ error: "Failed to generate quotation PDF" });
+    }
+  });
+
+  app.post("/api/restaurant/:id/events/quotations/:qid/send", authenticate, eventsStaff, requireTabAccess('EVENTS_QUOTATIONS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const data = await buildQuotePdfData(db, check.restaurant, req.params.qid);
+      if (!data) return res.status(404).json({ error: "Quotation not found" });
+      const to = String(req.body?.email || data.booking.customer_email || '').trim();
+      if (!to) return res.status(400).json({ error: "No recipient email — add the customer's email first." });
+      const pdf = await generateEventQuotationPdf(data);
+      const subject = `Quotation ${data.quotation.quote_number} — ${data.tenant.name}`;
+      const text = `Dear ${data.booking.customer_name},\n\nPlease find attached our quotation (${data.quotation.quote_number}) for your event. This quotation is valid until ${String(data.quotation.valid_until || '').slice(0, 10)}.\n\nWe look forward to hosting your event.\n\nRegards,\n${data.tenant.name}`;
+      const html = `<p>Dear ${data.booking.customer_name},</p><p>Please find attached our quotation (<strong>${data.quotation.quote_number}</strong>) for your event, valid until <strong>${String(data.quotation.valid_until || '').slice(0, 10)}</strong>.</p><p>We look forward to hosting your event.</p><p>Regards,<br/>${data.tenant.name}</p>`;
+      const sent = await sendEmail(to, subject, text, html, [{ filename: `${data.quotation.quote_number}.pdf`, content: pdf }]);
+      if (!sent) return res.status(502).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download." });
+      await db.run("UPDATE event_quotations SET status = 'SENT', sent_at = CURRENT_TIMESTAMP, sent_to_email = ? WHERE id = ?", [to, req.params.qid]);
+      res.json({ success: true, sent_to: to });
+    } catch (err: any) {
+      console.error("/events quotation send error:", err);
+      res.status(500).json({ error: "Failed to send quotation" });
+    }
+  });
+
+  // ─── CHECKOUT → folio (folio_kind='EVENT') ─────────────────────────────────
+  app.post("/api/restaurant/:id/events/bookings/:bid/checkout", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      if (bk.folio_id) {
+        const existing = await db.get("SELECT * FROM folios WHERE id = ?", [bk.folio_id]);
+        if (existing) return res.json({ ...existing, already_billed: true });
+      }
+      const { lines, subtotal, tax, discount, grand } = await assembleEventQuoteLines(db, bk);
+      const yr = new Date().getFullYear();
+      const cntRow: any = await db.get("SELECT COUNT(*)::int AS c FROM folios WHERE folio_kind = 'EVENT'", []);
+      const invoiceNumber = `EVT-${yr}-${String(Number(cntRow?.c || 0) + 1).padStart(5, '0')}`;
+      const fid = mkEventId('EFO');
+      await db.run(
+        `INSERT INTO folios (id, booking_id, event_booking_id, status, subtotal, gst_amount, discount, grand_total, doc_type, folio_kind, invoice_number, created_at)
+         VALUES (?, ?, ?, 'open', ?, ?, ?, ?, 'INVOICE', 'EVENT', ?, CURRENT_TIMESTAMP)`,
+        [fid, req.params.bid, req.params.bid, subtotal, tax, discount, grand, invoiceNumber]
+      );
+      for (const ln of lines) {
+        await db.run(
+          `INSERT INTO folio_entries (id, folio_id, entry_type, description, quantity, unit_price, amount, gst_rate, gst_amount)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [mkEventId('FEN'), fid, ln.line_type, ln.description, ln.quantity, ln.unit_rate, ln.amount, ln.gst_rate, ln.gst_amount]
+        );
+      }
+      // Record the advance as a payment if one was collected on the booking.
+      if (Number(bk.advance_amount || 0) > 0) {
+        await db.run(
+          `INSERT INTO folio_payments (id, folio_id, amount, payment_method, payment_type, notes)
+           VALUES (?, ?, ?, 'CASH', 'ADVANCE', 'Event advance')`,
+          [mkEventId('FPA'), fid, Number(bk.advance_amount)]
+        );
+      }
+      await db.run("UPDATE event_bookings SET folio_id = ?, status = CASE WHEN status = 'CONFIRMED' THEN 'IN_PROGRESS' ELSE status END WHERE id = ?", [fid, req.params.bid]);
+      const folio = await db.get("SELECT * FROM folios WHERE id = ?", [fid]);
+      res.status(201).json(folio);
+    } catch (err: any) {
+      console.error("/events checkout error:", err);
+      res.status(500).json({ error: "Failed to create event invoice" });
+    }
+  });
+
   // ─── Enable / disable the spa module (SUPER_ADMIN / CTO only) ──────────────
   app.post("/api/restaurant/:id/spa/enable", authenticate, async (req: AuthRequest, res: Response) => {
     try {
@@ -22439,6 +23440,69 @@ ${data.tenant.name}`;
       );
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to save spa profile" }); }
+  });
+
+  // ─── PUBLIC — Events & Convention (no auth) ────────────────────────────────
+  // Gate: events_enabled = 1 AND event_profile.is_published = 1.
+  const publicEventsGate = async (restaurantId: string): Promise<{ ok: boolean; restaurant: any }> => {
+    const r: any = await centralDb.get("SELECT * FROM restaurants WHERE id = ?", [restaurantId]);
+    if (!r || Number(r.events_enabled) !== 1) return { ok: false, restaurant: null };
+    return { ok: true, restaurant: r };
+  };
+
+  app.get("/api/public/restaurant/:id/events", async (req: Request, res: Response) => {
+    try {
+      const gate = await publicEventsGate(req.params.id);
+      if (!gate.ok) return res.status(404).json({ error: "Events not available" });
+      const db = await getTenantDb(req.params.id);
+      const profile: any = await db.get("SELECT * FROM event_profile WHERE id = 1");
+      if (profile && Number(profile.is_published) === 0) return res.status(404).json({ error: "Events not available" });
+      const venues = await db.query(
+        "SELECT id, name, category, ac_type, min_occupancy, max_occupancy, floor_area, hourly_rate, half_day_rate, daily_rate, amenities, image_url FROM event_venues WHERE is_active = 1 ORDER BY display_order, name"
+      );
+      const services = await db.query("SELECT id, name, category, pricing_type, rate FROM event_services WHERE is_active = 1 ORDER BY display_order, name");
+      const r = gate.restaurant;
+      res.json({
+        property: { name: r.name, city: r.city, state: r.state, phone: r.phone, logo_url: r.logo_url, currency_symbol: r.currency_symbol || '₹' },
+        profile: profile || { hero_title: null, tagline: null, description: null, hero_image_url: null, gallery: '[]' },
+        venues,
+        services,
+      });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load events page" }); }
+  });
+
+  app.post("/api/public/restaurant/:id/events/inquiry", async (req: Request, res: Response) => {
+    try {
+      const gate = await publicEventsGate(req.params.id);
+      if (!gate.ok) return res.status(404).json({ error: "Events not available" });
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      if (!b.customer_name || !b.customer_phone) {
+        return res.status(400).json({ error: "Name and phone are required" });
+      }
+      if (!b.event_date) return res.status(400).json({ error: "Event date is required" });
+      const id = `EVT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      await db.run(
+        `INSERT INTO event_bookings
+          (id, venue_id, customer_name, customer_phone, customer_email, event_type, status,
+           event_date, start_time, end_time, guest_count, booking_source, special_requests)
+         VALUES (?, ?, ?, ?, ?, ?, 'INQUIRY', ?, ?, ?, ?, 'PUBLIC_INQUIRY', ?)`,
+        [id, b.venue_id || null, b.customer_name, b.customer_phone, b.customer_email || null,
+         b.event_type || null, b.event_date, b.start_time || '10:00', b.end_time || '22:00',
+         Number(b.guest_count || 0), b.special_requests || null]
+      );
+      // Best-effort notify the property owner by email.
+      const ownerEmail = gate.restaurant?.email;
+      if (ownerEmail) {
+        const subject = `New event inquiry — ${b.customer_name}`;
+        const text = `New event inquiry received:\n\nName: ${b.customer_name}\nPhone: ${b.customer_phone}\nEmail: ${b.customer_email || '—'}\nEvent type: ${b.event_type || '—'}\nDate: ${b.event_date}\nGuests: ${b.guest_count || '—'}\nNotes: ${b.special_requests || '—'}\n\nOpen the Events module to prepare a quotation.`;
+        sendEmail(ownerEmail, subject, text).catch(() => {});
+      }
+      res.status(201).json({ success: true, inquiry_id: id, message: "Thank you! We'll get back to you shortly with a quotation." });
+    } catch (err: any) {
+      console.error("/public events inquiry error:", err);
+      res.status(500).json({ error: "Failed to submit inquiry" });
+    }
   });
 
   app.get("/api/public/restaurant/:id/spa", async (req: Request, res: Response) => {
