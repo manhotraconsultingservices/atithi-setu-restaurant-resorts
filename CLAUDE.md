@@ -402,6 +402,35 @@ Apply the same pattern to any new document-like object (Purchase Order, Sales Or
 
 ---
 
+## Localization (i18n) — MANDATORY for every new user-facing string
+
+There is a runtime i18n layer: `src/i18n.ts` (the `t()` resolver + `LanguageProvider`)
+and `src/locales/*.ts`. **English (`en.ts`) is the source of truth**; regional
+dictionaries (`hi`, `ta`, `kn`, `te`, `pa`, …) override per key and fall back to
+English for anything they omit. Each tenant sets a `secondary_language` and a
+toggle flips English ↔ that language. Currently seeded with full translations:
+**Hindi, Tamil, Kannada, Telugu** (Events module + public pages).
+
+**Definition of done — any new attribute label, feature, module, dropdown value,
+toast, or other visible string MUST be localized. This is not optional and is not
+limited to the Events module:**
+1. Add the English key to `src/locales/en.ts` and render it via `t('namespace.key')` —
+   **never hardcode a visible string** in a component.
+2. Add the translation to **every shipped regional dictionary** (`hi`, `ta`, `kn`,
+   `te`). Omitting a key is allowed only as a deliberate stopgap — it silently
+   falls back to English, which is acceptable temporarily but not for a shipped
+   feature.
+3. User-facing **enum/dropdown values** (event types, categories, statuses, pricing
+   bases, …) get localized display labels too — don't show raw codes like
+   `PER_EVENT` to end users once a feature is finalized.
+4. Keys use dot-notation namespaces (`events.bookings.discount`,
+   `common.save`). Reuse `common.*` for shared verbs/nouns.
+
+Treat this like the test-script rule: updating locales is part of the same
+definition-of-done as updating `test-scripts/run_technical_tests.mjs`.
+
+---
+
 ## Recent Feature Additions (2026-05 cycle — Hotel PMS expansion + OTA Channel Manager)
 
 A major two-wave sprint. Wave 1 (Sprints A–D + P2) closed the long

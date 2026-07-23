@@ -66,6 +66,8 @@ export const en: Record<string, string> = {
   'events.rentals.rentWeekly': 'Rent / week',
   'events.rentals.deposit': 'Deposit',
   'events.rentals.empty': 'No rental items yet.',
+  'events.rentals.newCategory': '+ New category…',
+  'events.rentals.enterCategory': 'Enter category name',
 
   // ── Services ────────────────────────────────────────────────────────────────
   'events.services.title': 'Add-on Services',

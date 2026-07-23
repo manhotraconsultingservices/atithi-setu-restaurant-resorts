@@ -180,9 +180,24 @@ function EventRentals({ restaurantId, token }: Props) {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="col-span-2 md:col-span-1"><label className={LABEL}>{t('common.name')}</label><input className={INPUT} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div>
             <div><label className={LABEL}>{t('common.category')}</label>
-              <select className={INPUT} value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}>
-                {['FURNITURE', 'KITCHEN', 'DECOR', 'AV', 'UTILITY', 'OTHER'].map(c => <option key={c} value={c}>{c}</option>)}
-              </select></div>
+              {(() => {
+                const base = ['FURNITURE', 'KITCHEN', 'DECOR', 'AV', 'UTILITY', 'OTHER'];
+                const custom = Array.from(new Set(rows.map((r: any) => r.category).filter((c: string) => c && !base.includes(c))));
+                const all = [...base, ...custom];
+                const isCustom = form.category === '__custom__' || (form.category && !all.includes(form.category));
+                return (
+                  <>
+                    <select className={INPUT} value={isCustom ? '__custom__' : form.category}
+                      onChange={e => setForm({ ...form, category: e.target.value === '__custom__' ? '' : e.target.value })}>
+                      {all.map(c => <option key={c} value={c}>{c}</option>)}
+                      <option value="__custom__">{t('events.rentals.newCategory')}</option>
+                    </select>
+                    {isCustom && <input className={`${INPUT} mt-1`} autoFocus value={form.category === '__custom__' ? '' : form.category}
+                      placeholder={t('events.rentals.enterCategory')} onChange={e => setForm({ ...form, category: e.target.value })} />}
+                  </>
+                );
+              })()}
+            </div>
             <div><label className={LABEL}>{t('events.rentals.unit')}</label>
               <select className={INPUT} value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value })}>
                 {['piece', 'set', 'pair'].map(u => <option key={u} value={u}>{u}</option>)}
@@ -385,6 +400,22 @@ function EventBookings({ restaurantId, token }: Props) {
   );
 }
 
+// ── Hotel-room add row: pick rooms + rate before attaching to the event ──────
+function HotelRoomAddRow({ rt, onAdd }: { rt: any; onAdd: (rate: number, rooms: number) => void }) {
+  const { t } = useT();
+  const [rate, setRate] = useState<string>(rt.rate ? String(rt.rate) : '');
+  const [rooms, setRooms] = useState<string>('1');
+  return (
+    <div className="flex items-center gap-1.5 text-xs py-1">
+      <span className="flex-1 min-w-0 truncate">{rt.name} <span className="text-[#9d8b7e]">({rt.available}/{rt.total} free)</span></span>
+      <input type="number" min={1} value={rooms} onChange={e => setRooms(e.target.value)} title="Rooms" className="w-11 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+      <span className="text-[#9d8b7e]">×₹</span>
+      <input type="number" min={0} value={rate} onChange={e => setRate(e.target.value)} placeholder="rate/night" title="Rate / night" className="w-20 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+      <button className={BTN_GHOST} onClick={() => onAdd(Number(rate) || 0, Number(rooms) || 1)}>{t('common.add')}</button>
+    </div>
+  );
+}
+
 // ── Booking detail: lines, hotel rooms, quotation, lifecycle ────────────────
 function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, onOpenObject }: Props & { bookingId: string; venues: any[]; onBack: () => void; onOpenObject?: (t: string, i: string) => void }) {
   const { t } = useT();
@@ -422,16 +453,38 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [kind]: src }) });
     await load();
   };
-
-  const loadHotel = async () => {
-    try { const r = await api(`/events/bookings/${bookingId}/hotel-availability`); setHotelRooms(r?.availability?.venues ? [] : (r?.availability?.room_types || r?.availability?.rooms || [])); setShowHotel(true); if (!r.hotel_enabled) alert('Hotel module is not enabled for this property.'); }
-    catch (e: any) { alert(e.message); }
-  };
-  const addRoom = async (roomTypeId: string, name: string, rate: number) => {
-    await api(`/events/bookings/${bookingId}/rooms`, { method: 'POST', body: JSON.stringify({ room_type_id: roomTypeId, room_type_snapshot: name, quoted_rate: rate, num_rooms: 1 }) });
+  // Inline-edit a rental/service line's quantity or unit price (owner override).
+  const commitLine = async (kind: 'items' | 'services', idx: number, field: string, value: string) => {
+    const src = kind === 'items'
+      ? (bk.items || []).map((x: any) => ({ rental_item_id: x.rental_item_id, quantity: x.quantity, rate_basis: x.rate_basis, unit_rate: x.unit_rate, duration_units: x.duration_units }))
+      : (bk.services || []).map((x: any) => ({ service_id: x.service_id, quantity: x.quantity, unit_rate: x.unit_rate }));
+    if (!src[idx]) return;
+    const num = Math.max(0, Number(value) || 0);
+    if (Number(src[idx][field]) === num) return; // no-op, avoids a PUT on every blur
+    src[idx] = { ...src[idx], [field]: num };
+    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [kind]: src }) });
     await load();
   };
+  const commitDiscount = async (value: string) => {
+    const num = Math.max(0, Number(value) || 0);
+    if (Number(bk.discount || 0) === num) return;
+    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ discount: num }) });
+    await load();
+  };
+
+  const loadHotel = async () => {
+    try { const r = await api(`/events/bookings/${bookingId}/hotel-availability`); setHotelRooms(r?.room_types || []); setShowHotel(true); if (!r.hotel_enabled) alert('Hotel module is not enabled for this property.'); }
+    catch (e: any) { alert(e.message); }
+  };
+  const addRoom = async (roomTypeId: string | null, name: string, rate: number, rooms: number) => {
+    await api(`/events/bookings/${bookingId}/rooms`, { method: 'POST', body: JSON.stringify({ room_type_id: roomTypeId, room_type_snapshot: name, quoted_rate: Number(rate) || 0, num_rooms: Math.max(1, Number(rooms) || 1) }) });
+    await load();
+  };
+  const updateRoom = async (rid: string, patch: any) => {
+    try { await api(`/events/bookings/${bookingId}/rooms/${rid}`, { method: 'PUT', body: JSON.stringify(patch) }); await load(); } catch (e: any) { alert(e.message); }
+  };
   const removeRoom = async (rid: string) => { try { await api(`/events/bookings/${bookingId}/rooms/${rid}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+  const dOnly = (v: any) => String(v || '').slice(0, 10);
 
   const act = async (path: string, okMsg?: string) => {
     setBusy(true);
@@ -470,6 +523,13 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
           <div className="text-right">
             <div className="text-2xl font-bold text-[#cc5a16]">{money(bk.total_amount)}</div>
             <div className="text-xs text-[#6b5d52]">{t('events.bookings.grandTotal')}</div>
+            {editable && (
+              <div className="mt-1.5 flex items-center gap-1.5 justify-end">
+                <label className="text-[10px] text-[#6b5d52]">{t('events.bookings.discount')} ₹</label>
+                <input type="number" min={0} defaultValue={Number(bk.discount || 0)} onBlur={e => commitDiscount(e.target.value)}
+                  className="w-24 px-1.5 py-0.5 rounded-lg border border-[#e8dccf] text-right text-xs" />
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -482,9 +542,17 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               <option value="">+ {t('common.add')}</option>{rentals.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>}</div>
           {(bk.items || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (bk.items || []).map((it: any, i: number) => (
-            <div key={it.id} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]">
-              <span>{it.name_snapshot} × {it.quantity} ({it.rate_basis})</span>
-              <span className="flex items-center gap-2">{money(it.line_total)}{editable && <button onClick={() => removeLine('items', i)}><X size={12} className="text-rose-500" /></button>}</span>
+            <div key={it.id} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
+              <span className="flex-1 min-w-0 truncate">{it.name_snapshot} <span className="text-[#9d8b7e]">({it.rate_basis})</span></span>
+              {editable ? (
+                <>
+                  <input type="number" min={0} defaultValue={it.quantity} title="Qty" onBlur={e => commitLine('items', i, 'quantity', e.target.value)} className="w-11 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                  <span className="text-[#9d8b7e]">×₹</span>
+                  <input type="number" min={0} defaultValue={it.unit_rate} title="Unit price" onBlur={e => commitLine('items', i, 'unit_rate', e.target.value)} className="w-16 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                </>
+              ) : <span className="text-[#9d8b7e]">{it.quantity} × {money(it.unit_rate)}</span>}
+              <span className="w-16 text-right font-semibold">{money(it.line_total)}</span>
+              {editable && <button onClick={() => removeLine('items', i)}><X size={12} className="text-rose-500" /></button>}
             </div>
           ))}
         </div>
@@ -496,9 +564,17 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               <option value="">+ {t('common.add')}</option>{services.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>}</div>
           {(bk.services || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (bk.services || []).map((sv: any, i: number) => (
-            <div key={sv.id} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]">
-              <span>{sv.name_snapshot} × {sv.quantity}</span>
-              <span className="flex items-center gap-2">{money(sv.line_total)}{editable && <button onClick={() => removeLine('services', i)}><X size={12} className="text-rose-500" /></button>}</span>
+            <div key={sv.id} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
+              <span className="flex-1 min-w-0 truncate">{sv.name_snapshot}</span>
+              {editable ? (
+                <>
+                  <input type="number" min={0} defaultValue={sv.quantity} title="Qty" onBlur={e => commitLine('services', i, 'quantity', e.target.value)} className="w-11 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                  <span className="text-[#9d8b7e]">×₹</span>
+                  <input type="number" min={0} defaultValue={sv.unit_rate} title="Unit price" onBlur={e => commitLine('services', i, 'unit_rate', e.target.value)} className="w-16 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                </>
+              ) : <span className="text-[#9d8b7e]">{sv.quantity} × {money(sv.unit_rate)}</span>}
+              <span className="w-16 text-right font-semibold">{money(sv.line_total)}</span>
+              {editable && <button onClick={() => removeLine('services', i)}><X size={12} className="text-rose-500" /></button>}
             </div>
           ))}
         </div>
@@ -507,20 +583,32 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
         <div className={`${CARD} md:col-span-2`}>
           <div className="flex items-center justify-between mb-2"><h3 className="font-bold text-sm flex items-center gap-1.5"><Hotel size={15} />{t('events.bookings.hotelRooms')}</h3>
             {editable && <button className={BTN_GHOST} onClick={loadHotel}><Plus size={13} />{t('events.bookings.addHotelRooms')}</button>}</div>
-          {(bk.rooms || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (bk.rooms || []).map((rm: any) => (
-            <div key={rm.id} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]">
-              <span>{rm.room_type_snapshot} × {rm.num_rooms} ({rm.check_in_date} → {rm.check_out_date}) <Pill status={rm.status} /></span>
-              <span className="flex items-center gap-2">{money(rm.line_total)}{editable && rm.status !== 'BOOKED' && <button onClick={() => removeRoom(rm.id)}><X size={12} className="text-rose-500" /></button>}</span>
-            </div>
-          ))}
+          {(bk.rooms || []).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : (bk.rooms || []).map((rm: any) => {
+            const roomEditable = editable && rm.status !== 'BOOKED';
+            return (
+              <div key={rm.id} className="flex items-center gap-1.5 text-xs py-1 border-b border-[#f0e9df]">
+                <span className="flex-1 min-w-0 truncate">{rm.room_type_snapshot} <span className="text-[#9d8b7e]">({dOnly(rm.check_in_date)} → {dOnly(rm.check_out_date)})</span> <Pill status={rm.status} /></span>
+                {roomEditable ? (
+                  <>
+                    <input type="number" min={1} defaultValue={rm.num_rooms} title="Rooms" onBlur={e => updateRoom(rm.id, { num_rooms: Number(e.target.value) })} className="w-11 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                    <span className="text-[#9d8b7e]">×₹</span>
+                    <input type="number" min={0} defaultValue={rm.quoted_rate} title="Rate / night" onBlur={e => updateRoom(rm.id, { quoted_rate: Number(e.target.value) })} className="w-16 px-1 py-0.5 rounded border border-[#e8dccf] text-right" />
+                  </>
+                ) : <span className="text-[#9d8b7e]">{rm.num_rooms} × {money(rm.quoted_rate)}</span>}
+                <span className="w-16 text-right font-semibold">{money(rm.line_total)}</span>
+                {roomEditable && <button onClick={() => removeRoom(rm.id)}><X size={12} className="text-rose-500" /></button>}
+              </div>
+            );
+          })}
           {showHotel && (
             <div className="mt-2 p-2 rounded-xl bg-[#faf7f2] border border-[#e8dccf]">
-              {hotelRooms.length === 0 ? <p className="text-xs text-[#9d8b7e]">No room types available for these dates.</p> : hotelRooms.map((rt: any) => (
-                <div key={rt.id || rt.type_id} className="flex items-center justify-between text-xs py-1">
-                  <span>{rt.name || rt.room_category || 'Room'} — {money(rt.base_rate || rt.rate || 0)}</span>
-                  <button className={BTN_GHOST} onClick={() => addRoom(rt.id || rt.type_id, rt.name || rt.room_category || 'Room', Number(rt.base_rate || rt.rate || 0))}>{t('common.add')}</button>
-                </div>
-              ))}
+              {hotelRooms.length === 0
+                ? <p className="text-xs text-[#9d8b7e]">No hotel rooms available. Is the Hotel module enabled with rooms set up for these dates?</p>
+                : hotelRooms.map((rt: any, idx: number) => (
+                  <div key={rt.room_type_id || idx}>
+                    <HotelRoomAddRow rt={rt} onAdd={(rate, rooms) => addRoom(rt.room_type_id, rt.name, rate, rooms)} />
+                  </div>
+                ))}
             </div>
           )}
         </div>

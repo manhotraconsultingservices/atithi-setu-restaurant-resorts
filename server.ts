@@ -21911,17 +21911,45 @@ ${data.tenant.name}`;
       const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
       if (!bk) return res.status(404).json({ error: "Booking not found" });
       const from = String(req.query.check_in || bk.event_date || '').slice(0, 10);
-      const to = String(req.query.check_out || bk.end_date || bk.event_date || '').slice(0, 10);
+      const to = String(req.query.check_out || bk.end_date || bk.event_date || from).slice(0, 10);
+      // Hotel availability takes start + days (NOT from/to). Cover the event window.
+      const nights = Math.max(1, Math.round((new Date(to + 'T00:00:00Z').getTime() - new Date(from + 'T00:00:00Z').getTime()) / 86400000) || 1);
       const result = await callSelfApi(
         'GET',
-        `/api/restaurant/${req.params.id}/hotel/availability?from=${from}&to=${to}`,
+        `/api/restaurant/${req.params.id}/hotel/availability?start=${from}&days=${nights}`,
         req.headers.authorization
       );
       if (!result.ok) {
         // Hotel not enabled for this tenant, or no rooms — return empty gracefully.
-        return res.json({ hotel_enabled: result.status !== 403, check_in: from, check_out: to, availability: null, note: result.data?.error || null });
+        return res.json({ hotel_enabled: result.status !== 403, check_in: from, check_out: to, room_types: [], note: result.data?.error || null });
       }
-      res.json({ hotel_enabled: true, check_in: from, check_out: to, availability: result.data });
+      // Reshape the raw room×date grid into a clean, deduplicated list of bookable
+      // room TYPES with a representative nightly rate and an available count for
+      // the window. base_rate is often 0 (tenants price via tariff/overrides), so
+      // the events UI lets staff override the rate at quote time.
+      const av: any = result.data || {};
+      const rooms: any[] = av.rooms || [];
+      const roomTypes: any[] = av.roomTypes || [];
+      const grid: Record<string, Record<string, any>> = av.grid || {};
+      const dates: string[] = av.dates || [];
+      const nameById: Record<string, string> = {};
+      for (const rt of roomTypes) nameById[rt.id] = rt.name;
+      const groups: Record<string, any> = {};
+      for (const rm of rooms) {
+        if (rm.status === 'MAINTENANCE' || rm.status === 'BLOCKED') continue;
+        const key = rm.type_id || `__ROOM__${rm.id}`; // uncategorised rooms stand alone
+        if (!groups[key]) {
+          groups[key] = { room_type_id: rm.type_id || null, name: nameById[rm.type_id] || rm.type || rm.name || 'Room', rate: 0, total: 0, available: 0 };
+        }
+        const g = groups[key];
+        g.total++;
+        g.rate = Math.max(g.rate, Number(rm.base_rate || 0));
+        const cells = grid[rm.id] || {};
+        const busy = dates.some(d => cells[d]);
+        if (!busy) g.available++;
+      }
+      const room_types = Object.values(groups).sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
+      res.json({ hotel_enabled: true, check_in: from, check_out: to, nights, room_types });
     } catch (err: any) {
       console.error("/events hotel-availability error:", err);
       res.status(500).json({ error: "Failed to read hotel availability" });
@@ -21972,6 +22000,29 @@ ${data.tenant.name}`;
       await recomputeEventTotal(db, req.params.bid);
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to remove room" }); }
+  });
+
+  // Edit an attached (QUOTED) room line — override rate / room count.
+  app.put("/api/restaurant/:id/events/bookings/:bid/rooms/:rid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const room: any = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [req.params.rid]);
+      if (!room) return res.status(404).json({ error: "Room line not found" });
+      if (room.status === 'BOOKED' && room.hotel_booking_id) {
+        return res.status(409).json({ error: "This room is already booked in the hotel and can't be re-priced here." });
+      }
+      const b = req.body || {};
+      const numRooms = Math.max(1, Number(b.num_rooms ?? room.num_rooms));
+      const rate = Number(b.quoted_rate ?? room.quoted_rate);
+      const nights = Math.max(1, Math.round((new Date(room.check_out_date + 'T00:00:00Z').getTime() - new Date(room.check_in_date + 'T00:00:00Z').getTime()) / 86400000) || 1);
+      const lineTotal = round2(rate * numRooms * nights);
+      await db.run("UPDATE event_booking_rooms SET num_rooms = ?, quoted_rate = ?, line_total = ? WHERE id = ?", [numRooms, rate, lineTotal, req.params.rid]);
+      await recomputeEventTotal(db, req.params.bid);
+      const row = await db.get("SELECT * FROM event_booking_rooms WHERE id = ?", [req.params.rid]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update room" }); }
   });
 
   // Confirm the event → hold the venue + create the real hotel bookings via API.
