@@ -657,6 +657,28 @@ async function testEvents() {
 
   const cat = await api('GET', `/api/restaurant/${restaurantId}/events/catering-packages`);
   (cat.status === 200 && Array.isArray(cat.data) ? pass : fail)('TC-EVT-010', 'Catering packages endpoint responds', `HTTP ${cat.status}`);
+
+  // TC-EVT-011: quotation PDF end-to-end. Regression guard for the 500 caused by
+  // pg returning DATE/TIMESTAMP columns (created_at, event dates) as JS Date
+  // objects — the PDF called .slice() on them and threw. A green tsc + logic
+  // test both missed it; only fetching the real PDF endpoint catches it. Uses an
+  // existing booking so it exercises the true DB round-trip (buildQuotePdfData →
+  // generateEventQuotationPdf), not synthetic data.
+  const firstBooking = Array.isArray(bk.data) && bk.data.length ? bk.data[0] : null;
+  if (!firstBooking) {
+    skip('TC-EVT-011', 'Quotation PDF renders', 'no event bookings to quote');
+  } else {
+    const q = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${firstBooking.id}/quotations`, {});
+    if (q.status === 201 && q.data?.id) {
+      const pdf = await api('GET', `/api/restaurant/${restaurantId}/events/quotations/${q.data.id}/pdf`);
+      const isPdf = pdf.status === 200 && typeof pdf.data === 'string' && pdf.data.startsWith('%PDF-');
+      (isPdf ? pass : fail)('TC-EVT-011', 'Quotation PDF renders (200 + %PDF body)', `HTTP ${pdf.status}${isPdf ? '' : ` body="${String(pdf.data).slice(0, 80)}"`}`);
+    } else if (q.status === 403) {
+      skip('TC-EVT-011', 'Quotation PDF renders', 'user lacks EVENTS_QUOTATIONS access');
+    } else {
+      fail('TC-EVT-011', 'Quotation create for PDF test', `HTTP ${q.status}`);
+    }
+  }
 }
 
 // ── Channel Manager tests ──────────────────────────────────────────────────
