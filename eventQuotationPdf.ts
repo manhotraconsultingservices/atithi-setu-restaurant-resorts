@@ -49,6 +49,32 @@ function fmtMoney(n: number, cur = 'INR'): string {
   return `${cur === 'INR' ? 'Rs. ' : cur + ' '}${s}`;
 }
 
+/**
+ * Normalize any date-like value to a YYYY-MM-DD string.
+ * CRITICAL: pg returns DATE/TIMESTAMP columns (event dates, created_at,
+ * valid_until) as JS **Date objects**, which have no `.slice` — calling
+ * `.slice(0,10)` on one throws `TypeError: .slice is not a function` and 500s
+ * the whole quotation PDF. Always route date values through this helper before
+ * rendering.
+ */
+function ymd(v: any): string {
+  if (v === null || v === undefined || v === '') return '';
+  if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
+  return String(v).slice(0, 10);
+}
+
+/**
+ * Make a string safe to render with Helvetica's WinAnsi (Windows-1252) encoding.
+ * Characters outside Latin-1 render as `.notdef` boxes (and, in some pdfkit
+ * builds, can throw). We only ship a Latin font here, so map the few non-Latin
+ * glyphs our own composed descriptions can contain to ASCII equivalents.
+ */
+function waSafe(s: any): string {
+  return String(s ?? '')
+    .replace(/→/g, ' to ')  // → arrow (hotel-room date ranges)
+    .replace(/₹/g, 'Rs.');  // ₹ (belt-and-suspenders; fmtMoney already avoids it)
+}
+
 function lineTypeLabel(t: string): string {
   switch (t) {
     case 'VENUE': return 'Venue';
@@ -84,10 +110,10 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
 
       // ── Header band ──────────────────────────────────────────────────────
       doc.rect(0, 0, PAGE_W, 96).fill(BAND);
-      doc.fillColor(INK).font('Helvetica-Bold').fontSize(20).text(data.tenant.name, M, 24, { width: INNER - 160 });
+      doc.fillColor(INK).font('Helvetica-Bold').fontSize(20).text(waSafe(data.tenant.name), M, 24, { width: INNER - 160 });
       doc.font('Helvetica').fontSize(9).fillColor(MUTED);
       let hy = 48;
-      if (data.tenant.address) { doc.text(data.tenant.address, M, hy, { width: INNER - 170 }); hy += 12; }
+      if (data.tenant.address) { doc.text(waSafe(data.tenant.address), M, hy, { width: INNER - 170 }); hy += 12; }
       const contactBits = [data.tenant.phone, data.tenant.email].filter(Boolean).join('  ·  ');
       if (contactBits) { doc.text(contactBits, M, hy, { width: INNER - 170 }); hy += 12; }
       if (data.tenant.gstin) doc.text(`GSTIN: ${data.tenant.gstin}`, M, hy, { width: INNER - 170 });
@@ -96,9 +122,9 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       doc.font('Helvetica-Bold').fontSize(16).fillColor(ACCENT).text('QUOTATION', M, 24, { width: INNER, align: 'right' });
       doc.font('Helvetica').fontSize(9).fillColor(INK);
       doc.text(`No: ${data.quotation.quote_number}  (v${data.quotation.version})`, M, 48, { width: INNER, align: 'right' });
-      const issued = (data.quotation.created_at || new Date().toISOString()).slice(0, 10);
+      const issued = ymd(data.quotation.created_at) || new Date().toISOString().slice(0, 10);
       doc.text(`Date: ${issued}`, M, 60, { width: INNER, align: 'right' });
-      if (data.quotation.valid_until) doc.text(`Valid until: ${String(data.quotation.valid_until).slice(0, 10)}`, M, 72, { width: INNER, align: 'right' });
+      if (data.quotation.valid_until) doc.text(`Valid until: ${ymd(data.quotation.valid_until)}`, M, 72, { width: INNER, align: 'right' });
 
       y = 118;
 
@@ -108,17 +134,19 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       y += 15;
       doc.font('Helvetica').fontSize(9).fillColor(INK);
       const leftLines = [
-        data.booking.customer_name,
+        waSafe(data.booking.customer_name),
         data.booking.customer_phone || '',
         data.booking.customer_email || '',
       ].filter(Boolean);
       const b = data.booking;
-      const dateStr = b.event_date ? (b.end_date && b.end_date !== b.event_date ? `${b.event_date} → ${b.end_date}` : b.event_date) : '';
+      const evStart = ymd(b.event_date);
+      const evEnd = ymd(b.end_date);
+      const dateStr = evStart ? (evEnd && evEnd !== evStart ? `${evStart} to ${evEnd}` : evStart) : '';
       const rightLines = [
-        b.venue_name ? `Venue: ${b.venue_name}` : '',
-        b.event_type ? `Type: ${b.event_type}` : '',
+        b.venue_name ? `Venue: ${waSafe(b.venue_name)}` : '',
+        b.event_type ? `Type: ${waSafe(b.event_type)}` : '',
         dateStr ? `Date: ${dateStr}` : '',
-        (b.start_time || b.end_time) ? `Time: ${b.start_time || ''}–${b.end_time || ''}` : '',
+        (b.start_time || b.end_time) ? `Time: ${b.start_time || ''}-${b.end_time || ''}` : '',
         b.guest_count ? `Guests: ${b.guest_count}` : '',
       ].filter(Boolean);
       const rowsCount = Math.max(leftLines.length, rightLines.length);
@@ -141,11 +169,12 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
 
       doc.font('Helvetica').fontSize(8.5).fillColor(INK);
       for (const ln of data.lines) {
-        const descH = doc.heightOfString(ln.description || '', { width: 220 });
+        const desc = waSafe(ln.description || '');
+        const descH = doc.heightOfString(desc, { width: 220 });
         const rowH = Math.max(18, descH + 8);
         if (y + rowH > 720) { doc.addPage(); y = M; }
         doc.fillColor(MUTED).fontSize(7.5).text(lineTypeLabel(ln.line_type), cols.type + 4, y + 5, { width: 64 });
-        doc.fillColor(INK).fontSize(8.5).text(ln.description || '', cols.desc, y + 5, { width: 220 });
+        doc.fillColor(INK).fontSize(8.5).text(desc, cols.desc, y + 5, { width: 220 });
         doc.text(String(ln.quantity ?? 1), cols.qty, y + 5, { width: 40, align: 'right' });
         doc.text(fmtMoney(ln.unit_rate, cur), cols.rate, y + 5, { width: 70, align: 'right' });
         doc.text(fmtMoney(ln.amount, cur), cols.amt, y + 5, { width: INNER - (cols.amt - M) - 4, align: 'right' });
@@ -173,10 +202,11 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       // ── Notes + footer ───────────────────────────────────────────────────
       y += 18;
       if (data.quotation.notes) {
+        const notes = waSafe(data.quotation.notes);
         doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Notes', M, y);
         y += 13;
-        doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(data.quotation.notes, M, y, { width: INNER });
-        y += doc.heightOfString(data.quotation.notes, { width: INNER }) + 12;
+        doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(notes, M, y, { width: INNER });
+        y += doc.heightOfString(notes, { width: INNER }) + 12;
       }
       doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text(
         'This is a quotation, not a tax invoice. Prices are indicative and subject to availability at time of confirmation.',
