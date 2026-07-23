@@ -21993,8 +21993,19 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
       if (!bk) return res.status(404).json({ error: "Booking not found" });
-      const from = String(req.query.check_in || bk.event_date || '').slice(0, 10);
-      const to = String(req.query.check_out || bk.end_date || bk.event_date || from).slice(0, 10);
+      // event_date / end_date come back from pg as Date objects — String() on a
+      // Date gives "Fri Jul 24 2026…", which fails the hotel endpoint's
+      // YYYY-MM-DD `start` validation (→ 400 → "no rooms"). Normalise to ISO.
+      const isoDate = (v: any): string => {
+        if (!v) return '';
+        if (v instanceof Date) return v.toISOString().slice(0, 10);
+        const s = String(v);
+        if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+        const t2 = Date.parse(s);
+        return isNaN(t2) ? '' : new Date(t2).toISOString().slice(0, 10);
+      };
+      const from = isoDate(req.query.check_in) || isoDate(bk.event_date) || new Date().toISOString().slice(0, 10);
+      const to = isoDate(req.query.check_out) || isoDate(bk.end_date) || from;
       // Hotel availability takes start + days (NOT from/to). Cover the event window.
       const nights = Math.max(1, Math.round((new Date(to + 'T00:00:00Z').getTime() - new Date(from + 'T00:00:00Z').getTime()) / 86400000) || 1);
       const result = await callSelfApi(
