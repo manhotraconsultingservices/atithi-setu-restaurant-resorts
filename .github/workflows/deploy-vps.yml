@@ -37,7 +37,12 @@ jobs:
   notify:
     name: Record release + verify pull-deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Headroom above the verify loop below (≈8.3 min). If timeout-minutes equals
+    # the loop length, GitHub cancels the job at the ceiling BEFORE the loop can
+    # emit its graceful "timed out" warning — the run then shows "Cancelled"
+    # instead of a clean pass/warning, which reads like a deploy failure even
+    # when the VPS deployed fine. Keep this strictly > the loop's worst case.
+    timeout-minutes: 15
     steps:
       - name: Tag the release event
         # CRITICAL: pass commit metadata via env, NOT via `${{ }}` shell
@@ -82,11 +87,13 @@ jobs:
           set -uo pipefail
           echo "→ Polling ${VERIFY_URL} for commit ${EXPECTED_SHA:0:7}…"
 
-          # 60 attempts × 10s = 10 minutes worst case
-          for i in $(seq 1 60); do
+          # 50 attempts × 10s ≈ 8.3 minutes worst case — deliberately UNDER the
+          # job's timeout-minutes (15) so the loop always finishes and emits its
+          # own pass/warning rather than being force-cancelled at the ceiling.
+          for i in $(seq 1 50); do
             body=$(curl -s --max-time 5 "${VERIFY_URL}" 2>/dev/null || true)
             if [ -z "${body}" ]; then
-              echo "  attempt ${i}/60: no response (curl error or 5xx) — retrying in 10s"
+              echo "  attempt ${i}/50: no response (curl error or 5xx) — retrying in 10s"
               sleep 10
               continue
             fi
@@ -106,9 +113,9 @@ jobs:
                 echo "✅ VPS rebooted ${age}s ago — commit_marker=${marker} — deploy is live."
                 exit 0
               fi
-              echo "  attempt ${i}/60: live marker=${marker} but booted ${age}s ago (waiting for fresh boot)…"
+              echo "  attempt ${i}/50: live marker=${marker} but booted ${age}s ago (waiting for fresh boot)…"
             else
-              echo "  attempt ${i}/60: marker=${marker} (no booted_at field) — retrying in 10s"
+              echo "  attempt ${i}/50: marker=${marker} (no booted_at field) — retrying in 10s"
             fi
             sleep 10
           done
@@ -116,7 +123,9 @@ jobs:
           # Don't fail the workflow — the cron-deploy may still succeed
           # after this 10-min window (e.g. slow npm install). Operators
           # can verify manually via curl. This is monitoring, not gating.
-          echo "::warning::Verification timed out after 10 minutes. The VPS cron may still complete the deploy."
+          echo "::warning::Verification timed out after ~8 minutes without seeing a fresh boot."
+          echo "::warning::This usually means the VPS pull-deploy did NOT run — check the VPS cron, not this workflow:"
+          echo "::warning::  sudo crontab -l | grep poll-and-deploy   # is the poller installed?"
           echo "::warning::Check live status: curl ${VERIFY_URL} | grep commit_marker"
           echo "::warning::If marker still doesn't match after 15 minutes, SSH to the VPS:"
           echo "::warning::  tail -100 /opt/atithi-setu/poll-deploy.log"
