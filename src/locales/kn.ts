@@ -122,6 +122,12 @@ export const kn: Record<string, string> = {
   'events.bookings.complete': 'ಪೂರ್ಣಗೊಂಡಿದೆ ಎಂದು ಗುರುತಿಸಿ',
   'events.bookings.empty': 'ಇನ್ನೂ ಬುಕಿಂಗ್‌ಗಳಿಲ್ಲ.',
   'events.bookings.grandTotal': 'ಒಟ್ಟು ಮೊತ್ತ',
+  'events.bookings.subtotal': 'ಉಪಮೊತ್ತ',
+  'events.bookings.phone': 'ಫೋನ್',
+  'events.bookings.email': 'ಇಮೇಲ್',
+  'events.bookings.emailHint': 'ಗ್ರಾಹಕರಿಗೆ ಉಲ್ಲೇಖ ಮತ್ತು ಸರಕುಪಟ್ಟಿ ಕಳುಹಿಸಲು ಇಮೇಲ್ ಸೇರಿಸಿ.',
+  'events.bookings.saved': '{amount} ಉಳಿತಾಯ ({pct}% ರಿಯಾಯಿತಿ)',
+  'events.bookings.gstNote': 'GST ಅನ್ನು ಉಲ್ಲೇಖ ಮತ್ತು ಸರಕುಪಟ್ಟಿಯಲ್ಲಿ ಸೇರಿಸಲಾಗುತ್ತದೆ',
 
   // Quotations
   'events.quotes.title': 'ದರಪಟ್ಟಿಗಳು',

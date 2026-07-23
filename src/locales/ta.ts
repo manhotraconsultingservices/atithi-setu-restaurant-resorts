@@ -122,6 +122,12 @@ export const ta: Record<string, string> = {
   'events.bookings.complete': 'முடிந்ததாகக் குறி',
   'events.bookings.empty': 'இன்னும் முன்பதிவுகள் இல்லை.',
   'events.bookings.grandTotal': 'மொத்தத் தொகை',
+  'events.bookings.subtotal': 'கூட்டுத்தொகை',
+  'events.bookings.phone': 'தொலைபேசி',
+  'events.bookings.email': 'மின்னஞ்சல்',
+  'events.bookings.emailHint': 'வாடிக்கையாளருக்கு விலைப்புள்ளி மற்றும் விலைப்பட்டியலை அனுப்ப மின்னஞ்சலைச் சேர்க்கவும்.',
+  'events.bookings.saved': '{amount} சேமிப்பு ({pct}% தள்ளுபடி)',
+  'events.bookings.gstNote': 'GST விலைப்புள்ளி மற்றும் விலைப்பட்டியலில் சேர்க்கப்படும்',
 
   // Quotations
   'events.quotes.title': 'விலைப்புள்ளிகள்',

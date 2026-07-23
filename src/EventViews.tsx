@@ -11,6 +11,7 @@ import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
+  AlertTriangle, Mail, Phone,
 } from 'lucide-react';
 
 // ── shared fetch helper ─────────────────────────────────────────────────────
@@ -602,9 +603,22 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     await load();
   };
   const commitDiscount = async (value: string) => {
-    const num = Math.max(0, Number(value) || 0);
+    // Clamp to [0, subtotal] so the discount can never exceed the bill. subtotal
+    // is the pre-discount total: total_amount is already net of the old discount,
+    // so subtotal = total_amount + current discount.
+    const sub = Number(bk.total_amount || 0) + Number(bk.discount || 0);
+    const num = Math.min(sub, Math.max(0, Number(value) || 0));
     if (Number(bk.discount || 0) === num) return;
     await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ discount: num }) });
+    await load();
+  };
+  // Inline-edit a customer contact field (name / phone / email / GSTIN). The
+  // booking PUT already whitelists these; capturing the email here is what lets
+  // the tenant email the quotation & invoice to the customer.
+  const commitContact = async (field: string, value: string) => {
+    const v = value.trim();
+    if (String(bk[field] || '') === v) return;
+    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ [field]: v }) });
     await load();
   };
 
@@ -635,6 +649,12 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
 
   if (!bk) return <div className="text-sm text-[#6b5d52]">{t('common.loading')}</div>;
   const editable = bk.status !== 'COMPLETED' && bk.status !== 'CANCELLED';
+  // Bill ledger figures. total_amount is already net of discount (server-side),
+  // so the pre-discount subtotal = total_amount + discount.
+  const evDiscount = Number(bk.discount || 0);
+  const evSubtotal = Number(bk.total_amount || 0) + evDiscount;
+  const evPct = evSubtotal > 0 ? Math.round((evDiscount / evSubtotal) * 100) : 0;
+  const hasEmail = !!(bk.customer_email && String(bk.customer_email).trim());
 
   return (
     <ObjectDetail
@@ -651,21 +671,63 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       overview={
       <div>
       <div className={`${CARD} mb-4`}>
-        <div className="flex items-center justify-between">
+        <div className="grid md:grid-cols-[1fr_16rem] gap-4 items-start">
+          {/* Customer + editable contact — the email captured here is the recipient
+              for the emailed quotation & invoice. */}
           <div>
             <h3 className="text-lg font-bold text-[#14110c]">{bk.customer_name}</h3>
-            <p className="text-xs text-[#6b5d52]">{bk.customer_phone || '—'}{bk.customer_email ? ` · ${bk.customer_email}` : ''}</p>
+            {editable ? (
+              <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-md">
+                <label className="block">
+                  <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#9d8b7e]"><Phone size={11} />{t('events.bookings.phone')}</span>
+                  <input defaultValue={bk.customer_phone || ''} onBlur={e => commitContact('customer_phone', e.target.value)} placeholder="+91 ..."
+                    className="mt-0.5 w-full px-2 py-1 rounded-lg border border-[#e8dccf] text-xs" />
+                </label>
+                <label className="block">
+                  <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#9d8b7e]"><Mail size={11} />{t('events.bookings.email')}</span>
+                  <input type="email" defaultValue={bk.customer_email || ''} onBlur={e => commitContact('customer_email', e.target.value)} placeholder="name@email.com"
+                    className={`mt-0.5 w-full px-2 py-1 rounded-lg border text-xs ${hasEmail ? 'border-[#e8dccf]' : 'border-amber-300 bg-amber-50'}`} />
+                </label>
+              </div>
+            ) : (
+              <p className="text-xs text-[#6b5d52]">{bk.customer_phone || '—'}{bk.customer_email ? ` · ${bk.customer_email}` : ''}</p>
+            )}
+            {editable && !hasEmail && (
+              <p className="mt-1.5 flex items-center gap-1 text-[11px] text-amber-700">
+                <AlertTriangle size={12} />{t('events.bookings.emailHint')}
+              </p>
+            )}
           </div>
-          <div className="text-right">
-            <div className="text-2xl font-bold text-[#cc5a16]">{money(bk.total_amount)}</div>
-            <div className="text-xs text-[#6b5d52]">{t('events.bookings.grandTotal')}</div>
-            {editable && (
-              <div className="mt-1.5 flex items-center gap-1.5 justify-end">
-                <label className="text-[10px] text-[#6b5d52]">{t('events.bookings.discount')} ₹</label>
-                <input type="number" min={0} defaultValue={Number(bk.discount || 0)} onBlur={e => commitDiscount(e.target.value)}
-                  className="w-24 px-1.5 py-0.5 rounded-lg border border-[#e8dccf] text-right text-xs" />
+
+          {/* Bill summary ledger — makes subtotal, discount and grand total legible. */}
+          <div className="rounded-xl bg-[#faf7f2] border border-[#e8dccf] p-3">
+            <div className="flex items-center justify-between text-xs text-[#6b5d52] mb-1.5">
+              <span>{t('events.bookings.subtotal')}</span>
+              <span className="tabular-nums">{money(evSubtotal)}</span>
+            </div>
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs text-[#6b5d52]">{t('events.bookings.discount')}</span>
+              {editable ? (
+                <span className="flex items-center gap-1">
+                  <span className="text-xs text-rose-500">− ₹</span>
+                  <input type="number" min={0} max={evSubtotal} defaultValue={evDiscount} onBlur={e => commitDiscount(e.target.value)}
+                    className="w-20 px-1.5 py-0.5 rounded-lg border border-[#e8dccf] text-right text-xs tabular-nums" />
+                </span>
+              ) : (
+                <span className="text-xs text-rose-500 tabular-nums">{evDiscount > 0 ? `− ${money(evDiscount)}` : money(0)}</span>
+              )}
+            </div>
+            {evDiscount > 0 && (
+              <div className="flex items-center justify-end gap-1 text-[10px] text-emerald-700 mb-1.5">
+                <Check size={11} />{t('events.bookings.saved', { amount: money(evDiscount), pct: evPct })}
               </div>
             )}
+            <div className="h-px bg-[#e8dccf] my-1.5" />
+            <div className="flex items-baseline justify-between">
+              <span className="text-xs font-semibold text-[#14110c]">{t('events.bookings.grandTotal')}</span>
+              <span className="text-2xl font-bold text-[#cc5a16] tabular-nums">{money(bk.total_amount)}</span>
+            </div>
+            <p className="mt-1.5 text-[10px] text-[#9d8b7e] text-right">{t('events.bookings.gstNote')}</p>
           </div>
         </div>
       </div>

@@ -122,6 +122,12 @@ export const hi: Record<string, string> = {
   'events.bookings.complete': 'पूर्ण चिह्नित करें',
   'events.bookings.empty': 'अभी कोई बुकिंग नहीं।',
   'events.bookings.grandTotal': 'कुल योग',
+  'events.bookings.subtotal': 'उप-योग',
+  'events.bookings.phone': 'फ़ोन',
+  'events.bookings.email': 'ईमेल',
+  'events.bookings.emailHint': 'ग्राहक को कोटेशन और चालान भेजने के लिए ईमेल जोड़ें।',
+  'events.bookings.saved': '{amount} बचाए ({pct}% छूट)',
+  'events.bookings.gstNote': 'GST कोटेशन और चालान पर जोड़ा जाता है',
 
   // Quotations
   'events.quotes.title': 'कोटेशन',

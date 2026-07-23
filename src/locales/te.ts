@@ -122,6 +122,12 @@ export const te: Record<string, string> = {
   'events.bookings.complete': 'పూర్తయినట్లు గుర్తించు',
   'events.bookings.empty': 'ఇంకా బుకింగ్‌లు లేవు.',
   'events.bookings.grandTotal': 'మొత్తం మొత్తం',
+  'events.bookings.subtotal': 'ఉప మొత్తం',
+  'events.bookings.phone': 'ఫోన్',
+  'events.bookings.email': 'ఇమెయిల్',
+  'events.bookings.emailHint': 'కస్టమర్‌కు కొటేషన్ & ఇన్‌వాయిస్ పంపడానికి ఇమెయిల్ జోడించండి.',
+  'events.bookings.saved': '{amount} ఆదా ({pct}% తగ్గింపు)',
+  'events.bookings.gstNote': 'GST కొటేషన్ & ఇన్‌వాయిస్‌పై జోడించబడుతుంది',
 
   // Quotations
   'events.quotes.title': 'కోటేషన్‌లు',

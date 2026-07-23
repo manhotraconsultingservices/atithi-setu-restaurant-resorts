@@ -126,6 +126,12 @@ export const en: Record<string, string> = {
   'events.bookings.complete': 'Mark Completed',
   'events.bookings.empty': 'No bookings yet.',
   'events.bookings.grandTotal': 'Grand total',
+  'events.bookings.subtotal': 'Subtotal',
+  'events.bookings.phone': 'Phone',
+  'events.bookings.email': 'Email',
+  'events.bookings.emailHint': 'Add an email to send the quotation & invoice to the customer.',
+  'events.bookings.saved': 'Saved {amount} ({pct}% off)',
+  'events.bookings.gstNote': 'GST is added on the quotation & invoice',
 
   // ── Quotations ──────────────────────────────────────────────────────────────
   'events.quotes.title': 'Quotations',
