@@ -679,6 +679,20 @@ async function testEvents() {
       fail('TC-EVT-011', 'Quotation create for PDF test', `HTTP ${q.status}`);
     }
   }
+
+  // TC-EVT-012: operations analytics/dashboard endpoint — shape + internal
+  // consistency (win rate 0..100, funnel covers all six statuses).
+  const an = await api('GET', `/api/restaurant/${restaurantId}/events/analytics`);
+  if (an.status === 200 && an.data?.kpis && Array.isArray(an.data.funnel)) {
+    const wr = Number(an.data.kpis.winRate);
+    const funnelOk = an.data.funnel.length === 6 && Array.isArray(an.data.venueUtilization) && Array.isArray(an.data.receivables);
+    const wrOk = wr >= 0 && wr <= 100;
+    (funnelOk && wrOk ? pass : fail)('TC-EVT-012', 'Events analytics dashboard responds with valid shape', `HTTP ${an.status}, winRate=${wr}, funnel=${an.data.funnel.length}`);
+  } else if (an.status === 403 || an.status === 404) {
+    skip('TC-EVT-012', 'Events analytics', `HTTP ${an.status}`);
+  } else {
+    fail('TC-EVT-012', 'Events analytics dashboard responds', `HTTP ${an.status}`);
+  }
 }
 
 // ── Channel Manager tests ──────────────────────────────────────────────────

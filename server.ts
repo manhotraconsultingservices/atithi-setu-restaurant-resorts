@@ -21790,6 +21790,131 @@ ${data.tenant.name}`;
     }
   };
 
+  // ─── ANALYTICS / DASHBOARD ─────────────────────────────────────────────────
+  // One-shot operations cockpit for the Events & Convention business: pipeline,
+  // conversion, venue utilization, revenue trend, receivables, covers. Computed
+  // in JS from a single windowed pull (per-tenant volumes are small).
+  app.get("/api/restaurant/:id/events/analytics", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const today = new Date().toISOString().slice(0, 10);
+      const from = String(req.query.from || '').trim() || new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10);
+      const to = String(req.query.to || '').trim() || new Date(Date.now() + 180 * 86400000).toISOString().slice(0, 10);
+      const ymd = (v: any) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
+      const num = (x: any) => Number(x || 0);
+      const WON = ['CONFIRMED', 'IN_PROGRESS', 'COMPLETED'];
+      const PIPE = ['INQUIRY', 'QUOTED'];
+      const isWon = (s: string) => WON.includes(s);
+
+      // All bookings overlapping the window (range-aware, like availability).
+      const rows: any[] = await db.query(
+        `SELECT b.id, b.venue_id, v.name AS venue_name, b.customer_name, b.customer_phone, b.event_type,
+                b.booking_source, b.status, b.event_date, b.end_date, b.guest_count, b.total_amount,
+                b.discount, b.advance_amount, b.created_at
+           FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
+          WHERE b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?`,
+        [to, from]
+      );
+
+      const won = rows.filter(r => isWon(r.status));
+      const pipeline = rows.filter(r => PIPE.includes(r.status));
+      const lost = rows.filter(r => r.status === 'CANCELLED');
+      const sum = (arr: any[], f: (r: any) => number) => round2(arr.reduce((s, r) => s + f(r), 0));
+
+      const confirmedRevenue = sum(won, r => num(r.total_amount));
+      const pipelineRevenue = sum(pipeline, r => num(r.total_amount));
+      const realizedRevenue = sum(rows.filter(r => r.status === 'COMPLETED'), r => num(r.total_amount));
+      const advanceCollected = sum(won, r => num(r.advance_amount));
+      const outstanding = round2(won.reduce((s, r) => s + Math.max(0, num(r.total_amount) - num(r.advance_amount)), 0));
+      const discountGiven = sum(won, r => num(r.discount));
+      const wonCount = won.length, lostCount = lost.length;
+      const winRate = (wonCount + lostCount) > 0 ? Math.round(wonCount / (wonCount + lostCount) * 100) : 0;
+      const avgBookingValue = wonCount > 0 ? round2(confirmedRevenue / wonCount) : 0;
+      const totalCovers = won.reduce((s, r) => s + num(r.guest_count), 0);
+
+      const STATUSES = ['INQUIRY', 'QUOTED', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
+      const funnel = STATUSES.map(st => {
+        const g = rows.filter(r => r.status === st);
+        return { status: st, count: g.length, value: sum(g, r => num(r.total_amount)) };
+      });
+
+      const monthMap: Record<string, { revenue: number; events: number; covers: number }> = {};
+      for (const r of won) {
+        const m = ymd(r.event_date).slice(0, 7);
+        if (!monthMap[m]) monthMap[m] = { revenue: 0, events: 0, covers: 0 };
+        monthMap[m].revenue += num(r.total_amount); monthMap[m].events += 1; monthMap[m].covers += num(r.guest_count);
+      }
+      const revenueByMonth = Object.keys(monthMap).sort().map(m => ({ month: m, revenue: round2(monthMap[m].revenue), events: monthMap[m].events, covers: monthMap[m].covers }));
+
+      // Venue utilization: distinct booked days in-window / period days.
+      const periodDays = Math.max(1, Math.round((new Date(to + 'T00:00:00Z').getTime() - new Date(from + 'T00:00:00Z').getTime()) / 86400000) + 1);
+      const venueMap: Record<string, { name: string; events: number; revenue: number; days: Set<string> }> = {};
+      for (const r of won) {
+        const vid = r.venue_id || '__unassigned__';
+        if (!venueMap[vid]) venueMap[vid] = { name: r.venue_name || 'Unassigned', events: 0, revenue: 0, days: new Set() };
+        venueMap[vid].events += 1; venueMap[vid].revenue += num(r.total_amount);
+        const s = ymd(r.event_date); const e0 = ymd(r.end_date || r.event_date); const e = e0 > s ? e0 : s;
+        let d = s < from ? from : s; const cap = e > to ? to : e;
+        while (d <= cap) { venueMap[vid].days.add(d); d = new Date(new Date(d + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10); }
+      }
+      const venueUtilization = Object.entries(venueMap).map(([vid, v]) => ({
+        venue_id: vid, name: v.name, events: v.events, revenue: round2(v.revenue),
+        bookedDays: v.days.size, utilizationPct: Math.min(100, Math.round(v.days.size / periodDays * 100)),
+      })).sort((a, b) => b.revenue - a.revenue);
+
+      const typeMap: Record<string, { count: number; revenue: number }> = {};
+      for (const r of rows.filter(r => r.status !== 'CANCELLED')) {
+        const ty = r.event_type || 'OTHER';
+        if (!typeMap[ty]) typeMap[ty] = { count: 0, revenue: 0 };
+        typeMap[ty].count += 1; if (isWon(r.status)) typeMap[ty].revenue += num(r.total_amount);
+      }
+      const eventTypeMix = Object.entries(typeMap).map(([type, v]) => ({ type, count: v.count, revenue: round2(v.revenue) })).sort((a, b) => b.count - a.count);
+
+      const srcMap: Record<string, { count: number; won: number; revenue: number }> = {};
+      for (const r of rows) {
+        const s = r.booking_source || 'DIRECT';
+        if (!srcMap[s]) srcMap[s] = { count: 0, won: 0, revenue: 0 };
+        srcMap[s].count += 1; if (isWon(r.status)) { srcMap[s].won += 1; srcMap[s].revenue += num(r.total_amount); }
+      }
+      const leadSources = Object.entries(srcMap).map(([source, v]) => ({ source, count: v.count, won: v.won, revenue: round2(v.revenue), winRate: v.count > 0 ? Math.round(v.won / v.count * 100) : 0 })).sort((a, b) => b.count - a.count);
+
+      const wonIds = won.map(r => r.id);
+      let cateringByPackage: any[] = []; let cateringCovers = 0; let cateringRevenue = 0;
+      if (wonIds.length) {
+        const ph = wonIds.map(() => '?').join(',');
+        const cater: any[] = await db.query(
+          `SELECT name_snapshot, package_type_snapshot, SUM(pax) AS covers, SUM(line_total) AS revenue
+             FROM event_booking_catering WHERE booking_id IN (${ph})
+            GROUP BY name_snapshot, package_type_snapshot ORDER BY SUM(line_total) DESC`,
+          wonIds
+        ).catch(() => []);
+        cateringByPackage = cater.map(c => ({ name: c.name_snapshot, package_type: c.package_type_snapshot, covers: num(c.covers), revenue: round2(num(c.revenue)) }));
+        cateringCovers = cater.reduce((s, c) => s + num(c.covers), 0);
+        cateringRevenue = round2(cater.reduce((s, c) => s + num(c.revenue), 0));
+      }
+
+      const upcoming = rows.filter(r => ymd(r.event_date) >= today && r.status !== 'CANCELLED')
+        .sort((a, b) => ymd(a.event_date).localeCompare(ymd(b.event_date))).slice(0, 15)
+        .map(r => ({ id: r.id, customer_name: r.customer_name, customer_phone: r.customer_phone, venue_name: r.venue_name, event_date: ymd(r.event_date), end_date: r.end_date ? ymd(r.end_date) : null, status: r.status, total_amount: num(r.total_amount), guest_count: num(r.guest_count) }));
+
+      const receivables = won.map(r => ({ id: r.id, customer_name: r.customer_name, venue_name: r.venue_name, event_date: ymd(r.event_date), status: r.status, total_amount: num(r.total_amount), advance_amount: num(r.advance_amount), outstanding: round2(Math.max(0, num(r.total_amount) - num(r.advance_amount))) }))
+        .filter(r => r.outstanding > 0).sort((a, b) => a.event_date.localeCompare(b.event_date));
+
+      res.json({
+        window: { from, to, days: periodDays },
+        kpis: { totalEvents: rows.length, wonCount, lostCount, winRate, avgBookingValue, totalCovers,
+          confirmedRevenue, pipelineRevenue, realizedRevenue, advanceCollected, outstanding, discountGiven,
+          cateringCovers, cateringRevenue },
+        funnel, revenueByMonth, venueUtilization, eventTypeMix, leadSources, cateringByPackage, upcoming, receivables,
+      });
+    } catch (err: any) {
+      console.error("/events/analytics error:", err);
+      res.status(500).json({ error: "Failed to compute analytics" });
+    }
+  });
+
   // ─── BOOKINGS ──────────────────────────────────────────────────────────────
   app.get("/api/restaurant/:id/events/bookings", authenticate, async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);

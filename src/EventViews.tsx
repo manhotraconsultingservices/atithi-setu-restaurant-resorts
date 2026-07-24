@@ -1244,39 +1244,232 @@ function EventQuotations({ restaurantId, token }: Props) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// REPORTS
+// DASHBOARD & REPORTS
 // ════════════════════════════════════════════════════════════════════════
+
+// Download rows as a CSV file (client-side, no server round-trip).
+function downloadCsv(filename: string, rows: (string | number)[][]) {
+  const esc = (v: any) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const csv = rows.map(r => r.map(esc).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+
+// Shared analytics fetch over a selectable period window.
+function useEventAnalytics(restaurantId: string, token: string) {
+  const api = makeApi(restaurantId, token);
+  const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const [from, setFrom] = useState(iso(Date.now() - 180 * 86400000));
+  const [to, setTo] = useState(iso(Date.now() + 180 * 86400000));
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { (async () => {
+    setLoading(true);
+    try { setData(await api(`/events/analytics?from=${from}&to=${to}`)); } catch { setData(null); } finally { setLoading(false); }
+  })(); }, [from, to]);
+  return { data, loading, from, to, setFrom, setTo };
+}
+
+const STATUS_META: Record<string, { label: string; color: string }> = {
+  INQUIRY: { label: 'Inquiry', color: '#64748b' },
+  QUOTED: { label: 'Quoted', color: '#2563eb' },
+  CONFIRMED: { label: 'Confirmed', color: '#6366f1' },
+  IN_PROGRESS: { label: 'In progress', color: '#d97706' },
+  COMPLETED: { label: 'Completed', color: '#059669' },
+  CANCELLED: { label: 'Cancelled', color: '#9ca3af' },
+};
+
+function PeriodBar({ from, to, setFrom, setTo, onExport }: { from: string; to: string; setFrom: (v: string) => void; setTo: (v: string) => void; onExport?: () => void }) {
+  const { t } = useT();
+  const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const preset = (back: number, fwd: number) => { setFrom(iso(Date.now() - back * 86400000)); setTo(iso(Date.now() + fwd * 86400000)); };
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-4">
+      <input type="date" className={`${INPUT} w-auto`} value={from} onChange={e => setFrom(e.target.value)} />
+      <span className="text-[#9d8b7e]">→</span>
+      <input type="date" className={`${INPUT} w-auto`} value={to} onChange={e => setTo(e.target.value)} />
+      <button className={BTN_GHOST} onClick={() => preset(30, 0)}>{t('events.dash.last30')}</button>
+      <button className={BTN_GHOST} onClick={() => preset(90, 90)}>{t('events.dash.quarter')}</button>
+      <button className={BTN_GHOST} onClick={() => preset(365, 90)}>{t('events.dash.year')}</button>
+      {onExport && <button className={BTN_GHOST} onClick={onExport}><FileText size={13} />{t('common.exportCsv')}</button>}
+    </div>
+  );
+}
+
+function EventDashboard({ restaurantId, token }: Props) {
+  const { t } = useT();
+  const { data, loading, from, to, setFrom, setTo } = useEventAnalytics(restaurantId, token);
+  const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
+
+  const top = objStack[objStack.length - 1];
+  if (top) return (
+    <EventObjectRouter restaurantId={restaurantId} token={token} obj={top} venues={[]}
+      onOpenObject={(type, id) => setObjStack(s => [...s, { type, id }])}
+      onBack={() => setObjStack(s => s.slice(0, -1))} />
+  );
+
+  const k = data?.kpis;
+  const tile = (label: string, value: string, sub?: string, accent = '#cc5a16') => (
+    <div className={CARD}>
+      <div className="text-[10px] font-bold uppercase tracking-wide text-[#9d8b7e]">{label}</div>
+      <div className="text-2xl font-bold mt-0.5 tabular-nums" style={{ color: accent }}>{value}</div>
+      {sub && <div className="text-[11px] text-[#6b5d52] mt-0.5">{sub}</div>}
+    </div>
+  );
+  const openLeads = data ? ((data.funnel.find((f: any) => f.status === 'INQUIRY')?.count || 0) + (data.funnel.find((f: any) => f.status === 'QUOTED')?.count || 0)) : 0;
+  const maxMonth = Math.max(1, ...((data?.revenueByMonth || []).map((m: any) => m.revenue)));
+  const maxFunnel = Math.max(1, ...((data?.funnel || []).map((f: any) => f.count)));
+
+  return (
+    <div>
+      <SectionHeader icon={<IndianRupee size={18} />} title={t('events.dash.title')} sub={t('events.dash.sub')} />
+      <PeriodBar from={from} to={to} setFrom={setFrom} setTo={setTo} />
+      {loading || !data ? <p className="text-sm text-[#6b5d52]">{t('common.loading')}</p> : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            {tile(t('events.dash.confirmedRevenue'), money(k.confirmedRevenue), `${k.wonCount} ${t('events.dash.wonEvents')}`)}
+            {tile(t('events.dash.pipeline'), money(k.pipelineRevenue), `${openLeads} ${t('events.dash.openLeads')}`, '#2563eb')}
+            {tile(t('events.dash.winRate'), `${k.winRate}%`, `${k.wonCount} ${t('common.of')} ${k.wonCount + k.lostCount}`, '#059669')}
+            {tile(t('events.dash.avgValue'), money(k.avgBookingValue), t('events.dash.perEvent'), '#7c3aed')}
+            {tile(t('events.dash.outstanding'), money(k.outstanding), `${t('events.dash.advance')} ${money(k.advanceCollected)}`, '#dc2626')}
+            {tile(t('events.dash.covers'), String(k.totalCovers), t('events.dash.guestsServed'))}
+            {tile(t('events.dash.catering'), money(k.cateringRevenue), `${k.cateringCovers} ${t('events.dash.plates')}`, '#b45309')}
+            {tile(t('events.dash.discount'), money(k.discountGiven), t('events.dash.givenWon'), '#9ca3af')}
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-4 mb-4">
+            <div className={CARD}>
+              <h3 className="font-bold text-sm mb-3">{t('events.dash.funnel')}</h3>
+              {data.funnel.map((f: any) => (
+                <div key={f.status} className="mb-2">
+                  <div className="flex items-center justify-between text-xs mb-0.5">
+                    <span style={{ color: STATUS_META[f.status]?.color }}>{STATUS_META[f.status]?.label || f.status}</span>
+                    <span className="tabular-nums text-[#6b5d52]">{f.count} · {money(f.value)}</span>
+                  </div>
+                  <div className="h-2 rounded bg-[#f0e9df] overflow-hidden">
+                    <div className="h-full rounded" style={{ width: `${Math.round(f.count / maxFunnel * 100)}%`, background: STATUS_META[f.status]?.color }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className={CARD}>
+              <h3 className="font-bold text-sm mb-3">{t('events.dash.revenueTrend')}</h3>
+              {data.revenueByMonth.length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : data.revenueByMonth.map((m: any) => (
+                <div key={m.month} className="mb-2">
+                  <div className="flex items-center justify-between text-xs mb-0.5">
+                    <span>{m.month}</span><span className="tabular-nums text-[#6b5d52]">{money(m.revenue)} · {m.events} {t('events.dash.evShort')}</span>
+                  </div>
+                  <div className="h-2 rounded bg-[#f0e9df] overflow-hidden">
+                    <div className="h-full rounded bg-[#cc5a16]" style={{ width: `${Math.round(m.revenue / maxMonth * 100)}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className={`${CARD} mb-4`}>
+            <h3 className="font-bold text-sm mb-3">{t('events.dash.venueUtil')} <span className="font-normal text-[#9d8b7e]">({data.window.days} {t('events.dash.days')})</span></h3>
+            {data.venueUtilization.length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : data.venueUtilization.map((v: any) => (
+              <div key={v.venue_id} className="flex items-center gap-3 text-xs py-1.5 border-b border-[#f0e9df]">
+                <span className="w-40 truncate font-medium">{v.name}</span>
+                <div className="flex-1 h-2.5 rounded bg-[#f0e9df] overflow-hidden"><div className="h-full rounded bg-[#6366f1]" style={{ width: `${v.utilizationPct}%` }} /></div>
+                <span className="w-10 text-right tabular-nums">{v.utilizationPct}%</span>
+                <span className="w-14 text-right tabular-nums text-[#9d8b7e]">{v.events} {t('events.dash.evShort')}</span>
+                <span className="w-24 text-right tabular-nums font-semibold">{money(v.revenue)}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className={CARD}>
+              <h3 className="font-bold text-sm mb-2">{t('events.dash.upcoming')}</h3>
+              {data.upcoming.length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : data.upcoming.map((r: any) => (
+                <button key={r.id} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}
+                  className="w-full flex items-center justify-between text-xs py-1.5 border-b border-[#f0e9df] hover:bg-[#faf7f2] text-left">
+                  <span className="min-w-0 truncate"><span className="font-semibold">{r.customer_name}</span> <span className="text-[#9d8b7e]">· {r.venue_name || '—'}</span></span>
+                  <span className="flex items-center gap-2 shrink-0"><span className="text-[#6b5d52]">{r.event_date}</span><Pill status={r.status} /></span>
+                </button>
+              ))}
+            </div>
+            <div className={CARD}>
+              <h3 className="font-bold text-sm mb-2 flex items-center justify-between">{t('events.dash.receivables')}
+                <span className="text-xs font-normal text-rose-600 tabular-nums">{money(k.outstanding)}</span></h3>
+              {data.receivables.length === 0 ? <p className="text-xs text-[#9d8b7e]">{t('events.dash.allSettled')}</p> : data.receivables.slice(0, 12).map((r: any) => (
+                <button key={r.id} onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: r.id }])}
+                  className="w-full flex items-center justify-between text-xs py-1.5 border-b border-[#f0e9df] hover:bg-[#faf7f2] text-left">
+                  <span className="min-w-0 truncate"><span className="font-semibold">{r.customer_name}</span> <span className="text-[#9d8b7e]">· {r.event_date}</span></span>
+                  <span className="tabular-nums font-semibold text-rose-600 shrink-0">{money(r.outstanding)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Reports & exports — tabular breakdowns with per-table and full CSV download.
 function EventReports({ restaurantId, token }: Props) {
   const { t } = useT();
-  const api = makeApi(restaurantId, token);
-  const [rows, setRows] = useState<any[]>([]);
-  useEffect(() => { api('/events/bookings').then(setRows).catch(() => {}); }, []);
+  const { data, loading, from, to, setFrom, setTo } = useEventAnalytics(restaurantId, token);
 
-  const today = new Date().toISOString().slice(0, 10);
-  const upcoming = rows.filter(r => r.event_date >= today && ['CONFIRMED', 'IN_PROGRESS'].includes(r.status)).length;
-  const inquiries = rows.filter(r => r.status === 'INQUIRY').length;
-  const revenue = rows.filter(r => ['CONFIRMED', 'IN_PROGRESS', 'COMPLETED'].includes(r.status)).reduce((s, r) => s + Number(r.total_amount || 0), 0);
-  const byVenue: Record<string, number> = {};
-  rows.forEach(r => { const v = r.venue_name || '—'; byVenue[v] = (byVenue[v] || 0) + 1; });
+  const exportAll = () => {
+    if (!data) return;
+    const rows: (string | number)[][] = [['Events & Convention report', `${from} to ${to}`], []];
+    rows.push(['BOOKING FUNNEL'], ['Status', 'Count', 'Value']);
+    data.funnel.forEach((f: any) => rows.push([f.status, f.count, f.value]));
+    rows.push([], ['VENUE UTILIZATION'], ['Venue', 'Events', 'Booked days', 'Utilization %', 'Revenue']);
+    data.venueUtilization.forEach((v: any) => rows.push([v.name, v.events, v.bookedDays, v.utilizationPct, v.revenue]));
+    rows.push([], ['EVENT TYPE MIX'], ['Type', 'Count', 'Revenue']);
+    data.eventTypeMix.forEach((v: any) => rows.push([v.type, v.count, v.revenue]));
+    rows.push([], ['LEAD SOURCES'], ['Source', 'Leads', 'Won', 'Win %', 'Revenue']);
+    data.leadSources.forEach((v: any) => rows.push([v.source, v.count, v.won, v.winRate, v.revenue]));
+    rows.push([], ['REVENUE BY MONTH'], ['Month', 'Events', 'Covers', 'Revenue']);
+    data.revenueByMonth.forEach((v: any) => rows.push([v.month, v.events, v.covers, v.revenue]));
+    rows.push([], ['CATERING'], ['Package', 'Type', 'Covers', 'Revenue']);
+    data.cateringByPackage.forEach((v: any) => rows.push([v.name, v.package_type, v.covers, v.revenue]));
+    rows.push([], ['RECEIVABLES'], ['Customer', 'Event date', 'Total', 'Advance', 'Outstanding']);
+    data.receivables.forEach((v: any) => rows.push([v.customer_name, v.event_date, v.total_amount, v.advance_amount, v.outstanding]));
+    downloadCsv(`events-report-${from}_${to}.csv`, rows);
+  };
 
-  const kpi = (label: string, value: string) => (
-    <div className={CARD}><div className="text-2xl font-bold text-[#cc5a16]">{value}</div><div className="text-xs text-[#6b5d52]">{label}</div></div>
+  const table = (title: string, cols: string[], rows: any[][]) => (
+    <div className={`${CARD} mb-4`}>
+      <h3 className="font-bold text-sm mb-2">{title}</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead><tr className="text-left text-[#9d8b7e] border-b border-[#e8dccf]">{cols.map((c, i) => <th key={c} className={`py-1.5 pr-3 font-semibold ${i === 0 ? '' : 'text-right'}`}>{c}</th>)}</tr></thead>
+          <tbody>{rows.length === 0 ? <tr><td colSpan={cols.length} className="py-2 text-[#9d8b7e]">—</td></tr> : rows.map((r, i) => (
+            <tr key={i} className="border-b border-[#f0e9df]">{r.map((c, j) => <td key={j} className={`py-1.5 pr-3 ${j === 0 ? '' : 'tabular-nums text-right'}`}>{c}</td>)}</tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
   );
 
   return (
     <div>
-      <SectionHeader icon={<IndianRupee size={18} />} title={t('events.reports.title')} />
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
-        {kpi(t('events.reports.upcoming'), String(upcoming))}
-        {kpi(t('events.reports.inquiries'), String(inquiries))}
-        {kpi(t('events.reports.confirmedRevenue'), money(revenue))}
-      </div>
-      <div className={CARD}>
-        <h3 className="font-bold text-sm mb-2">{t('events.reports.byVenue')}</h3>
-        {Object.keys(byVenue).length === 0 ? <p className="text-xs text-[#9d8b7e]">—</p> : Object.entries(byVenue).map(([v, n]) => (
-          <div key={v} className="flex items-center justify-between text-xs py-1 border-b border-[#f0e9df]"><span>{v}</span><span className="font-semibold">{n}</span></div>
-        ))}
-      </div>
+      <SectionHeader icon={<FileText size={18} />} title={t('events.reports.title')} sub={t('events.reports.sub')} />
+      <PeriodBar from={from} to={to} setFrom={setFrom} setTo={setTo} onExport={exportAll} />
+      {loading || !data ? <p className="text-sm text-[#6b5d52]">{t('common.loading')}</p> : (
+        <>
+          {table(t('events.dash.venueUtil'), [t('events.bookings.venue'), t('events.dash.events'), t('events.dash.bookedDays'), t('events.dash.utilPct'), t('common.total')],
+            data.venueUtilization.map((v: any) => [v.name, v.events, v.bookedDays, `${v.utilizationPct}%`, money(v.revenue)]))}
+          {table(t('events.dash.eventTypeMix'), [t('events.bookings.eventType'), t('events.dash.events'), t('common.total')],
+            data.eventTypeMix.map((v: any) => [v.type, v.count, money(v.revenue)]))}
+          {table(t('events.dash.leadSources'), [t('events.dash.source'), t('events.dash.leads'), t('events.dash.won'), t('events.dash.winRate'), t('common.total')],
+            data.leadSources.map((v: any) => [v.source, v.count, v.won, `${v.winRate}%`, money(v.revenue)]))}
+          {table(t('events.dash.revenueTrend'), [t('events.dash.month'), t('events.dash.events'), t('events.dash.covers'), t('common.total')],
+            data.revenueByMonth.map((v: any) => [v.month, v.events, v.covers, money(v.revenue)]))}
+          {table(t('events.dash.catering'), [t('events.dash.package'), t('events.dash.covers'), t('common.total')],
+            data.cateringByPackage.map((v: any) => [`${v.name} (${v.package_type})`, v.covers, money(v.revenue)]))}
+          {table(t('events.dash.receivables'), [t('events.bookings.customer'), t('events.bookings.eventDate'), t('common.total'), t('events.bookings.advance'), t('events.dash.outstanding')],
+            data.receivables.map((v: any) => [v.customer_name, v.event_date, money(v.total_amount), money(v.advance_amount), money(v.outstanding)]))}
+        </>
+      )}
     </div>
   );
 }
@@ -1355,6 +1548,7 @@ function LanguageToggle() {
 // ════════════════════════════════════════════════════════════════════════
 function EventsModuleInner({ restaurantId, token, tab }: Props & { tab: string }) {
   switch (tab) {
+    case 'EVENTS_DASHBOARD': return <EventDashboard restaurantId={restaurantId} token={token} />;
     case 'EVENTS_CALENDAR': return <EventCalendar restaurantId={restaurantId} token={token} />;
     case 'EVENTS_BOOKINGS': return <EventBookings restaurantId={restaurantId} token={token} />;
     case 'EVENTS_VENUES': return <EventVenues restaurantId={restaurantId} token={token} />;

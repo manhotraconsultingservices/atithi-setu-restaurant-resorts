@@ -13364,6 +13364,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
             id: 'EVENTS', label: 'Events & Convention', icon: <CalendarRange size={16} />,
             visible: isEventsEnabled,
             tabs: [
+              { id: 'EVENTS_DASHBOARD',  label: 'Dashboard' },
               { id: 'EVENTS_CALENDAR',   label: 'Event Calendar' },
               { id: 'EVENTS_BOOKINGS',   label: 'Bookings' },
               { id: 'EVENTS_VENUES',     label: 'Halls & Venues' },
@@ -14141,7 +14142,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         </div>
       ) : (activeTab === 'SPA_CALENDAR' || activeTab === 'SPA_APPOINTMENTS' || activeTab === 'SPA_CATALOG' || activeTab === 'SPA_RESOURCES' || activeTab === 'SPA_CLIENTS' || activeTab === 'SPA_PACKAGES' || activeTab === 'SPA_REPORTS' || activeTab === 'SPA_INVENTORY' || activeTab === 'SPA_SETTINGS') && isSpaEnabled ? (
         <SpaModule restaurantId={restaurantId} token={token!} tab={activeTab} />
-      ) : (activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS') && isEventsEnabled ? (
+      ) : (activeTab === 'EVENTS_DASHBOARD' || activeTab === 'EVENTS_CALENDAR' || activeTab === 'EVENTS_BOOKINGS' || activeTab === 'EVENTS_VENUES' || activeTab === 'EVENTS_RENTALS' || activeTab === 'EVENTS_SERVICES' || activeTab === 'EVENTS_CATERING' || activeTab === 'EVENTS_QUOTATIONS' || activeTab === 'EVENTS_REPORTS' || activeTab === 'EVENTS_SETTINGS') && isEventsEnabled ? (
         <LanguageProvider secondary={secondaryLanguage}>
           <EventsModule restaurantId={restaurantId} token={token!} tab={activeTab} />
         </LanguageProvider>
