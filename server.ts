@@ -27,7 +27,7 @@ import {
   resolveVenueCharge, venueBookingConflict, venueBlockConflict, rentalCommittedQty,
   recomputeEventPaid,
 } from "./eventsService.ts";
-import { generateEventQuotationPdf, type EventQuotationData } from "./eventQuotationPdf.ts";
+import { generateEventQuotationPdf, generateEventBEOPdf, type EventQuotationData } from "./eventQuotationPdf.ts";
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
 import {
   computePayslip as computeStatutoryPayslip,
@@ -22630,6 +22630,88 @@ ${data.tenant.name}`;
       console.error("/events quotation pdf error:", err);
       res.status(500).json({ error: "Failed to generate quotation PDF" });
     }
+  });
+
+  // ─── BEO / function sheet PDF (Sprint 2) ────────────────────────────────────
+  app.get("/api/restaurant/:id/events/bookings/:bid/beo.pdf", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get(`SELECT b.*, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?`, [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const items: any[] = await db.query("SELECT * FROM event_booking_items WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
+      const svcs: any[] = await db.query("SELECT * FROM event_booking_services WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
+      const cater: any[] = await db.query("SELECT * FROM event_booking_catering WHERE booking_id = ? ORDER BY created_at", [req.params.bid]).catch(() => []);
+      const rooms: any[] = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED' ORDER BY created_at", [req.params.bid]);
+      const schedule: any[] = await db.query("SELECT * FROM event_payment_schedule WHERE booking_id = ? ORDER BY sort_order, due_date", [req.params.bid]).catch(() => []);
+      const payRows: any[] = await db.query("SELECT COALESCE(SUM(amount),0) AS t FROM event_payments WHERE booking_id = ?", [req.params.bid]).catch(() => [{ t: 0 }]);
+      const paid = round2(Number(payRows?.[0]?.t || 0));
+      const grand = round2(Number(bk.total_amount || 0));
+      const pdf = await generateEventBEOPdf({
+        tenant: { name: check.restaurant?.name || 'Venue', phone: check.restaurant?.phone, email: check.restaurant?.email },
+        booking: { id: bk.id, status: bk.status, customer_name: bk.customer_name, customer_phone: bk.customer_phone, customer_email: bk.customer_email, event_type: bk.event_type, event_date: bk.event_date, end_date: bk.end_date, start_time: bk.start_time, end_time: bk.end_time, guest_count: bk.guest_count, venue_name: bk.venue_name, special_requests: bk.special_requests },
+        catering: cater.map((c: any) => { let menu: any[] = []; try { const m = c.menu_snapshot ? JSON.parse(c.menu_snapshot) : null; if (Array.isArray(m)) menu = m; } catch { /* */ } return { name: c.name_snapshot, package_type: c.package_type_snapshot, pax: c.pax, menu }; }),
+        rentals: items.map((it: any) => ({ name: it.name_snapshot, quantity: it.quantity, rate_basis: it.rate_basis })),
+        services: svcs.map((s: any) => ({ name: s.name_snapshot, quantity: s.quantity })),
+        rooms: rooms.map((rm: any) => ({ room_type: rm.room_type_snapshot, num_rooms: rm.num_rooms, check_in: rm.check_in_date, check_out: rm.check_out_date })),
+        schedule: schedule.map((s: any) => ({ label: s.label, due_date: s.due_date, amount: s.amount, status: s.status })),
+        totals: { grand_total: grand, paid, balance: round2(grand - paid) },
+      });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="BEO-${bk.id}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) { console.error("/events beo pdf error:", err); res.status(500).json({ error: "Failed to generate BEO" }); }
+  });
+
+  // ─── Invoice PDF + email (Sprint 2) ─────────────────────────────────────────
+  const buildInvoiceData = async (db: any, restaurant: any, bid: string): Promise<EventQuotationData | null> => {
+    const bk: any = await db.get(`SELECT b.*, v.name AS venue_name FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id WHERE b.id = ?`, [bid]);
+    if (!bk) return null;
+    const { lines, subtotal, tax, discount, grand } = await assembleEventQuoteLines(db, bk);
+    const folio: any = await db.get("SELECT invoice_number, created_at FROM folios WHERE event_booking_id = ? AND folio_kind = 'EVENT' ORDER BY created_at DESC LIMIT 1", [bid]).catch(() => null);
+    return {
+      tenant: { name: restaurant?.name || 'Our Venue', address: restaurant?.address || undefined, gstin: restaurant?.gstin || undefined, phone: restaurant?.phone || undefined, email: restaurant?.email || undefined, currency: 'INR' },
+      quotation: { quote_number: folio?.invoice_number || `INV-${String(bid).slice(-6)}`, version: 1, created_at: folio?.created_at || new Date().toISOString() },
+      docLabel: 'TAX INVOICE',
+      booking: { customer_name: bk.customer_name || '', customer_phone: bk.customer_phone, customer_email: bk.customer_email, event_type: bk.event_type, event_date: bk.event_date, end_date: bk.end_date, start_time: bk.start_time, end_time: bk.end_time, guest_count: bk.guest_count, venue_name: bk.venue_name },
+      lines: lines.map((l: any) => ({ line_type: l.line_type, description: l.description, quantity: Number(l.quantity), unit_rate: Number(l.unit_rate), amount: Number(l.amount), gst_rate: Number(l.gst_rate), gst_amount: Number(l.gst_amount) })),
+      subtotal, tax_amount: tax, discount, grand_total: grand,
+    };
+  };
+
+  app.get("/api/restaurant/:id/events/bookings/:bid/invoice.pdf", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const data = await buildInvoiceData(db, check.restaurant, req.params.bid);
+      if (!data) return res.status(404).json({ error: "Booking not found" });
+      const pdf = await generateEventQuotationPdf(data);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${data.quotation.quote_number}.pdf"`);
+      res.send(pdf);
+    } catch (err: any) { console.error("/events invoice pdf error:", err); res.status(500).json({ error: "Failed to generate invoice" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/bookings/:bid/invoice/send", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const data = await buildInvoiceData(db, check.restaurant, req.params.bid);
+      if (!data) return res.status(404).json({ error: "Booking not found" });
+      const to = String(req.body?.email || data.booking.customer_email || '').trim();
+      if (!to) return res.status(400).json({ error: "No recipient email — add the customer's email first." });
+      const pdf = await generateEventQuotationPdf(data);
+      const subject = `Invoice ${data.quotation.quote_number} — ${data.tenant.name}`;
+      const text = `Dear ${data.booking.customer_name},\n\nPlease find attached your invoice (${data.quotation.quote_number}).\n\nThank you,\n${data.tenant.name}`;
+      const html = `<p>Dear ${data.booking.customer_name},</p><p>Please find attached your invoice (<strong>${data.quotation.quote_number}</strong>).</p><p>Thank you,<br/>${data.tenant.name}</p>`;
+      const sent = await sendEmail(to, subject, text, html, [{ filename: `${data.quotation.quote_number}.pdf`, content: pdf }]);
+      if (!sent) return res.status(502).json({ error: "Email could not be sent (SMTP not configured). PDF is still available for download." });
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'INVOICE_SENT', summary: `Invoice emailed to ${to}` });
+      res.json({ success: true, sent_to: to });
+    } catch (err: any) { console.error("/events invoice send error:", err); res.status(500).json({ error: "Failed to send invoice" }); }
   });
 
   app.post("/api/restaurant/:id/events/quotations/:qid/send", authenticate, eventsStaff, requireTabAccess('EVENTS_QUOTATIONS'), async (req: AuthRequest, res: Response) => {

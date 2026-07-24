@@ -55,8 +55,8 @@ const money = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximum
 // at send time (defaulting to the customer's email when one is on file). The
 // /send endpoint accepts { email } as an override — email is never mandatory on
 // the booking itself, so this is the point where a recipient is chosen.
-function SendQuoteDialog({ restaurantId, token, quotationId, defaultEmail, onClose, onSent }:
-  { restaurantId: string; token: string; quotationId: string; defaultEmail?: string; onClose: () => void; onSent: (to: string) => void }) {
+function SendQuoteDialog({ restaurantId, token, quotationId, sendUrl, defaultEmail, onClose, onSent }:
+  { restaurantId: string; token: string; quotationId?: string; sendUrl?: string; defaultEmail?: string; onClose: () => void; onSent: (to: string) => void }) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
   const [email, setEmail] = useState(defaultEmail || '');
@@ -67,7 +67,7 @@ function SendQuoteDialog({ restaurantId, token, quotationId, defaultEmail, onClo
     if (!valid) { setErr(t('events.quotes.invalidEmail')); return; }
     setBusy(true); setErr('');
     try {
-      await api(`/events/quotations/${quotationId}/send`, { method: 'POST', body: JSON.stringify({ email: email.trim() }) });
+      await api(sendUrl || `/events/quotations/${quotationId}/send`, { method: 'POST', body: JSON.stringify({ email: email.trim() }) });
       onSent(email.trim());
       onClose();
     } catch (e: any) { setErr(e?.message || 'Failed to send'); setBusy(false); }
@@ -708,6 +708,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const [showHotel, setShowHotel] = useState(false);
   const [sendQuote, setSendQuote] = useState<{ id: string; email: string } | null>(null);
   const [showCancel, setShowCancel] = useState(false);
+  const [emailInvoice, setEmailInvoice] = useState(false);
   const [caterPkgs, setCaterPkgs] = useState<any[]>([]);
   const [nonce, setNonce] = useState(0);
 
@@ -1027,6 +1028,9 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       {/* Lifecycle actions */}
       <div className="flex flex-wrap gap-2 mt-4">
         <button className={BTN_GHOST} disabled={busy} onClick={genQuote}><FileText size={13} />{t('events.bookings.generateQuote')}</button>
+        <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/beo.pdf`, token)}><ClipboardList size={13} />{t('events.bookings.beo')}</button>
+        <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/bookings/${bookingId}/invoice.pdf`, token)}><FileText size={13} />{t('events.bookings.invoice')}</button>
+        <button className={BTN_GHOST} onClick={() => setEmailInvoice(true)}><Send size={13} />{t('events.bookings.emailInvoice')}</button>
         {(bk.status === 'INQUIRY' || bk.status === 'QUOTED') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('confirm')}><Check size={13} />{t('events.bookings.confirm')}</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('checkout')}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_GHOST} disabled={busy} onClick={() => act('complete')}>{t('events.bookings.complete')}</button>}
@@ -1036,6 +1040,11 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
       {showCancel && (
         <CancelEventDialog restaurantId={restaurantId} token={token} bookingId={bookingId}
           onClose={() => setShowCancel(false)} onCancelled={() => load()} />
+      )}
+
+      {emailInvoice && (
+        <SendQuoteDialog restaurantId={restaurantId} token={token} sendUrl={`/events/bookings/${bookingId}/invoice/send`} defaultEmail={bk.customer_email || ''}
+          onClose={() => setEmailInvoice(false)} onSent={(to) => alert(`${t('events.quotes.sent')} ${to}`)} />
       )}
 
       {(bk.quotations || []).length > 0 && (

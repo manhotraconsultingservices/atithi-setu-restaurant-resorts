@@ -22,6 +22,7 @@ export interface EventQuotationLine {
 export interface EventQuotationData {
   tenant: { name: string; address?: string; gstin?: string; phone?: string; email?: string; currency?: string };
   quotation: { quote_number: string; version: number; valid_until?: string; notes?: string; created_at?: string };
+  docLabel?: string;  // header label; defaults to 'QUOTATION'. Pass 'TAX INVOICE' to render an invoice.
   booking: {
     customer_name: string; customer_phone?: string; customer_email?: string;
     event_type?: string; event_date?: string; end_date?: string;
@@ -119,7 +120,7 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
       if (data.tenant.gstin) doc.text(`GSTIN: ${data.tenant.gstin}`, M, hy, { width: INNER - 170 });
 
       // Quotation title block (right)
-      doc.font('Helvetica-Bold').fontSize(16).fillColor(ACCENT).text('QUOTATION', M, 24, { width: INNER, align: 'right' });
+      doc.font('Helvetica-Bold').fontSize(16).fillColor(ACCENT).text(waSafe(data.docLabel || 'QUOTATION'), M, 24, { width: INNER, align: 'right' });
       doc.font('Helvetica').fontSize(9).fillColor(INK);
       doc.text(`No: ${data.quotation.quote_number}  (v${data.quotation.version})`, M, 48, { width: INNER, align: 'right' });
       const issued = ymd(data.quotation.created_at) || new Date().toISOString().slice(0, 10);
@@ -208,8 +209,11 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
         doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(notes, M, y, { width: INNER });
         y += doc.heightOfString(notes, { width: INNER }) + 12;
       }
+      const isInvoice = /INVOICE/i.test(data.docLabel || '');
       doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text(
-        'This is a quotation, not a tax invoice. Prices are indicative and subject to availability at time of confirmation.',
+        isInvoice
+          ? 'Thank you for your business.'
+          : 'This is a quotation, not a tax invoice. Prices are indicative and subject to availability at time of confirmation.',
         M, Math.max(y, 770), { width: INNER, align: 'center' }
       );
 
@@ -217,5 +221,129 @@ export async function generateEventQuotationPdf(data: EventQuotationData): Promi
     } catch (err) {
       reject(err);
     }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Banquet Event Order (BEO) / function sheet — the operations run-sheet handed
+// to the kitchen / venue team. Distinct from the customer quotation: it focuses
+// on WHAT to set up and WHO owes WHAT, not on selling.
+// ─────────────────────────────────────────────────────────────────────────────
+export interface EventBEOData {
+  tenant: { name: string; phone?: string; email?: string };
+  booking: {
+    id: string; status?: string; customer_name: string; customer_phone?: string; customer_email?: string;
+    event_type?: string; event_date?: any; end_date?: any; start_time?: string; end_time?: string;
+    guest_count?: number; venue_name?: string; special_requests?: string;
+  };
+  catering: Array<{ name: string; package_type?: string; pax?: number; menu?: Array<{ section: string; options: string[] }> }>;
+  rentals: Array<{ name: string; quantity?: number; rate_basis?: string }>;
+  services: Array<{ name: string; quantity?: number }>;
+  rooms: Array<{ room_type: string; num_rooms?: number; check_in?: any; check_out?: any }>;
+  schedule: Array<{ label: string; due_date?: any; amount?: number; status?: string }>;
+  totals: { grand_total: number; paid: number; balance: number };
+}
+
+export async function generateEventBEOPdf(data: EventBEOData): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 0, info: { Title: `BEO ${data.booking.id}`, Author: data.tenant.name } });
+      const chunks: Buffer[] = [];
+      doc.on('data', (c: Buffer) => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+
+      const PAGE_W = 595.28;
+      const M = 42;
+      const INNER = PAGE_W - M * 2;
+      let y = M;
+
+      const b = data.booking;
+      // Header
+      doc.rect(0, 0, PAGE_W, 88).fill(BAND);
+      doc.fillColor(INK).font('Helvetica-Bold').fontSize(18).text(waSafe(data.tenant.name), M, 22, { width: INNER - 150 });
+      doc.font('Helvetica').fontSize(9).fillColor(MUTED).text([data.tenant.phone, data.tenant.email].filter(Boolean).join('  ·  '), M, 46, { width: INNER - 150 });
+      doc.font('Helvetica-Bold').fontSize(15).fillColor(ACCENT).text('BANQUET EVENT ORDER', M, 24, { width: INNER, align: 'right' });
+      doc.font('Helvetica').fontSize(9).fillColor(INK).text(`Ref: ${b.id}`, M, 48, { width: INNER, align: 'right' });
+      if (b.status) doc.text(`Status: ${b.status}`, M, 60, { width: INNER, align: 'right' });
+      y = 104;
+
+      const sectionTitle = (t: string) => {
+        if (y > 760) { doc.addPage(); y = M; }
+        doc.font('Helvetica-Bold').fontSize(10.5).fillColor(ACCENT).text(waSafe(t), M, y); y += 15;
+        doc.moveTo(M, y - 2).lineTo(M + INNER, y - 2).lineWidth(0.5).strokeColor(HAIR).stroke();
+      };
+      const kv = (k: string, v: string) => {
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text(waSafe(k), M, y, { width: 110, continued: false });
+        doc.font('Helvetica').fontSize(9).fillColor(INK).text(waSafe(v || '—'), M + 115, y, { width: INNER - 115 });
+        y += 14;
+      };
+      const bullet = (t: string) => {
+        if (y > 780) { doc.addPage(); y = M; }
+        doc.font('Helvetica').fontSize(9).fillColor(INK).text(`•  ${waSafe(t)}`, M + 6, y, { width: INNER - 12 });
+        y += 13;
+      };
+
+      // Event summary
+      sectionTitle('Event Summary');
+      const dateStr = ymd(b.event_date) + (b.end_date && ymd(b.end_date) > ymd(b.event_date) ? ` to ${ymd(b.end_date)}` : '');
+      kv('Customer', b.customer_name);
+      kv('Contact', [b.customer_phone, b.customer_email].filter(Boolean).join('  ·  '));
+      kv('Event type', b.event_type || '—');
+      kv('Date', dateStr);
+      kv('Time', `${b.start_time || ''}-${b.end_time || ''}`);
+      kv('Venue', b.venue_name || '—');
+      kv('Guests', String(b.guest_count ?? '—'));
+      y += 6;
+
+      // Catering
+      if (data.catering.length) {
+        sectionTitle('Catering');
+        for (const c of data.catering) {
+          doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(`${waSafe(c.name)} (${c.package_type || 'BUFFET'}) — ${c.pax ?? 0} pax`, M, y); y += 13;
+          for (const s of (c.menu || [])) bullet(`${s.section}: ${(s.options || []).join(', ')}`);
+          y += 4;
+        }
+      }
+
+      // Rentals
+      if (data.rentals.length) {
+        sectionTitle('Rentals / Equipment');
+        for (const r of data.rentals) bullet(`${r.name} × ${r.quantity ?? 1}${r.rate_basis ? ` (${r.rate_basis})` : ''}`);
+        y += 4;
+      }
+
+      // Services
+      if (data.services.length) {
+        sectionTitle('Services / Staffing');
+        for (const s of data.services) bullet(`${s.name} × ${s.quantity ?? 1}`);
+        y += 4;
+      }
+
+      // Hotel rooms
+      if (data.rooms.length) {
+        sectionTitle('Hotel Rooms');
+        for (const rm of data.rooms) bullet(`${rm.room_type} × ${rm.num_rooms ?? 1} (${ymd(rm.check_in)} to ${ymd(rm.check_out)})`);
+        y += 4;
+      }
+
+      // Special requests
+      if (b.special_requests) {
+        sectionTitle('Special Requests');
+        doc.font('Helvetica').fontSize(9).fillColor(INK).text(waSafe(b.special_requests), M, y, { width: INNER });
+        y += doc.heightOfString(waSafe(b.special_requests), { width: INNER }) + 8;
+      }
+
+      // Payment status
+      sectionTitle('Payment Status');
+      kv('Grand total', fmtMoney(data.totals.grand_total));
+      kv('Received', fmtMoney(data.totals.paid));
+      kv('Balance', fmtMoney(data.totals.balance));
+      for (const s of data.schedule) {
+        bullet(`${s.label} — ${fmtMoney(Number(s.amount || 0))} due ${ymd(s.due_date) || '—'} [${s.status || 'DUE'}]`);
+      }
+
+      doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text('Operations run-sheet — internal use.', M, Math.max(y + 10, 800), { width: INNER, align: 'center' });
+      doc.end();
+    } catch (err) { reject(err); }
   });
 }
