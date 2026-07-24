@@ -7,6 +7,7 @@ import { useConfirm } from './components/ConfirmDialog';
 import { usePaymentDialog } from './components/PaymentDialog';
 import { SpaModule, SpaBookingPage } from './SpaViews';
 import { EventsModule, EventBookingPage } from './EventViews';
+import { StaffPayrollGrid } from './StaffPayroll';
 import { LanguageProvider, useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -103,7 +104,7 @@ import { MenuItem, Order, UserRole, OrderItem, Restaurant, Table, DietaryType, I
 // to any non-owner with an ancient unmarked allowedTabs list — which is
 // the exact bug the founder flagged on 7 Jun 2026 ("STAFF_ACCESS should
 // only be visible to Business owner. this is critical.").
-const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'RESTAURANT_REPORTS', 'HR_PAYROLL', 'PROCUREMENT', 'ALL_REPORTS']);
+const ALWAYS_VISIBLE_TABS = new Set<string>(['INVENTORY', 'DELIVERY', 'LOYALTY', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL', 'FRONT_OFFICE_REPORTS', 'CHANNEL_MANAGER', 'PUBLIC_BOOKING_PAGE', 'RESTAURANT_REPORTS', 'HR_PAYROLL', 'PROCUREMENT', 'ALL_REPORTS']);
 
 // Versioned sentinels appended by savePermissions() to every PARTIAL
 // restriction list. Each marker stamps the list as "configured through the
@@ -129,7 +130,7 @@ const PERMS_V3_MARKER = '__perm_v3__';
 // themselves about these tabs (because they hadn't been built yet) — so
 // we grandfather them visible. Once the admin re-saves through the V3 UI,
 // the V3 marker is appended and any exclusion sticks.
-const TABS_INTRODUCED_AFTER_V2 = new Set<string>(['LOYALTY', 'ROSTER', 'TIMESHEET', 'HR_PAYROLL', 'RESTAURANT_REPORTS', 'PROCUREMENT', 'EXPENSE_JOURNAL']);
+const TABS_INTRODUCED_AFTER_V2 = new Set<string>(['LOYALTY', 'ROSTER', 'TIMESHEET', 'STAFF_PAYROLL', 'HR_PAYROLL', 'RESTAURANT_REPORTS', 'PROCUREMENT', 'EXPENSE_JOURNAL']);
 
 // Tabs introduced after V3 was shipped. V3-era permission saves pre-date
 // these tabs, so even a fully-informed V3 list won't include them — we
@@ -8188,7 +8189,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
     | 'INVENTORY'                                 // inventory module
     | 'DELIVERY'                                  // multi-platform delivery integration
     | 'LOYALTY'                                   // tier-based customer loyalty (Phase 1)
-    | 'ROSTER' | 'TIMESHEET'                      // shift roster + planned-vs-actual (Phase 3)
+    | 'ROSTER' | 'TIMESHEET' | 'STAFF_PAYROLL'    // shift roster + planned-vs-actual + operational payroll (Phase 3)
     | 'ROOMS' | 'ROOM_SETUP' | 'SERVICES' | 'SERVICE_REQUESTS'   // hospitality Phase 1 (ROOMS=availability board, ROOM_SETUP=owner-only setup)
     | 'HOTEL_BOOKINGS' | 'FOLIOS' | 'COMPLIANCE' | 'HOTEL_INVENTORY'  // hospitality Phase 2 & 3
     | 'FRONT_OFFICE_REPORTS'                      // Arrival / Departure / Room Status / Night Audit
@@ -13431,6 +13432,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
               { id: 'ATTENDANCE', label: 'Attendance' },
               { id: 'ROSTER',     label: 'Roster' },
               { id: 'TIMESHEET',  label: 'Timesheet' },
+              { id: 'STAFF_PAYROLL', label: 'Staff Payroll' },
               { id: 'HR_PAYROLL', label: 'HR & Payroll' },
             ],
           },
@@ -16987,6 +16989,8 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
         <RosterManagement restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'TIMESHEET' ? (
         <TimesheetDashboard restaurantId={restaurantId} token={token!} />
+      ) : activeTab === 'STAFF_PAYROLL' ? (
+        <StaffPayrollGrid restaurantId={restaurantId} token={token!} />
       ) : activeTab === 'HR_PAYROLL' ? (
         <HRPayrollModule restaurantId={restaurantId} token={token!} restaurant={restaurant} />
       ) : activeTab === 'EXPENSE_JOURNAL' ? (

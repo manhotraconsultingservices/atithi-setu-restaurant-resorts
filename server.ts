@@ -41874,13 +41874,22 @@ ${data.tenant.name}`;
     }
   });
 
-  // Staff: Update Settings (default hours)
+  // Staff: Update Settings (default hours + payroll wage type/rate)
   app.patch("/api/owner/staff/:id/settings", authenticate, async (req: AuthRequest, res: Response) => {
     try {
-      const { default_hours } = req.body;
+      const b = req.body || {};
       const db = await getTenantDb(req.user!.restaurantId);
       await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS default_hours DOUBLE PRECISION DEFAULT 8");
-      await db.run("UPDATE attendance_staff SET default_hours = ? WHERE id = ?", [default_hours, req.params.id]);
+      await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS pay_type TEXT DEFAULT 'HOURLY'").catch(() => {});
+      await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS monthly_wage DOUBLE PRECISION DEFAULT 0").catch(() => {});
+      const fields: string[] = []; const vals: any[] = [];
+      if (b.default_hours !== undefined) { fields.push("default_hours = ?"); vals.push(Number(b.default_hours) || 0); }
+      if (b.pay_type !== undefined) { fields.push("pay_type = ?"); vals.push(String(b.pay_type).toUpperCase() === 'FULL_TIME' ? 'FULL_TIME' : 'HOURLY'); }
+      if (b.monthly_wage !== undefined) { fields.push("monthly_wage = ?"); vals.push(Number(b.monthly_wage) || 0); }
+      if (b.hourly_rate !== undefined) { fields.push("hourly_rate = ?"); vals.push(Number(b.hourly_rate) || 0); }
+      if (!fields.length) return res.status(400).json({ error: "No settings to update" });
+      vals.push(req.params.id);
+      await db.run(`UPDATE attendance_staff SET ${fields.join(', ')} WHERE id = ?`, vals);
       res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: "Failed to update staff settings" });
