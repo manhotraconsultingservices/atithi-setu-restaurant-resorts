@@ -468,6 +468,58 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   await tenantDb.exec(`ALTER TABLE event_services ADD COLUMN IF NOT EXISTS description TEXT`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_items ADD COLUMN IF NOT EXISTS description_snapshot TEXT`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_services ADD COLUMN IF NOT EXISTS description_snapshot TEXT`).catch(() => {});
+
+  // ── Sprint 1: cash & revenue integrity ──────────────────────────────────────
+  // Staged deposit / payment schedule (booking deposit → interim → balance).
+  await tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS event_payment_schedule (
+      id          TEXT PRIMARY KEY,
+      booking_id  TEXT NOT NULL,
+      label       TEXT,
+      due_date    DATE,
+      amount      DOUBLE PRECISION DEFAULT 0,   -- resolved amount due for this instalment
+      percent     DOUBLE PRECISION,             -- optional: % of grand total (for display/regeneration)
+      status      TEXT DEFAULT 'DUE',           -- DUE | PAID | WAIVED
+      paid_amount DOUBLE PRECISION DEFAULT 0,
+      paid_at     TIMESTAMP,
+      sort_order  INTEGER DEFAULT 0,
+      created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_pay_sched ON event_payment_schedule(booking_id, sort_order);
+  `);
+  // Payment ledger — receipts recorded against a booking (source of truth for
+  // "money received"; booking.advance_amount is kept in sync = SUM(amount)).
+  await tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS event_payments (
+      id          TEXT PRIMARY KEY,
+      booking_id  TEXT NOT NULL,
+      schedule_id TEXT,
+      amount      DOUBLE PRECISION DEFAULT 0,
+      method      TEXT DEFAULT 'CASH',          -- CASH | UPI | CARD | BANK | CHEQUE
+      reference   TEXT,
+      paid_at     DATE,
+      note        TEXT,
+      recorded_by TEXT,
+      created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_payments ON event_payments(booking_id);
+  `);
+  // Lost-reason capture on cancel (makes win-rate actionable). The structured
+  // reason category reuses the existing `cancellation_reason` column; this adds
+  // an optional free-text note alongside it.
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS cancel_reason_note TEXT`).catch(() => {});
+}
+
+/**
+ * Recompute a booking's advance_amount as the sum of recorded payments, so the
+ * dashboard's receivables (total_amount − advance_amount) stays correct without
+ * changing the analytics contract. Returns the new total received.
+ */
+export async function recomputeEventPaid(tenantDb: DbInterface, bookingId: string): Promise<number> {
+  const rows: any[] = await tenantDb.query("SELECT COALESCE(SUM(amount),0) AS t FROM event_payments WHERE booking_id = ?", [bookingId]);
+  const paid = Math.round((Number(rows?.[0]?.t || 0)) * 100) / 100;
+  await tenantDb.run("UPDATE event_bookings SET advance_amount = ? WHERE id = ?", [paid, bookingId]);
+  return paid;
 }
 
 // ── Seed a couple of sensible defaults so a fresh tenant sees a populated master.

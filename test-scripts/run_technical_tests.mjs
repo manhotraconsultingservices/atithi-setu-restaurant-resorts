@@ -693,6 +693,23 @@ async function testEvents() {
   } else {
     fail('TC-EVT-012', 'Events analytics dashboard responds', `HTTP ${an.status}`);
   }
+
+  // TC-EVT-013: Sprint 1 cash — payment schedule + receipt round-trip.
+  if (!firstBooking) {
+    skip('TC-EVT-013', 'Payment schedule + receipt', 'no event bookings');
+  } else {
+    const gen = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${firstBooking.id}/schedule/generate`, {});
+    if (gen.status === 200 && Array.isArray(gen.data)) {
+      const p = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${firstBooking.id}/payments`, { amount: 1, method: 'CASH', reference: 'TC-EVT-013' });
+      const paidOk = p.status === 201 && Number(p.data?.paid) >= 1;
+      (paidOk ? pass : fail)('TC-EVT-013', 'Payment schedule generate + record receipt', `sched=${gen.data.length}, pay=${p.status}, paid=${p.data?.paid}`);
+      if (p.data?.payment_id) await api('DELETE', `/api/restaurant/${restaurantId}/events/payments/${p.data.payment_id}`); // clean up
+    } else if (gen.status === 403) {
+      skip('TC-EVT-013', 'Payment schedule', 'user lacks EVENTS_BOOKINGS access');
+    } else {
+      fail('TC-EVT-013', 'Payment schedule generate', `HTTP ${gen.status}`);
+    }
+  }
 }
 
 // ── Channel Manager tests ──────────────────────────────────────────────────

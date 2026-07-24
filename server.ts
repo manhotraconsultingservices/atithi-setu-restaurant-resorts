@@ -25,6 +25,7 @@ import {
 import {
   createEventTables, seedEventDefaults,
   resolveVenueCharge, venueBookingConflict, venueBlockConflict, rentalCommittedQty,
+  recomputeEventPaid,
 } from "./eventsService.ts";
 import { generateEventQuotationPdf, type EventQuotationData } from "./eventQuotationPdf.ts";
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
@@ -21812,7 +21813,7 @@ ${data.tenant.name}`;
       const rows: any[] = await db.query(
         `SELECT b.id, b.venue_id, v.name AS venue_name, b.customer_name, b.customer_phone, b.event_type,
                 b.booking_source, b.status, b.event_date, b.end_date, b.guest_count, b.total_amount,
-                b.discount, b.advance_amount, b.created_at
+                b.discount, b.advance_amount, b.cancellation_reason, b.created_at
            FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
           WHERE b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?`,
         [to, from]
@@ -21902,12 +21903,29 @@ ${data.tenant.name}`;
       const receivables = won.map(r => ({ id: r.id, customer_name: r.customer_name, venue_name: r.venue_name, event_date: ymd(r.event_date), status: r.status, total_amount: num(r.total_amount), advance_amount: num(r.advance_amount), outstanding: round2(Math.max(0, num(r.total_amount) - num(r.advance_amount))) }))
         .filter(r => r.outstanding > 0).sort((a, b) => a.event_date.localeCompare(b.event_date));
 
+      // Lost-reason breakdown (why we lose deals) — from CANCELLED bookings.
+      const lostMap: Record<string, number> = {};
+      for (const r of lost) { const k = r.cancellation_reason || 'Unspecified'; lostMap[k] = (lostMap[k] || 0) + 1; }
+      const lostReasons = Object.entries(lostMap).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count);
+
+      // Overdue: sum of unpaid amounts on schedule instalments past their due date.
+      let overdue = 0;
+      try {
+        const od: any[] = await db.query(
+          `SELECT COALESCE(SUM(GREATEST(s.amount - COALESCE(s.paid_amount,0), 0)),0) AS t
+             FROM event_payment_schedule s JOIN event_bookings b ON b.id = s.booking_id
+            WHERE s.status <> 'PAID' AND s.due_date < ? AND b.status IN ('CONFIRMED','IN_PROGRESS','QUOTED')`,
+          [today]
+        );
+        overdue = round2(Number(od?.[0]?.t || 0));
+      } catch { /* schedule table may not exist on un-migrated tenant */ }
+
       res.json({
         window: { from, to, days: periodDays },
         kpis: { totalEvents: rows.length, wonCount, lostCount, winRate, avgBookingValue, totalCovers,
           confirmedRevenue, pipelineRevenue, realizedRevenue, advanceCollected, outstanding, discountGiven,
-          cateringCovers, cateringRevenue },
-        funnel, revenueByMonth, venueUtilization, eventTypeMix, leadSources, cateringByPackage, upcoming, receivables,
+          cateringCovers, cateringRevenue, overdue },
+        funnel, revenueByMonth, venueUtilization, eventTypeMix, leadSources, cateringByPackage, upcoming, receivables, lostReasons,
       });
     } catch (err: any) {
       console.error("/events/analytics error:", err);
@@ -22067,12 +22085,179 @@ ${data.tenant.name}`;
       const existing: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
       if (!existing) return res.status(404).json({ error: "Booking not found" });
       await db.run(
-        "UPDATE event_bookings SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancelled_by = ?, cancellation_reason = ? WHERE id = ?",
-        [req.user?.email || null, req.body?.reason || null, req.params.bid]
-      );
+        "UPDATE event_bookings SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancelled_by = ?, cancellation_reason = ?, cancel_reason_note = ? WHERE id = ?",
+        [req.user?.email || null, req.body?.reason || null, req.body?.note || null, req.params.bid]
+      ).catch(async () => {
+        // cancel_reason_note may not exist on an un-migrated tenant — fall back.
+        await db.run("UPDATE event_bookings SET status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP, cancelled_by = ?, cancellation_reason = ? WHERE id = ?", [req.user?.email || null, req.body?.reason || null, req.params.bid]);
+      });
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'CANCELLED', summary: `Booking cancelled${req.body?.reason ? ` — ${req.body.reason}` : ''}`, before: { status: existing.status }, after: { status: 'CANCELLED' } });
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: "Failed to cancel booking" }); }
+  });
+
+  // ─── PAYMENT SCHEDULE (staged deposits) ────────────────────────────────────
+  app.get("/api/restaurant/:id/events/bookings/:bid/schedule", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query("SELECT * FROM event_payment_schedule WHERE booking_id = ? ORDER BY sort_order, due_date", [req.params.bid]).catch(() => []);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to load schedule" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/bookings/:bid/schedule", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const b = req.body || {};
+      const total = Number(bk.total_amount || 0);
+      const pct = (b.percent !== undefined && b.percent !== null && b.percent !== '') ? Number(b.percent) : null;
+      const amount = pct != null ? round2(total * pct / 100) : round2(Number(b.amount || 0));
+      const cntRow: any = await db.get("SELECT COUNT(*)::int AS c FROM event_payment_schedule WHERE booking_id = ?", [req.params.bid]);
+      const sid = mkEventId('EPS');
+      await db.run(
+        `INSERT INTO event_payment_schedule (id, booking_id, label, due_date, amount, percent, status, sort_order) VALUES (?, ?, ?, ?, ?, ?, 'DUE', ?)`,
+        [sid, req.params.bid, b.label || 'Instalment', b.due_date || null, amount, pct, Number(cntRow?.c || 0)]
+      );
+      const row = await db.get("SELECT * FROM event_payment_schedule WHERE id = ?", [sid]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'SCHEDULE_ADDED', summary: `Schedule "${b.label || 'Instalment'}" (${amount})` });
+      res.status(201).json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to add schedule row" }); }
+  });
+
+  // Generate a staged schedule from a template (default 25/50/25 at now / T-30 / T-7).
+  app.post("/api/restaurant/:id/events/bookings/:bid/schedule/generate", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const ymd = (v: any) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
+      const eventDate = ymd(bk.event_date);
+      const splits: any[] = (Array.isArray(req.body?.splits) && req.body.splits.length) ? req.body.splits : [
+        { label: 'Booking deposit', percent: 25, offsetDays: 0 },
+        { label: 'Interim payment', percent: 50, offsetDays: -30 },
+        { label: 'Balance', percent: 25, offsetDays: -7 },
+      ];
+      const total = Number(bk.total_amount || 0);
+      await db.run("DELETE FROM event_payment_schedule WHERE booking_id = ? AND status = 'DUE'", [req.params.bid]);
+      let order = 0;
+      const todayIso = new Date().toISOString().slice(0, 10);
+      for (const s of splits) {
+        const pct = Number(s.percent || 0);
+        const amount = round2(total * pct / 100);
+        let due: string | null = null;
+        if (eventDate) {
+          const base = new Date(eventDate + 'T00:00:00Z').getTime();
+          due = new Date(base + Number(s.offsetDays || 0) * 86400000).toISOString().slice(0, 10);
+          if (Number(s.offsetDays || 0) === 0 && due < todayIso) due = todayIso; // deposit due now
+        }
+        await db.run(`INSERT INTO event_payment_schedule (id, booking_id, label, due_date, amount, percent, status, sort_order) VALUES (?, ?, ?, ?, ?, ?, 'DUE', ?)`,
+          [mkEventId('EPS'), req.params.bid, s.label || 'Instalment', due, amount, pct, order++]);
+      }
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'SCHEDULE_GENERATED', summary: `${splits.length}-stage payment schedule generated` });
+      const rows = await db.query("SELECT * FROM event_payment_schedule WHERE booking_id = ? ORDER BY sort_order, due_date", [req.params.bid]);
+      res.json(rows);
+    } catch (err: any) { res.status(500).json({ error: "Failed to generate schedule" }); }
+  });
+
+  app.put("/api/restaurant/:id/events/schedule/:sid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const b = req.body || {};
+      const fields: string[] = []; const vals: any[] = [];
+      for (const k of ['label', 'due_date', 'amount', 'percent', 'status']) {
+        if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(b[k]); }
+      }
+      if (!fields.length) return res.status(400).json({ error: "Nothing to update" });
+      vals.push(req.params.sid);
+      await db.run(`UPDATE event_payment_schedule SET ${fields.join(', ')} WHERE id = ?`, vals);
+      const row = await db.get("SELECT * FROM event_payment_schedule WHERE id = ?", [req.params.sid]);
+      res.json(row);
+    } catch (err: any) { res.status(500).json({ error: "Failed to update schedule row" }); }
+  });
+
+  app.delete("/api/restaurant/:id/events/schedule/:sid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      await db.run("DELETE FROM event_payment_schedule WHERE id = ?", [req.params.sid]);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete schedule row" }); }
+  });
+
+  // ─── PAYMENTS (receipts) ───────────────────────────────────────────────────
+  app.get("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query("SELECT * FROM event_payments WHERE booking_id = ? ORDER BY created_at DESC", [req.params.bid]).catch(() => []);
+      const bk: any = await db.get("SELECT total_amount FROM event_bookings WHERE id = ?", [req.params.bid]);
+      const paid = round2((rows || []).reduce((s, r) => s + Number(r.amount || 0), 0));
+      res.json({ payments: rows, paid, total: Number(bk?.total_amount || 0), balance: round2(Number(bk?.total_amount || 0) - paid) });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load payments" }); }
+  });
+
+  app.post("/api/restaurant/:id/events/bookings/:bid/payments", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const b = req.body || {};
+      const amount = round2(Number(b.amount || 0));
+      if (!(amount > 0)) return res.status(400).json({ error: "Amount must be greater than 0" });
+      const pid = mkEventId('EPY');
+      await db.run(
+        `INSERT INTO event_payments (id, booking_id, schedule_id, amount, method, reference, paid_at, note, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [pid, req.params.bid, b.schedule_id || null, amount, b.method || 'CASH', b.reference || null, b.paid_at || new Date().toISOString().slice(0, 10), b.note || null, req.user?.email || null]
+      );
+      // Allocate to a schedule row if given (accumulate; flip to PAID when covered).
+      if (b.schedule_id) {
+        const sched: any = await db.get("SELECT * FROM event_payment_schedule WHERE id = ?", [b.schedule_id]);
+        if (sched) {
+          const paidAmt = round2(Number(sched.paid_amount || 0) + amount);
+          const status = paidAmt >= Number(sched.amount || 0) - 0.01 ? 'PAID' : 'DUE';
+          await db.run("UPDATE event_payment_schedule SET paid_amount = ?, status = ?, paid_at = CASE WHEN ? = 'PAID' THEN CURRENT_TIMESTAMP ELSE paid_at END WHERE id = ?", [paidAmt, status, status, b.schedule_id]);
+        }
+      }
+      const paid = await recomputeEventPaid(db, req.params.bid);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'PAYMENT_RECORDED', summary: `Payment ${amount} via ${b.method || 'CASH'} (total paid ${paid})` });
+      res.status(201).json({ success: true, payment_id: pid, paid, balance: round2(Number(bk.total_amount || 0) - paid) });
+    } catch (err: any) { res.status(500).json({ error: "Failed to record payment" }); }
+  });
+
+  app.delete("/api/restaurant/:id/events/payments/:pid", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const pay: any = await db.get("SELECT * FROM event_payments WHERE id = ?", [req.params.pid]);
+      if (!pay) return res.status(404).json({ error: "Payment not found" });
+      await db.run("DELETE FROM event_payments WHERE id = ?", [req.params.pid]);
+      if (pay.schedule_id) {
+        const sched: any = await db.get("SELECT * FROM event_payment_schedule WHERE id = ?", [pay.schedule_id]);
+        if (sched) {
+          const paidAmt = round2(Math.max(0, Number(sched.paid_amount || 0) - Number(pay.amount || 0)));
+          const status = (Number(sched.amount || 0) > 0 && paidAmt >= Number(sched.amount || 0) - 0.01) ? 'PAID' : 'DUE';
+          await db.run("UPDATE event_payment_schedule SET paid_amount = ?, status = ? WHERE id = ?", [paidAmt, status, pay.schedule_id]);
+        }
+      }
+      const paid = await recomputeEventPaid(db, pay.booking_id);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: pay.booking_id, action: 'PAYMENT_REVERSED', summary: `Payment ${pay.amount} reversed (total paid ${paid})` });
+      res.json({ success: true, paid });
+    } catch (err: any) { res.status(500).json({ error: "Failed to delete payment" }); }
   });
 
   app.post("/api/restaurant/:id/events/bookings/:bid/complete", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {

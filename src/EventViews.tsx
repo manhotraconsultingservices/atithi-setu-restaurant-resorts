@@ -575,6 +575,128 @@ function HotelRoomAddRow({ rt, onAdd }: { rt: any; onAdd: (rate: number, rooms: 
 }
 
 // ── Booking detail: lines, hotel rooms, quotation, lifecycle ────────────────
+// ── Payment schedule + receipts (Sprint 1: cash & revenue integrity) ─────────
+function PaymentPanel({ restaurantId, token, booking, editable, onChanged }: Props & { booking: any; editable: boolean; onChanged: () => void }) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const bid = booking.id;
+  const [sched, setSched] = useState<any[]>([]);
+  const [pay, setPay] = useState<any>({ payments: [], paid: 0, total: 0, balance: 0 });
+  const [form, setForm] = useState<{ open: boolean; schedule_id: string | null; amount: string; method: string; paid_at: string; reference: string }>({ open: false, schedule_id: null, amount: '', method: 'UPI', paid_at: new Date().toISOString().slice(0, 10), reference: '' });
+  const today = new Date().toISOString().slice(0, 10);
+  const dOnly = (v: any) => String(v || '').slice(0, 10);
+
+  const load = async () => {
+    try { setSched(await api(`/events/bookings/${bid}/schedule`)); } catch { setSched([]); }
+    try { setPay(await api(`/events/bookings/${bid}/payments`)); } catch { /* */ }
+  };
+  useEffect(() => { load(); }, [bid]);
+
+  const genSchedule = async () => { try { await api(`/events/bookings/${bid}/schedule/generate`, { method: 'POST', body: JSON.stringify({}) }); await load(); } catch (e: any) { alert(e.message); } };
+  const delSched = async (sid: string) => { try { await api(`/events/schedule/${sid}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
+  const openPay = (row?: any) => setForm({ open: true, schedule_id: row?.id || null, amount: row ? String(Math.max(0, Number(row.amount || 0) - Number(row.paid_amount || 0))) : '', method: 'UPI', paid_at: today, reference: '' });
+  const savePay = async () => {
+    const amount = Number(form.amount || 0);
+    if (!(amount > 0)) { alert(t('events.pay.enterAmount')); return; }
+    try { await api(`/events/bookings/${bid}/payments`, { method: 'POST', body: JSON.stringify({ amount, method: form.method, paid_at: form.paid_at, reference: form.reference, schedule_id: form.schedule_id }) }); setForm({ ...form, open: false }); await load(); onChanged(); }
+    catch (e: any) { alert(e.message); }
+  };
+  const delPay = async (pid: string) => { try { await api(`/events/payments/${pid}`, { method: 'DELETE' }); await load(); onChanged(); } catch (e: any) { alert(e.message); } };
+  const METHODS = ['UPI', 'CASH', 'CARD', 'BANK', 'CHEQUE'];
+
+  return (
+    <div className={`${CARD} mb-4`}>
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h3 className="font-bold text-sm flex items-center gap-1.5"><IndianRupee size={15} />{t('events.pay.title')}</h3>
+        <div className="flex items-center gap-3 text-xs">
+          <span className="text-[#6b5d52]">{t('events.pay.paid')} <b className="text-emerald-700 tabular-nums">{money(pay.paid)}</b></span>
+          <span className="text-[#6b5d52]">{t('events.pay.balance')} <b className="text-rose-600 tabular-nums">{money(pay.balance)}</b></span>
+          {editable && <button className={BTN_PRIMARY} onClick={() => openPay()}><Plus size={12} />{t('events.pay.record')}</button>}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between mt-1 mb-1">
+        <span className="text-[11px] font-bold uppercase tracking-wide text-[#9d8b7e]">{t('events.pay.schedule')}</span>
+        {editable && <button className={BTN_GHOST} onClick={genSchedule}>{t('events.pay.generate')}</button>}
+      </div>
+      {sched.length === 0 ? <p className="text-xs text-[#9d8b7e]">{t('events.pay.noSchedule')}</p> : sched.map((s: any) => {
+        const overdue = s.status !== 'PAID' && dOnly(s.due_date) && dOnly(s.due_date) < today;
+        return (
+          <div key={s.id} className="flex items-center gap-2 text-xs py-1 border-b border-[#f0e9df]">
+            <span className="flex-1 min-w-0 truncate">{s.label}{s.percent != null ? ` (${s.percent}%)` : ''}</span>
+            <span className={`w-24 text-right ${overdue ? 'text-rose-600 font-semibold' : 'text-[#6b5d52]'}`}>{dOnly(s.due_date) || '—'}</span>
+            <span className="w-20 text-right tabular-nums font-semibold">{money(s.amount)}</span>
+            <span className="w-16 text-center">
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${overdue ? 'bg-rose-100 text-rose-700' : s.status === 'PAID' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                {overdue ? t('events.pay.overdue') : s.status === 'PAID' ? t('events.pay.paidStatus') : t('events.pay.due')}
+              </span>
+            </span>
+            {editable && s.status !== 'PAID' && <button className={BTN_GHOST} onClick={() => openPay(s)}>{t('events.pay.pay')}</button>}
+            {editable && <button onClick={() => delSched(s.id)}><X size={12} className="text-rose-500" /></button>}
+          </div>
+        );
+      })}
+
+      {(pay.payments || []).length > 0 && <div className="text-[11px] font-bold uppercase tracking-wide text-[#9d8b7e] mt-3 mb-1">{t('events.pay.receipts')}</div>}
+      {(pay.payments || []).map((p: any) => (
+        <div key={p.id} className="flex items-center gap-2 text-xs py-1 border-b border-[#f0e9df]">
+          <span className="flex-1 min-w-0 truncate">{dOnly(p.paid_at)} · {p.method}{p.reference ? ` · ${p.reference}` : ''}</span>
+          <span className="w-20 text-right tabular-nums font-semibold text-emerald-700">{money(p.amount)}</span>
+          {editable && <button onClick={() => delPay(p.id)}><X size={12} className="text-rose-500" /></button>}
+        </div>
+      ))}
+
+      {form.open && (
+        <div className="mt-3 p-3 rounded-xl bg-[#faf7f2] border border-[#e8dccf]">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <div><label className={LABEL}>{t('events.pay.amount')}</label><input type="number" min={0} className={INPUT} value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('events.pay.method')}</label><select className={INPUT} value={form.method} onChange={e => setForm({ ...form, method: e.target.value })}>{METHODS.map(m => <option key={m} value={m}>{m}</option>)}</select></div>
+            <div><label className={LABEL}>{t('events.pay.date')}</label><input type="date" className={INPUT} value={form.paid_at} onChange={e => setForm({ ...form, paid_at: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('events.pay.reference')}</label><input className={INPUT} value={form.reference} onChange={e => setForm({ ...form, reference: e.target.value })} /></div>
+          </div>
+          <div className="flex gap-2 mt-2">
+            <button className={BTN_PRIMARY} onClick={savePay}>{t('common.save')}</button>
+            <button className={BTN_GHOST} onClick={() => setForm({ ...form, open: false })}>{t('common.cancel')}</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Cancel-with-reason dialog (lost-reason capture) ──────────────────────────
+function CancelEventDialog({ restaurantId, token, bookingId, onClose, onCancelled }: Props & { bookingId: string; onClose: () => void; onCancelled: () => void }) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const [reason, setReason] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const REASONS = ['Price too high', 'Date unavailable', 'Went with competitor', 'Event postponed', 'Customer unresponsive', 'Other'];
+  const submit = async () => {
+    if (!reason) { alert(t('events.cancel.pickReason')); return; }
+    setBusy(true);
+    try { await api(`/events/bookings/${bookingId}/cancel`, { method: 'POST', body: JSON.stringify({ reason, note }) }); onCancelled(); onClose(); }
+    catch (e: any) { alert(e.message); setBusy(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-sm bg-white rounded-2xl border border-[#e8dccf] p-5 shadow-xl" onClick={e => e.stopPropagation()}>
+        <h3 className="font-bold text-sm mb-3 text-[#14110c]">{t('events.cancel.title')}</h3>
+        <label className={LABEL}>{t('events.cancel.reason')}</label>
+        <select className={INPUT} value={reason} onChange={e => setReason(e.target.value)} autoFocus>
+          <option value="">—</option>{REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <label className={`${LABEL} mt-2`}>{t('events.cancel.note')}</label>
+        <textarea className={INPUT} rows={2} value={note} onChange={e => setNote(e.target.value)} />
+        <div className="flex justify-end gap-2 mt-4">
+          <button className={BTN_GHOST} onClick={onClose} disabled={busy}>{t('events.cancel.keep')}</button>
+          <button className={BTN_DANGER} onClick={submit} disabled={busy || !reason}>{t('events.bookings.cancel')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, onOpenObject }: Props & { bookingId: string; venues: any[]; onBack: () => void; onOpenObject?: (t: string, i: string) => void }) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
@@ -585,6 +707,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const [hotelRooms, setHotelRooms] = useState<any[]>([]);
   const [showHotel, setShowHotel] = useState(false);
   const [sendQuote, setSendQuote] = useState<{ id: string; email: string } | null>(null);
+  const [showCancel, setShowCancel] = useState(false);
   const [caterPkgs, setCaterPkgs] = useState<any[]>([]);
   const [nonce, setNonce] = useState(0);
 
@@ -898,14 +1021,22 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
         </div>
       </div>
 
+      {/* Payment schedule + receipts */}
+      <PaymentPanel restaurantId={restaurantId} token={token} booking={bk} editable={editable} onChanged={load} />
+
       {/* Lifecycle actions */}
       <div className="flex flex-wrap gap-2 mt-4">
         <button className={BTN_GHOST} disabled={busy} onClick={genQuote}><FileText size={13} />{t('events.bookings.generateQuote')}</button>
         {(bk.status === 'INQUIRY' || bk.status === 'QUOTED') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('confirm')}><Check size={13} />{t('events.bookings.confirm')}</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_PRIMARY} disabled={busy} onClick={() => act('checkout')}><IndianRupee size={13} />{t('events.bookings.checkout')}</button>}
         {(bk.status === 'CONFIRMED' || bk.status === 'IN_PROGRESS') && <button className={BTN_GHOST} disabled={busy} onClick={() => act('complete')}>{t('events.bookings.complete')}</button>}
-        {editable && <button className={BTN_DANGER} disabled={busy} onClick={() => { if (window.confirm('Cancel this booking?')) act('cancel'); }}>{t('events.bookings.cancel')}</button>}
+        {editable && <button className={BTN_DANGER} disabled={busy} onClick={() => setShowCancel(true)}>{t('events.bookings.cancel')}</button>}
       </div>
+
+      {showCancel && (
+        <CancelEventDialog restaurantId={restaurantId} token={token} bookingId={bookingId}
+          onClose={() => setShowCancel(false)} onCancelled={() => load()} />
+      )}
 
       {(bk.quotations || []).length > 0 && (
         <div className={`${CARD} mt-4`}>
@@ -1344,7 +1475,7 @@ function EventDashboard({ restaurantId, token }: Props) {
             {tile(t('events.dash.pipeline'), money(k.pipelineRevenue), `${openLeads} ${t('events.dash.openLeads')}`, '#2563eb')}
             {tile(t('events.dash.winRate'), `${k.winRate}%`, `${k.wonCount} ${t('common.of')} ${k.wonCount + k.lostCount}`, '#059669')}
             {tile(t('events.dash.avgValue'), money(k.avgBookingValue), t('events.dash.perEvent'), '#7c3aed')}
-            {tile(t('events.dash.outstanding'), money(k.outstanding), `${t('events.dash.advance')} ${money(k.advanceCollected)}`, '#dc2626')}
+            {tile(t('events.dash.outstanding'), money(k.outstanding), Number(k.overdue) > 0 ? `${t('events.dash.overdueLabel')} ${money(k.overdue)}` : `${t('events.dash.advance')} ${money(k.advanceCollected)}`, '#dc2626')}
             {tile(t('events.dash.covers'), String(k.totalCovers), t('events.dash.guestsServed'))}
             {tile(t('events.dash.catering'), money(k.cateringRevenue), `${k.cateringCovers} ${t('events.dash.plates')}`, '#b45309')}
             {tile(t('events.dash.discount'), money(k.discountGiven), t('events.dash.givenWon'), '#9ca3af')}
@@ -1479,6 +1610,8 @@ function EventReports({ restaurantId, token }: Props) {
             data.cateringByPackage.map((v: any) => [`${v.name} (${v.package_type})`, v.covers, money(v.revenue)]))}
           {table(t('events.dash.receivables'), [t('events.bookings.customer'), t('events.bookings.eventDate'), t('common.total'), t('events.bookings.advance'), t('events.dash.outstanding')],
             data.receivables.map((v: any) => [v.customer_name, v.event_date, money(v.total_amount), money(v.advance_amount), money(v.outstanding)]))}
+          {table(t('events.dash.lostReasons'), [t('events.cancel.reason'), t('events.dash.events')],
+            (data.lostReasons || []).map((v: any) => [v.reason, v.count]))}
         </>
       )}
     </div>
