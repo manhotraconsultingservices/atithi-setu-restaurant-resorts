@@ -141,6 +141,11 @@ export const en: Record<string, string> = {
   'events.quotes.viewPdf': 'View PDF',
   'events.quotes.send': 'Send Email',
   'events.quotes.sent': 'Sent',
+  'events.quotes.sendTitle': 'Send Quotation',
+  'events.quotes.recipientEmail': 'Recipient email',
+  'events.quotes.sendHint': 'Send to any email — the customer’s email is pre-filled when available.',
+  'events.quotes.invalidEmail': 'Enter a valid email address.',
+  'events.quotes.sending': 'Sending…',
   'events.quotes.empty': 'No quotations yet. Create one from a booking.',
 
   // ── Calendar ────────────────────────────────────────────────────────────────

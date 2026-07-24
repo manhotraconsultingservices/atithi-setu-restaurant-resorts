@@ -51,6 +51,49 @@ const INPUT = 'w-full px-3 py-2 rounded-xl border border-[#e8dccf] text-sm bg-wh
 const LABEL = 'text-xs font-semibold text-[#6b5d52] mb-1 block';
 const money = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
+// Send-quotation dialog. Lets the user confirm or type an ad-hoc recipient email
+// at send time (defaulting to the customer's email when one is on file). The
+// /send endpoint accepts { email } as an override — email is never mandatory on
+// the booking itself, so this is the point where a recipient is chosen.
+function SendQuoteDialog({ restaurantId, token, quotationId, defaultEmail, onClose, onSent }:
+  { restaurantId: string; token: string; quotationId: string; defaultEmail?: string; onClose: () => void; onSent: (to: string) => void }) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const [email, setEmail] = useState(defaultEmail || '');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const send = async () => {
+    if (!valid) { setErr(t('events.quotes.invalidEmail')); return; }
+    setBusy(true); setErr('');
+    try {
+      await api(`/events/quotations/${quotationId}/send`, { method: 'POST', body: JSON.stringify({ email: email.trim() }) });
+      onSent(email.trim());
+      onClose();
+    } catch (e: any) { setErr(e?.message || 'Failed to send'); setBusy(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-sm bg-white rounded-2xl border border-[#e8dccf] p-5 shadow-xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-bold text-sm flex items-center gap-1.5 text-[#14110c]"><Mail size={15} />{t('events.quotes.sendTitle')}</h3>
+          <button onClick={onClose} aria-label={t('common.cancel')}><X size={16} className="text-[#9d8b7e]" /></button>
+        </div>
+        <label className="block text-xs text-[#6b5d52] mb-1">{t('events.quotes.recipientEmail')}</label>
+        <input type="email" autoFocus value={email} onChange={e => { setEmail(e.target.value); setErr(''); }}
+          onKeyDown={e => { if (e.key === 'Enter' && valid && !busy) send(); }}
+          placeholder="name@email.com" className={INPUT} />
+        <p className="mt-1.5 text-[11px] text-[#9d8b7e]">{t('events.quotes.sendHint')}</p>
+        {err && <p className="mt-2 text-xs text-rose-600">{err}</p>}
+        <div className="flex justify-end gap-2 mt-4">
+          <button className={BTN_GHOST} onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
+          <button className={BTN_PRIMARY} onClick={send} disabled={busy || !valid}><Send size={13} />{busy ? t('events.quotes.sending') : t('events.quotes.send')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const STATUS_COLOR: Record<string, string> = {
   INQUIRY: 'bg-slate-50 text-slate-700 border-slate-200',
   QUOTED: 'bg-blue-50 text-blue-700 border-blue-200',
@@ -538,6 +581,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const [busy, setBusy] = useState(false);
   const [hotelRooms, setHotelRooms] = useState<any[]>([]);
   const [showHotel, setShowHotel] = useState(false);
+  const [sendQuote, setSendQuote] = useState<{ id: string; email: string } | null>(null);
   const [caterPkgs, setCaterPkgs] = useState<any[]>([]);
   const [nonce, setNonce] = useState(0);
 
@@ -852,11 +896,16 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               <span className="flex gap-1">
                 {onOpenObject && <button className={BTN_GHOST} onClick={() => onOpenObject('EVENT_QUOTATION', q.id)}>Open</button>}
                 <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${q.id}/pdf`, token)}>{t('events.quotes.viewPdf')}</button>
-                <button className={BTN_PRIMARY} onClick={async () => { try { await api(`/events/quotations/${q.id}/send`, { method: 'POST', body: JSON.stringify({}) }); alert(t('events.quotes.sent')); await load(); } catch (e: any) { alert(e.message); } }}><Send size={12} />{t('events.quotes.send')}</button>
+                <button className={BTN_PRIMARY} onClick={() => setSendQuote({ id: q.id, email: bk.customer_email || '' })}><Send size={12} />{t('events.quotes.send')}</button>
               </span>
             </div>
           ))}
         </div>
+      )}
+
+      {sendQuote && (
+        <SendQuoteDialog restaurantId={restaurantId} token={token} quotationId={sendQuote.id} defaultEmail={sendQuote.email}
+          onClose={() => setSendQuote(null)} onSent={(to) => { alert(`${t('events.quotes.sent')} ${to}`); load(); }} />
       )}
       </div>
       }
@@ -1100,6 +1149,7 @@ function EventQuotations({ restaurantId, token }: Props) {
   const { t } = useT();
   const api = makeApi(restaurantId, token);
   const [rows, setRows] = useState<any[]>([]);
+  const [sendQuote, setSendQuote] = useState<{ id: string; email: string } | null>(null);
 
   const load = async () => {
     try {
@@ -1107,7 +1157,7 @@ function EventQuotations({ restaurantId, token }: Props) {
       const all: any[] = [];
       for (const b of bookings) {
         const full = await api(`/events/bookings/${b.id}`);
-        for (const q of (full.quotations || [])) all.push({ ...q, customer_name: b.customer_name });
+        for (const q of (full.quotations || [])) all.push({ ...q, customer_name: b.customer_name, customer_email: b.customer_email });
       }
       all.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
       setRows(all);
@@ -1132,11 +1182,15 @@ function EventQuotations({ restaurantId, token }: Props) {
           { key: '_a', label: t('common.actions'), render: (r: any) => (
             <div className="flex gap-1">
               <button className={BTN_GHOST} onClick={() => openAuthedPdf(`/api/restaurant/${restaurantId}/events/quotations/${r.id}/pdf`, token)}>{t('events.quotes.viewPdf')}</button>
-              <button className={BTN_PRIMARY} onClick={async () => { try { await api(`/events/quotations/${r.id}/send`, { method: 'POST', body: JSON.stringify({}) }); alert(t('events.quotes.sent')); await load(); } catch (e: any) { alert(e.message); } }}><Send size={12} />{t('events.quotes.send')}</button>
+              <button className={BTN_PRIMARY} onClick={() => setSendQuote({ id: r.id, email: r.customer_email || '' })}><Send size={12} />{t('events.quotes.send')}</button>
             </div>
           ) },
         ]}
       />
+      {sendQuote && (
+        <SendQuoteDialog restaurantId={restaurantId} token={token} quotationId={sendQuote.id} defaultEmail={sendQuote.email}
+          onClose={() => setSendQuote(null)} onSent={(to) => { alert(`${t('events.quotes.sent')} ${to}`); load(); }} />
+      )}
     </div>
   );
 }

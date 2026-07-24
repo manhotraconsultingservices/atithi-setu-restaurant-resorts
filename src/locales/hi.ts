@@ -137,6 +137,11 @@ export const hi: Record<string, string> = {
   'events.quotes.viewPdf': 'पीडीएफ देखें',
   'events.quotes.send': 'ईमेल भेजें',
   'events.quotes.sent': 'भेजा गया',
+  'events.quotes.sendTitle': 'कोटेशन भेजें',
+  'events.quotes.recipientEmail': 'प्राप्तकर्ता ईमेल',
+  'events.quotes.sendHint': 'किसी भी ईमेल पर भेजें — उपलब्ध होने पर ग्राहक का ईमेल पहले से भरा रहता है।',
+  'events.quotes.invalidEmail': 'मान्य ईमेल पता दर्ज करें।',
+  'events.quotes.sending': 'भेजा जा रहा है…',
   'events.quotes.empty': 'अभी कोई कोटेशन नहीं। किसी बुकिंग से बनाएँ।',
 
   // Calendar

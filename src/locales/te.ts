@@ -137,6 +137,11 @@ export const te: Record<string, string> = {
   'events.quotes.viewPdf': 'PDF చూడండి',
   'events.quotes.send': 'ఇమెయిల్ పంపు',
   'events.quotes.sent': 'పంపబడింది',
+  'events.quotes.sendTitle': 'కొటేషన్ పంపండి',
+  'events.quotes.recipientEmail': 'గ్రహీత ఇమెయిల్',
+  'events.quotes.sendHint': 'ఏ ఇమెయిల్‌కైనా పంపండి — అందుబాటులో ఉన్నప్పుడు కస్టమర్ ఇమెయిల్ ముందే నింపబడుతుంది.',
+  'events.quotes.invalidEmail': 'చెల్లుబాటు అయ్యే ఇమెయిల్ చిరునామా నమోదు చేయండి.',
+  'events.quotes.sending': 'పంపుతోంది…',
   'events.quotes.empty': 'ఇంకా కోటేషన్‌లు లేవు. బుకింగ్ నుండి రూపొందించండి.',
 
   // Calendar

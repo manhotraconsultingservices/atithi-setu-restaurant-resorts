@@ -137,6 +137,11 @@ export const ta: Record<string, string> = {
   'events.quotes.viewPdf': 'PDF காண்க',
   'events.quotes.send': 'மின்னஞ்சல் அனுப்பு',
   'events.quotes.sent': 'அனுப்பப்பட்டது',
+  'events.quotes.sendTitle': 'விலைப்புள்ளியை அனுப்பு',
+  'events.quotes.recipientEmail': 'பெறுநர் மின்னஞ்சல்',
+  'events.quotes.sendHint': 'எந்த மின்னஞ்சலுக்கும் அனுப்பலாம் — கிடைக்கும்போது வாடிக்கையாளரின் மின்னஞ்சல் முன்கூட்டியே நிரப்பப்படும்.',
+  'events.quotes.invalidEmail': 'சரியான மின்னஞ்சல் முகவரியை உள்ளிடவும்.',
+  'events.quotes.sending': 'அனுப்புகிறது…',
   'events.quotes.empty': 'இன்னும் விலைப்புள்ளிகள் இல்லை. ஒரு முன்பதிவிலிருந்து உருவாக்கவும்.',
 
   // Calendar

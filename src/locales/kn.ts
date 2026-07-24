@@ -137,6 +137,11 @@ export const kn: Record<string, string> = {
   'events.quotes.viewPdf': 'PDF ವೀಕ್ಷಿಸಿ',
   'events.quotes.send': 'ಇಮೇಲ್ ಕಳುಹಿಸಿ',
   'events.quotes.sent': 'ಕಳುಹಿಸಲಾಗಿದೆ',
+  'events.quotes.sendTitle': 'ಉಲ್ಲೇಖ ಕಳುಹಿಸಿ',
+  'events.quotes.recipientEmail': 'ಸ್ವೀಕರಿಸುವವರ ಇಮೇಲ್',
+  'events.quotes.sendHint': 'ಯಾವುದೇ ಇಮೇಲ್‌ಗೆ ಕಳುಹಿಸಿ — ಲಭ್ಯವಿದ್ದಾಗ ಗ್ರಾಹಕರ ಇಮೇಲ್ ಮೊದಲೇ ತುಂಬಿರುತ್ತದೆ.',
+  'events.quotes.invalidEmail': 'ಮಾನ್ಯ ಇಮೇಲ್ ವಿಳಾಸ ನಮೂದಿಸಿ.',
+  'events.quotes.sending': 'ಕಳುಹಿಸಲಾಗುತ್ತಿದೆ…',
   'events.quotes.empty': 'ಇನ್ನೂ ದರಪಟ್ಟಿಗಳಿಲ್ಲ. ಬುಕಿಂಗ್‌ನಿಂದ ರಚಿಸಿ.',
 
   // Calendar
