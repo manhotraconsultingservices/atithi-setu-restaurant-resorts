@@ -132,7 +132,7 @@ function EventVenues({ restaurantId, token }: Props) {
   const [rows, setRows] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [edit, setEdit] = useState<any>(null);
-  const blank = { name: '', category: 'BANQUET', ac_type: 'AC', min_occupancy: '', max_occupancy: '', floor_area: '', hourly_rate: '', half_day_rate: '', daily_rate: '', amenities: '' };
+  const blank = { name: '', category: 'BANQUET', ac_type: 'AC', min_occupancy: '', max_occupancy: '', floor_area: '', hourly_rate: '', half_day_rate: '', daily_rate: '', amenities: '', image_url: '' };
   const [form, setForm] = useState<any>(blank);
 
   const load = async () => { try { setRows(await api('/events/venues')); } catch { /* */ } };
@@ -173,6 +173,8 @@ function EventVenues({ restaurantId, token }: Props) {
             <div><label className={LABEL}>{t('events.venues.halfDayRate')}</label><input type="number" className={INPUT} value={form.half_day_rate} onChange={e => setForm({ ...form, half_day_rate: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.venues.dailyRate')}</label><input type="number" className={INPUT} value={form.daily_rate} onChange={e => setForm({ ...form, daily_rate: e.target.value })} /></div>
             <div className="col-span-2 md:col-span-3"><label className={LABEL}>{t('events.venues.amenities')}</label><input className={INPUT} value={form.amenities} onChange={e => setForm({ ...form, amenities: e.target.value })} placeholder="Stage, projector, parking, green room" /></div>
+            <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('events.venues.image')}</label><input className={INPUT} value={form.image_url || ''} onChange={e => setForm({ ...form, image_url: e.target.value })} placeholder="https://…/hall.jpg — shown on the public page" />
+              {form.image_url && <img src={form.image_url} alt="" className="mt-2 h-24 w-40 object-cover rounded-xl border border-[#e8dccf]" />}</div>
           </div>
           <div className="flex gap-2 mt-3">
             <button className={BTN_PRIMARY} onClick={save}>{t('common.save')}</button>
@@ -1640,9 +1642,16 @@ function EventSettings({ restaurantId, token }: Props) {
   const [form, setForm] = useState<any>({ hero_title: '', tagline: '', description: '', contact_phone: '', contact_email: '', is_published: true });
   const [saved, setSaved] = useState(false);
   const [secLang, setSecLang] = useState<string>('');
-  useEffect(() => { api('/events/profile').then((p) => { if (p && p.id) setForm({ ...p, is_published: Number(p.is_published) !== 0 }); }).catch(() => {}); }, []);
+  useEffect(() => { api('/events/profile').then((p) => { if (p && p.id) { let gt = ''; try { const g = JSON.parse(p.gallery || '[]'); if (Array.isArray(g)) gt = g.join('\n'); } catch { /* */ } setForm({ ...p, is_published: Number(p.is_published) !== 0, gallery_text: gt }); } }).catch(() => {}); }, []);
   useEffect(() => { api('/settings/language').then((r) => setSecLang(r.secondary_language || '')).catch(() => {}); }, []);
-  const save = async () => { try { await api('/events/profile', { method: 'PUT', body: JSON.stringify(form) }); setSaved(true); setTimeout(() => setSaved(false), 1500); } catch (e: any) { alert(e.message); } };
+  const save = async () => {
+    try {
+      const gallery = JSON.stringify(String(form.gallery_text || '').split('\n').map((s: string) => s.trim()).filter(Boolean));
+      const { gallery_text, ...rest } = form;
+      await api('/events/profile', { method: 'PUT', body: JSON.stringify({ ...rest, gallery }) });
+      setSaved(true); setTimeout(() => setSaved(false), 1500);
+    } catch (e: any) { alert(e.message); }
+  };
   const saveLang = async (l: string) => {
     setSecLang(l);
     try { await api('/settings/language', { method: 'PUT', body: JSON.stringify({ secondary_language: l || null }) }); window.location.reload(); } catch (e: any) { alert(e.message); }
@@ -1669,6 +1678,11 @@ function EventSettings({ restaurantId, token }: Props) {
         <div><label className={LABEL}>{t('events.settings.heroTitle')}</label><input className={INPUT} value={form.hero_title || ''} onChange={e => setForm({ ...form, hero_title: e.target.value })} /></div>
         <div><label className={LABEL}>{t('events.settings.tagline')}</label><input className={INPUT} value={form.tagline || ''} onChange={e => setForm({ ...form, tagline: e.target.value })} /></div>
         <div><label className={LABEL}>{t('events.settings.description')}</label><textarea className={INPUT} rows={3} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} /></div>
+        <div><label className={LABEL}>{t('events.settings.heroImage')}</label><input className={INPUT} value={form.hero_image_url || ''} onChange={e => setForm({ ...form, hero_image_url: e.target.value })} placeholder="https://…/hero.jpg" />
+          {form.hero_image_url && <img src={form.hero_image_url} alt="" className="mt-2 h-24 w-full max-w-md object-cover rounded-xl border border-[#e8dccf]" />}</div>
+        <div><label className={LABEL}>{t('events.settings.gallery')}</label>
+          <textarea className={INPUT} rows={3} value={form.gallery_text || ''} onChange={e => setForm({ ...form, gallery_text: e.target.value })} placeholder={t('events.settings.galleryHint')} />
+          <p className="text-[11px] text-[#9d8b7e] mt-0.5">{t('events.settings.galleryHint')}</p></div>
         <div className="grid grid-cols-2 gap-3">
           <div><label className={LABEL}>{t('common.phone')}</label><input className={INPUT} value={form.contact_phone || ''} onChange={e => setForm({ ...form, contact_phone: e.target.value })} /></div>
           <div><label className={LABEL}>{t('common.email')}</label><input className={INPUT} value={form.contact_email || ''} onChange={e => setForm({ ...form, contact_email: e.target.value })} /></div>
@@ -1766,41 +1780,88 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
 
   const p = data.profile || {};
   const property = data.property || {};
+  let gallery: string[] = [];
+  try { const g = p.gallery ? JSON.parse(p.gallery) : []; if (Array.isArray(g)) gallery = g.filter(Boolean); } catch { /* */ }
+  const heroImg = p.hero_image_url || gallery[0] || '';
+  const venues = data.venues || [];
+  const capMin = venues.length ? Math.min(...venues.map((v: any) => Number(v.min_occupancy || 0)).filter((n: number) => n > 0)) : 0;
+  const capMax = venues.length ? Math.max(...venues.map((v: any) => Number(v.max_occupancy || 0))) : 0;
+  const heroBg = heroImg
+    ? `linear-gradient(180deg, rgba(20,17,12,0.35) 0%, rgba(20,17,12,0.75) 100%), url("${heroImg}") center/cover no-repeat`
+    : 'linear-gradient(135deg, #cc5a16, #7c3aed)';
+
   return (
-    <div style={{ minHeight: '100vh', background: '#faf7f2', color: '#14110c' }}>
-      {/* Hero */}
-      <div style={{ background: 'linear-gradient(135deg, #cc5a16, #7c3aed)', color: '#fff', padding: '48px 20px', textAlign: 'center' }}>
-        <h1 style={{ fontSize: 34, fontWeight: 800, margin: 0 }}>{p.hero_title || property.name || t('public.events.enquire')}</h1>
-        {p.tagline && <p style={{ opacity: 0.9, marginTop: 8 }}>{p.tagline}</p>}
-      </div>
+    <div style={{ minHeight: '100vh', background: '#faf7f2', color: '#14110c', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif' }}>
+      {/* ── Hero ─────────────────────────────────────────────────────────── */}
+      <section style={{ background: heroBg, color: '#fff', minHeight: heroImg ? '68vh' : 'auto', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '64px 20px' }}>
+        <div style={{ maxWidth: 760 }}>
+          {property.logo_url && <img src={property.logo_url} alt="" style={{ height: 54, marginBottom: 18, borderRadius: 10 }} />}
+          <h1 style={{ fontSize: 'clamp(30px, 6vw, 52px)', fontWeight: 800, margin: 0, lineHeight: 1.08, letterSpacing: '-0.02em', textShadow: heroImg ? '0 2px 16px rgba(0,0,0,0.4)' : 'none' }}>
+            {p.hero_title || property.name || t('public.events.enquire')}
+          </h1>
+          {p.tagline && <p style={{ fontSize: 'clamp(15px, 2.4vw, 20px)', opacity: 0.95, marginTop: 14, textShadow: heroImg ? '0 1px 8px rgba(0,0,0,0.4)' : 'none' }}>{p.tagline}</p>}
+          <a href="#enquire" style={{ display: 'inline-block', marginTop: 26, background: '#fff', color: '#7c3aed', fontWeight: 700, padding: '13px 30px', borderRadius: 999, textDecoration: 'none', boxShadow: '0 8px 24px rgba(0,0,0,0.18)' }}>
+            {t('public.events.enquire')}
+          </a>
+          {(capMax > 0 || venues.length > 0) && (
+            <div style={{ marginTop: 30, display: 'flex', gap: 28, justifyContent: 'center', flexWrap: 'wrap', fontSize: 13, opacity: 0.95 }}>
+              {venues.length > 0 && <span><b style={{ fontSize: 22, display: 'block' }}>{venues.length}</b>{t('public.events.venues')}</span>}
+              {capMax > 0 && <span><b style={{ fontSize: 22, display: 'block' }}>{capMin || '—'}–{capMax}</b>{t('public.events.capacity')}</span>}
+            </div>
+          )}
+        </div>
+      </section>
 
-      <div style={{ maxWidth: 960, margin: '0 auto', padding: 20 }}>
-        {p.description && <p style={{ color: '#6b5d52', textAlign: 'center', marginBottom: 24 }}>{p.description}</p>}
+      <div style={{ maxWidth: 1040, margin: '0 auto', padding: '0 20px' }}>
+        {p.description && <p style={{ color: '#4b423a', textAlign: 'center', fontSize: 17, lineHeight: 1.6, maxWidth: 720, margin: '40px auto 8px' }}>{p.description}</p>}
 
-        {/* Venues */}
-        {(data.venues || []).length > 0 && (
-          <div style={{ marginBottom: 32 }}>
-            <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 12 }}>{t('public.events.venues')}</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
-              {(data.venues || []).map((v: any) => (
-                <div key={v.id} style={{ background: '#fff', border: '1px solid #e8dccf', borderRadius: 16, padding: 16 }}>
-                  <div style={{ fontWeight: 700 }}>{v.name}</div>
-                  <div style={{ fontSize: 12, color: '#6b5d52' }}>{v.category} · {v.ac_type === 'AC' ? t('events.venues.ac') : t('events.venues.nonAc')}</div>
-                  <div style={{ fontSize: 12, color: '#6b5d52' }}>{t('public.events.capacity')}: {v.min_occupancy}–{v.max_occupancy}</div>
-                  <div style={{ marginTop: 6, fontWeight: 700, color: '#cc5a16' }}>{money(v.daily_rate)}<span style={{ fontSize: 11, fontWeight: 400 }}> / day</span></div>
+        {/* ── Gallery ────────────────────────────────────────────────────── */}
+        {gallery.length > 0 && (
+          <div style={{ margin: '36px 0' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10, gridAutoRows: 150 }}>
+              {gallery.slice(0, 8).map((src, i) => (
+                <div key={i} style={{ background: `url("${src}") center/cover no-repeat`, borderRadius: 14, gridColumn: i === 0 ? 'span 2' : 'auto', gridRow: i === 0 ? 'span 2' : 'auto', border: '1px solid #e8dccf' }} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Venues ─────────────────────────────────────────────────────── */}
+        {venues.length > 0 && (
+          <div style={{ margin: '44px 0' }}>
+            <h2 style={{ fontSize: 26, fontWeight: 800, marginBottom: 4, letterSpacing: '-0.01em' }}>{t('public.events.venues')}</h2>
+            <div style={{ width: 48, height: 3, background: '#cc5a16', borderRadius: 2, marginBottom: 22 }} />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 18 }}>
+              {venues.map((v: any) => (
+                <div key={v.id} style={{ background: '#fff', border: '1px solid #ece3d7', borderRadius: 18, overflow: 'hidden', boxShadow: '0 2px 12px rgba(20,17,12,0.05)' }}>
+                  <div style={{ height: 172, background: v.image_url ? `url("${v.image_url}") center/cover no-repeat` : 'linear-gradient(135deg, #efe7fb, #fbe6da)', position: 'relative' }}>
+                    <span style={{ position: 'absolute', top: 12, left: 12, background: 'rgba(255,255,255,0.92)', color: '#7c3aed', fontWeight: 700, fontSize: 11, padding: '4px 10px', borderRadius: 999 }}>
+                      {v.ac_type === 'AC' ? t('events.venues.ac') : t('events.venues.nonAc')}
+                    </span>
+                  </div>
+                  <div style={{ padding: 16 }}>
+                    <div style={{ fontWeight: 700, fontSize: 17 }}>{v.name}</div>
+                    <div style={{ fontSize: 13, color: '#6b5d52', marginTop: 2 }}>{v.category} · {t('public.events.capacity')} {v.min_occupancy}–{v.max_occupancy}</div>
+                    {v.amenities && <div style={{ fontSize: 12, color: '#9d8b7e', marginTop: 8, lineHeight: 1.4 }}>{String(v.amenities).split(',').slice(0, 4).map((a: string) => a.trim()).filter(Boolean).join(' · ')}</div>}
+                    <div style={{ marginTop: 12, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+                      <span style={{ fontWeight: 800, color: '#cc5a16', fontSize: 19 }}>{money(v.daily_rate)}<span style={{ fontSize: 12, fontWeight: 400, color: '#9d8b7e' }}> / day</span></span>
+                      <a href="#enquire" onClick={() => setForm((f: any) => ({ ...f, venue_id: v.id }))} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>{t('public.events.enquire')} →</a>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        {/* Inquiry form */}
-        <div style={{ background: '#fff', border: '1px solid #e8dccf', borderRadius: 20, padding: 24 }}>
-          <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 16 }}>{t('public.events.enquire')}</h2>
+        {/* ── Inquiry form ───────────────────────────────────────────────── */}
+        <div id="enquire" style={{ scrollMarginTop: 20, background: '#fff', border: '1px solid #ece3d7', borderRadius: 22, padding: 28, margin: '20px 0 56px', boxShadow: '0 4px 20px rgba(20,17,12,0.06)' }}>
+          <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 4 }}>{t('public.events.enquire')}</h2>
+          <p style={{ fontSize: 14, color: '#6b5d52', marginBottom: 18 }}>{t('public.events.formSub')}</p>
           {done ? (
-            <div style={{ textAlign: 'center', padding: 24, color: '#047857', fontWeight: 600 }}>{t('public.events.thankYou')}</div>
+            <div style={{ textAlign: 'center', padding: 32, color: '#047857', fontWeight: 700, fontSize: 17 }}>✓ {t('public.events.thankYou')}</div>
           ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
               <input className={INPUT} placeholder={t('public.events.yourName')} value={form.customer_name} onChange={e => setForm({ ...form, customer_name: e.target.value })} />
               <input className={INPUT} placeholder={t('public.events.yourPhone')} value={form.customer_phone} onChange={e => setForm({ ...form, customer_phone: e.target.value })} />
               <input className={INPUT} placeholder={t('public.events.yourEmail')} value={form.customer_email} onChange={e => setForm({ ...form, customer_email: e.target.value })} />
@@ -1809,19 +1870,29 @@ export function EventBookingPage({ tenantId }: { tenantId: string }) {
               </select>
               <select className={INPUT} value={form.venue_id} onChange={e => setForm({ ...form, venue_id: e.target.value })}>
                 <option value="">{t('events.bookings.venue')} —</option>
-                {(data.venues || []).map((v: any) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                {venues.map((v: any) => <option key={v.id} value={v.id}>{v.name}</option>)}
               </select>
               <input type="date" className={INPUT} value={form.event_date} onChange={e => setForm({ ...form, event_date: e.target.value })} />
               <input type="number" className={INPUT} placeholder={t('public.events.guests')} value={form.guest_count} onChange={e => setForm({ ...form, guest_count: e.target.value })} />
               <textarea className={INPUT} style={{ gridColumn: '1 / -1' }} rows={3} placeholder={t('public.events.message')} value={form.special_requests} onChange={e => setForm({ ...form, special_requests: e.target.value })} />
               {error && <div style={{ gridColumn: '1 / -1', color: '#dc2626', fontSize: 13 }}>{error}</div>}
-              <button className={BTN_PRIMARY} style={{ gridColumn: '1 / -1', justifyContent: 'center', padding: 12 }} disabled={busy} onClick={submit}>
+              <button className={BTN_PRIMARY} style={{ gridColumn: '1 / -1', justifyContent: 'center', padding: 14, fontSize: 15 }} disabled={busy} onClick={submit}>
                 {busy ? t('public.events.submitting') : t('public.events.submit')}
               </button>
             </div>
           )}
         </div>
       </div>
+
+      {/* ── Footer ─────────────────────────────────────────────────────────── */}
+      <footer style={{ background: '#14110c', color: '#d8cfc4', textAlign: 'center', padding: '28px 20px', fontSize: 13 }}>
+        <div style={{ fontWeight: 700, color: '#fff', fontSize: 15 }}>{property.name}</div>
+        <div style={{ marginTop: 6 }}>
+          {[property.city, property.state].filter(Boolean).join(', ')}
+          {(p.contact_phone || property.phone) ? `  ·  ${p.contact_phone || property.phone}` : ''}
+          {p.contact_email ? `  ·  ${p.contact_email}` : ''}
+        </div>
+      </footer>
     </div>
   );
 }
