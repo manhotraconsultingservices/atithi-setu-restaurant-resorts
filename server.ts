@@ -41887,6 +41887,219 @@ ${data.tenant.name}`;
     }
   });
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PAYROLL — cross-module (Hotel / Spa / Restaurant / Events)
+  // Built on the shared operational roster (attendance_staff) so ONE monthly run
+  // covers every module. FULL_TIME staff earn a fixed monthly wage; HOURLY staff
+  // are paid from the timesheet (timesheet_day.pay_amount = actual_hours × rate).
+  // Advances are recorded against a staff member and recovered from the next run.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const ensurePayrollTables = async (db: any) => {
+    await db.exec(`ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS pay_type TEXT DEFAULT 'HOURLY'`).catch(() => {});
+    await db.exec(`ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS monthly_wage DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS staff_advances (
+        id           TEXT PRIMARY KEY,
+        staff_id     TEXT NOT NULL,
+        amount       DOUBLE PRECISION DEFAULT 0,
+        advance_date DATE,
+        note         TEXT,
+        recovered    DOUBLE PRECISION DEFAULT 0,
+        status       TEXT DEFAULT 'OPEN',        -- OPEN | RECOVERED
+        recorded_by  TEXT,
+        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `).catch(() => {});
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_staff_adv ON staff_advances(staff_id, status)`).catch(() => {});
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS staff_payroll (
+        id               TEXT PRIMARY KEY,
+        staff_id         TEXT NOT NULL,
+        period           TEXT NOT NULL,          -- YYYY-MM
+        pay_type         TEXT,
+        units            DOUBLE PRECISION DEFAULT 0,  -- hours (HOURLY) or 1 (FULL_TIME)
+        rate             DOUBLE PRECISION DEFAULT 0,
+        gross            DOUBLE PRECISION DEFAULT 0,
+        advance_deducted DOUBLE PRECISION DEFAULT 0,
+        net              DOUBLE PRECISION DEFAULT 0,
+        status           TEXT DEFAULT 'DRAFT',   -- DRAFT | PAID
+        paid_at          TIMESTAMP,
+        created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `).catch(() => {});
+    await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_payroll_period ON staff_payroll(staff_id, period)`).catch(() => {});
+  };
+
+  const payrollGate = (req: AuthRequest) => STAFF_MGMT_ROLES.includes(req.user?.role ?? '');
+  const monthRange = (m: string) => {
+    const period = /^\d{4}-\d{2}$/.test(m) ? m : new Date().toISOString().slice(0, 7);
+    const start = `${period}-01`;
+    const d = new Date(`${period}-01T00:00:00Z`);
+    const end = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+    return { period, start, end };
+  };
+
+  // ─── Staff advances ────────────────────────────────────────────────────────
+  app.get("/api/owner/staff-advances", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!payrollGate(req)) return res.status(403).json({ error: "Forbidden" });
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
+      const db = await getTenantDb(targetId);
+      await ensurePayrollTables(db);
+      const rows = await db.query(
+        `SELECT a.*, s.name AS staff_name FROM staff_advances a
+           LEFT JOIN attendance_staff s ON s.id = a.staff_id
+          ORDER BY a.advance_date DESC NULLS LAST, a.created_at DESC`
+      );
+      res.json(rows);
+    } catch (err) { res.status(500).json({ error: "Failed to load advances" }); }
+  });
+
+  app.post("/api/owner/staff-advances", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!payrollGate(req)) return res.status(403).json({ error: "Forbidden" });
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
+      const db = await getTenantDb(targetId);
+      await ensurePayrollTables(db);
+      const { staff_id, amount, advance_date, note } = req.body || {};
+      const amt = Math.round((Number(amount) || 0) * 100) / 100;
+      if (!staff_id) return res.status(400).json({ error: "staff_id is required" });
+      if (!(amt > 0)) return res.status(400).json({ error: "Amount must be greater than 0" });
+      const id = randomUUID();
+      await db.run(
+        `INSERT INTO staff_advances (id, staff_id, amount, advance_date, note, recorded_by) VALUES (?, ?, ?, ?, ?, ?)`,
+        [id, staff_id, amt, advance_date || new Date().toISOString().slice(0, 10), note || null, req.user?.email || null]
+      );
+      res.status(201).json({ success: true, id });
+    } catch (err) { console.error("staff advance error:", err); res.status(500).json({ error: "Failed to record advance" }); }
+  });
+
+  app.delete("/api/owner/staff-advances/:id", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!payrollGate(req)) return res.status(403).json({ error: "Forbidden" });
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
+      const db = await getTenantDb(targetId);
+      await ensurePayrollTables(db);
+      await db.run("DELETE FROM staff_advances WHERE id = ?", [req.params.id]);
+      res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: "Failed to delete advance" }); }
+  });
+
+  // ─── Monthly payroll — computed from attendance/timesheet ──────────────────
+  app.get("/api/owner/payroll", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!payrollGate(req)) return res.status(403).json({ error: "Forbidden" });
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
+      const db = await getTenantDb(targetId);
+      await ensurePayrollTables(db);
+      const { period, start, end } = monthRange(String(req.query.month || ''));
+
+      const staff: any[] = await db.query(
+        `SELECT id, name, role, COALESCE(pay_type,'HOURLY') AS pay_type,
+                COALESCE(hourly_rate,0) AS hourly_rate, COALESCE(monthly_wage,0) AS monthly_wage
+           FROM attendance_staff WHERE is_active = 1 ORDER BY name`
+      );
+      // Hours + pay already computed per day by the timesheet engine.
+      const ts: any[] = await db.query(
+        `SELECT staff_id, COALESCE(SUM(actual_hours),0) AS hrs, COALESCE(SUM(pay_amount),0) AS pay,
+                COUNT(*) FILTER (WHERE COALESCE(actual_hours,0) > 0) AS days
+           FROM timesheet_day WHERE shift_date >= ? AND shift_date <= ? GROUP BY staff_id`,
+        [start, end]
+      ).catch(() => []);
+      const tsBy: Record<string, any> = {};
+      for (const r of ts) tsBy[r.staff_id] = r;
+
+      const adv: any[] = await db.query(
+        `SELECT staff_id, COALESCE(SUM(amount - COALESCE(recovered,0)),0) AS outstanding
+           FROM staff_advances WHERE status = 'OPEN' GROUP BY staff_id`
+      ).catch(() => []);
+      const advBy: Record<string, number> = {};
+      for (const r of adv) advBy[r.staff_id] = Number(r.outstanding || 0);
+
+      const existing: any[] = await db.query("SELECT * FROM staff_payroll WHERE period = ?", [period]).catch(() => []);
+      const exBy: Record<string, any> = {};
+      for (const r of existing) exBy[r.staff_id] = r;
+
+      const rows = staff.map(s => {
+        const t = tsBy[s.id] || { hrs: 0, pay: 0, days: 0 };
+        const isFull = String(s.pay_type).toUpperCase() === 'FULL_TIME';
+        const units = isFull ? Number(t.days || 0) : round2(Number(t.hrs || 0));
+        const rate = isFull ? Number(s.monthly_wage || 0) : Number(s.hourly_rate || 0);
+        const gross = isFull ? round2(Number(s.monthly_wage || 0)) : round2(Number(t.pay || 0) || Number(t.hrs || 0) * rate);
+        const outstanding = round2(advBy[s.id] || 0);
+        const already = exBy[s.id];
+        const advanceDeducted = already ? Number(already.advance_deducted || 0) : round2(Math.min(outstanding, gross));
+        const net = round2(gross - advanceDeducted);
+        return {
+          staff_id: s.id, name: s.name, role: s.role, pay_type: isFull ? 'FULL_TIME' : 'HOURLY',
+          units, rate, days: Number(t.days || 0), hours: round2(Number(t.hrs || 0)),
+          gross, advance_outstanding: outstanding, advance_deducted: advanceDeducted, net,
+          status: already?.status || 'DRAFT',
+        };
+      });
+      const totals = {
+        gross: round2(rows.reduce((a, r) => a + r.gross, 0)),
+        advance: round2(rows.reduce((a, r) => a + r.advance_deducted, 0)),
+        net: round2(rows.reduce((a, r) => a + r.net, 0)),
+      };
+      res.json({ period, start, end, rows, totals });
+    } catch (err: any) { console.error("payroll compute error:", err); res.status(500).json({ error: "Failed to compute payroll" }); }
+  });
+
+  // Finalize the month: persist the run and recover advances against it.
+  app.post("/api/owner/payroll/finalize", authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      if (!payrollGate(req)) return res.status(403).json({ error: "Forbidden" });
+      const targetId = resolveTargetRestaurantId(req);
+      if (!targetId) return res.status(400).json({ error: "restaurantId is required" });
+      const db = await getTenantDb(targetId);
+      await ensurePayrollTables(db);
+      const { period } = monthRange(String(req.body?.month || ''));
+      const rows: any[] = Array.isArray(req.body?.rows) ? req.body.rows : [];
+      if (!rows.length) return res.status(400).json({ error: "No payroll rows supplied" });
+
+      for (const r of rows) {
+        const gross = round2(Number(r.gross || 0));
+        const ded = round2(Math.max(0, Math.min(Number(r.advance_deducted || 0), gross)));
+        const net = round2(gross - ded);
+        const existing: any = await db.get("SELECT id FROM staff_payroll WHERE staff_id = ? AND period = ?", [r.staff_id, period]);
+        if (existing) {
+          await db.run(
+            `UPDATE staff_payroll SET pay_type=?, units=?, rate=?, gross=?, advance_deducted=?, net=?, status='PAID', paid_at=CURRENT_TIMESTAMP WHERE id=?`,
+            [r.pay_type || null, Number(r.units || 0), Number(r.rate || 0), gross, ded, net, existing.id]
+          );
+        } else {
+          await db.run(
+            `INSERT INTO staff_payroll (id, staff_id, period, pay_type, units, rate, gross, advance_deducted, net, status, paid_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PAID', CURRENT_TIMESTAMP)`,
+            [randomUUID(), r.staff_id, period, r.pay_type || null, Number(r.units || 0), Number(r.rate || 0), gross, ded, net]
+          );
+        }
+        // Recover advances oldest-first up to the deducted amount.
+        let remaining = ded;
+        if (remaining > 0) {
+          const open: any[] = await db.query(
+            "SELECT * FROM staff_advances WHERE staff_id = ? AND status = 'OPEN' ORDER BY advance_date, created_at", [r.staff_id]
+          );
+          for (const a of open) {
+            if (remaining <= 0) break;
+            const due = round2(Number(a.amount || 0) - Number(a.recovered || 0));
+            const take = round2(Math.min(due, remaining));
+            const rec = round2(Number(a.recovered || 0) + take);
+            await db.run("UPDATE staff_advances SET recovered = ?, status = ? WHERE id = ?",
+              [rec, rec >= Number(a.amount || 0) - 0.01 ? 'RECOVERED' : 'OPEN', a.id]);
+            remaining = round2(remaining - take);
+          }
+        }
+      }
+      res.json({ success: true, period, count: rows.length });
+    } catch (err: any) { console.error("payroll finalize error:", err); res.status(500).json({ error: "Failed to finalize payroll" }); }
+  });
+
   // Feedback: Request Feedback
   app.post("/api/orders/:id/request-feedback", authenticate, async (req: AuthRequest, res: Response) => {
     try {
