@@ -108,6 +108,8 @@ export const en: Record<string, string> = {
   'events.bookings.venue': 'Venue',
   'events.bookings.eventDate': 'Event date',
   'events.bookings.endDate': 'End date',
+  'events.bookings.endDateHint': 'Optional — for multi-day or overnight events.',
+  'events.bookings.schedule': 'Event schedule',
   'events.bookings.startTime': 'Start time',
   'events.bookings.endTime': 'End time',
   'events.bookings.guests': 'Guests',

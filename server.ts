@@ -21675,11 +21675,11 @@ ${data.tenant.name}`;
 
       const venues: any[] = await db.query("SELECT * FROM event_venues WHERE is_active = 1 ORDER BY display_order, name");
       const bookings: any[] = await db.query(
-        `SELECT id, venue_id, customer_name, event_date, start_time, end_time, status, event_type
+        `SELECT id, venue_id, customer_name, event_date, end_date, start_time, end_time, status, event_type
            FROM event_bookings
           WHERE status IN ('CONFIRMED','IN_PROGRESS','QUOTED','INQUIRY')
-            AND event_date >= ? AND event_date <= ?`,
-        [from, to]
+            AND event_date <= ? AND COALESCE(end_date, event_date) >= ?`,
+        [to, from]
       );
       const blocks: any[] = await db.query(
         `SELECT id, venue_id, from_date, to_date, reason FROM event_venue_blocks
@@ -21853,7 +21853,7 @@ ${data.tenant.name}`;
       // Venue conflict guard (only meaningful for held statuses; INQUIRY skips it).
       const targetStatus = b.status || 'INQUIRY';
       if (b.venue_id && (targetStatus === 'CONFIRMED' || targetStatus === 'IN_PROGRESS')) {
-        const conflict = await venueBookingConflict(db, b.venue_id, b.event_date, startTime, endTime);
+        const conflict = await venueBookingConflict(db, b.venue_id, b.event_date, b.end_date || null, startTime, endTime);
         if (conflict) return res.status(409).json({ error: "Venue already booked for this date/time" });
         const blocked = await venueBlockConflict(db, b.venue_id, b.event_date);
         if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });
@@ -22132,7 +22132,7 @@ ${data.tenant.name}`;
       }
       // Re-check venue availability at confirm time.
       if (bk.venue_id) {
-        const conflict = await venueBookingConflict(db, bk.venue_id, bk.event_date, bk.start_time, bk.end_time, bk.id);
+        const conflict = await venueBookingConflict(db, bk.venue_id, bk.event_date, bk.end_date || null, bk.start_time, bk.end_time, bk.id);
         if (conflict) return res.status(409).json({ error: "Venue is no longer available for this date/time" });
         const blocked = await venueBlockConflict(db, bk.venue_id, bk.event_date);
         if (blocked) return res.status(409).json({ error: `Venue blocked: ${blocked.reason || 'maintenance'}` });

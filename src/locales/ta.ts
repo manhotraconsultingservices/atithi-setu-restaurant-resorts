@@ -104,6 +104,8 @@ export const ta: Record<string, string> = {
   'events.bookings.venue': 'இடம்',
   'events.bookings.eventDate': 'நிகழ்வு தேதி',
   'events.bookings.endDate': 'முடிவு தேதி',
+  'events.bookings.endDateHint': 'விருப்பம் — பல நாள் அல்லது இரவு தாண்டும் நிகழ்வுகளுக்கு.',
+  'events.bookings.schedule': 'நிகழ்வு அட்டவணை',
   'events.bookings.startTime': 'தொடக்க நேரம்',
   'events.bookings.endTime': 'முடிவு நேரம்',
   'events.bookings.guests': 'விருந்தினர்கள்',

@@ -58,32 +58,53 @@ export function resolveVenueCharge(
   return daily;
 }
 
+/** Normalize a DATE value (pg returns Date objects) to a YYYY-MM-DD string. */
+function ymdStr(v: any): string {
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  return String(v || '').slice(0, 10);
+}
+
 /**
- * Returns a conflicting event booking on a venue for the given date + time
- * window, or null. Half-open overlap on time-of-day within the same date.
+ * Returns a conflicting event booking on a venue for the given date range +
+ * time window, or null. Supports multi-day events (end_date) and overnight
+ * events (end_date = next day). Date ranges overlap when
+ * `newStart <= existingEnd AND existingStart <= newEnd`. When BOTH bookings are
+ * single-day on the same date, time-of-day overlap is additionally required;
+ * if either spans multiple days, any date overlap is a conflict.
  * Only CONFIRMED / IN_PROGRESS bookings hold the venue (INQUIRY/QUOTED do not).
  */
 export async function venueBookingConflict(
   tenantDb: DbInterface,
   venueId: string,
   eventDate: string,
+  endDate: string | null,
   startTime: string,
   endTime: string,
   excludeBookingId?: string
 ): Promise<any | null> {
+  const newStart = ymdStr(eventDate);
+  const ed = endDate ? ymdStr(endDate) : '';
+  const newEnd = ed && ed > newStart ? ed : newStart;
   const rows = await tenantDb.query(
-    `SELECT id, start_time, end_time FROM event_bookings
+    `SELECT id, event_date, end_date, start_time, end_time FROM event_bookings
       WHERE venue_id = ?
-        AND event_date = ?
         AND status IN ('CONFIRMED','IN_PROGRESS')
-        AND start_time < ? AND end_time > ?
-        ${excludeBookingId ? "AND id <> ?" : ""}
-      LIMIT 1`,
+        AND event_date <= ?
+        AND COALESCE(end_date, event_date) >= ?
+        ${excludeBookingId ? "AND id <> ?" : ""}`,
     excludeBookingId
-      ? [venueId, eventDate, endTime, startTime, excludeBookingId]
-      : [venueId, eventDate, endTime, startTime]
+      ? [venueId, newEnd, newStart, excludeBookingId]
+      : [venueId, newEnd, newStart]
   );
-  return rows[0] || null;
+  for (const r of rows) {
+    const exStart = ymdStr(r.event_date);
+    const exEnd = ymdStr(r.end_date || r.event_date) > exStart ? ymdStr(r.end_date) : exStart;
+    // Either side multi-day → date overlap alone is a conflict.
+    if (newEnd > newStart || exEnd > exStart) return r;
+    // Both single-day on the same date → require time-of-day overlap.
+    if (exStart === newStart && String(r.start_time) < endTime && String(r.end_time) > startTime) return r;
+  }
+  return null;
 }
 
 /** Returns a venue block (maintenance/hold) overlapping the date, or null. */

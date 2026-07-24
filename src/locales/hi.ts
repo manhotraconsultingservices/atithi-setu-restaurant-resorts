@@ -104,6 +104,8 @@ export const hi: Record<string, string> = {
   'events.bookings.venue': 'स्थल',
   'events.bookings.eventDate': 'इवेंट की तारीख',
   'events.bookings.endDate': 'समाप्ति तारीख',
+  'events.bookings.endDateHint': 'वैकल्पिक — बहु-दिवसीय या रात भर चलने वाले आयोजनों के लिए।',
+  'events.bookings.schedule': 'आयोजन कार्यक्रम',
   'events.bookings.startTime': 'आरंभ समय',
   'events.bookings.endTime': 'समाप्ति समय',
   'events.bookings.guests': 'अतिथि',

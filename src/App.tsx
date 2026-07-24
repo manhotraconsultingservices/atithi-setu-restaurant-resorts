@@ -13639,6 +13639,7 @@ function OwnerDashboard({ restaurantId, token, onRestaurantUpdate }: { restauran
           isHotelEnabled={isHotelEnabled}
           isRestaurantEnabled={isRestaurantEnabled}
           isSpaEnabled={isSpaEnabled}
+          isEventsEnabled={isEventsEnabled}
           onOpenHotel={() => { setDashboardMode('HOTEL'); setActiveTab('HOTEL_BOOKINGS'); }}
           onOpenRestaurant={() => { setDashboardMode('RESTAURANT'); setActiveTab('MONITOR'); }}
           onOpenSpa={() => setActiveTab('SPA_CALENDAR')}
@@ -41269,9 +41270,10 @@ const HotelLateFeeBanner: React.FC<{
 function HotelHomeLaunchpad({
   restaurantId, token, propertyName, restaurantImageUrl, isHotelEnabled, isRestaurantEnabled,
   onOpenHotel, onOpenRestaurant, onNewBooking, onNewOrder, onOpenReports, isSpaEnabled, onOpenSpa, role,
+  isEventsEnabled,
 }: {
   restaurantId: string; token: string; propertyName: string; restaurantImageUrl?: string;
-  isHotelEnabled: boolean; isRestaurantEnabled: boolean; isSpaEnabled: boolean;
+  isHotelEnabled: boolean; isRestaurantEnabled: boolean; isSpaEnabled: boolean; isEventsEnabled?: boolean;
   onOpenHotel: () => void; onOpenRestaurant: () => void; onOpenSpa: () => void;
   onNewBooking: () => void; onNewOrder: () => void; onOpenReports: () => void;
   role: string | null;
@@ -41406,6 +41408,7 @@ function HotelHomeLaunchpad({
           if (isHotelEnabled) links.push({ label: 'Hotel booking', url: `${origin}/book/${bookingSlug || restaurantId}`, color: '#cc5a16' });
           if (isRestaurantEnabled) links.push({ label: 'Restaurant menu', url: `${origin}/menu/${restaurantId}`, color: '#0f6e56' });
           if (isSpaEnabled) links.push({ label: 'Spa booking', url: `${origin}/spa/${restaurantId}`, color: '#7e5792' });
+          if (isEventsEnabled) links.push({ label: 'Events & Convention', url: `${origin}/events/${restaurantId}`, color: '#7c3aed' });
           if (links.length === 0) return null;
           return (
             <div className="mb-5">

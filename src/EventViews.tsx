@@ -476,7 +476,7 @@ function EventBookings({ restaurantId, token }: Props) {
   const [venues, setVenues] = useState<any[]>([]);
   const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
   const [showNew, setShowNew] = useState(false);
-  const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', guest_count: '' };
+  const blank = { customer_name: '', customer_phone: '', customer_email: '', event_type: 'WEDDING', venue_id: '', event_date: new Date().toISOString().slice(0, 10), end_date: '', start_time: '10:00', end_time: '22:00', venue_rate_basis: 'DAILY', guest_count: '' };
   const [form, setForm] = useState<any>(blank);
 
   const load = async () => { try { setRows(await api('/events/bookings')); } catch { /* */ } };
@@ -522,6 +522,9 @@ function EventBookings({ restaurantId, token }: Props) {
                 {venues.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
               </select></div>
             <div><label className={LABEL}>{t('events.bookings.eventDate')}</label><input type="date" className={INPUT} value={form.event_date} onChange={e => setForm({ ...form, event_date: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('events.bookings.endDate')}</label>
+              <input type="date" className={INPUT} min={form.event_date} value={form.end_date} onChange={e => setForm({ ...form, end_date: e.target.value })} />
+              <p className="text-[10px] text-[#9d8b7e] mt-0.5">{t('events.bookings.endDateHint')}</p></div>
             <div><label className={LABEL}>{t('events.bookings.startTime')}</label><input type="time" className={INPUT} value={form.start_time} onChange={e => setForm({ ...form, start_time: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.bookings.endTime')}</label><input type="time" className={INPUT} value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.bookings.rateBasis')}</label>
@@ -544,7 +547,7 @@ function EventBookings({ restaurantId, token }: Props) {
         columns={[
           { key: 'customer_name', label: t('events.bookings.customer') },
           { key: 'venue_name', label: t('events.bookings.venue'), render: (r: any) => r.venue_name || '—' },
-          { key: 'event_date', label: t('events.bookings.eventDate') },
+          { key: 'event_date', label: t('events.bookings.eventDate'), render: (r: any) => { const s = String(r.event_date || '').slice(0, 10); const e = String(r.end_date || '').slice(0, 10); return e && e > s ? `${s} → ${e}` : s; } },
           { key: 'guest_count', label: t('events.bookings.guests') },
           { key: 'total_amount', label: t('common.total'), render: (r: any) => money(r.total_amount) },
           { key: 'status', label: t('common.status'), render: (r: any) => <Pill status={r.status} /> },
@@ -703,7 +706,7 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   return (
     <ObjectDetail
       title={bk.customer_name}
-      subtitle={`${bk.venue_name || '—'} · ${bk.event_date} · ${bk.start_time}–${bk.end_time} · ${bk.guest_count} ${t('events.bookings.guests').toLowerCase()}`}
+      subtitle={`${bk.venue_name || '—'} · ${dOnly(bk.event_date)}${bk.end_date && dOnly(bk.end_date) > dOnly(bk.event_date) ? ` → ${dOnly(bk.end_date)}` : ''} · ${bk.start_time}–${bk.end_time} · ${bk.guest_count} ${t('events.bookings.guests').toLowerCase()}`}
       statusPill={<Pill status={bk.status} />}
       onBack={onBack}
       backLabel={t('events.bookings.title')}
@@ -775,6 +778,23 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
           </div>
         </div>
       </div>
+
+      {editable && (
+        <div className={`${CARD} mb-4`}>
+          <h3 className="font-bold text-sm flex items-center gap-1.5 mb-2 text-[#14110c]"><CalendarRange size={15} />{t('events.bookings.schedule')}</h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div><label className={LABEL}>{t('events.bookings.eventDate')}</label>
+              <input type="date" className={INPUT} defaultValue={dOnly(bk.event_date)} onBlur={e => commitContact('event_date', e.target.value)} /></div>
+            <div><label className={LABEL}>{t('events.bookings.endDate')}</label>
+              <input type="date" className={INPUT} min={dOnly(bk.event_date)} defaultValue={bk.end_date ? dOnly(bk.end_date) : ''} onBlur={e => commitContact('end_date', e.target.value)} />
+              <p className="text-[10px] text-[#9d8b7e] mt-0.5">{t('events.bookings.endDateHint')}</p></div>
+            <div><label className={LABEL}>{t('events.bookings.startTime')}</label>
+              <input type="time" className={INPUT} defaultValue={bk.start_time || ''} onBlur={e => commitContact('start_time', e.target.value)} /></div>
+            <div><label className={LABEL}>{t('events.bookings.endTime')}</label>
+              <input type="time" className={INPUT} defaultValue={bk.end_time || ''} onBlur={e => commitContact('end_time', e.target.value)} /></div>
+          </div>
+        </div>
+      )}
 
       <div className="grid md:grid-cols-2 gap-4">
         {/* Rentals */}
@@ -1038,6 +1058,7 @@ function EventCalendar({ restaurantId, token }: Props) {
   const api = makeApi(restaurantId, token);
   const [data, setData] = useState<any>(null);
   const [start, setStart] = useState(todayIso());
+  const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
   const shift = (n: number) => setStart(new Date(new Date(start + 'T00:00:00Z').getTime() + n * 86400000).toISOString().slice(0, 10));
 
   const load = async () => {
@@ -1048,15 +1069,35 @@ function EventCalendar({ restaurantId, token }: Props) {
   };
   useEffect(() => { load(); }, [start]);
 
+  // A booking covers `date` when event_date <= date <= end_date (end_date falls
+  // back to event_date for single-day events). This is what makes multi-day and
+  // overnight events span across the grid.
+  const covers = (b: any, date: string) => {
+    const s = String(b.event_date).slice(0, 10);
+    const e = b.end_date ? String(b.end_date).slice(0, 10) : s;
+    const end = e > s ? e : s;
+    return s <= date && date <= end;
+  };
   const cellFor = (venueId: string, date: string) => {
     const blocked = (data?.blocks || []).some((b: any) => b.venue_id === venueId && String(b.from_date).slice(0, 10) <= date && String(b.to_date).slice(0, 10) >= date);
-    if (blocked) return { label: '⛔', title: t('events.calendar.blocked'), sty: EV_CAL.BLOCKED };
-    const booked = (data?.bookings || []).find((b: any) => b.venue_id === venueId && String(b.event_date).slice(0, 10) === date && ['CONFIRMED', 'IN_PROGRESS'].includes(b.status));
-    if (booked) return { label: booked.customer_name?.split(' ')[0]?.slice(0, 9) || t('events.calendar.booked'), title: `${booked.customer_name} · ${booked.status}`, sty: EV_CAL.CONFIRMED };
-    const tentative = (data?.bookings || []).find((b: any) => b.venue_id === venueId && String(b.event_date).slice(0, 10) === date && ['INQUIRY', 'QUOTED'].includes(b.status));
-    if (tentative) return { label: '◔', title: `${tentative.customer_name} · ${tentative.status}`, sty: EV_CAL.TENTATIVE };
-    return { label: '', title: t('events.calendar.free'), sty: EV_CAL.FREE };
+    if (blocked) return { title: t('events.calendar.blocked'), sty: EV_CAL.BLOCKED, booking: null as any, isStart: false };
+    const booked = (data?.bookings || []).find((b: any) => b.venue_id === venueId && covers(b, date) && ['CONFIRMED', 'IN_PROGRESS'].includes(b.status));
+    if (booked) return { title: `${booked.customer_name} · ${booked.status}`, sty: EV_CAL.CONFIRMED, booking: booked, isStart: String(booked.event_date).slice(0, 10) === date };
+    const tentative = (data?.bookings || []).find((b: any) => b.venue_id === venueId && covers(b, date) && ['INQUIRY', 'QUOTED'].includes(b.status));
+    if (tentative) return { title: `${tentative.customer_name} · ${tentative.status}`, sty: EV_CAL.TENTATIVE, booking: tentative, isStart: String(tentative.event_date).slice(0, 10) === date };
+    return { title: t('events.calendar.free'), sty: EV_CAL.FREE, booking: null as any, isStart: false };
   };
+  const cellName = (b: any) => b.customer_name?.split(' ')[0]?.slice(0, 9) || t('events.calendar.booked');
+
+  // Clicking a booking in the grid drills into its detail (hyperlink behaviour).
+  const top = objStack[objStack.length - 1];
+  if (top) return (
+    <EventObjectRouter
+      restaurantId={restaurantId} token={token} obj={top} venues={data?.venues || []}
+      onOpenObject={(type, id) => setObjStack(s => [...s, { type, id }])}
+      onBack={() => { setObjStack(s => s.slice(0, -1)); load(); }}
+    />
+  );
 
   // KPI strip over the visible window.
   const bookings = data?.bookings || [];
@@ -1120,9 +1161,16 @@ function EventCalendar({ restaurantId, token }: Props) {
                   </td>
                   {(data.dates || []).map((d: string) => {
                     const c = cellFor(v.id, d);
+                    const label = c.booking ? (c.isStart ? cellName(c.booking) : '') : (c.sty === EV_CAL.BLOCKED ? '⛔' : '');
                     return (
                       <td key={d} title={c.title} className="border border-[#f0e9df] text-center align-middle p-0">
-                        <div className="text-[9px] font-semibold px-0.5 py-1.5 truncate" style={{ background: c.sty.bg, color: c.sty.fg }}>{c.label || '·'}</div>
+                        {c.booking ? (
+                          <button type="button" onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: c.booking.id }])}
+                            className="block w-full text-[9px] font-semibold px-0.5 py-1.5 truncate cursor-pointer hover:brightness-95 hover:underline focus:outline-none"
+                            style={{ background: c.sty.bg, color: c.sty.fg }}>{label}</button>
+                        ) : (
+                          <div className="text-[9px] font-semibold px-0.5 py-1.5 truncate" style={{ background: c.sty.bg, color: c.sty.fg }}>{label || '·'}</div>
+                        )}
                       </td>
                     );
                   })}

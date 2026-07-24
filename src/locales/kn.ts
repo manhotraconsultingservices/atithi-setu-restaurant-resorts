@@ -104,6 +104,8 @@ export const kn: Record<string, string> = {
   'events.bookings.venue': 'ಸ್ಥಳ',
   'events.bookings.eventDate': 'ಈವೆಂಟ್ ದಿನಾಂಕ',
   'events.bookings.endDate': 'ಅಂತಿಮ ದಿನಾಂಕ',
+  'events.bookings.endDateHint': 'ಐಚ್ಛಿಕ — ಬಹು-ದಿನ ಅಥವಾ ರಾತ್ರಿ ದಾಟುವ ಕಾರ್ಯಕ್ರಮಗಳಿಗೆ.',
+  'events.bookings.schedule': 'ಕಾರ್ಯಕ್ರಮ ವೇಳಾಪಟ್ಟಿ',
   'events.bookings.startTime': 'ಪ್ರಾರಂಭ ಸಮಯ',
   'events.bookings.endTime': 'ಅಂತಿಮ ಸಮಯ',
   'events.bookings.guests': 'ಅತಿಥಿಗಳು',

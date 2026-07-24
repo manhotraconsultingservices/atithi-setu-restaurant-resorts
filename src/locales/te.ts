@@ -104,6 +104,8 @@ export const te: Record<string, string> = {
   'events.bookings.venue': 'వేదిక',
   'events.bookings.eventDate': 'ఈవెంట్ తేదీ',
   'events.bookings.endDate': 'ముగింపు తేదీ',
+  'events.bookings.endDateHint': 'ఐచ్ఛికం — బహుళ-రోజు లేదా రాత్రి దాటే కార్యక్రమాలకు.',
+  'events.bookings.schedule': 'కార్యక్రమ షెడ్యూల్',
   'events.bookings.startTime': 'ప్రారంభ సమయం',
   'events.bookings.endTime': 'ముగింపు సమయం',
   'events.bookings.guests': 'అతిథులు',
