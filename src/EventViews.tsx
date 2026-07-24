@@ -998,8 +998,19 @@ function EventFolioDetail({ restaurantId, token, folioId, onBack, onOpenObject }
       onOpenObject={onOpenObject}
       overview={
         <div>
-          <div className={`${CARD} mb-4 flex items-center justify-between`}>
-            <div className="text-sm font-bold">{f.invoice_number || folioId}</div>
+          <div className={`${CARD} mb-4 flex items-start justify-between`}>
+            <div>
+              <div className="text-sm font-bold">{f.invoice_number || folioId}</div>
+              {f.customer_name && (
+                <div className="mt-1.5 text-xs text-[#6b5d52]">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-[#9d8b7e]">{t('events.folio.billTo')}</div>
+                  <div className="font-semibold text-[#14110c]">{f.customer_name}</div>
+                  {(f.customer_phone || f.customer_email) && <div>{f.customer_phone || ''}{f.customer_email ? ` · ${f.customer_email}` : ''}</div>}
+                  {f.customer_gstin && <div>GSTIN: {f.customer_gstin}</div>}
+                  <div className="mt-0.5 text-[#9d8b7e]">{f.venue_name || '—'}{f.event_date ? ` · ${String(f.event_date).slice(0, 10)}` : ''}</div>
+                </div>
+              )}
+            </div>
             <div className="text-right"><div className="text-2xl font-bold text-[#cc5a16]">{money(f.grand_total)}</div><div className="text-xs text-[#6b5d52]">{t('events.bookings.grandTotal')}</div></div>
           </div>
           <div className={CARD}>

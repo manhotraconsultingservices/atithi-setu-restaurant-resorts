@@ -22588,7 +22588,17 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const folio: any = await db.get("SELECT * FROM folios WHERE id = ? AND folio_kind = 'EVENT'", [req.params.fid]);
+      // Join the originating booking so the invoice carries a bill-to (customer
+      // name/contact + event context); the shared folios table stores none of it.
+      const folio: any = await db.get(
+        `SELECT f.*, b.customer_name, b.customer_phone, b.customer_email, b.customer_gstin,
+                b.event_type, b.event_date, b.end_date, b.guest_count, v.name AS venue_name
+           FROM folios f
+           LEFT JOIN event_bookings b ON b.id = f.event_booking_id
+           LEFT JOIN event_venues v ON v.id = b.venue_id
+          WHERE f.id = ? AND f.folio_kind = 'EVENT'`,
+        [req.params.fid]
+      );
       if (!folio) return res.status(404).json({ error: "Event folio not found" });
       const entries = await db.query("SELECT * FROM folio_entries WHERE folio_id = ? ORDER BY created_at", [req.params.fid]);
       const payments = await db.query("SELECT * FROM folio_payments WHERE folio_id = ? ORDER BY recorded_at", [req.params.fid]);

@@ -200,6 +200,7 @@ export const en: Record<string, string> = {
   'events.dash.won': 'Won',
   'events.dash.month': 'Month',
   'events.dash.package': 'Package',
+  'events.folio.billTo': 'Bill to',
   'events.reports.upcoming': 'Upcoming events',
   'events.reports.confirmedRevenue': 'Confirmed revenue',
   'events.reports.inquiries': 'Open inquiries',
