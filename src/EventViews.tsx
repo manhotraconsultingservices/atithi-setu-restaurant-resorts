@@ -212,7 +212,7 @@ function EventRentals({ restaurantId, token }: Props) {
   const [rows, setRows] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [edit, setEdit] = useState<any>(null);
-  const blank = { name: '', category: 'FURNITURE', unit: 'piece', quantity_owned: '', rent_hourly: '', rent_daily: '', rent_weekly: '', deposit: '' };
+  const blank = { name: '', category: 'FURNITURE', unit: 'piece', quantity_owned: '', rent_hourly: '', rent_daily: '', rent_weekly: '', deposit: '', cost_price: '' };
   const [form, setForm] = useState<any>(blank);
 
   const load = async () => { try { setRows(await api('/events/rental-items')); } catch { /* */ } };
@@ -220,7 +220,7 @@ function EventRentals({ restaurantId, token }: Props) {
 
   const save = async () => {
     if (!form.name) return;
-    const body = { ...form, quantity_owned: Number(form.quantity_owned || 0), rent_hourly: Number(form.rent_hourly || 0), rent_daily: Number(form.rent_daily || 0), rent_weekly: Number(form.rent_weekly || 0), deposit: Number(form.deposit || 0) };
+    const body = { ...form, quantity_owned: Number(form.quantity_owned || 0), rent_hourly: Number(form.rent_hourly || 0), rent_daily: Number(form.rent_daily || 0), rent_weekly: Number(form.rent_weekly || 0), deposit: Number(form.deposit || 0), cost_price: Number(form.cost_price || 0) };
     try {
       if (edit) await api(`/events/rental-items/${edit.id}`, { method: 'PATCH', body: JSON.stringify(body) });
       else await api('/events/rental-items', { method: 'POST', body: JSON.stringify(body) });
@@ -266,6 +266,7 @@ function EventRentals({ restaurantId, token }: Props) {
             <div><label className={LABEL}>{t('events.rentals.rentDaily')}</label><input type="number" className={INPUT} value={form.rent_daily} onChange={e => setForm({ ...form, rent_daily: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.rentals.rentWeekly')}</label><input type="number" className={INPUT} value={form.rent_weekly} onChange={e => setForm({ ...form, rent_weekly: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.rentals.deposit')}</label><input type="number" className={INPUT} value={form.deposit} onChange={e => setForm({ ...form, deposit: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('events.cost.costPrice')}</label><input type="number" className={INPUT} value={form.cost_price ?? ''} onChange={e => setForm({ ...form, cost_price: e.target.value })} placeholder={t('events.cost.costHint')} /></div>
             <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('common.description')}</label><input className={INPUT} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Pulled into booking, quote & invoice" /></div>
           </div>
           <div className="flex gap-2 mt-3">
@@ -307,7 +308,7 @@ function EventServices({ restaurantId, token }: Props) {
   const [rows, setRows] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [edit, setEdit] = useState<any>(null);
-  const blank = { name: '', category: 'STAFF', pricing_type: 'PER_EVENT', rate: '' };
+  const blank = { name: '', category: 'STAFF', pricing_type: 'PER_EVENT', rate: '', cost_price: '' };
   const [form, setForm] = useState<any>(blank);
 
   const load = async () => { try { setRows(await api('/events/services')); } catch { /* */ } };
@@ -316,7 +317,7 @@ function EventServices({ restaurantId, token }: Props) {
   const save = async () => {
     if (!form.name) return;
     try {
-      const body = { ...form, rate: Number(form.rate || 0) };
+      const body = { ...form, rate: Number(form.rate || 0), cost_price: Number(form.cost_price || 0) };
       if (edit) await api(`/events/services/${edit.id}`, { method: 'PATCH', body: JSON.stringify(body) });
       else await api('/events/services', { method: 'POST', body: JSON.stringify(body) });
       setShowForm(false); setEdit(null); setForm(blank); await load();
@@ -342,6 +343,7 @@ function EventServices({ restaurantId, token }: Props) {
                 {['PER_EVENT', 'PER_HOUR', 'PER_DAY', 'PER_PERSON', 'PER_UNIT'].map(c => <option key={c} value={c}>{c}</option>)}
               </select></div>
             <div><label className={LABEL}>{t('events.services.rate')}</label><input type="number" className={INPUT} value={form.rate} onChange={e => setForm({ ...form, rate: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('events.cost.costPrice')}</label><input type="number" className={INPUT} value={form.cost_price ?? ''} onChange={e => setForm({ ...form, cost_price: e.target.value })} placeholder={t('events.cost.costHint')} /></div>
             <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('common.description')}</label><input className={INPUT} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Pulled into booking, quote & invoice" /></div>
           </div>
           <div className="flex gap-2 mt-3">
@@ -381,7 +383,7 @@ function EventCatering({ restaurantId, token }: Props) {
   const [rows, setRows] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [edit, setEdit] = useState<any>(null);
-  const blank = { name: '', package_type: 'BUFFET', price_per_plate: '', gst_percent: '5', description: '', sections: [{ name: '', optionsText: '' }] };
+  const blank = { name: '', package_type: 'BUFFET', price_per_plate: '', gst_percent: '5', cost_price: '', description: '', sections: [{ name: '', optionsText: '' }] };
   const [form, setForm] = useState<any>(blank);
 
   const load = async () => { try { setRows(await api('/events/catering-packages')); } catch { /* */ } };
@@ -395,7 +397,7 @@ function EventCatering({ restaurantId, token }: Props) {
   const save = async () => {
     if (!form.name) return;
     const menu = (form.sections || []).filter((s: any) => s.name).map((s: any) => ({ section: s.name, options: String(s.optionsText || '').split(',').map((x: string) => x.trim()).filter(Boolean) }));
-    const body = { name: form.name, package_type: form.package_type, price_per_plate: Number(form.price_per_plate || 0), gst_percent: Number(form.gst_percent || 5), description: form.description, menu_json: menu };
+    const body = { name: form.name, package_type: form.package_type, price_per_plate: Number(form.price_per_plate || 0), gst_percent: Number(form.gst_percent || 5), cost_price: Number(form.cost_price || 0), description: form.description, menu_json: menu };
     try {
       if (edit) await api(`/events/catering-packages/${edit.id}`, { method: 'PATCH', body: JSON.stringify(body) });
       else await api('/events/catering-packages', { method: 'POST', body: JSON.stringify(body) });
@@ -423,6 +425,7 @@ function EventCatering({ restaurantId, token }: Props) {
               </select></div>
             <div><label className={LABEL}>{t('events.catering.pricePerPlate')}</label><input type="number" className={INPUT} value={form.price_per_plate} onChange={e => setForm({ ...form, price_per_plate: e.target.value })} /></div>
             <div><label className={LABEL}>GST %</label><input type="number" className={INPUT} value={form.gst_percent} onChange={e => setForm({ ...form, gst_percent: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('events.cost.costPrice')}</label><input type="number" className={INPUT} value={form.cost_price ?? ''} onChange={e => setForm({ ...form, cost_price: e.target.value })} placeholder={t('events.cost.costHint')} /></div>
             <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('common.description')}</label><input className={INPUT} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Pulled into booking, quote & invoice" /></div>
           </div>
 
@@ -1484,6 +1487,7 @@ function EventDashboard({ restaurantId, token }: Props) {
             {tile(t('events.dash.pipeline'), money(k.pipelineRevenue), `${openLeads} ${t('events.dash.openLeads')}`, '#2563eb')}
             {tile(t('events.dash.winRate'), `${k.winRate}%`, `${k.wonCount} ${t('common.of')} ${k.wonCount + k.lostCount}`, '#059669')}
             {tile(t('events.dash.avgValue'), money(k.avgBookingValue), t('events.dash.perEvent'), '#7c3aed')}
+            {tile(t('events.dash.margin'), money(k.margin || 0), `${k.marginPct || 0}% · ${t('events.dash.afterCost')}`, Number(k.margin) >= 0 ? '#059669' : '#dc2626')}
             {tile(t('events.dash.outstanding'), money(k.outstanding), Number(k.overdue) > 0 ? `${t('events.dash.overdueLabel')} ${money(k.overdue)}` : `${t('events.dash.advance')} ${money(k.advanceCollected)}`, '#dc2626')}
             {tile(t('events.dash.covers'), String(k.totalCovers), t('events.dash.guestsServed'))}
             {tile(t('events.dash.catering'), money(k.cateringRevenue), `${k.cateringCovers} ${t('events.dash.plates')}`, '#b45309')}

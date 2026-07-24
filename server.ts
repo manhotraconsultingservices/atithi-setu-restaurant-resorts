@@ -21465,11 +21465,11 @@ ${data.tenant.name}`;
       if (!b.name) return res.status(400).json({ error: "name is required" });
       const id = mkEventId('ERI');
       await db.run(
-        `INSERT INTO event_rental_items (id, name, category, unit, quantity_owned, rent_hourly, rent_daily, rent_weekly, deposit, gst_percent, display_order, notes, description, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        `INSERT INTO event_rental_items (id, name, category, unit, quantity_owned, rent_hourly, rent_daily, rent_weekly, deposit, gst_percent, display_order, notes, description, cost_price, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [id, b.name, b.category || 'FURNITURE', b.unit || 'piece', Number(b.quantity_owned || 0),
          Number(b.rent_hourly || 0), Number(b.rent_daily || 0), Number(b.rent_weekly || 0),
-         Number(b.deposit || 0), Number(b.gst_percent ?? 18), Number(b.display_order || 0), b.notes || null, b.description || null]
+         Number(b.deposit || 0), Number(b.gst_percent ?? 18), Number(b.display_order || 0), b.notes || null, b.description || null, Number(b.cost_price || 0)]
       );
       const row = await db.get("SELECT * FROM event_rental_items WHERE id = ?", [id]);
       res.status(201).json(row);
@@ -21483,7 +21483,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
-      const allow = ['name','category','unit','quantity_owned','rent_hourly','rent_daily','rent_weekly','deposit','gst_percent','display_order','notes','description','is_active'];
+      const allow = ['name','category','unit','quantity_owned','rent_hourly','rent_daily','rent_weekly','deposit','gst_percent','display_order','notes','description','cost_price','is_active'];
       for (const k of allow) {
         if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
       }
@@ -21525,10 +21525,10 @@ ${data.tenant.name}`;
       if (!b.name) return res.status(400).json({ error: "name is required" });
       const id = mkEventId('ESV');
       await db.run(
-        `INSERT INTO event_services (id, name, category, pricing_type, rate, gst_percent, display_order, notes, description, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        `INSERT INTO event_services (id, name, category, pricing_type, rate, gst_percent, display_order, notes, description, cost_price, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [id, b.name, b.category || 'STAFF', b.pricing_type || 'PER_EVENT',
-         Number(b.rate || 0), Number(b.gst_percent ?? 18), Number(b.display_order || 0), b.notes || null, b.description || null]
+         Number(b.rate || 0), Number(b.gst_percent ?? 18), Number(b.display_order || 0), b.notes || null, b.description || null, Number(b.cost_price || 0)]
       );
       const row = await db.get("SELECT * FROM event_services WHERE id = ?", [id]);
       res.status(201).json(row);
@@ -21542,7 +21542,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
-      const allow = ['name','category','pricing_type','rate','gst_percent','display_order','notes','description','is_active'];
+      const allow = ['name','category','pricing_type','rate','gst_percent','display_order','notes','description','cost_price','is_active'];
       for (const k of allow) {
         if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
       }
@@ -21585,9 +21585,9 @@ ${data.tenant.name}`;
       const id = mkEventId('ECP');
       const menuJson = typeof b.menu_json === 'string' ? b.menu_json : JSON.stringify(b.menu_json || b.menu || []);
       await db.run(
-        `INSERT INTO event_catering_packages (id, name, package_type, price_per_plate, description, menu_json, gst_percent, display_order, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-        [id, b.name, b.package_type || 'BUFFET', Number(b.price_per_plate || 0), b.description || null, menuJson, Number(b.gst_percent ?? 5), Number(b.display_order || 0)]
+        `INSERT INTO event_catering_packages (id, name, package_type, price_per_plate, description, menu_json, gst_percent, display_order, cost_price, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [id, b.name, b.package_type || 'BUFFET', Number(b.price_per_plate || 0), b.description || null, menuJson, Number(b.gst_percent ?? 5), Number(b.display_order || 0), Number(b.cost_price || 0)]
       );
       const row = await db.get("SELECT * FROM event_catering_packages WHERE id = ?", [id]);
       res.status(201).json(row);
@@ -21601,7 +21601,7 @@ ${data.tenant.name}`;
       const db = await getTenantDb(req.params.id);
       const b = req.body || {};
       const fields: string[] = []; const vals: any[] = [];
-      const allow = ['name', 'package_type', 'price_per_plate', 'description', 'gst_percent', 'display_order', 'is_active'];
+      const allow = ['name', 'package_type', 'price_per_plate', 'description', 'gst_percent', 'display_order', 'cost_price', 'is_active'];
       for (const k of allow) {
         if (b[k] !== undefined) { fields.push(`${k} = ?`); vals.push(typeof b[k] === 'boolean' ? (b[k] ? 1 : 0) : b[k]); }
       }
@@ -21751,9 +21751,9 @@ ${data.tenant.name}`;
         const lineTotal = round2(unitRate * qty * dur);
         const desc = it.description_snapshot ?? master?.description ?? null;
         await db.run(
-          `INSERT INTO event_booking_items (id, booking_id, rental_item_id, name_snapshot, description_snapshot, quantity, rate_basis, unit_rate, duration_units, gst_percent, line_total)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [mkEventId('EBI'), bookingId, it.rental_item_id, master?.name || it.name_snapshot || 'Item', desc, qty, basis, unitRate, dur, gst, lineTotal]
+          `INSERT INTO event_booking_items (id, booking_id, rental_item_id, name_snapshot, description_snapshot, quantity, rate_basis, unit_rate, duration_units, gst_percent, line_total, cost_snapshot)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [mkEventId('EBI'), bookingId, it.rental_item_id, master?.name || it.name_snapshot || 'Item', desc, qty, basis, unitRate, dur, gst, lineTotal, Number(master?.cost_price || 0)]
         );
       }
     }
@@ -21767,9 +21767,9 @@ ${data.tenant.name}`;
         const lineTotal = round2(unitRate * qty);
         const desc = s.description_snapshot ?? master?.description ?? null;
         await db.run(
-          `INSERT INTO event_booking_services (id, booking_id, service_id, name_snapshot, description_snapshot, pricing_snapshot, quantity, unit_rate, gst_percent, line_total)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [mkEventId('EBS'), bookingId, s.service_id, master?.name || s.name_snapshot || 'Service', desc, master?.pricing_type || 'PER_EVENT', qty, unitRate, gst, lineTotal]
+          `INSERT INTO event_booking_services (id, booking_id, service_id, name_snapshot, description_snapshot, pricing_snapshot, quantity, unit_rate, gst_percent, line_total, cost_snapshot)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [mkEventId('EBS'), bookingId, s.service_id, master?.name || s.name_snapshot || 'Service', desc, master?.pricing_type || 'PER_EVENT', qty, unitRate, gst, lineTotal, Number(master?.cost_price || 0)]
         );
       }
     }
@@ -21782,10 +21782,10 @@ ${data.tenant.name}`;
         const gst = Number(c.gst_percent ?? master?.gst_percent ?? 5);
         const lineTotal = round2(pricePerPlate * pax);
         await db.run(
-          `INSERT INTO event_booking_catering (id, booking_id, package_id, name_snapshot, package_type_snapshot, description_snapshot, menu_snapshot, pax, price_per_plate, gst_percent, line_total)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO event_booking_catering (id, booking_id, package_id, name_snapshot, package_type_snapshot, description_snapshot, menu_snapshot, pax, price_per_plate, gst_percent, line_total, cost_snapshot)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [mkEventId('EBC'), bookingId, c.package_id, master?.name || c.name_snapshot || 'Catering', master?.package_type || 'BUFFET',
-           c.description_snapshot ?? master?.description ?? null, c.menu_snapshot ?? master?.menu_json ?? null, pax, pricePerPlate, gst, lineTotal]
+           c.description_snapshot ?? master?.description ?? null, c.menu_snapshot ?? master?.menu_json ?? null, pax, pricePerPlate, gst, lineTotal, Number(master?.cost_price || 0)]
         );
       }
     }
@@ -21896,6 +21896,22 @@ ${data.tenant.name}`;
         cateringRevenue = round2(cater.reduce((s, c) => s + num(c.revenue), 0));
       }
 
+      // Variable cost of won events (rentals + services + catering line cost
+      // snapshots). Venue/hotel-room cost is not tracked, so margin here is a
+      // contribution proxy: sell − variable cost.
+      let totalCost = 0;
+      if (wonIds.length) {
+        const ph = wonIds.map(() => '?').join(',');
+        const cq = async (sql: string) => { try { const r: any[] = await db.query(sql, wonIds); return num(r?.[0]?.c); } catch { return 0; } };
+        totalCost = round2(
+          (await cq(`SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS c FROM event_booking_items WHERE booking_id IN (${ph})`)) +
+          (await cq(`SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS c FROM event_booking_services WHERE booking_id IN (${ph})`)) +
+          (await cq(`SELECT COALESCE(SUM(cost_snapshot*pax),0) AS c FROM event_booking_catering WHERE booking_id IN (${ph})`))
+        );
+      }
+      const margin = round2(confirmedRevenue - totalCost);
+      const marginPct = confirmedRevenue > 0 ? Math.round(margin / confirmedRevenue * 100) : 0;
+
       const upcoming = rows.filter(r => ymd(r.event_date) >= today && r.status !== 'CANCELLED')
         .sort((a, b) => ymd(a.event_date).localeCompare(ymd(b.event_date))).slice(0, 15)
         .map(r => ({ id: r.id, customer_name: r.customer_name, customer_phone: r.customer_phone, venue_name: r.venue_name, event_date: ymd(r.event_date), end_date: r.end_date ? ymd(r.end_date) : null, status: r.status, total_amount: num(r.total_amount), guest_count: num(r.guest_count) }));
@@ -21924,7 +21940,7 @@ ${data.tenant.name}`;
         window: { from, to, days: periodDays },
         kpis: { totalEvents: rows.length, wonCount, lostCount, winRate, avgBookingValue, totalCovers,
           confirmedRevenue, pipelineRevenue, realizedRevenue, advanceCollected, outstanding, discountGiven,
-          cateringCovers, cateringRevenue, overdue },
+          cateringCovers, cateringRevenue, overdue, totalCost, margin, marginPct },
         funnel, revenueByMonth, venueUtilization, eventTypeMix, leadSources, cateringByPackage, upcoming, receivables, lostReasons,
       });
     } catch (err: any) {

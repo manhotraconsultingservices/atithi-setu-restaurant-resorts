@@ -508,6 +508,16 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // reason category reuses the existing `cancellation_reason` column; this adds
   // an optional free-text note alongside it.
   await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS cancel_reason_note TEXT`).catch(() => {});
+
+  // ── Sprint 3: cost & margin ─────────────────────────────────────────────────
+  // Cost price on masters + snapshotted onto booking lines (so margin is stable
+  // even after a master's cost later changes). Margin = sell − cost.
+  await tenantDb.exec(`ALTER TABLE event_rental_items ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_services ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_catering_packages ADD COLUMN IF NOT EXISTS cost_price DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_booking_items ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_booking_services ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+  await tenantDb.exec(`ALTER TABLE event_booking_catering ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
 }
 
 /**
