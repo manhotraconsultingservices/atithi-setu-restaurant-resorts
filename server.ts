@@ -22059,6 +22059,31 @@ ${data.tenant.name}`;
       if (existing.status === 'COMPLETED' || existing.status === 'CANCELLED') {
         return res.status(409).json({ error: `Cannot edit a ${existing.status} booking` });
       }
+
+      // ── Hard min-margin guard (Sprint 2C) ────────────────────────────────
+      // A discount may not push pre-tax revenue below the tracked variable cost
+      // (rental/service/catering cost snapshots). Only enforced once costs exist.
+      if (b.discount !== undefined && Number(b.discount) > 0) {
+        const bid = req.params.bid;
+        const q = async (sql: string) => { try { const r: any = await db.get(sql, [bid]); return Number(r?.v || 0); } catch { return 0; } };
+        const subtotal = round2(
+          Number(existing.venue_rate || 0) +
+          await q("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_items WHERE booking_id = ?") +
+          await q("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_services WHERE booking_id = ?") +
+          await q("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_catering WHERE booking_id = ?") +
+          await q("SELECT COALESCE(SUM(line_total),0) AS v FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'")
+        );
+        const totalCost = round2(
+          await q("SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS v FROM event_booking_items WHERE booking_id = ?") +
+          await q("SELECT COALESCE(SUM(cost_snapshot*quantity),0) AS v FROM event_booking_services WHERE booking_id = ?") +
+          await q("SELECT COALESCE(SUM(cost_snapshot*pax),0) AS v FROM event_booking_catering WHERE booking_id = ?")
+        );
+        if (totalCost > 0 && round2(subtotal - Number(b.discount)) < totalCost) {
+          const maxDisc = round2(Math.max(0, subtotal - totalCost));
+          return res.status(409).json({ error: `Discount too high — this would sell below cost (variable cost Rs. ${totalCost.toFixed(2)}). Maximum discount is Rs. ${maxDisc.toFixed(2)}.` });
+        }
+      }
+
       const fields: string[] = []; const vals: any[] = [];
       const allow = ['venue_id','customer_name','customer_phone','customer_email','customer_gstin','event_type',
         'event_date','end_date','start_time','end_time','venue_rate_basis','guest_count','booking_source',
@@ -44572,6 +44597,77 @@ ${data.tenant.name}`;
     }
   }, { timezone: 'Asia/Kolkata' });
   console.log('[pre-arrival] Pre-arrival email cron started — daily at 10:00 IST (T-3 days from check-in)');
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // Sprint 2C — Event payment-schedule reminders (daily 11:00 IST).
+  // Emails the customer when a deposit instalment falls due within 3 days or is
+  // overdue. Dedup via a central table so a schedule row is reminded at most
+  // once per day. Only bookings that are still live (QUOTED/CONFIRMED/IN_PROGRESS)
+  // with a customer email are contacted.
+  // ═════════════════════════════════════════════════════════════════════════
+  await centralDb.exec(`
+    CREATE TABLE IF NOT EXISTS sent_event_payment_reminders (
+      id SERIAL PRIMARY KEY,
+      tenant_id  TEXT NOT NULL,
+      schedule_id TEXT NOT NULL,
+      sent_on DATE NOT NULL DEFAULT CURRENT_DATE,
+      UNIQUE (tenant_id, schedule_id, sent_on)
+    )
+  `).catch(() => {});
+
+  cron.schedule('0 11 * * *', async () => {
+    try {
+      const tzDate = new Date().toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' });
+      const todayIST = (tzDate.split(',')[0] || '').trim();
+      const horizon = new Date(todayIST + 'T00:00:00Z'); horizon.setUTCDate(horizon.getUTCDate() + 3);
+      const horizonIso = horizon.toISOString().slice(0, 10);
+
+      const tenants = await centralDb.query("SELECT id, name FROM restaurants WHERE is_active = 1 AND events_enabled = 1").catch(() => []);
+      let sent = 0;
+      for (const t of tenants) {
+        try {
+          const db = await getTenantDb(t.id);
+          const due: any[] = await db.query(
+            `SELECT s.id, s.label, s.due_date, s.amount, COALESCE(s.paid_amount,0) AS paid,
+                    b.customer_name, b.customer_email, b.event_date
+               FROM event_payment_schedule s
+               JOIN event_bookings b ON b.id = s.booking_id
+              WHERE s.status <> 'PAID' AND s.due_date IS NOT NULL AND s.due_date <= ?
+                AND b.status IN ('QUOTED','CONFIRMED','IN_PROGRESS')
+                AND b.customer_email IS NOT NULL AND b.customer_email <> ''`,
+            [horizonIso]
+          ).catch(() => []);
+          for (const r of due) {
+            const remaining = Math.round((Number(r.amount || 0) - Number(r.paid || 0)) * 100) / 100;
+            if (!(remaining > 0)) continue;
+            // Dedup — once per schedule row per day.
+            try {
+              await centralDb.run(
+                `INSERT INTO sent_event_payment_reminders (tenant_id, schedule_id, sent_on) VALUES (?, ?, CURRENT_DATE) ON CONFLICT (tenant_id, schedule_id, sent_on) DO NOTHING`,
+                [t.id, r.id]
+              );
+              const dup: any = await centralDb.get(
+                `SELECT COUNT(*) AS n FROM sent_event_payment_reminders WHERE tenant_id = ? AND schedule_id = ? AND sent_on = CURRENT_DATE`,
+                [t.id, r.id]
+              );
+              if (Number(dup?.n || 0) > 1) continue;
+            } catch { /* race — fine */ }
+            const dueStr = String(r.due_date).slice(0, 10);
+            const overdue = dueStr < todayIST;
+            const amt = `Rs. ${remaining.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            const subject = `${overdue ? 'Overdue' : 'Payment'} reminder — ${r.label || 'instalment'} (${t.name})`;
+            const text = `Dear ${r.customer_name || 'Guest'},\n\nThis is a friendly reminder that your ${r.label || 'payment instalment'} of ${amt} for your event${r.event_date ? ' on ' + String(r.event_date).slice(0, 10) : ''} ${overdue ? `was due on ${dueStr} and is now overdue` : `is due on ${dueStr}`}.\n\nPlease arrange the payment at your earliest convenience.\n\nRegards,\n${t.name}`;
+            const html = `<p>Dear ${r.customer_name || 'Guest'},</p><p>This is a friendly reminder that your <strong>${r.label || 'payment instalment'}</strong> of <strong>${amt}</strong> for your event${r.event_date ? ' on ' + String(r.event_date).slice(0, 10) : ''} ${overdue ? `was due on <strong>${dueStr}</strong> and is now <strong>overdue</strong>` : `is due on <strong>${dueStr}</strong>`}.</p><p>Please arrange the payment at your earliest convenience.</p><p>Regards,<br/>${t.name}</p>`;
+            try { await sendEmail(r.customer_email, subject, text, html); sent++; }
+            catch (e) { console.warn(`[event-reminder] send failed for schedule ${r.id}:`, e); }
+          }
+        } catch (e) { console.warn(`[event-reminder] tenant ${t.id} skipped:`, e); }
+      }
+      await centralDb.run(`DELETE FROM sent_event_payment_reminders WHERE sent_on < (CURRENT_DATE - INTERVAL '90 days')`).catch(() => {});
+      if (sent) console.log(`[event-reminder] done — ${sent} payment reminders sent.`);
+    } catch (err) { console.error('[event-reminder] cron error:', err); }
+  }, { timezone: 'Asia/Kolkata' });
+  console.log('[event-reminder] Event payment-reminder cron started — daily 11:00 IST (due within 3 days / overdue)');
 
   // ═════════════════════════════════════════════════════════════════════════
   // Sprint CH-1 — Channel sync worker (every 5 minutes).

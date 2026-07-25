@@ -785,8 +785,11 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     const sub = Number(bk.total_amount || 0) + Number(bk.discount || 0);
     const num = Math.min(sub, Math.max(0, Number(value) || 0));
     if (Number(bk.discount || 0) === num) return;
-    await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ discount: num }) });
-    await load();
+    // The server enforces a hard below-cost guard; surface a rejection and revert.
+    try {
+      await api(`/events/bookings/${bookingId}`, { method: 'PUT', body: JSON.stringify({ discount: num }) });
+      await load();
+    } catch (e: any) { alert(e.message); await load(); }
   };
   // Inline-edit a customer contact field (name / phone / email / GSTIN). The
   // booking PUT already whitelists these; capturing the email here is what lets
