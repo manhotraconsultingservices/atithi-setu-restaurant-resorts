@@ -22333,9 +22333,16 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
-      const rows = await db.query(
-        "SELECT id, name, role, phone, COALESCE(pay_type,'') AS pay_type FROM attendance_staff WHERE is_active = 1 ORDER BY name ASC"
-      );
+      // pay_type is added by the payroll module; a tenant that never opened
+      // payroll won't have it yet, so ensure it before selecting (no-op if present).
+      await db.exec("ALTER TABLE attendance_staff ADD COLUMN IF NOT EXISTS pay_type TEXT").catch(() => {});
+      let rows: any[];
+      try {
+        rows = await db.query("SELECT id, name, role, phone, COALESCE(pay_type,'') AS pay_type FROM attendance_staff WHERE is_active = 1 ORDER BY name ASC");
+      } catch {
+        // Extra safety: fall back to the always-present columns.
+        rows = await db.query("SELECT id, name, role, phone FROM attendance_staff WHERE is_active = 1 ORDER BY name ASC");
+      }
       res.json({ staff: rows || [] });
     } catch (err: any) { res.status(500).json({ error: "Failed to load roster staff" }); }
   });
@@ -43842,7 +43849,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-accounts-bridge-plus-staff-rostering',
+    commit_marker: 'events-rostering-paytype-defensive-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
