@@ -21719,19 +21719,38 @@ ${data.tenant.name}`;
   });
 
   // Recompute + persist a booking's total from its venue + line items.
+  // Bill breakdown for a booking: pre-tax subtotal, GST (per-line, added on top),
+  // discount, and the tax-inclusive grand total the customer pays. Mirrors the
+  // quotation/invoice model (assembleEventQuoteLines) EXACTLY so the booking
+  // screen, quotation and invoice always agree.
+  const computeEventBill = async (db: any, bookingId: string): Promise<{ subtotal: number; tax: number; discount: number; grand: number }> => {
+    const bk: any = await db.get("SELECT venue_id, venue_rate, discount FROM event_bookings WHERE id = ?", [bookingId]);
+    if (!bk) return { subtotal: 0, tax: 0, discount: 0, grand: 0 };
+    let subtotal = 0, tax = 0;
+    const venueRate = Number(bk.venue_rate || 0);
+    if (venueRate > 0) {
+      const venue: any = bk.venue_id ? await db.get("SELECT gst_percent FROM event_venues WHERE id = ?", [bk.venue_id]) : null;
+      const g = Number(venue?.gst_percent ?? 18);
+      subtotal += venueRate; tax += venueRate * g / 100;
+    }
+    const addLines = (arr: any[]) => { for (const l of arr || []) { const lt = Number(l.line_total || 0); const g = Number(l.gst_percent ?? 18); subtotal += lt; tax += lt * g / 100; } };
+    addLines(await db.query("SELECT line_total, gst_percent FROM event_booking_items WHERE booking_id = ?", [bookingId]));
+    addLines(await db.query("SELECT line_total, gst_percent FROM event_booking_services WHERE booking_id = ?", [bookingId]));
+    addLines(await db.query("SELECT line_total, gst_percent FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId]));
+    addLines(await db.query("SELECT line_total, gst_percent FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => []));
+    subtotal = round2(subtotal); tax = round2(tax);
+    const discount = round2(Number(bk.discount || 0));
+    const grand = round2(subtotal + tax - discount);
+    return { subtotal, tax, discount, grand };
+  };
+
   const recomputeEventTotal = async (db: any, bookingId: string): Promise<number> => {
-    const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [bookingId]);
-    if (!bk) return 0;
-    const items: any[] = await db.query("SELECT COALESCE(SUM(line_total),0) AS t FROM event_booking_items WHERE booking_id = ?", [bookingId]);
-    const svcs: any[] = await db.query("SELECT COALESCE(SUM(line_total),0) AS t FROM event_booking_services WHERE booking_id = ?", [bookingId]);
-    const rooms: any[] = await db.query("SELECT COALESCE(SUM(line_total),0) AS t FROM event_booking_rooms WHERE booking_id = ? AND status <> 'CANCELLED'", [bookingId]);
-    const cater: any[] = await db.query("SELECT COALESCE(SUM(line_total),0) AS t FROM event_booking_catering WHERE booking_id = ?", [bookingId]).catch(() => [{ t: 0 }]);
-    const total = round2(
-      Number(bk.venue_rate || 0) + Number(items[0]?.t || 0) + Number(svcs[0]?.t || 0) +
-      Number(rooms[0]?.t || 0) + Number(cater[0]?.t || 0) - Number(bk.discount || 0)
-    );
-    await db.run("UPDATE event_bookings SET total_amount = ? WHERE id = ?", [total, bookingId]);
-    return total;
+    const { tax, grand } = await computeEventBill(db, bookingId);
+    // total_amount is the tax-inclusive amount the customer owes; tax_amount is
+    // its GST portion (nets out to pre-tax revenue in the dashboard).
+    await db.run("UPDATE event_bookings SET total_amount = ?, tax_amount = ? WHERE id = ?", [grand, tax, bookingId])
+      .catch(async () => { await db.run("UPDATE event_bookings SET total_amount = ? WHERE id = ?", [grand, bookingId]); });
+    return grand;
   };
 
   // Insert booking line items (rentals + services) from request arrays.
@@ -21812,21 +21831,26 @@ ${data.tenant.name}`;
       // All bookings overlapping the window (range-aware, like availability).
       const rows: any[] = await db.query(
         `SELECT b.id, b.venue_id, v.name AS venue_name, b.customer_name, b.customer_phone, b.event_type,
-                b.booking_source, b.status, b.event_date, b.end_date, b.guest_count, b.total_amount,
+                b.booking_source, b.status, b.event_date, b.end_date, b.guest_count, b.total_amount, b.tax_amount,
                 b.discount, b.advance_amount, b.cancellation_reason, b.created_at
            FROM event_bookings b LEFT JOIN event_venues v ON v.id = b.venue_id
           WHERE b.event_date <= ? AND COALESCE(b.end_date, b.event_date) >= ?`,
         [to, from]
       );
+      // Revenue is reported NET of GST (tax is a passthrough). total_amount is now
+      // tax-inclusive, so subtract tax_amount. Old rows have tax_amount 0 and a
+      // net total_amount, so this stays correct across the migration. Amounts the
+      // customer OWES (outstanding / receivables) keep the gross total_amount.
+      const netAmt = (r: any) => round2(Number(r.total_amount || 0) - Number(r.tax_amount || 0));
 
       const won = rows.filter(r => isWon(r.status));
       const pipeline = rows.filter(r => PIPE.includes(r.status));
       const lost = rows.filter(r => r.status === 'CANCELLED');
       const sum = (arr: any[], f: (r: any) => number) => round2(arr.reduce((s, r) => s + f(r), 0));
 
-      const confirmedRevenue = sum(won, r => num(r.total_amount));
-      const pipelineRevenue = sum(pipeline, r => num(r.total_amount));
-      const realizedRevenue = sum(rows.filter(r => r.status === 'COMPLETED'), r => num(r.total_amount));
+      const confirmedRevenue = sum(won, r => netAmt(r));
+      const pipelineRevenue = sum(pipeline, r => netAmt(r));
+      const realizedRevenue = sum(rows.filter(r => r.status === 'COMPLETED'), r => netAmt(r));
       const advanceCollected = sum(won, r => num(r.advance_amount));
       const outstanding = round2(won.reduce((s, r) => s + Math.max(0, num(r.total_amount) - num(r.advance_amount)), 0));
       const discountGiven = sum(won, r => num(r.discount));
@@ -21838,14 +21862,14 @@ ${data.tenant.name}`;
       const STATUSES = ['INQUIRY', 'QUOTED', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
       const funnel = STATUSES.map(st => {
         const g = rows.filter(r => r.status === st);
-        return { status: st, count: g.length, value: sum(g, r => num(r.total_amount)) };
+        return { status: st, count: g.length, value: sum(g, r => netAmt(r)) };
       });
 
       const monthMap: Record<string, { revenue: number; events: number; covers: number }> = {};
       for (const r of won) {
         const m = ymd(r.event_date).slice(0, 7);
         if (!monthMap[m]) monthMap[m] = { revenue: 0, events: 0, covers: 0 };
-        monthMap[m].revenue += num(r.total_amount); monthMap[m].events += 1; monthMap[m].covers += num(r.guest_count);
+        monthMap[m].revenue += netAmt(r); monthMap[m].events += 1; monthMap[m].covers += num(r.guest_count);
       }
       const revenueByMonth = Object.keys(monthMap).sort().map(m => ({ month: m, revenue: round2(monthMap[m].revenue), events: monthMap[m].events, covers: monthMap[m].covers }));
 
@@ -21855,7 +21879,7 @@ ${data.tenant.name}`;
       for (const r of won) {
         const vid = r.venue_id || '__unassigned__';
         if (!venueMap[vid]) venueMap[vid] = { name: r.venue_name || 'Unassigned', events: 0, revenue: 0, days: new Set() };
-        venueMap[vid].events += 1; venueMap[vid].revenue += num(r.total_amount);
+        venueMap[vid].events += 1; venueMap[vid].revenue += netAmt(r);
         const s = ymd(r.event_date); const e0 = ymd(r.end_date || r.event_date); const e = e0 > s ? e0 : s;
         let d = s < from ? from : s; const cap = e > to ? to : e;
         while (d <= cap) { venueMap[vid].days.add(d); d = new Date(new Date(d + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10); }
@@ -21869,7 +21893,7 @@ ${data.tenant.name}`;
       for (const r of rows.filter(r => r.status !== 'CANCELLED')) {
         const ty = r.event_type || 'OTHER';
         if (!typeMap[ty]) typeMap[ty] = { count: 0, revenue: 0 };
-        typeMap[ty].count += 1; if (isWon(r.status)) typeMap[ty].revenue += num(r.total_amount);
+        typeMap[ty].count += 1; if (isWon(r.status)) typeMap[ty].revenue += netAmt(r);
       }
       const eventTypeMix = Object.entries(typeMap).map(([type, v]) => ({ type, count: v.count, revenue: round2(v.revenue) })).sort((a, b) => b.count - a.count);
 
@@ -21877,7 +21901,7 @@ ${data.tenant.name}`;
       for (const r of rows) {
         const s = r.booking_source || 'DIRECT';
         if (!srcMap[s]) srcMap[s] = { count: 0, won: 0, revenue: 0 };
-        srcMap[s].count += 1; if (isWon(r.status)) { srcMap[s].won += 1; srcMap[s].revenue += num(r.total_amount); }
+        srcMap[s].count += 1; if (isWon(r.status)) { srcMap[s].won += 1; srcMap[s].revenue += netAmt(r); }
       }
       const leadSources = Object.entries(srcMap).map(([source, v]) => ({ source, count: v.count, won: v.won, revenue: round2(v.revenue), winRate: v.count > 0 ? Math.round(v.won / v.count * 100) : 0 })).sort((a, b) => b.count - a.count);
 
@@ -21993,7 +22017,10 @@ ${data.tenant.name}`;
       const rooms = await db.query("SELECT * FROM event_booking_rooms WHERE booking_id = ? ORDER BY created_at", [req.params.bid]);
       const catering = await db.query("SELECT * FROM event_booking_catering WHERE booking_id = ? ORDER BY created_at", [req.params.bid]).catch(() => []);
       const quotations = await db.query("SELECT * FROM event_quotations WHERE booking_id = ? ORDER BY version DESC", [req.params.bid]);
-      res.json({ ...bk, items, services, rooms, catering, quotations });
+      // Bill breakdown (subtotal / GST / discount / grand) so the UI can show a
+      // proper tax-aware ledger instead of deriving it from total_amount.
+      const bill = await computeEventBill(db, req.params.bid);
+      res.json({ ...bk, items, services, rooms, catering, quotations, bill });
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch booking" }); }
   });
 
@@ -22502,17 +22529,26 @@ ${data.tenant.name}`;
       // the events UI lets staff override the rate at quote time.
       const av: any = result.data || {};
       const rooms: any[] = av.rooms || [];
-      const roomTypes: any[] = av.roomTypes || [];
+      // The hotel availability endpoint returns `room_types` (snake_case). Reading
+      // `roomTypes` (camelCase) here silently yielded [] → every category showed
+      // the first room's NAME ("Room 101") instead of its type ("Kings Suite").
+      const roomTypes: any[] = av.room_types || av.roomTypes || [];
       const grid: Record<string, Record<string, any>> = av.grid || {};
       const dates: string[] = av.dates || [];
       const nameById: Record<string, string> = {};
       for (const rt of roomTypes) nameById[rt.id] = rt.name;
+      // Humanize an ALL_CAPS enum-style type code (e.g. RIVER_VIEW → "River View")
+      // for legacy rooms whose type_id isn't a real room_types row. UUID-style ids
+      // (RTYPE-…) don't match and fall through to the room_types name lookup.
+      const prettyType = (code: string): string =>
+        /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/.test(code || '')
+          ? code.split('_').map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(' ') : '';
       const groups: Record<string, any> = {};
       for (const rm of rooms) {
         if (rm.status === 'MAINTENANCE' || rm.status === 'BLOCKED') continue;
         const key = rm.type_id || `__ROOM__${rm.id}`; // uncategorised rooms stand alone
         if (!groups[key]) {
-          groups[key] = { room_type_id: rm.type_id || null, name: nameById[rm.type_id] || rm.type || rm.name || 'Room', rate: 0, total: 0, available: 0 };
+          groups[key] = { room_type_id: rm.type_id || null, name: nameById[rm.type_id] || rm.type || prettyType(rm.type_id) || rm.name || 'Room', rate: 0, total: 0, available: 0 };
         }
         const g = groups[key];
         g.total++;
@@ -43849,7 +43885,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-rostering-paytype-defensive-fix',
+    commit_marker: 'events-gst-total-discount-hotelcat-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',

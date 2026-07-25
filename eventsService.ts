@@ -508,6 +508,10 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   // reason category reuses the existing `cancellation_reason` column; this adds
   // an optional free-text note alongside it.
   await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS cancel_reason_note TEXT`).catch(() => {});
+  // GST portion of the (now tax-inclusive) total_amount, so the booking screen
+  // and reports can show tax separately and net it out of revenue. total_amount
+  // = subtotal + tax_amount − discount (matches the quotation/invoice model).
+  await tenantDb.exec(`ALTER TABLE event_bookings ADD COLUMN IF NOT EXISTS tax_amount DOUBLE PRECISION DEFAULT 0`).catch(() => {});
 
   // ── Sprint 3: cost & margin ─────────────────────────────────────────────────
   // Cost price on masters + snapshotted onto booking lines (so margin is stable

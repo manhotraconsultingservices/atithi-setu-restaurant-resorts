@@ -848,10 +848,10 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
     await load();
   };
   const commitDiscount = async (value: string) => {
-    // Clamp to [0, subtotal] so the discount can never exceed the bill. subtotal
-    // is the pre-discount total: total_amount is already net of the old discount,
-    // so subtotal = total_amount + current discount.
-    const sub = Number(bk.total_amount || 0) + Number(bk.discount || 0);
+    // Clamp to [0, subtotal] so the discount can never exceed the bill. The
+    // pre-tax subtotal comes from the backend bill breakdown (falls back to
+    // deriving it from total_amount for older API responses).
+    const sub = Number(bk.bill?.subtotal ?? (Number(bk.total_amount || 0) + Number(bk.discount || 0)));
     const num = Math.min(sub, Math.max(0, Number(value) || 0));
     if (Number(bk.discount || 0) === num) return;
     // The server enforces a hard below-cost guard; surface a rejection and revert.
@@ -897,10 +897,14 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
 
   if (!bk) return <div className="text-sm text-[#6b5d52]">{t('common.loading')}</div>;
   const editable = bk.status !== 'COMPLETED' && bk.status !== 'CANCELLED';
-  // Bill ledger figures. total_amount is already net of discount (server-side),
-  // so the pre-discount subtotal = total_amount + discount.
-  const evDiscount = Number(bk.discount || 0);
-  const evSubtotal = Number(bk.total_amount || 0) + evDiscount;
+  // Bill ledger figures come from the backend breakdown (subtotal / GST / discount
+  // / grand). total_amount is now the tax-inclusive grand total; older responses
+  // without `bill` fall back to deriving from total_amount (treated as pre-tax).
+  const bill = bk.bill || { subtotal: Number(bk.total_amount || 0) + Number(bk.discount || 0), tax: 0, discount: Number(bk.discount || 0), grand: Number(bk.total_amount || 0) };
+  const evSubtotal = Number(bill.subtotal || 0);
+  const evTax = Number(bill.tax || 0);
+  const evDiscount = Number(bill.discount || 0);
+  const evGrand = Number(bill.grand ?? bk.total_amount ?? 0);
   const evPct = evSubtotal > 0 ? Math.round((evDiscount / evSubtotal) * 100) : 0;
   const hasEmail = !!(bk.customer_email && String(bk.customer_email).trim());
 
@@ -958,7 +962,9 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
               {editable ? (
                 <span className="flex items-center gap-1">
                   <span className="text-xs text-rose-500">− ₹</span>
-                  <input type="number" min={0} max={evSubtotal} defaultValue={evDiscount} onBlur={e => commitDiscount(e.target.value)}
+                  {/* key remounts the uncontrolled input when the persisted discount
+                      changes (e.g. after a below-cost rejection reverts it). */}
+                  <input key={`disc-${evDiscount}`} type="number" min={0} max={evSubtotal} defaultValue={evDiscount} onBlur={e => commitDiscount(e.target.value)}
                     className="w-20 px-1.5 py-0.5 rounded-lg border border-[#e8dccf] text-right text-xs tabular-nums" />
                 </span>
               ) : (
@@ -970,12 +976,20 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
                 <Check size={11} />{t('events.bookings.saved', { amount: money(evDiscount), pct: evPct })}
               </div>
             )}
+            {/* GST line — shown only when tax applies. Booking total now matches
+                the quotation/invoice (subtotal + GST − discount). */}
+            {evTax > 0 && (
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs text-[#6b5d52]">{t('events.bookings.gst')}</span>
+                <span className="text-xs text-[#6b5d52] tabular-nums">+ {money(evTax)}</span>
+              </div>
+            )}
             <div className="h-px bg-[#e8dccf] my-1.5" />
             <div className="flex items-baseline justify-between">
               <span className="text-xs font-semibold text-[#14110c]">{t('events.bookings.grandTotal')}</span>
-              <span className="text-2xl font-bold text-[#cc5a16] tabular-nums">{money(bk.total_amount)}</span>
+              <span className="text-2xl font-bold text-[#cc5a16] tabular-nums">{money(evGrand)}</span>
             </div>
-            <p className="mt-1.5 text-[10px] text-[#9d8b7e] text-right">{t('events.bookings.gstNote')}</p>
+            <p className="mt-1.5 text-[10px] text-[#9d8b7e] text-right">{evTax > 0 ? t('events.bookings.gstInclNote') : t('events.bookings.gstNote')}</p>
           </div>
         </div>
       </div>

@@ -757,6 +757,23 @@ async function testEvents() {
       skip('TC-EVT-015', 'Events staff rostering', `roster-staff HTTP ${rs.status}, count=${rs.data?.staff?.length ?? 0}`);
     }
   }
+
+  // TC-EVT-016: booking bill breakdown — GST is computed into a tax-inclusive
+  // total (total_amount = subtotal + GST − discount), matching the invoice.
+  if (!firstBooking) {
+    skip('TC-EVT-016', 'Booking GST-inclusive total', 'no event bookings');
+  } else {
+    const g = await api('GET', `/api/restaurant/${restaurantId}/events/bookings/${firstBooking.id}`);
+    const bill = g.data?.bill;
+    if (g.status === 200 && bill && typeof bill.grand === 'number') {
+      const expect = Math.round((Number(bill.subtotal || 0) + Number(bill.tax || 0) - Number(bill.discount || 0)) * 100) / 100;
+      const mathOk = Math.abs(expect - Number(bill.grand)) < 0.02;
+      const totalOk = Math.abs(Number(bill.grand) - Number(g.data.total_amount || 0)) < 0.02;
+      (mathOk && totalOk ? pass : fail)('TC-EVT-016', 'Booking total = subtotal + GST − discount', `sub=${bill.subtotal}, gst=${bill.tax}, disc=${bill.discount}, grand=${bill.grand}, total_amount=${g.data.total_amount}`);
+    } else {
+      fail('TC-EVT-016', 'Booking bill breakdown returned', `HTTP ${g.status}, bill=${JSON.stringify(bill)}`);
+    }
+  }
 }
 
 // ── Channel Manager tests ──────────────────────────────────────────────────
