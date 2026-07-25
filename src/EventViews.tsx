@@ -669,6 +669,75 @@ function PaymentPanel({ restaurantId, token, booking, editable, onChanged }: Pro
   );
 }
 
+// ── Staff rostering: assign the shared roster to the event per working date ──
+function StaffPanel({ restaurantId, token, booking, editable, onChanged }: Props & { booking: any; editable: boolean; onChanged: () => void }) {
+  const { t } = useT();
+  const api = makeApi(restaurantId, token);
+  const bid = booking.id;
+  const dOnly = (v: any) => String(v || '').slice(0, 10);
+  const startDate = dOnly(booking.event_date) || new Date().toISOString().slice(0, 10);
+  const blank = () => ({ open: false, staff_id: '', assigned_date: startDate, shift_start: booking.start_time || '', shift_end: booking.end_time || '', note: '' });
+  const [roster, setRoster] = useState<any[]>([]);
+  const [rows, setRows] = useState<any[]>([]);
+  const [form, setForm] = useState<{ open: boolean; staff_id: string; assigned_date: string; shift_start: string; shift_end: string; note: string }>(blank());
+
+  const load = async () => { try { const r = await api(`/events/bookings/${bid}/staff`); setRows(r.assignments || []); } catch { setRows([]); } };
+  const loadRoster = async () => { try { const r = await api(`/events/roster-staff`); setRoster(r.staff || []); } catch { setRoster([]); } };
+  useEffect(() => { load(); loadRoster(); }, [bid]);
+
+  const save = async (force = false): Promise<void> => {
+    if (!form.staff_id) { alert(t('events.staff.pickStaff')); return; }
+    try {
+      await api(`/events/bookings/${bid}/staff`, { method: 'POST', body: JSON.stringify({ ...form, force }) });
+      setForm(blank()); await load(); onChanged();
+    } catch (e: any) {
+      // Cross-event double-booking → offer to override; other errors just surface.
+      if (!force && /rostered|already/i.test(e.message || '')) {
+        if (confirm(`${e.message}\n\n${t('events.staff.assignAnyway')}`)) return save(true);
+      } else { alert(e.message); }
+    }
+  };
+  const remove = async (id: string) => { try { await api(`/events/staff/${id}`, { method: 'DELETE' }); await load(); onChanged(); } catch (e: any) { alert(e.message); } };
+
+  return (
+    <div className={`${CARD} mb-4`}>
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h3 className="font-bold text-sm flex items-center gap-1.5"><Users size={15} />{t('events.staff.title')}</h3>
+        {editable && <button className={BTN_PRIMARY} onClick={() => setForm({ ...blank(), open: true })}><Plus size={12} />{t('events.staff.assign')}</button>}
+      </div>
+      {rows.length === 0 ? <p className="text-xs text-[#9d8b7e]">{t('events.staff.none')}</p> : rows.map((r: any) => (
+        <div key={r.id} className="flex items-center gap-2 text-xs py-1 border-b border-[#f0e9df]">
+          <span className="flex-1 min-w-0 truncate font-medium">{r.staff_name || r.staff_name_snapshot}
+            {(r.staff_role || r.role_snapshot) ? <span className="text-[#9d8b7e]"> · {r.staff_role || r.role_snapshot}</span> : null}</span>
+          <span className="w-24 text-right text-[#6b5d52] tabular-nums">{dOnly(r.assigned_date)}</span>
+          <span className="w-24 text-right text-[#9d8b7e] tabular-nums">{r.shift_start && r.shift_end ? `${r.shift_start}–${r.shift_end}` : ''}</span>
+          {editable && <button onClick={() => remove(r.id)} title={t('common.delete')}><X size={12} className="text-rose-500" /></button>}
+        </div>
+      ))}
+      {form.open && (
+        <div className="mt-3 p-3 rounded-xl bg-[#faf7f2] border border-[#e8dccf]">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <div><label className={LABEL}>{t('events.staff.staff')}</label>
+              <select className={INPUT} value={form.staff_id} onChange={e => setForm({ ...form, staff_id: e.target.value })} autoFocus>
+                <option value="">—</option>
+                {roster.map((s: any) => <option key={s.id} value={s.id}>{s.name}{s.role ? ` (${s.role})` : ''}</option>)}
+              </select>
+            </div>
+            <div><label className={LABEL}>{t('events.staff.date')}</label><input type="date" className={INPUT} value={form.assigned_date} onChange={e => setForm({ ...form, assigned_date: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('events.staff.shiftStart')}</label><input type="time" className={INPUT} value={form.shift_start} onChange={e => setForm({ ...form, shift_start: e.target.value })} /></div>
+            <div><label className={LABEL}>{t('events.staff.shiftEnd')}</label><input type="time" className={INPUT} value={form.shift_end} onChange={e => setForm({ ...form, shift_end: e.target.value })} /></div>
+          </div>
+          {roster.length === 0 && <p className="text-[11px] text-amber-700 mt-2">{t('events.staff.noRoster')}</p>}
+          <div className="flex gap-2 mt-2">
+            <button className={BTN_PRIMARY} onClick={() => save(false)}>{t('common.save')}</button>
+            <button className={BTN_GHOST} onClick={() => setForm({ ...form, open: false })}>{t('common.cancel')}</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Cancel-with-reason dialog (lost-reason capture) ──────────────────────────
 function CancelEventDialog({ restaurantId, token, bookingId, onClose, onCancelled }: Props & { bookingId: string; onClose: () => void; onCancelled: () => void }) {
   const { t } = useT();
@@ -1032,6 +1101,9 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
 
       {/* Payment schedule + receipts */}
       <PaymentPanel restaurantId={restaurantId} token={token} booking={bk} editable={editable} onChanged={load} />
+
+      {/* Staff rostering — assign roster staff to the event per working date */}
+      <StaffPanel restaurantId={restaurantId} token={token} booking={bk} editable={editable} onChanged={load} />
 
       {/* Lifecycle actions */}
       <div className="flex flex-wrap gap-2 mt-4">

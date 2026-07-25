@@ -710,6 +710,53 @@ async function testEvents() {
       fail('TC-EVT-013', 'Payment schedule generate', `HTTP ${gen.status}`);
     }
   }
+
+  // TC-EVT-014: Events ↔ Accounts — a recorded event receipt posts an idempotent
+  // IN entry into the shared cash ledger (petty_cash), and reverses on delete.
+  if (!firstBooking) {
+    skip('TC-EVT-014', 'Events → Accounts ledger bridge', 'no event bookings');
+  } else {
+    const p = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${firstBooking.id}/payments`, { amount: 7, method: 'CASH', reference: 'TC-EVT-014' });
+    if (p.status === 201 && p.data?.payment_id) {
+      const pid = p.data.payment_id;
+      const refKey = `EVENT-PAY-${pid}`;
+      const pc = await api('GET', `/api/restaurant/${restaurantId}/petty-cash?module=SHARED`);
+      const posted = pc.status === 200 && (pc.data?.rows || []).some(r => r.reference_id === refKey && String(r.direction) === 'IN' && Number(r.amount) === 7);
+      // Reverse and confirm the ledger entry is pulled back out.
+      await api('DELETE', `/api/restaurant/${restaurantId}/events/payments/${pid}`);
+      const pc2 = await api('GET', `/api/restaurant/${restaurantId}/petty-cash?module=SHARED`);
+      const reversed = pc2.status === 200 && !(pc2.data?.rows || []).some(r => r.reference_id === refKey);
+      (posted && reversed ? pass : fail)('TC-EVT-014', 'Event receipt posts + reverses in Accounts ledger', `posted=${posted}, reversed=${reversed}`);
+    } else if (p.status === 403) {
+      skip('TC-EVT-014', 'Events → Accounts ledger bridge', 'user lacks EVENTS_BOOKINGS access');
+    } else {
+      fail('TC-EVT-014', 'Events → Accounts ledger bridge', `payment HTTP ${p.status}`);
+    }
+  }
+
+  // TC-EVT-015: Events ↔ staff rostering — list roster, assign to a booking for a
+  // working date, confirm it lists, then unassign (self-cleaning).
+  if (!firstBooking) {
+    skip('TC-EVT-015', 'Events staff rostering', 'no event bookings');
+  } else {
+    const rs = await api('GET', `/api/restaurant/${restaurantId}/events/roster-staff`);
+    if (rs.status === 403) {
+      skip('TC-EVT-015', 'Events staff rostering', 'user lacks EVENTS_BOOKINGS access');
+    } else if (rs.status === 200 && Array.isArray(rs.data?.staff) && rs.data.staff.length > 0) {
+      const staffId = rs.data.staff[0].id;
+      const asg = await api('POST', `/api/restaurant/${restaurantId}/events/bookings/${firstBooking.id}/staff`, { staff_id: staffId });
+      if (asg.status === 201 && asg.data?.assignment_id) {
+        const lst = await api('GET', `/api/restaurant/${restaurantId}/events/bookings/${firstBooking.id}/staff`);
+        const listed = lst.status === 200 && (lst.data?.assignments || []).some(a => a.id === asg.data.assignment_id);
+        await api('DELETE', `/api/restaurant/${restaurantId}/events/staff/${asg.data.assignment_id}`); // clean up
+        (listed ? pass : fail)('TC-EVT-015', 'Assign roster staff to event + list + unassign', `assigned=${asg.status}, listed=${listed}`);
+      } else {
+        fail('TC-EVT-015', 'Assign roster staff to event', `HTTP ${asg.status}`);
+      }
+    } else {
+      skip('TC-EVT-015', 'Events staff rostering', `roster-staff HTTP ${rs.status}, count=${rs.data?.staff?.length ?? 0}`);
+    }
+  }
 }
 
 // ── Channel Manager tests ──────────────────────────────────────────────────

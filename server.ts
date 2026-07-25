@@ -25,7 +25,7 @@ import {
 import {
   createEventTables, seedEventDefaults,
   resolveVenueCharge, venueBookingConflict, venueBlockConflict, rentalCommittedQty,
-  recomputeEventPaid,
+  recomputeEventPaid, eventStaffConflict,
 } from "./eventsService.ts";
 import { generateEventQuotationPdf, generateEventBEOPdf, type EventQuotationData } from "./eventQuotationPdf.ts";
 import { chatWithConcierge, analyzeSentiment } from "./aiService.ts";
@@ -22274,6 +22274,24 @@ ${data.tenant.name}`;
         }
       }
       const paid = await recomputeEventPaid(db, req.params.bid);
+      // ── Events ↔ Accounts: post the receipt to the cash ledger (petty_cash) ──
+      // Idempotent via reference_id, so it surfaces in the Expense Journal /
+      // accounts reports without ever double-counting. Mirrors the HR payroll bridge.
+      try {
+        await _ensurePettyCash(db);
+        await db.exec("ALTER TABLE petty_cash ADD COLUMN IF NOT EXISTS reference_id TEXT").catch(() => {});
+        const refKey = `EVENT-PAY-${pid}`;
+        const already = await db.get("SELECT id FROM petty_cash WHERE reference_id = ?", [refKey]);
+        if (!already) {
+          await db.run(
+            `INSERT INTO petty_cash (id, entry_date, direction, category, amount, notes, recorded_by, module, reference_id)
+             VALUES (?, ?, 'IN', 'EVENT_PAYMENT', ?, ?, ?, 'SHARED', ?)`,
+            [`PC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`, (b.paid_at || new Date().toISOString().slice(0, 10)),
+              amount, `Event payment — ${bk.customer_name || ''} via ${b.method || 'CASH'}${b.reference ? ' (' + b.reference + ')' : ''}`,
+              req.user?.email || null, refKey]
+          );
+        }
+      } catch (e) { console.warn('[events] accounts bridge (post) failed:', e); }
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'PAYMENT_RECORDED', summary: `Payment ${amount} via ${b.method || 'CASH'} (total paid ${paid})` });
       res.status(201).json({ success: true, payment_id: pid, paid, balance: round2(Number(bk.total_amount || 0) - paid) });
     } catch (err: any) { res.status(500).json({ error: "Failed to record payment" }); }
@@ -22287,6 +22305,8 @@ ${data.tenant.name}`;
       const pay: any = await db.get("SELECT * FROM event_payments WHERE id = ?", [req.params.pid]);
       if (!pay) return res.status(404).json({ error: "Payment not found" });
       await db.run("DELETE FROM event_payments WHERE id = ?", [req.params.pid]);
+      // Events ↔ Accounts: pull the mirrored receipt back out of the cash ledger.
+      await db.run("DELETE FROM petty_cash WHERE reference_id = ?", [`EVENT-PAY-${req.params.pid}`]).catch(() => {});
       if (pay.schedule_id) {
         const sched: any = await db.get("SELECT * FROM event_payment_schedule WHERE id = ?", [pay.schedule_id]);
         if (sched) {
@@ -22299,6 +22319,107 @@ ${data.tenant.name}`;
       await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: pay.booking_id, action: 'PAYMENT_REVERSED', summary: `Payment ${pay.amount} reversed (total paid ${paid})` });
       res.json({ success: true, paid });
     } catch (err: any) { res.status(500).json({ error: "Failed to delete payment" }); }
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Events ↔ staff rostering — assign the shared attendance_staff roster to an
+  // event for specific working dates, with a per-date double-booking guard.
+  // Read-only against attendance_staff; all writes land in event_booking_staff.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Roster picker — active operational staff the owner can assign to an event.
+  app.get("/api/restaurant/:id/events/roster-staff", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        "SELECT id, name, role, phone, COALESCE(pay_type,'') AS pay_type FROM attendance_staff WHERE is_active = 1 ORDER BY name ASC"
+      );
+      res.json({ staff: rows || [] });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load roster staff" }); }
+  });
+
+  // List all staff assigned to a booking (ordered by working date).
+  app.get("/api/restaurant/:id/events/bookings/:bid/staff", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows = await db.query(
+        `SELECT es.*, s.name AS staff_name, s.role AS staff_role, s.phone AS staff_phone
+           FROM event_booking_staff es
+           LEFT JOIN attendance_staff s ON s.id = es.staff_id
+          WHERE es.booking_id = ?
+          ORDER BY es.assigned_date ASC, es.created_at ASC`,
+        [req.params.bid]
+      );
+      res.json({ assignments: rows || [] });
+    } catch (err: any) { res.status(500).json({ error: "Failed to load staff assignments" }); }
+  });
+
+  // Assign a roster staff member to a booking for a working date. Blocks a
+  // same-date double-booking across live events (409 unless body.force = true),
+  // and blocks an exact duplicate assignment on this booking.
+  app.post("/api/restaurant/:id/events/bookings/:bid/staff", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const ymd = (v: any) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
+      const bk: any = await db.get("SELECT * FROM event_bookings WHERE id = ?", [req.params.bid]);
+      if (!bk) return res.status(404).json({ error: "Booking not found" });
+      const b = req.body || {};
+      const staffId = String(b.staff_id || '').trim();
+      if (!staffId) return res.status(400).json({ error: "staff_id is required" });
+      const staff: any = await db.get("SELECT id, name, role FROM attendance_staff WHERE id = ? AND is_active = 1", [staffId]);
+      if (!staff) return res.status(404).json({ error: "Staff not found or inactive" });
+      // Default the working date to the event's start date when not supplied.
+      const assignedDate = ymd(b.assigned_date || bk.event_date) || ymd(new Date().toISOString());
+
+      // Exact-duplicate guard (same person, same booking, same date).
+      const dup: any = await db.get(
+        "SELECT id FROM event_booking_staff WHERE booking_id = ? AND staff_id = ? AND TO_CHAR(assigned_date,'YYYY-MM-DD') = ?",
+        [req.params.bid, staffId, assignedDate]
+      );
+      if (dup) return res.status(409).json({ error: `${staff.name} is already assigned to this event on ${assignedDate}.` });
+
+      // Cross-event double-booking guard (skippable with force).
+      if (!b.force) {
+        const clash = await eventStaffConflict(db, staffId, assignedDate, req.params.bid);
+        if (clash) {
+          return res.status(409).json({
+            error: `${staff.name} is already rostered to "${clash.customer_name || 'another event'}" on ${assignedDate}.`,
+            conflict: { booking_id: clash.booking_id, customer_name: clash.customer_name, date: assignedDate },
+          });
+        }
+      }
+
+      const asgId = mkEventId('EAS');
+      await db.run(
+        `INSERT INTO event_booking_staff (id, booking_id, staff_id, staff_name_snapshot, role_snapshot, service_line_id, assigned_date, shift_start, shift_end, note, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [asgId, req.params.bid, staffId, staff.name || null, b.role || staff.role || null, b.service_line_id || null,
+          assignedDate, b.shift_start || bk.start_time || null, b.shift_end || bk.end_time || null, b.note || null, req.user?.email || null]
+      );
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: req.params.bid, action: 'STAFF_ASSIGNED', summary: `${staff.name} assigned for ${assignedDate}` });
+      res.status(201).json({ success: true, assignment_id: asgId });
+    } catch (err: any) { res.status(500).json({ error: "Failed to assign staff" }); }
+  });
+
+  // Unassign a staff member from a booking.
+  app.delete("/api/restaurant/:id/events/staff/:asgId", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const ymd = (v: any) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
+      const asg: any = await db.get("SELECT * FROM event_booking_staff WHERE id = ?", [req.params.asgId]);
+      if (!asg) return res.status(404).json({ error: "Assignment not found" });
+      await db.run("DELETE FROM event_booking_staff WHERE id = ?", [req.params.asgId]);
+      await writeObjectAudit(db, req, { objectType: 'EVENT_BOOKING', objectId: asg.booking_id, action: 'STAFF_UNASSIGNED', summary: `${asg.staff_name_snapshot || 'Staff'} unassigned (${ymd(asg.assigned_date)})` });
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: "Failed to unassign staff" }); }
   });
 
   app.post("/api/restaurant/:id/events/bookings/:bid/complete", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
@@ -43721,7 +43842,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'ba-phase2-night-audit-noshow-formc-commission',
+    commit_marker: 'events-accounts-bridge-plus-staff-rostering',
     code_features: [
       'subscription-billing',
       'read-only-mode',

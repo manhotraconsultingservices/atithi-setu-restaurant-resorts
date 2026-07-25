@@ -518,6 +518,58 @@ export async function createEventTables(tenantDb: DbInterface): Promise<void> {
   await tenantDb.exec(`ALTER TABLE event_booking_items ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_services ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
   await tenantDb.exec(`ALTER TABLE event_booking_catering ADD COLUMN IF NOT EXISTS cost_snapshot DOUBLE PRECISION DEFAULT 0`).catch(() => {});
+
+  // ── Sprint 3B: staff rostering ──────────────────────────────────────────────
+  // Assign roster staff (the shared `attendance_staff` roster — same people who
+  // clock attendance and get paid in the operational payroll run) to an event for
+  // a specific working date. name/role are snapshotted so the assignment survives
+  // a later roster edit; assigned_date drives the per-date double-booking guard
+  // (one person can't work two events the same day). Never touches attendance_staff.
+  await tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS event_booking_staff (
+      id                  TEXT PRIMARY KEY,
+      booking_id          TEXT NOT NULL,
+      staff_id            TEXT NOT NULL,        -- attendance_staff.id
+      staff_name_snapshot TEXT,
+      role_snapshot       TEXT,
+      service_line_id     TEXT,                 -- optional link to an event_booking_services line
+      assigned_date       DATE NOT NULL,        -- the working date (events can span days)
+      shift_start         TEXT,
+      shift_end           TEXT,
+      note                TEXT,
+      created_by          TEXT,
+      created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_bkg_staff_booking ON event_booking_staff(booking_id);
+    CREATE INDEX IF NOT EXISTS idx_event_bkg_staff_date ON event_booking_staff(staff_id, assigned_date);
+  `);
+}
+
+/**
+ * Returns the conflicting event-staff assignment (this staff member already
+ * rostered to a DIFFERENT live event on the same date), or null. A booking whose
+ * event has been CANCELLED/COMPLETED no longer holds the person. Used to block
+ * double-booking a staff member across concurrent events.
+ */
+export async function eventStaffConflict(
+  tenantDb: DbInterface,
+  staffId: string,
+  assignedDate: string,
+  excludeBookingId: string
+): Promise<any | null> {
+  const d = ymdStr(assignedDate);
+  const rows = await tenantDb.query(
+    `SELECT es.id, es.booking_id, es.assigned_date, b.customer_name, b.event_type
+       FROM event_booking_staff es
+       JOIN event_bookings b ON b.id = es.booking_id
+      WHERE es.staff_id = ?
+        AND TO_CHAR(es.assigned_date,'YYYY-MM-DD') = ?
+        AND es.booking_id <> ?
+        AND b.status NOT IN ('CANCELLED','COMPLETED')
+      LIMIT 1`,
+    [staffId, d, excludeBookingId]
+  );
+  return rows[0] || null;
 }
 
 /**
