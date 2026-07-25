@@ -22145,6 +22145,31 @@ ${data.tenant.name}`;
     }
   });
 
+  // Maintenance (owner/admin only): recompute every booking's tax-inclusive total
+  // + tax_amount, so bookings created before the GST-in-total fix show the correct
+  // figure without needing a manual edit. Deterministic + idempotent; writes NO
+  // audit noise (recomputeEventTotal only updates the two amount columns).
+  app.post("/api/restaurant/:id/events/admin/recompute-totals", authenticate, eventsStaff, async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    const role = String(req.user?.role || '').toUpperCase();
+    if (!['OWNER', 'SUPER_ADMIN', 'CTO'].includes(role)) return res.status(403).json({ error: 'Owner or admin only' });
+    try {
+      const db = await getTenantDb(req.params.id);
+      const rows: any[] = await db.query("SELECT id, total_amount, status FROM event_bookings ORDER BY created_at");
+      let changed = 0; const changes: any[] = [];
+      for (const b of rows) {
+        const before = round2(Number(b.total_amount || 0));
+        const after = await recomputeEventTotal(db, b.id);
+        if (Math.abs(after - before) >= 0.01) { changed++; changes.push({ id: b.id, status: b.status, before, after }); }
+      }
+      res.json({ total: rows.length, changed, unchanged: rows.length - changed, changes: changes.slice(0, 200) });
+    } catch (err: any) {
+      console.error("/events/admin/recompute-totals error:", err);
+      res.status(500).json({ error: "Failed to recompute totals" });
+    }
+  });
+
   app.post("/api/restaurant/:id/events/bookings/:bid/cancel", authenticate, eventsStaff, requireTabAccess('EVENTS_BOOKINGS'), async (req: AuthRequest, res: Response) => {
     const check = await ensureEventsEnabled(req.params.id);
     if (!check.ok) return res.status(check.status).json({ error: check.error });
@@ -43885,7 +43910,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-gst-total-discount-hotelcat-fix',
+    commit_marker: 'events-recompute-totals-maintenance',
     code_features: [
       'subscription-billing',
       'read-only-mode',
