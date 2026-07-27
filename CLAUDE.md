@@ -431,6 +431,31 @@ definition-of-done as updating `test-scripts/run_technical_tests.mjs`.
 
 ---
 
+## Events & Convention — public-page images & calendar
+
+**Public-page pictures (owner-uploaded, not URL-only).** Business owners add photos
+by **uploading files**, mirroring the Hotel property-profile flow — not just pasting
+URLs. Backend: `POST /api/restaurant/:id/events/upload-image` (multer `upload.single`,
+`eventsStaff`-gated, returns `{ url: '/uploads/<file>' }`) — the events-namespaced twin
+of `/hotel/upload-image` so an events-only tenant can use it. Frontend (`EventViews.tsx`):
+`uploadEventImage()` + reusable `SingleImagePicker` (hero image, per-venue `image_url`;
+preview + Upload + Remove + optional paste-URL) and `GalleryPicker` (thumbnail grid +
+"Add photo" tile). Storage model: `event_profile.hero_image_url`, `event_profile.gallery`
+(**JSON array** of URLs), `event_venues.image_url`. The public page (`EventBookingPage`)
+already renders hero + gallery + venue photos, so uploads flow straight through. When
+adding image inputs anywhere in Events, reuse these pickers — don't reintroduce bare
+URL text boxes.
+
+**Calendar handles multiple bookings per venue-day.** `EventCalendar` is a venue × date
+grid. A single cell can cover **more than one booking on the same venue and day**
+(e.g. a morning function + an evening reception). `cellFor` returns the FULL covering
+list (confirmed/in-progress ranked ahead of inquiry/quoted), renders the primary with a
+**count badge**, and clicking a multi-booking cell opens a chooser to drill into any of
+them. **Do not** revert `cellFor` to `.find()` — that silently hides every booking but
+the first (the bug this replaced).
+
+---
+
 ## Recent Feature Additions (2026-05 cycle — Hotel PMS expansion + OTA Channel Manager)
 
 A major two-wave sprint. Wave 1 (Sprints A–D + P2) closed the long

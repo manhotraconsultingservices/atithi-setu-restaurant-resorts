@@ -21658,6 +21658,18 @@ ${data.tenant.name}`;
     } catch (err: any) { res.status(500).json({ error: "Failed to update profile" }); }
   });
 
+  // Upload an image for the Events public page (hero / gallery / venue photos).
+  // Mirrors the hotel upload endpoint (same multer, same /uploads/<file> URL) but
+  // gated to events staff so an events-only tenant can add pictures too.
+  app.post("/api/restaurant/:id/events/upload-image", authenticate, eventsStaff, upload.single('file'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureEventsEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      if (!req.file) return res.status(400).json({ error: 'no file provided' });
+      res.json({ success: true, url: `/uploads/${req.file.filename}` });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'upload failed' }); }
+  });
+
   // ─── AVAILABILITY ──────────────────────────────────────────────────────────
   // Venue × date grid. For each active venue and each date in [from,to], report
   // whether it is FREE, BOOKED (a CONFIRMED/IN_PROGRESS event overlaps), or
@@ -43910,7 +43922,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-recompute-totals-maintenance',
+    commit_marker: 'events-calendar-multibooking-image-upload',
     code_features: [
       'subscription-billing',
       'read-only-mode',

@@ -4,15 +4,83 @@
 // right sub-view; the public inquiry page is exported separately. Strings run
 // through the i18n t() so the whole module is translatable.
 // ════════════════════════════════════════════════════════════════════════
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { DataTable } from './components/DataTable';
 import { ObjectDetail } from './components/ObjectDetail';
 import { useT, LANGUAGE_NAMES, SECONDARY_LANGUAGE_OPTIONS } from './i18n';
 import {
   CalendarRange, Plus, Trash2, Check, X, Building2, Sofa, Users, FileText,
   RefreshCw, Send, IndianRupee, ClipboardList, Hotel, Utensils,
-  AlertTriangle, Mail, Phone,
+  AlertTriangle, Mail, Phone, Upload, Image as ImageIcon,
 } from 'lucide-react';
+
+// ── Image upload (public-page pictures) — mirrors the Hotel upload flow so an
+// events-only tenant can add photos by file, not just paste a URL. ──────────
+async function uploadEventImage(restaurantId: string, token: string, file: File): Promise<string> {
+  const fd = new FormData();
+  fd.append('file', file);
+  const r = await fetch(`/api/restaurant/${restaurantId}/events/upload-image`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
+  });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'Upload failed'); }
+  const { url } = await r.json();
+  if (!url) throw new Error('Upload returned no URL');
+  return url;
+}
+
+// A single image slot: preview + upload button + remove, with an optional
+// "paste a URL instead" fallback. Used for the hero image and venue photos.
+function SingleImagePicker({ restaurantId, token, value, onChange, allowUrl = true, aspect = 'h-24 w-full max-w-md' }: { restaurantId: string; token: string; value: string; onChange: (url: string) => void; allowUrl?: boolean; aspect?: string }) {
+  const { t } = useT();
+  const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+  const pick = async (f?: File) => {
+    if (!f) return; setBusy(true);
+    try { onChange(await uploadEventImage(restaurantId, token, f)); } catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div>
+      <div className="flex items-start gap-3 flex-wrap">
+        {value
+          ? <img src={value} alt="" className={`${aspect} object-cover rounded-xl border border-[#e8dccf]`} />
+          : <div className={`${aspect} rounded-xl border border-dashed border-[#d9cbbb] bg-[#faf7f2] grid place-items-center text-[#b9a897]`}><ImageIcon size={22} /></div>}
+        <div className="flex flex-col gap-1.5">
+          <input ref={ref} type="file" accept="image/*" className="hidden" onChange={e => { pick(e.target.files?.[0]); e.currentTarget.value = ''; }} />
+          <button type="button" className={BTN_GHOST} disabled={busy} onClick={() => ref.current?.click()}><Upload size={13} />{busy ? '…' : t('events.settings.uploadImage')}</button>
+          {value && <button type="button" className="text-[11px] text-rose-600 hover:underline text-left" onClick={() => onChange('')}>{t('common.delete')}</button>}
+        </div>
+      </div>
+      {allowUrl && <input className={`${INPUT} mt-2`} value={value || ''} onChange={e => onChange(e.target.value)} placeholder={t('events.settings.orPasteUrl')} />}
+    </div>
+  );
+}
+
+// A gallery grid: thumbnails with remove + an "add photo" upload tile.
+function GalleryPicker({ restaurantId, token, images, onChange }: { restaurantId: string; token: string; images: string[]; onChange: (imgs: string[]) => void }) {
+  const { t } = useT();
+  const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+  const add = async (f?: File) => {
+    if (!f) return; setBusy(true);
+    try { onChange([...images, await uploadEventImage(restaurantId, token, f)]); } catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="flex flex-wrap gap-2">
+      {images.map((src, i) => (
+        <div key={i} className="relative">
+          <img src={src} alt="" className="h-20 w-28 object-cover rounded-xl border border-[#e8dccf]" />
+          <button type="button" onClick={() => onChange(images.filter((_, idx) => idx !== i))}
+            className="absolute -top-1.5 -right-1.5 bg-white border border-[#e8dccf] rounded-full w-5 h-5 grid place-items-center shadow text-rose-500 hover:bg-rose-50"><X size={12} /></button>
+        </div>
+      ))}
+      <input ref={ref} type="file" accept="image/*" className="hidden" onChange={e => { add(e.target.files?.[0]); e.currentTarget.value = ''; }} />
+      <button type="button" disabled={busy} onClick={() => ref.current?.click()}
+        className="h-20 w-28 rounded-xl border border-dashed border-[#d9cbbb] bg-[#faf7f2] grid place-items-center text-[#b9a897] hover:bg-[#f3ece1] transition-colors">
+        <span className="flex flex-col items-center gap-0.5 text-[10px] font-semibold">{busy ? '…' : <><Plus size={16} />{t('events.settings.addPhoto')}</>}</span>
+      </button>
+    </div>
+  );
+}
 
 // ── shared fetch helper ─────────────────────────────────────────────────────
 function makeApi(restaurantId: string, token: string) {
@@ -173,8 +241,8 @@ function EventVenues({ restaurantId, token }: Props) {
             <div><label className={LABEL}>{t('events.venues.halfDayRate')}</label><input type="number" className={INPUT} value={form.half_day_rate} onChange={e => setForm({ ...form, half_day_rate: e.target.value })} /></div>
             <div><label className={LABEL}>{t('events.venues.dailyRate')}</label><input type="number" className={INPUT} value={form.daily_rate} onChange={e => setForm({ ...form, daily_rate: e.target.value })} /></div>
             <div className="col-span-2 md:col-span-3"><label className={LABEL}>{t('events.venues.amenities')}</label><input className={INPUT} value={form.amenities} onChange={e => setForm({ ...form, amenities: e.target.value })} placeholder="Stage, projector, parking, green room" /></div>
-            <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('events.venues.image')}</label><input className={INPUT} value={form.image_url || ''} onChange={e => setForm({ ...form, image_url: e.target.value })} placeholder="https://…/hall.jpg — shown on the public page" />
-              {form.image_url && <img src={form.image_url} alt="" className="mt-2 h-24 w-40 object-cover rounded-xl border border-[#e8dccf]" />}</div>
+            <div className="col-span-2 md:col-span-4"><label className={LABEL}>{t('events.venues.image')}</label>
+              <SingleImagePicker restaurantId={restaurantId} token={token} value={form.image_url || ''} onChange={(url) => setForm({ ...form, image_url: url })} aspect="h-24 w-40" /></div>
           </div>
           <div className="flex gap-2 mt-3">
             <button className={BTN_PRIMARY} onClick={save}>{t('common.save')}</button>
@@ -1304,6 +1372,9 @@ function EventCalendar({ restaurantId, token }: Props) {
   const [data, setData] = useState<any>(null);
   const [start, setStart] = useState(todayIso());
   const [objStack, setObjStack] = useState<Array<{ type: string; id: string }>>([]);
+  // When a venue has >1 booking on a day, clicking opens this chooser so the user
+  // can drill into any of them (a single grid cell can't show them all at once).
+  const [chooser, setChooser] = useState<{ venueName: string; date: string; bookings: any[] } | null>(null);
   const shift = (n: number) => setStart(new Date(new Date(start + 'T00:00:00Z').getTime() + n * 86400000).toISOString().slice(0, 10));
 
   const load = async () => {
@@ -1323,14 +1394,22 @@ function EventCalendar({ restaurantId, token }: Props) {
     const end = e > s ? e : s;
     return s <= date && date <= end;
   };
+  // All active (non-cancelled/completed) bookings covering a venue on a date, with
+  // confirmed/in-progress ranked ahead of tentative inquiries/quotes. Returning the
+  // full list (not just the first) is what fixes multiple-bookings-per-day.
+  const CONFIRMED_ST = ['CONFIRMED', 'IN_PROGRESS'];
+  const coveringBookings = (venueId: string, date: string) => (data?.bookings || [])
+    .filter((b: any) => b.venue_id === venueId && covers(b, date) && [...CONFIRMED_ST, 'INQUIRY', 'QUOTED'].includes(b.status))
+    .sort((a: any, b: any) => (CONFIRMED_ST.includes(a.status) ? 0 : 1) - (CONFIRMED_ST.includes(b.status) ? 0 : 1));
   const cellFor = (venueId: string, date: string) => {
     const blocked = (data?.blocks || []).some((b: any) => b.venue_id === venueId && String(b.from_date).slice(0, 10) <= date && String(b.to_date).slice(0, 10) >= date);
-    if (blocked) return { title: t('events.calendar.blocked'), sty: EV_CAL.BLOCKED, booking: null as any, isStart: false };
-    const booked = (data?.bookings || []).find((b: any) => b.venue_id === venueId && covers(b, date) && ['CONFIRMED', 'IN_PROGRESS'].includes(b.status));
-    if (booked) return { title: `${booked.customer_name} · ${booked.status}`, sty: EV_CAL.CONFIRMED, booking: booked, isStart: String(booked.event_date).slice(0, 10) === date };
-    const tentative = (data?.bookings || []).find((b: any) => b.venue_id === venueId && covers(b, date) && ['INQUIRY', 'QUOTED'].includes(b.status));
-    if (tentative) return { title: `${tentative.customer_name} · ${tentative.status}`, sty: EV_CAL.TENTATIVE, booking: tentative, isStart: String(tentative.event_date).slice(0, 10) === date };
-    return { title: t('events.calendar.free'), sty: EV_CAL.FREE, booking: null as any, isStart: false };
+    if (blocked) return { title: t('events.calendar.blocked'), sty: EV_CAL.BLOCKED, booking: null as any, all: [] as any[], isStart: false, count: 0 };
+    const all = coveringBookings(venueId, date);
+    if (all.length === 0) return { title: t('events.calendar.free'), sty: EV_CAL.FREE, booking: null as any, all, isStart: false, count: 0 };
+    const primary = all[0];
+    const isConfirmed = CONFIRMED_ST.includes(primary.status);
+    const extra = all.length > 1 ? ` (+${all.length - 1} ${t('events.calendar.more')})` : '';
+    return { title: `${primary.customer_name} · ${primary.status}${extra}`, sty: isConfirmed ? EV_CAL.CONFIRMED : EV_CAL.TENTATIVE, booking: primary, all, isStart: String(primary.event_date).slice(0, 10) === date, count: all.length };
   };
   const cellName = (b: any) => b.customer_name?.split(' ')[0]?.slice(0, 9) || t('events.calendar.booked');
 
@@ -1410,9 +1489,17 @@ function EventCalendar({ restaurantId, token }: Props) {
                     return (
                       <td key={d} title={c.title} className="border border-[#f0e9df] text-center align-middle p-0">
                         {c.booking ? (
-                          <button type="button" onClick={() => setObjStack([{ type: 'EVENT_BOOKING', id: c.booking.id }])}
-                            className="block w-full text-[9px] font-semibold px-0.5 py-1.5 truncate cursor-pointer hover:brightness-95 hover:underline focus:outline-none"
-                            style={{ background: c.sty.bg, color: c.sty.fg }}>{label}</button>
+                          <button type="button"
+                            onClick={() => c.count > 1
+                              ? setChooser({ venueName: v.name, date: d, bookings: c.all })
+                              : setObjStack([{ type: 'EVENT_BOOKING', id: c.booking.id }])}
+                            className="relative block w-full text-[9px] font-semibold px-0.5 py-1.5 truncate cursor-pointer hover:brightness-95 hover:underline focus:outline-none"
+                            style={{ background: c.sty.bg, color: c.sty.fg }}>
+                            {label || (c.count > 1 ? '•' : '')}
+                            {c.count > 1 && (
+                              <span className="absolute top-0 right-0 min-w-[13px] text-[8px] font-bold leading-[13px] bg-[#cc5a16] text-white rounded-bl-md px-[3px]">{c.count}</span>
+                            )}
+                          </button>
                         ) : (
                           <div className="text-[9px] font-semibold px-0.5 py-1.5 truncate" style={{ background: c.sty.bg, color: c.sty.fg }}>{label || '·'}</div>
                         )}
@@ -1431,6 +1518,29 @@ function EventCalendar({ restaurantId, token }: Props) {
         {dot(EV_CAL.BLOCKED, t('events.calendar.blocked'))}
         {dot(EV_CAL.FREE, t('events.calendar.free'))}
       </div>
+
+      {/* Multiple bookings on one venue+day — pick which one to open. */}
+      {chooser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setChooser(null)}>
+          <div className="w-full max-w-sm bg-white rounded-2xl border border-[#e8dccf] p-4 shadow-xl" onClick={e => e.stopPropagation()}>
+            <h3 className="font-bold text-sm text-[#14110c]">{chooser.venueName}</h3>
+            <p className="text-[11px] text-[#9d8b7e] mb-3">{chooser.date} · {chooser.bookings.length} {t('events.calendar.onDay')}</p>
+            <div className="flex flex-col gap-1.5 max-h-[60vh] overflow-y-auto">
+              {chooser.bookings.map((b: any) => (
+                <button key={b.id} onClick={() => { setObjStack([{ type: 'EVENT_BOOKING', id: b.id }]); setChooser(null); }}
+                  className="flex items-center justify-between gap-2 text-left px-3 py-2 rounded-xl border border-[#e8dccf] hover:bg-[#faf7f2]">
+                  <span className="min-w-0">
+                    <span className="font-semibold text-[#14110c] block truncate">{b.customer_name}</span>
+                    <span className="text-[10px] text-[#9d8b7e]">{String(b.start_time || '').slice(0, 5)}–{String(b.end_time || '').slice(0, 5)}{b.event_type ? ` · ${b.event_type}` : ''}</span>
+                  </span>
+                  <Pill status={b.status} />
+                </button>
+              ))}
+            </div>
+            <button className={`${BTN_GHOST} mt-3 w-full justify-center`} onClick={() => setChooser(null)}>{t('common.cancel')}</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1731,12 +1841,12 @@ function EventSettings({ restaurantId, token }: Props) {
   const [form, setForm] = useState<any>({ hero_title: '', tagline: '', description: '', contact_phone: '', contact_email: '', is_published: true });
   const [saved, setSaved] = useState(false);
   const [secLang, setSecLang] = useState<string>('');
-  useEffect(() => { api('/events/profile').then((p) => { if (p && p.id) { let gt = ''; try { const g = JSON.parse(p.gallery || '[]'); if (Array.isArray(g)) gt = g.join('\n'); } catch { /* */ } setForm({ ...p, is_published: Number(p.is_published) !== 0, gallery_text: gt }); } }).catch(() => {}); }, []);
+  useEffect(() => { api('/events/profile').then((p) => { if (p && p.id) { let gl: string[] = []; try { const g = JSON.parse(p.gallery || '[]'); if (Array.isArray(g)) gl = g.filter(Boolean); } catch { /* */ } setForm({ ...p, is_published: Number(p.is_published) !== 0, gallery_list: gl }); } }).catch(() => {}); }, []);
   useEffect(() => { api('/settings/language').then((r) => setSecLang(r.secondary_language || '')).catch(() => {}); }, []);
   const save = async () => {
     try {
-      const gallery = JSON.stringify(String(form.gallery_text || '').split('\n').map((s: string) => s.trim()).filter(Boolean));
-      const { gallery_text, ...rest } = form;
+      const gallery = JSON.stringify((form.gallery_list || []).map((s: string) => String(s).trim()).filter(Boolean));
+      const { gallery_list, ...rest } = form;
       await api('/events/profile', { method: 'PUT', body: JSON.stringify({ ...rest, gallery }) });
       setSaved(true); setTimeout(() => setSaved(false), 1500);
     } catch (e: any) { alert(e.message); }
@@ -1767,11 +1877,11 @@ function EventSettings({ restaurantId, token }: Props) {
         <div><label className={LABEL}>{t('events.settings.heroTitle')}</label><input className={INPUT} value={form.hero_title || ''} onChange={e => setForm({ ...form, hero_title: e.target.value })} /></div>
         <div><label className={LABEL}>{t('events.settings.tagline')}</label><input className={INPUT} value={form.tagline || ''} onChange={e => setForm({ ...form, tagline: e.target.value })} /></div>
         <div><label className={LABEL}>{t('events.settings.description')}</label><textarea className={INPUT} rows={3} value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} /></div>
-        <div><label className={LABEL}>{t('events.settings.heroImage')}</label><input className={INPUT} value={form.hero_image_url || ''} onChange={e => setForm({ ...form, hero_image_url: e.target.value })} placeholder="https://…/hero.jpg" />
-          {form.hero_image_url && <img src={form.hero_image_url} alt="" className="mt-2 h-24 w-full max-w-md object-cover rounded-xl border border-[#e8dccf]" />}</div>
+        <div><label className={LABEL}>{t('events.settings.heroImage')}</label>
+          <SingleImagePicker restaurantId={restaurantId} token={token} value={form.hero_image_url || ''} onChange={(url) => setForm({ ...form, hero_image_url: url })} /></div>
         <div><label className={LABEL}>{t('events.settings.gallery')}</label>
-          <textarea className={INPUT} rows={3} value={form.gallery_text || ''} onChange={e => setForm({ ...form, gallery_text: e.target.value })} placeholder={t('events.settings.galleryHint')} />
-          <p className="text-[11px] text-[#9d8b7e] mt-0.5">{t('events.settings.galleryHint')}</p></div>
+          <GalleryPicker restaurantId={restaurantId} token={token} images={form.gallery_list || []} onChange={(imgs) => setForm({ ...form, gallery_list: imgs })} />
+          <p className="text-[11px] text-[#9d8b7e] mt-1.5">{t('events.settings.galleryHint')}</p></div>
         <div className="grid grid-cols-2 gap-3">
           <div><label className={LABEL}>{t('common.phone')}</label><input className={INPUT} value={form.contact_phone || ''} onChange={e => setForm({ ...form, contact_phone: e.target.value })} /></div>
           <div><label className={LABEL}>{t('common.email')}</label><input className={INPUT} value={form.contact_email || ''} onChange={e => setForm({ ...form, contact_email: e.target.value })} /></div>
