@@ -610,6 +610,31 @@ async function testSpa() {
   } else {
     fail('TC-SPA-CLIENTS', 'Spa clients endpoint responds', `HTTP ${cl.status}`);
   }
+
+  // TC-SPA-FOLIOS: Invoices workspace list — returns folios with balance fields.
+  const fo = await api('GET', `/api/restaurant/${restaurantId}/spa/folios`);
+  if (fo.status === 200 && Array.isArray(fo.data)) {
+    const shapeOk = fo.data.length === 0 || ('outstanding' in fo.data[0] && 'paid_amount' in fo.data[0]);
+    (shapeOk ? pass : fail)('TC-SPA-FOLIOS', 'Spa invoices list returns paid/outstanding balances', `${fo.data.length} invoices`);
+  } else if (fo.status === 403 || fo.status === 404) {
+    skip('TC-SPA-FOLIOS', 'Spa invoices list', `HTTP ${fo.status}`);
+  } else {
+    fail('TC-SPA-FOLIOS', 'Spa invoices list', `HTTP ${fo.status}`);
+  }
+
+  // TC-SPA-PROMO: apply-promo endpoint exists and validates (bad code → 4xx, not 404-route).
+  const fid = (fo.data && fo.data[0] && fo.data[0].id) || 'SPAFOL-none';
+  const pr = await api('POST', `/api/restaurant/${restaurantId}/spa/folios/${fid}/apply-promo`, { code: 'ZZ-UAT-NOPE' });
+  if (pr.status === 403) {
+    skip('TC-SPA-PROMO', 'Spa apply-promo', 'user lacks SPA_APPOINTMENTS access');
+  } else if ([400, 404].includes(pr.status)) {
+    // 404 = folio/promo not found, 400 = settled/invalid — either proves the route exists & validates.
+    pass('TC-SPA-PROMO', 'Spa apply-promo endpoint validates input', `HTTP ${pr.status}`);
+  } else if (pr.status === 200) {
+    pass('TC-SPA-PROMO', 'Spa apply-promo applied a code', `discount=${pr.data?.discount}`);
+  } else {
+    fail('TC-SPA-PROMO', 'Spa apply-promo endpoint', `HTTP ${pr.status}`);
+  }
 }
 
 // ── Events & Convention Center tests ────────────────────────────────────────

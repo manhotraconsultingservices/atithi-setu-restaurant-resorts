@@ -7,7 +7,7 @@ import React, { useState, useEffect } from 'react';
 import { DataTable } from './components/DataTable';
 import {
   Calendar, Clock, Plus, Trash2, Check, X, User, Package, Award,
-  TrendingUp, RefreshCw, FileText, Scissors, DoorOpen,
+  TrendingUp, RefreshCw, FileText, Scissors, DoorOpen, IndianRupee, Tag, ReceiptText,
 } from 'lucide-react';
 
 // ── shared fetch helper ─────────────────────────────────────────────────────
@@ -333,12 +333,21 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
     try {
       const r = await api(`/spa/appointments/${coAppt.id}/checkout`, { method: 'POST', body: JSON.stringify({
         use_package: coState.use_package, apply_membership: coState.apply_membership, tip_amount: Number(coState.tip_amount || 0),
+        discount: Number(coState.discount || 0),
       }) });
-      // collect payment for outstanding
-      if (r.folio && Number(r.outstanding) > 0) {
-        await api(`/spa/folios/${r.folio.id}/payments`, { method: 'POST', body: JSON.stringify({ amount: r.outstanding, payment_method: coState.payment_method, payment_type: 'FINAL' }) });
+      const folioId = r.folio?.id;
+      let outstanding = Number(r.outstanding || 0);
+      // Apply a promo code (reduces the invoice further, before we take payment).
+      const promo = String(coState.promo_code || '').trim().toUpperCase();
+      if (promo && folioId) {
+        try { const pr = await api(`/spa/folios/${folioId}/apply-promo`, { method: 'POST', body: JSON.stringify({ code: promo }) }); outstanding = Number(pr.outstanding ?? outstanding); }
+        catch (e: any) { alert(`Invoice created, but the promo could not be applied: ${e.message}`); }
       }
-      setCoResult({ ...r, paid: true });
+      // collect payment for the (possibly discounted) outstanding
+      if (folioId && outstanding > 0) {
+        await api(`/spa/folios/${folioId}/payments`, { method: 'POST', body: JSON.stringify({ amount: outstanding, payment_method: coState.payment_method, payment_type: 'FINAL' }) });
+      }
+      setCoResult({ ...r, outstanding, paid: true });
       await load();
     } catch (e: any) { alert(e.message); }
   };
@@ -395,7 +404,7 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                   {r.status === 'BOOKED' && <button className={BTN_GHOST} onClick={() => transition(r, 'confirm')}>Confirm</button>}
                   {['BOOKED', 'CONFIRMED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'check-in')}>Check-in</button>}
                   {['CHECKED_IN', 'IN_PROGRESS', 'CONFIRMED', 'BOOKED'].includes(r.status) && <button className={BTN_GHOST} onClick={() => transition(r, 'complete')}><Check size={12} /> Complete</button>}
-                  {r.status === 'COMPLETED' && !r.folio_id && <button className={BTN_PRIMARY} onClick={() => { setCoAppt(r); setCoResult(null); setCoState({ use_package: false, apply_membership: false, tip_amount: '', payment_method: 'CASH' }); }}>Checkout</button>}
+                  {r.status === 'COMPLETED' && !r.folio_id && <button className={BTN_PRIMARY} onClick={() => { setCoAppt(r); setCoResult(null); setCoState({ use_package: false, apply_membership: false, tip_amount: '', discount: '', promo_code: '', payment_method: 'CASH' }); }}>Checkout</button>}
                   {r.folio_id && <button className={BTN_GHOST} onClick={async () => { try { const res = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${r.folio_id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } }); if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); } const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `SpaInvoice-${r.folio_id}.pdf`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000); } catch (err: any) { alert(err.message); } }}><FileText size={12} /> Invoice</button>}
                   {!['COMPLETED', 'CANCELLED', 'NO_SHOW'].includes(r.status) && <button className={`${BTN} bg-rose-50 text-rose-600`} onClick={() => transition(r, 'cancel')}><X size={12} /></button>}
                 </div>
@@ -454,7 +463,11 @@ function SpaAppointments({ restaurantId, token, calendar }: Props & { calendar?:
                 <div className="space-y-2.5 mb-4">
                   <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={coState.use_package} onChange={e => setCoState({ ...coState, use_package: e.target.checked })} /> Redeem a prepaid package session</label>
                   <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={coState.apply_membership} onChange={e => setCoState({ ...coState, apply_membership: e.target.checked })} /> Apply membership discount</label>
-                  <div><label className={LABEL}>Tip (₹)</label><input className={INPUT} type="number" value={coState.tip_amount} onChange={e => setCoState({ ...coState, tip_amount: e.target.value })} /></div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div><label className={LABEL}>Discount (₹)</label><input className={INPUT} type="number" min={0} value={coState.discount} onChange={e => setCoState({ ...coState, discount: e.target.value })} placeholder="0" /></div>
+                    <div><label className={LABEL}>Tip (₹)</label><input className={INPUT} type="number" min={0} value={coState.tip_amount} onChange={e => setCoState({ ...coState, tip_amount: e.target.value })} placeholder="0" /></div>
+                  </div>
+                  <div><label className={LABEL}>Promo code (optional)</label><input className={`${INPUT} uppercase`} value={coState.promo_code} onChange={e => setCoState({ ...coState, promo_code: e.target.value.toUpperCase() })} placeholder="e.g. WELCOME10" /></div>
                   <div><label className={LABEL}>Payment method</label>
                     <select className={INPUT} value={coState.payment_method} onChange={e => setCoState({ ...coState, payment_method: e.target.value })}>
                       {['CASH', 'CARD', 'UPI', 'BANK_TRANSFER'].map(m => <option key={m}>{m}</option>)}
@@ -851,6 +864,174 @@ function SpaSettings({ restaurantId, token }: Props) {
 // ════════════════════════════════════════════════════════════════════════
 // Dispatcher
 // ════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════
+// INVOICES & PAYMENTS — every spa invoice (paid + unpaid) with per-invoice
+// record-payment and apply-promo. This is the operational billing workspace
+// (the old SPA_BILLING screen was a settled-only accounting report).
+// ════════════════════════════════════════════════════════════════════════
+function SpaFolios({ restaurantId, token }: Props) {
+  const api = makeApi(restaurantId, token);
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<'all' | 'unpaid' | 'paid'>('all');
+  const [payFor, setPayFor] = useState<any>(null);
+  const [promoFor, setPromoFor] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [payForm, setPayForm] = useState({ amount: '', method: 'CASH' });
+  const [promoCode, setPromoCode] = useState('');
+
+  const load = async () => {
+    setLoading(true);
+    try { setRows(await api('/spa/folios')); } catch { setRows([]); } finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const dOnly = (v: any) => v ? new Date(v).toLocaleDateString('en-IN') : '—';
+  const outOf = (f: any) => Math.max(0, Number(f.outstanding || 0));
+  const statusOf = (f: any) => f.status === 'closed' || outOf(f) <= 0.01 ? 'PAID' : (Number(f.paid_amount || 0) > 0 ? 'PART-PAID' : 'UNPAID');
+  const stColor = (s: string) => s === 'PAID' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : s === 'PART-PAID' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-rose-50 text-rose-700 border-rose-200';
+
+  const filtered = rows.filter(f => filter === 'all' ? true : filter === 'paid' ? outOf(f) <= 0.01 : outOf(f) > 0.01);
+  const totInvoiced = rows.reduce((s, f) => s + Number(f.grand_total || 0), 0);
+  const totPaid = rows.reduce((s, f) => s + Number(f.paid_amount || 0), 0);
+  const totOut = rows.reduce((s, f) => s + outOf(f), 0);
+
+  const downloadPdf = async (f: any) => {
+    try {
+      const r = await fetch(`/api/restaurant/${restaurantId}/spa/folios/${f.id}/invoice.pdf`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j?.error || 'Download failed'); }
+      const blob = await r.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a');
+      a.href = url; a.download = `SpaInvoice-${f.invoice_number || f.id}.pdf`; document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    } catch (e: any) { alert(e.message); }
+  };
+  const openPay = (f: any) => { setPayForm({ amount: String(outOf(f)), method: 'CASH' }); setPayFor(f); };
+  const savePayment = async () => {
+    const amount = Math.round(Number(payForm.amount || 0) * 100) / 100;
+    if (!(amount > 0)) { alert('Enter an amount greater than 0'); return; }
+    setBusy(true);
+    try { await api(`/spa/folios/${payFor.id}/payments`, { method: 'POST', body: JSON.stringify({ amount, payment_method: payForm.method, payment_type: 'FINAL' }) }); setPayFor(null); await load(); }
+    catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
+  const openPromo = (f: any) => { setPromoCode(''); setPromoFor(f); };
+  const savePromo = async () => {
+    const code = promoCode.trim();
+    if (!code) { alert('Enter a promo code'); return; }
+    setBusy(true);
+    try { const r = await api(`/spa/folios/${promoFor.id}/apply-promo`, { method: 'POST', body: JSON.stringify({ code }) }); setPromoFor(null); await load(); alert(`Promo applied — ${money(r.discount)} off. New balance ${money(r.outstanding)}.`); }
+    catch (e: any) { alert(e.message); } finally { setBusy(false); }
+  };
+
+  const tile = (label: string, val: string, accent: string) => (
+    <div className="bg-white rounded-2xl border border-[#e8dccf] p-4">
+      <p className="text-[9px] font-bold uppercase tracking-widest text-[#9c8e85]">{label}</p>
+      <p className={`text-2xl font-bold mt-1 tabular-nums ${accent}`}>{val}</p>
+    </div>
+  );
+
+  return (
+    <div>
+      <SectionHeader icon={<ReceiptText size={18} />} title="Invoices & Payments"
+        sub="Every spa invoice — record payments and apply promo codes / discounts."
+        action={<button className={BTN_GHOST} onClick={load}><RefreshCw size={13} /> Refresh</button>} />
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        {tile('Invoices', String(rows.length), 'text-[#3d3128]')}
+        {tile('Invoiced', money(totInvoiced), 'text-indigo-700')}
+        {tile('Collected', money(totPaid), 'text-emerald-700')}
+        {tile('Outstanding', money(totOut), totOut > 0 ? 'text-rose-600' : 'text-[#9c8e85]')}
+      </div>
+
+      <div className="flex items-center gap-1.5 mb-3">
+        {(['all', 'unpaid', 'paid'] as const).map(k => (
+          <button key={k} onClick={() => setFilter(k)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold capitalize ${filter === k ? 'bg-[#cc5a16] text-white' : 'bg-[#faf7f2] border border-[#e8dccf] text-[#6b5d52]'}`}>{k}</button>
+        ))}
+        <span className="text-[11px] text-[#9c8e85] ml-1">{filtered.length} shown</span>
+      </div>
+
+      <div className={`${CARD} p-0 overflow-x-auto`}>
+        {loading ? <p className="text-sm text-[#6b5d52] p-5">Loading…</p> : filtered.length === 0 ? (
+          <p className="text-sm text-[#9c8e85] italic p-5">No invoices{filter !== 'all' ? ` (${filter})` : ''} yet. Invoices are created when you check out a completed appointment.</p>
+        ) : (
+          <table className="w-full text-sm border-collapse min-w-[720px]">
+            <thead><tr className="bg-[#faf7f2] text-[#6b5d52] text-[11px] uppercase tracking-wider">
+              <th className="text-left px-3 py-3">Invoice</th>
+              <th className="text-left px-3 py-3">Date</th>
+              <th className="text-left px-3 py-3">Client / Service</th>
+              <th className="text-right px-3 py-3">Total</th>
+              <th className="text-right px-3 py-3">Paid</th>
+              <th className="text-right px-3 py-3">Outstanding</th>
+              <th className="text-center px-3 py-3">Status</th>
+              <th className="px-3 py-3"></th>
+            </tr></thead>
+            <tbody>
+              {filtered.map(f => {
+                const st = statusOf(f); const open = outOf(f) > 0.01;
+                return (
+                  <tr key={f.id} className="border-t border-[#f0ebe4] hover:bg-[#faf7f2]">
+                    <td className="px-3 py-2 font-mono text-xs text-[#1a1208]">{f.invoice_number || '—'}</td>
+                    <td className="px-3 py-2 text-[#6b5d52] text-xs">{dOnly(f.settled_at || f.created_at)}</td>
+                    <td className="px-3 py-2"><div className="font-medium text-[#1a1208]">{f.client_name || '—'}</div><div className="text-[10px] text-[#9c8e85]">{f.service_name || ''}</div></td>
+                    <td className="px-3 py-2 text-right tabular-nums font-semibold text-[#1a1208]">{money(f.grand_total)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-emerald-700">{money(f.paid_amount)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums font-bold text-rose-600">{open ? money(outOf(f)) : '—'}</td>
+                    <td className="px-3 py-2 text-center"><span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${stColor(st)}`}>{st}</span></td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                        {open && <button className={BTN_PRIMARY} onClick={() => openPay(f)}><IndianRupee size={12} /> Payment</button>}
+                        {open && <button className={BTN_GHOST} onClick={() => openPromo(f)}><Tag size={12} /> Promo</button>}
+                        <button className={BTN_GHOST} onClick={() => downloadPdf(f)}><FileText size={12} /> Invoice</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Record payment */}
+      {payFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setPayFor(null)}>
+          <div className="w-full max-w-sm bg-white rounded-2xl border border-[#e8dccf] p-5 shadow-xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold font-serif mb-1">Record payment</h3>
+            <p className="text-xs text-[#6b5d52] mb-3">{payFor.invoice_number} · outstanding <b className="text-rose-600">{money(outOf(payFor))}</b></p>
+            <label className={LABEL}>Amount (₹)</label>
+            <input type="number" min={0} max={outOf(payFor)} className={INPUT} value={payForm.amount} onChange={e => setPayForm({ ...payForm, amount: e.target.value })} />
+            <label className={`${LABEL} mt-2`}>Method</label>
+            <select className={INPUT} value={payForm.method} onChange={e => setPayForm({ ...payForm, method: e.target.value })}>
+              {['CASH', 'UPI', 'CARD', 'BANK', 'CHEQUE'].map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <div className="flex justify-end gap-2 mt-4">
+              <button className={BTN_GHOST} onClick={() => setPayFor(null)} disabled={busy}>Cancel</button>
+              <button className={BTN_PRIMARY} onClick={savePayment} disabled={busy}>Record payment</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Apply promo */}
+      {promoFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setPromoFor(null)}>
+          <div className="w-full max-w-sm bg-white rounded-2xl border border-[#e8dccf] p-5 shadow-xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold font-serif mb-1">Apply promo code</h3>
+            <p className="text-xs text-[#6b5d52] mb-3">{promoFor.invoice_number} · bill {money(promoFor.subtotal)}</p>
+            <label className={LABEL}>Promo code</label>
+            <input className={`${INPUT} uppercase`} value={promoCode} onChange={e => setPromoCode(e.target.value.toUpperCase())} placeholder="e.g. WELCOME10" autoFocus />
+            <p className="text-[11px] text-[#9c8e85] mt-1.5">Uses your shared promo codes (Loyalty → Promo Codes). Discount applies to this invoice.</p>
+            <div className="flex justify-end gap-2 mt-4">
+              <button className={BTN_GHOST} onClick={() => setPromoFor(null)} disabled={busy}>Cancel</button>
+              <button className={BTN_PRIMARY} onClick={savePromo} disabled={busy}>Apply</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SpaModule({ restaurantId, token, tab }: Props & { tab: string }) {
   switch (tab) {
     case 'SPA_CALENDAR': return <SpaAppointments restaurantId={restaurantId} token={token} calendar />;
@@ -860,6 +1041,7 @@ export function SpaModule({ restaurantId, token, tab }: Props & { tab: string })
     case 'SPA_CLIENTS': return <SpaClients restaurantId={restaurantId} token={token} />;
     case 'SPA_PACKAGES': return <SpaPackages restaurantId={restaurantId} token={token} />;
     case 'SPA_REPORTS': return <SpaReports restaurantId={restaurantId} token={token} />;
+    case 'SPA_BILLING': return <SpaFolios restaurantId={restaurantId} token={token} />;
     case 'SPA_INVENTORY': return <SpaInventory restaurantId={restaurantId} token={token} />;
     case 'SPA_SETTINGS': return <SpaSettings restaurantId={restaurantId} token={token} />;
     default: return null;

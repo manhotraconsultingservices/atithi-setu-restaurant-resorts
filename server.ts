@@ -23915,9 +23915,19 @@ ${data.tenant.name}`;
     if (!check.ok) return res.status(check.status).json({ error: check.error });
     try {
       const db = await getTenantDb(req.params.id);
+      // Include paid + outstanding so the Invoices workspace shows balances without
+      // an N+1. paid nets refunds and ignores voided payments; outstanding is what
+      // the client still owes on the invoice.
       const rows = await db.query(
-        `SELECT f.*, a.client_name, a.service_name, a.start_at AS appt_start
-           FROM folios f LEFT JOIN spa_appointments a ON a.id = f.appointment_id
+        `SELECT f.*, a.client_name, a.service_name, a.start_at AS appt_start,
+                COALESCE(p.paid, 0)::float AS paid_amount,
+                ROUND((COALESCE(f.grand_total,0) - COALESCE(p.paid, 0))::numeric, 2)::float AS outstanding
+           FROM folios f
+           LEFT JOIN spa_appointments a ON a.id = f.appointment_id
+           LEFT JOIN (
+             SELECT folio_id, SUM(CASE WHEN payment_type = 'REFUND' THEN -amount ELSE amount END) AS paid
+               FROM folio_payments WHERE is_voided = 0 GROUP BY folio_id
+           ) p ON p.folio_id = f.id
           WHERE f.folio_kind = 'SPA' ORDER BY f.created_at DESC LIMIT 500`);
       res.json(rows);
     } catch (err: any) { res.status(500).json({ error: "Failed to fetch folios" }); }
@@ -23979,6 +23989,58 @@ ${data.tenant.name}`;
       }
       res.json({ success: true, outstanding: out?.outstanding, is_fully_paid: out?.is_fully_paid });
     } catch (err: any) { res.status(500).json({ error: "Failed to void payment" }); }
+  });
+
+  // Apply a promo code to an OPEN spa folio (mirrors the hotel apply-promo). Uses
+  // the shared promo_codes / promo_redemptions tables. Percent then flat, capped
+  // at subtotal; bumps folio.discount + recomputes totals + records a redemption.
+  app.post("/api/restaurant/:id/spa/folios/:fid/apply-promo", authenticate, spaStaff, requireTabAccess('SPA_APPOINTMENTS'), async (req: AuthRequest, res: Response) => {
+    const check = await ensureSpaEnabled(req.params.id);
+    if (!check.ok) return res.status(check.status).json({ error: check.error });
+    try {
+      const code = String(req.body?.code || '').trim().toUpperCase();
+      if (!code) return res.status(400).json({ error: 'Promo code is required.' });
+      const db = await getTenantDb(req.params.id);
+      const folio: any = await db.get("SELECT * FROM folios WHERE id = ? AND folio_kind = 'SPA'", [req.params.fid]);
+      if (!folio) return res.status(404).json({ error: 'Folio not found.' });
+      if (folio.status !== 'open') return res.status(400).json({ error: 'Invoice is already settled — cannot apply a promo.' });
+
+      // Client phone (for per-customer usage limit) — best-effort via the appointment.
+      let clientPhone: string | null = null;
+      try {
+        const appt: any = folio.appointment_id ? await db.get("SELECT client_id FROM spa_appointments WHERE id = ?", [folio.appointment_id]) : null;
+        if (appt?.client_id) { const c: any = await db.get("SELECT phone FROM spa_clients WHERE id = ?", [appt.client_id]); clientPhone = c?.phone || null; }
+      } catch { /* clients table/phone may vary — phone is optional */ }
+
+      const promo: any = await db.get("SELECT * FROM promo_codes WHERE UPPER(code) = ? AND is_enabled = 1", [code]);
+      if (!promo) return res.status(404).json({ error: 'Invalid promo code.' });
+      const now = new Date();
+      if (promo.starts_at && new Date(promo.starts_at) > now) return res.status(400).json({ error: `Promo not valid until ${new Date(promo.starts_at).toLocaleDateString('en-IN')}.` });
+      if (promo.expires_at && new Date(promo.expires_at) < now) return res.status(400).json({ error: 'Promo code has expired.' });
+      if (promo.min_order_amount && Number(folio.subtotal || 0) < Number(promo.min_order_amount)) return res.status(400).json({ error: `Minimum bill of ₹${promo.min_order_amount} required for this promo.` });
+      if (promo.max_uses && Number(promo.used_count || 0) >= Number(promo.max_uses)) return res.status(400).json({ error: 'Promo code has reached its usage limit.' });
+      if (clientPhone && promo.max_uses_per_customer) {
+        const u: any = await db.get("SELECT COUNT(*) AS n FROM promo_redemptions WHERE promo_code_id = ? AND customer_phone = ?", [promo.id, clientPhone]);
+        if (Number(u?.n || 0) >= Number(promo.max_uses_per_customer)) return res.status(400).json({ error: 'This client has already used this promo the maximum times.' });
+      }
+
+      const subtotal = Number(folio.subtotal || 0);
+      let discount = 0;
+      if (Number(promo.discount_percent) > 0) discount = round2(subtotal * Number(promo.discount_percent) / 100);
+      if (Number(promo.discount_amount) > 0) discount += Number(promo.discount_amount);
+      discount = Math.min(round2(discount), subtotal);
+
+      await db.run("UPDATE folios SET discount = ? WHERE id = ?", [discount, folio.id]);
+      await db.run("UPDATE promo_codes SET used_count = COALESCE(used_count, 0) + 1 WHERE id = ?", [promo.id]);
+      await db.run("INSERT INTO promo_redemptions (promo_code_id, code, customer_phone, order_id, discount_amount) VALUES (?, ?, ?, ?, ?)",
+        [promo.id, code, clientPhone, folio.id, discount]).catch(() => {});
+      await recomputeFolioTotals(db, folio.id);
+      const out = await getFolioOutstanding(db, folio.id);
+      res.json({ success: true, promo: { code, label: promo.label, percent: promo.discount_percent, amount: promo.discount_amount }, discount, folio: out?.folio, outstanding: out?.outstanding });
+    } catch (err: any) {
+      console.error("spa apply-promo error:", err);
+      res.status(500).json({ error: "Failed to apply promo code" });
+    }
   });
 
   // Spa invoice PDF — reuses the module-agnostic generateInvoicePdf renderer.
@@ -43922,7 +43984,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'events-calendar-multibooking-image-upload',
+    commit_marker: 'spa-invoices-tab-payments-promo',
     code_features: [
       'subscription-billing',
       'read-only-mode',
