@@ -17,11 +17,14 @@ import { hi } from './locales/hi';
 import { kn } from './locales/kn';
 import { te } from './locales/te';
 import { pa } from './locales/pa';
+import { mr } from './locales/mr';
+import { bn } from './locales/bn';
+import { gu } from './locales/gu';
 
 export type Dict = Record<string, string>;
 
 // English is authoritative; regional dictionaries override per-key when present.
-export const dictionaries: Record<string, Dict> = { en, ta, hi, kn, te, pa };
+export const dictionaries: Record<string, Dict> = { en, ta, hi, kn, te, pa, mr, bn, gu };
 
 // Human-readable names for the tenant's language picker. Covers the common
 // Indian regional languages; extend freely — an unknown code still works, it
