@@ -289,10 +289,12 @@ async function testHotel() {
       rate: 0,
       apply_days: [],
     });
-    if (bui.status === 200 && (bui.data?.created !== undefined || bui.data?.updated !== undefined)) {
-      pass('TC-HOTEL-BULKINV', `Bulk inventory update: created=${bui.data.created ?? 0}, updated=${bui.data.updated ?? 0}`);
+    // The inventory branch upserts N override rows and returns { ok, saved }
+    // (the rate branch returns { created, updated }). Accept either shape.
+    if (bui.status === 200 && (bui.data?.saved !== undefined || bui.data?.created !== undefined || bui.data?.updated !== undefined)) {
+      pass('TC-HOTEL-BULKINV', `Bulk inventory update: saved=${bui.data.saved ?? bui.data.updated ?? 0}`);
     } else {
-      fail('TC-HOTEL-BULKINV', 'Bulk inventory update endpoint', `HTTP ${bui.status}`);
+      fail('TC-HOTEL-BULKINV', 'Bulk inventory update endpoint', `HTTP ${bui.status} — ${JSON.stringify(bui.data).slice(0, 80)}`);
     }
   } else {
     skip('TC-HOTEL-BULKRATE', 'Bulk rate update smoke test', 'no room types in rate-grid response');
@@ -305,15 +307,17 @@ async function testHotel() {
     const checkedInBkg  = hb.data.find(b => b.status === 'CHECKED_IN');
 
     if (bookedBkg) {
-      // A BOOKED (not yet checked-in) booking must be rejected with 400.
+      // A BOOKED (not yet checked-in) booking must be rejected. The endpoint
+      // uses 409 Conflict for state-precondition failures (wrong status / no
+      // open folio) and reserves 400 for malformed input — so expect 409 here.
       const ac = await api('POST', `/api/restaurant/${restaurantId}/hotel/bookings/${bookedBkg.id}/amend-checkout`,
         { new_check_out_date: (bookedBkg.check_out_date || '').slice(0, 10) });
-      if (ac.status === 400) {
+      if (ac.status === 409 || ac.status === 400) {
         pass('TC-HOTEL-AMEND-GUARD', `Amend-checkout rejects non-CHECKED_IN booking (${ac.data?.error || 'status guard OK'})`);
       } else if (ac.status === 403 || ac.status === 404) {
         skip('TC-HOTEL-AMEND-GUARD', 'Amend-checkout status guard', `HTTP ${ac.status}`);
       } else {
-        fail('TC-HOTEL-AMEND-GUARD', 'Amend-checkout must reject BOOKED status with 400', `HTTP ${ac.status}`);
+        fail('TC-HOTEL-AMEND-GUARD', 'Amend-checkout must reject non-CHECKED_IN booking (409/400)', `HTTP ${ac.status}`);
       }
     } else if (checkedInBkg) {
       // Same checkout date must be rejected (non-destructive — nothing is changed).
@@ -1607,8 +1611,13 @@ async function testRBACHardening() {
   // TC-RBAC-F8-003: THERAPIST appears in the role-permissions list (F5 default seed)
   // If the tenant was registered after c040e42, it should have a THERAPIST row.
   const permsRes = await api('GET', `/api/restaurant/${restaurantId}/role-permissions`);
-  if (permsRes.status === 200 && Array.isArray(permsRes.data)) {
-    const roles = permsRes.data.map(p => p.role);
+  // The endpoint returns an object map: Record<role, Record<tabId, level>>
+  // (NOT an array of rows). Keys are the seeded roles; each value is that
+  // role's tab→level map.
+  const permsMap = (permsRes.data && typeof permsRes.data === 'object' && !Array.isArray(permsRes.data))
+    ? permsRes.data : null;
+  if (permsRes.status === 200 && permsMap) {
+    const roles = Object.keys(permsMap);
     const expectedRoles = ['WAITER', 'CHEF', 'CASHIER', 'FRONT_DESK', 'HOUSEKEEPING', 'MAINTENANCE', 'CONCIERGE', 'THERAPIST'];
     const present = expectedRoles.filter(r => roles.includes(r));
     const missing = expectedRoles.filter(r => !roles.includes(r));
@@ -1621,18 +1630,16 @@ async function testRBACHardening() {
       fail('TC-RBAC-F5-001', 'Default permission seeds', `no expected roles found — got: ${roles.join(', ')}`);
     }
     // Specifically check THERAPIST has SPA_APPOINTMENTS access
-    const therapistRow = permsRes.data.find(p => p.role === 'THERAPIST');
-    if (therapistRow) {
-      const perms = typeof therapistRow.tab_permissions === 'string'
-        ? JSON.parse(therapistRow.tab_permissions)
-        : (therapistRow.tab_permissions || {});
+    const therapistPerms = permsMap.THERAPIST;
+    if (therapistPerms) {
+      const perms = typeof therapistPerms === 'string' ? JSON.parse(therapistPerms) : (therapistPerms || {});
       if (perms.SPA_APPOINTMENTS >= 1) {
         pass('TC-RBAC-F5-002', 'THERAPIST default seed includes SPA_APPOINTMENTS access', `level=${perms.SPA_APPOINTMENTS}`);
       } else {
         fail('TC-RBAC-F5-002', 'THERAPIST default seed includes SPA_APPOINTMENTS access', `tab_permissions=${JSON.stringify(perms)}`);
       }
     } else {
-      skip('TC-RBAC-F5-002', 'THERAPIST default seed SPA_APPOINTMENTS check', 'THERAPIST row not found (tenant predates F5)');
+      skip('TC-RBAC-F5-002', 'THERAPIST default seed SPA_APPOINTMENTS check', 'THERAPIST role not found (tenant predates F5)');
     }
   } else if (permsRes.status === 403 || permsRes.status === 404) {
     skip('TC-RBAC-F5-001', 'Default permission seeds check', `role-permissions endpoint not accessible (${permsRes.status})`);

@@ -23838,8 +23838,11 @@ ${data.tenant.name}`;
       }
       const from = String(req.query.from || new Date().toISOString().slice(0, 10));
       const to   = String(req.query.to   || new Date().toISOString().slice(0, 10));
-      const clauses = [`a.start_at >= ? AND a.start_at < date(?, '+1 day')`];
-      const params: any[] = [from, to];
+      // Inclusive of the whole `to` day → boundary is next-day midnight. Compute
+      // it in JS: Postgres has no SQLite-style date(x, '+1 day') 2-arg function.
+      const toNext = new Date(to + 'T00:00:00Z'); toNext.setUTCDate(toNext.getUTCDate() + 1);
+      const clauses = [`a.start_at >= ? AND a.start_at < ?`];
+      const params: any[] = [from, toNext.toISOString().slice(0, 10)];
       if (therapistId) { clauses.push("a.therapist_id = ?"); params.push(therapistId); }
       const rows = await db.query(
         `SELECT a.*, s.name AS service_name_full, t.display_name AS therapist_name, r.name AS resource_name, c.phone AS client_phone
@@ -25329,20 +25332,20 @@ ${data.tenant.name}`;
       const end = new Date(toDate + 'T12:00:00Z');
       while (cur <= end) { dates.push(cur.toISOString().slice(0, 10)); cur.setDate(cur.getDate() + 1); }
 
-      // Room types with total rooms per type
+      // Room types with total rooms per type. Tenant isolation is by schema, so
+      // these tables have NO restaurant_id column — never filter by it here.
+      // (room_types orders by display_order; there is no sort_order column.)
       const types: any[] = await tenantDb.query(`
         SELECT rt.id, rt.name, COUNT(r.id)::int AS total_rooms
         FROM room_types rt
         LEFT JOIN rooms r ON r.type_id = rt.id AND r.status NOT IN ('MAINTENANCE','BLOCKED')
-        WHERE rt.restaurant_id = ?
         GROUP BY rt.id, rt.name
-        ORDER BY rt.sort_order, rt.name
-      `, [req.params.id]);
+        ORDER BY rt.display_order, rt.name
+      `);
 
       // Also include uncategorised rooms as a synthetic type
       const untypedRooms: any[] = await tenantDb.query(
-        "SELECT id FROM rooms WHERE type_id IS NULL AND restaurant_id = ? AND status NOT IN ('MAINTENANCE','BLOCKED')",
-        [req.params.id]
+        "SELECT id FROM rooms WHERE type_id IS NULL AND status NOT IN ('MAINTENANCE','BLOCKED')"
       );
 
       // Manual overrides for the date range
@@ -25363,9 +25366,8 @@ ${data.tenant.name}`;
          FROM room_bookings rb
          JOIN rooms r ON r.id = rb.room_id
          WHERE rb.status NOT IN ('CANCELLED','CHECKED_OUT')
-           AND rb.check_in_date <= ? AND rb.check_out_date >= ?
-           AND r.restaurant_id = ?`,
-        [toDate, from, req.params.id]
+           AND rb.check_in_date <= ? AND rb.check_out_date >= ?`,
+        [toDate, from]
       );
 
       // Compute occupied count per type per date
@@ -44241,7 +44243,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'housekeeping-checklist-workflow',
+    commit_marker: 'inv-grid-spa-appts-query-fix',
     code_features: [
       'subscription-billing',
       'read-only-mode',
