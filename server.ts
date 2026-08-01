@@ -25432,8 +25432,10 @@ ${data.tenant.name}`;
     try {
       const tenantDb = await getTenantDb(req.params.id);
       const { overrides } = req.body || {};
-      if (!Array.isArray(overrides) || overrides.length === 0)
-        return res.status(400).json({ error: 'overrides must be a non-empty array' });
+      if (!Array.isArray(overrides))
+        return res.status(400).json({ error: 'overrides must be an array' });
+      // An empty batch is a harmless no-op — saving zero changes should not error.
+      if (overrides.length === 0) return res.json({ ok: true, saved: 0 });
       let saved = 0;
       for (const o of overrides) {
         if (!o.room_type_id || !o.date || o.available_count == null) continue;
@@ -44263,7 +44265,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'hk-event-nav-actor-name',
+    commit_marker: 'event-confirm-hk-override',
     code_features: [
       'subscription-billing',
       'read-only-mode',

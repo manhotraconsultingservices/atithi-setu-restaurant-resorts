@@ -90,7 +90,13 @@ function makeApi(restaurantId: string, token: string) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers || {}) },
     });
     const b = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error((b && b.error) || `HTTP ${r.status}`);
+    if (!r.ok) {
+      // Preserve the structured body + status so callers can react to typed
+      // errors (e.g. the housekeeping override gate on event confirm).
+      const err: any = new Error((b && b.error) || `HTTP ${r.status}`);
+      err.status = r.status; err.data = b;
+      throw err;
+    }
     return b;
   };
 }
@@ -952,10 +958,30 @@ function EventBookingDetail({ restaurantId, token, bookingId, venues, onBack, on
   const removeRoom = async (rid: string) => { try { await api(`/events/bookings/${bookingId}/rooms/${rid}`, { method: 'DELETE' }); await load(); } catch (e: any) { alert(e.message); } };
   const dOnly = (v: any) => String(v || '').slice(0, 10);
 
+  const runAct = async (path: string, body: any, okMsg?: string) => {
+    const r = await api(`/events/bookings/${bookingId}/${path}`, { method: 'POST', body: JSON.stringify(body) });
+    if (r?.warning) alert(r.warning); else if (okMsg) alert(okMsg);
+    await load();
+  };
   const act = async (path: string, okMsg?: string) => {
     setBusy(true);
-    try { const r = await api(`/events/bookings/${bookingId}/${path}`, { method: 'POST', body: JSON.stringify({}) }); if (r?.warning) alert(r.warning); else if (okMsg) alert(okMsg); await load(); }
-    catch (e: any) { alert(e.message); } finally { setBusy(false); }
+    try {
+      await runAct(path, {}, okMsg);
+    } catch (e: any) {
+      const d = e?.data;
+      // Housekeeping gate: the venue still has an open cleaning job from a prior
+      // event. A manager/owner may override — re-send confirm with override_cleaning.
+      if (d?.housekeeping_blocked && d?.can_override) {
+        if (window.confirm(`${d.error}\n\nConfirm this booking anyway and override the venue's pending housekeeping?`)) {
+          try { await runAct(path, { override_cleaning: true }, okMsg); }
+          catch (e2: any) { alert(e2.message); }
+        }
+      } else if (d?.housekeeping_blocked) {
+        alert(`${d.error}\n\nOpen Housekeeping → Worklist (or Events → Cleaning Checklist) to finish the venue's cleaning, then confirm again.`);
+      } else {
+        alert(e.message);
+      }
+    } finally { setBusy(false); }
   };
   const genQuote = async () => {
     setBusy(true);
