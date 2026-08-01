@@ -45947,6 +45947,25 @@ function LiveOrderEditModal({ order, restaurantId, token, onClose, onSaved }: {
   );
 }
 
+// Open a upi://pay?… link so a UPI app actually launches with the amount
+// pre-filled. A plain <a href="upi://…"> is unreliable on Android (Chrome
+// ignores unknown-scheme anchors); the robust path is an Android `intent://`
+// URL that opens the UPI app chooser. iOS / desktop navigate to the upi: scheme
+// directly (desktop simply no-ops, where the QR is the fallback).
+function fireUpiIntent(link: string) {
+  if (!link) return;
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  try {
+    if (/android/i.test(ua)) {
+      const q = link.includes('?') ? link.slice(link.indexOf('?') + 1) : '';
+      // scheme=upi + VIEW action, no package → Android shows the UPI app chooser.
+      window.location.href = `intent://pay?${q}#Intent;scheme=upi;action=android.intent.action.VIEW;end`;
+    } else {
+      window.location.href = link;
+    }
+  } catch { /* button/QR remain as fallback */ }
+}
+
 // ── PayPage (17 Jun 2026) — guest-facing UPI pay screen ─────────────────────
 // Reached via the https `?pay=<payload>` link sent in payment emails/WhatsApp.
 // Decodes the base64url payload {u: upi link, amt, cur, payee, vpa, prop} and
@@ -45968,6 +45987,15 @@ function PayPage({ payload }: { payload: string }) {
   const [copied, setCopied] = useState(false);
   const isMobile = typeof navigator !== 'undefined' && /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
 
+  // On mobile, best-effort auto-launch the UPI app (amount pre-filled) as soon as
+  // the pay page opens — so tapping the email/WhatsApp link goes straight to UPI.
+  // The prominent button below is the reliable fallback if the browser blocks it.
+  useEffect(() => {
+    if (!data || !data.u || !isMobile) return;
+    const t = setTimeout(() => fireUpiIntent(data.u), 600);
+    return () => clearTimeout(t);
+  }, [data, isMobile]);
+
   if (!data || !data.u) {
     return (
       <div className="min-h-screen bg-[#faf7f2] flex items-center justify-center p-6">
@@ -45986,12 +46014,13 @@ function PayPage({ payload }: { payload: string }) {
     try { navigator.clipboard?.writeText(data.vpa); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ }
   };
   const payButton = (
-    <a
-      href={data.u}
+    <button
+      type="button"
+      onClick={() => fireUpiIntent(data.u)}
       className="block w-full text-center bg-[#cc5a16] text-white py-4 rounded-2xl font-bold text-base hover:bg-[#a84612] transition-colors"
     >
       Pay {fmt(data.amt)} with any UPI app
-    </a>
+    </button>
   );
   const qrBlock = (
     <div className="flex flex-col items-center gap-2 bg-[#faf7f2] rounded-2xl p-4">
