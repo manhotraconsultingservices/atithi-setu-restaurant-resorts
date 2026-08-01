@@ -62657,7 +62657,8 @@ function BookingsManagement({ restaurantId, token }: { restaurantId: string, tok
 
 const NOTIFICATION_EVENTS: {
   id: string; label: string; roles: string[];
-  group: 'Orders' | 'Payments' | 'Bookings' | 'Feedback & Reports' | 'Hotel';
+  group: 'Orders' | 'Payments' | 'Bookings' | 'Feedback & Reports' | 'Hotel'
+       | 'Loyalty' | 'Staff' | 'Delivery & OTA' | 'Inventory' | 'System';
   description: string;
   schedulable?: boolean;
 }[] = [
@@ -62684,6 +62685,32 @@ const NOTIFICATION_EVENTS: {
   { id: 'BOOKING_CREATED',            label: 'New Hotel Booking',             roles: ['OWNER', 'FRONT_DESK'],                               group: 'Hotel', description: 'Fired when a new room booking is made' },
   { id: 'GUEST_CHECKED_IN',           label: 'Guest Checked In',              roles: ['OWNER', 'FRONT_DESK'],                               group: 'Hotel', description: 'Fired on guest check-in' },
   { id: 'GUEST_CHECKED_OUT',          label: 'Guest Checked Out',             roles: ['OWNER', 'FRONT_DESK', 'HOUSEKEEPING'],               group: 'Hotel', description: 'Fired on guest check-out (housekeeping is notified to prepare cleaning)' },
+  { id: 'BOOKING_NO_SHOW',            label: 'Booking No-Show',               roles: ['OWNER', 'FRONT_DESK'],                               group: 'Hotel', description: 'Fired when a booking is marked as a no-show' },
+  { id: 'GUEST_PRE_ARRIVAL',          label: 'Pre-Arrival Message',           roles: ['CUSTOMER'],                                          group: 'Hotel', description: 'Sent to the guest before their arrival date' },
+  // Loyalty
+  { id: 'LOYALTY_TIER_UPGRADED',      label: 'Loyalty Tier Upgraded',         roles: ['CUSTOMER'],                                          group: 'Loyalty', description: 'Sent when a customer moves up a loyalty tier' },
+  { id: 'LOYALTY_NEAR_UPGRADE',       label: 'Near Tier Upgrade',             roles: ['CUSTOMER'],                                          group: 'Loyalty', description: 'Nudge sent when a customer is close to the next tier' },
+  { id: 'LOYALTY_BIRTHDAY_REWARD',    label: 'Birthday Reward',               roles: ['CUSTOMER'],                                          group: 'Loyalty', description: 'Birthday reward sent to a loyalty customer', schedulable: true },
+  { id: 'GUEST_PERK_TRIGGERED',       label: 'Loyalty Perk Unlocked',         roles: ['CUSTOMER'],                                          group: 'Loyalty', description: 'Sent when a customer unlocks a perk or reward' },
+  // Staff & Payroll
+  { id: 'SHIFT_REMINDER',             label: 'Shift Reminder',                roles: ['MANAGER'],                                           group: 'Staff', description: 'Reminder sent to a staff member before their shift', schedulable: true },
+  { id: 'SHIFT_CANCELLED',            label: 'Shift Cancelled',               roles: ['MANAGER'],                                           group: 'Staff', description: 'Fired when a scheduled shift is cancelled' },
+  { id: 'PAYROLL_RUN_AUTOCREATED',    label: 'Payroll Run Created',           roles: ['OWNER'],                                             group: 'Staff', description: 'Fired when a monthly payroll run is auto-created' },
+  // Delivery & OTA
+  { id: 'NEW_PLATFORM_ORDER',         label: 'New Delivery-Platform Order',   roles: ['OWNER', 'CHEF'],                                     group: 'Delivery & OTA', description: 'Fired on a new order from a delivery platform (Swiggy / Zomato / ONDC)' },
+  { id: 'PLATFORM_ORDER_CANCELLED',   label: 'Platform Order Cancelled',      roles: ['OWNER', 'CHEF'],                                     group: 'Delivery & OTA', description: 'Fired when a delivery-platform order is cancelled' },
+  { id: 'RIDER_ASSIGNED',             label: 'Delivery Rider Assigned',       roles: ['CUSTOMER'],                                          group: 'Delivery & OTA', description: 'Sent to the customer when a delivery rider is assigned' },
+  { id: 'SETTLEMENT_RECEIVED',        label: 'OTA Settlement Received',       roles: ['OWNER'],                                             group: 'Delivery & OTA', description: 'Fired when a platform settlement/payout is received' },
+  { id: 'SETTLEMENT_VARIANCE',        label: 'Settlement Variance',           roles: ['OWNER'],                                             group: 'Delivery & OTA', description: 'Fired when a settlement amount differs from expected' },
+  // Inventory & Purchasing
+  { id: 'STOCK_LOW_REPORT',           label: 'Low Stock Alert',               roles: ['OWNER'],                                             group: 'Inventory', description: 'Fired when ingredients fall below reorder level (with any auto-PO draft)' },
+  // System & Reports
+  { id: 'REVENUE_ANOMALY',            label: 'Revenue Anomaly Alert',         roles: ['OWNER'],                                             group: 'System', description: 'Fired when daily revenue deviates sharply from the 4-week average' },
+  { id: 'FEEDBACK_REQUEST',           label: 'Feedback Request',              roles: ['CUSTOMER'],                                          group: 'Feedback & Reports', description: 'Auto-request for a review sent to the customer after a visit' },
+  { id: 'FEEDBACK_OWNER_REPLY',       label: 'Feedback Reply Sent',           roles: ['CUSTOMER'],                                          group: 'Feedback & Reports', description: 'Sent to the customer when the owner replies to their review' },
+  { id: 'ITEM_MAPPING_ALERT',         label: 'Channel Item-Mapping Alert',    roles: ['OWNER', 'MANAGER'],                                  group: 'System', description: 'Fired when a channel-manager item mapping needs attention' },
+  { id: 'SYNC_JOB_DEAD',              label: 'Channel Sync Failed',           roles: ['OWNER'],                                             group: 'System', description: 'Fired when a channel-sync job fails after all retries' },
+  { id: 'WEBHOOK_SIGNATURE_FAILURE',  label: 'Webhook Security Alert',        roles: ['OWNER'],                                             group: 'System', description: 'Fired when an inbound webhook fails signature verification' },
 ];
 
 const NOTIFICATION_CHANNELS = [

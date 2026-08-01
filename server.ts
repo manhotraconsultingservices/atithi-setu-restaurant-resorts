@@ -44348,7 +44348,7 @@ ${data.tenant.name}`;
   // production. Bumped manually on every deploy-blocking change so curl
   // /api/version against the live host immediately confirms the new code.
   const BUILD_VERSION = {
-    commit_marker: 'upi-pay-intent-fix',
+    commit_marker: 'notif-catalog-all-fired-events',
     code_features: [
       'subscription-billing',
       'read-only-mode',
